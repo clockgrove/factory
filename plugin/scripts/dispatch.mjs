@@ -29,7 +29,7 @@ import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -527,9 +527,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
   // `{block, tries}` (relaunchDecision).
-  const decideLost = (n, events, { lost, key }) => {
+  const decideLost = (n, events, { lost, key, setup = null }) => {
     const comments = commentsOf(events);
-    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null });
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
   };
   // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
   // Running stint. False when a write failed: the next tick tries again, never a Block (that would be a write too).
@@ -737,6 +737,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             const workStep = needsWorkStep(job) ? await stintWorkStep(repo, job, opts) : null;
             if (needsWorkStep(job) && workStep === null) log(`  #${n}: its work job failed at step "${String(job.steps?.find((x) => x?.conclusion === "failure")?.name ?? "").slice(0, 120)}", but its workflow file at ${String(job.head_sha ?? "its commit").slice(0, 12)} could not be read or names no Factory work step, so that step cannot be placed: taken as lost`);
             notLost = endedNotLost({ record: boxRecord, job, workStep });
+            // One set-up failure may pass (a 5xx on the checkout, a runner not acquired): relaunched once, its step on the
+            // record; the same step failing again on the relaunch's job is a set-up that fails every time, and Blocks.
+            const comments = commentsOf(events);
+            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), personStart(events, comments, inputs.objectiveLabel), notLost)) {
+              log(`  #${n}: its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : " (GitHub never started it)"}, the first time at that step; relaunched once to tell a passing failure from one that fails every time`);
+              await relaunchLost(issue, decideLost(n, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
+              continue;
+            }
             if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
             else {
               await relaunchLost(issue, d, "vanished");

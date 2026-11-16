@@ -138,7 +138,12 @@ export function jsonLines(text) {
  * (`customer_verification_required`, 403) types, which decide a gateway body that carries no status. A subscription's
  * usage limit (`usage_limit_reached`, a 429) is in it too: a retry on any model of the same subscription meets it again.
  */
-const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "permission_error", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required"]);
+/**
+ * Copilot's per-user rate limits (its schema's RateLimitErrorCode for `errorType: "rate_limit"`): the user's weekly and
+ * global limits, which hold the account for a window, so they are usage limits with no reset reported, never "busy".
+ */
+const COPILOT_USER_LIMITS = ["user_weekly_rate_limited", "user_global_rate_limited"];
+const REFUSED_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", "authentication", "authentication_failed", "authentication_error", "invalid_api_key", "authorization", "permission_error", "quota_for_entity_exceeded", "insufficient_funds", "customer_verification_required", ...COPILOT_USER_LIMITS]);
 const refusedKind = (r) => REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
 /** The kinds that are a subscription's usage limit: it resets at a known moment (usageReset), unlike a quota or billing refusal. */
 export const USAGE_LIMIT_KINDS = new Set(["usage_limit_reached"]);
@@ -146,7 +151,7 @@ export const USAGE_LIMIT_KINDS = new Set(["usage_limit_reached"]);
 export const usageLimited = (r) => !!r && (USAGE_LIMIT_KINDS.has(r.type) || USAGE_LIMIT_KINDS.has(r.code));
 
 /** Provider error types and codes (REFUSED_KINDS) that are a quota or billing refusal, by whose account. */
-const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota"]);
+const PROVIDER_QUOTA_KINDS = new Set(["usage_limit_reached", "insufficient_quota", "billing_error", "quota", ...COPILOT_USER_LIMITS]);
 const GATEWAY_BUDGET_KINDS = new Set(["quota_for_entity_exceeded", "insufficient_funds"]);
 
 /**
@@ -289,30 +294,33 @@ export function rotatedPin(harness, events) {
  *             the reset from that snapshot's full window
  *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
-export function providerRefusal(harness, events, opts = {}) {
-  const e = providerError(harness, events, opts);
-  if (!e) return null;
+export function providerRefusal(harness, events, { rollout = null, since = null } = {}) {
+  let e = providerError(harness, events);
+  // A failed Codex run whose stream names no error of its own: its usage limit, from the thread's rollout (codexLimit).
+  if (!e && harness === "codex") {
+    const limit = codexLimit(events, rollout, since);
+    if (limit) e = { harness, retryAt: null, ...limit };
+  }
+  // Claude Code's API error with no status (a connection it could not make) is no refusal.
+  if (!e || (harness === "claude" && e.status === null)) return null;
   const { reset, retryAt, ...r } = e;
   const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r)) : refusedKind(r);
   if (!refused) return null;
-  return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+  return { ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
 /**
- * The provider saying it is busy, as structure, on a failed run: {harness, status, type, code, message, retryAt?}, else
- * null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included), with no refusal
- * type or code (REFUSED_KINDS: a 429 `insufficient_quota` or `usage_limit_reached` is a refusal). No status (a transport
- * error, a bare body) is never busy. `retryAt` (ms) is the provider's own word on when to go again, where the harness
- * reports one: Claude's API error `api_error_params.rate_limit_info.resetsAt`, else its last rejected
- * `rate_limit_event`; Copilot's last `auto_mode_switch.requested` event's `retryAfterSeconds` from that event's time.
- * Codex reports none. runHarness waits for it (else the outage doubling) and runs the pass again: no death.
+ * The provider saying it is busy, from its error (providerError) on a failed run: {harness, status, type, code, message,
+ * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included),
+ * with no refusal type or code (REFUSED_KINDS: a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or
+ * global rate limit is a refusal). No status (a transport error, a bare body) is never busy. `retryAt` is the error's
+ * own (providerError: a 429's only); runHarness waits for it, else the outage doubling, and runs the pass again: no death.
  */
-export function providerBusy(harness, events, opts = {}) {
-  const e = providerError(harness, events, opts);
+export function providerBusy(harness, events) {
+  const e = providerError(harness, events);
   if (!e || e.status === null || refusedKind(e) || !(BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600))) return null;
   const { reset, retryAt, ...r } = e;
-  const at = harness === "claude" ? reset : retryAt;
-  return { harness, ...r, ...(Number.isFinite(at) ? { retryAt: at } : {}) };
+  return { ...r, ...(Number.isFinite(retryAt) ? { retryAt } : {}) };
 }
 
 /**
@@ -322,8 +330,22 @@ export function providerBusy(harness, events, opts = {}) {
  */
 export const requestRefused = (r) => !!r && REQUEST_4XX.has(r.status) && !refusedKind(r);
 
-/** The provider error a failed run ended on, as each harness reports it (providerRefusal's structure), or null. */
-function providerError(harness, events, { rollout = null, since = null } = {}) {
+/**
+ * The provider error a failed run ended on, as the harness reported it in structure: {harness, status, type, code,
+ * message, reset, retryAt}, else null (no such structure: a crash, a run killed, an error reported as prose only).
+ * providerRefusal and providerBusy are read from it, never from the words:
+ *   claude  : the result line with is_error and an API error message: the result's `api_error_status` (else the
+ *             message's; null for a connection Claude Code could not make), the message's `error` as the type and the
+ *             result's (else the message's) `api_error` as the code
+ *   codex   : the last `turn.failed` (else `error`) event's JSON error body (codexError)
+ *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
+ * `reset` (ms): a usage limit's reset as Claude Code reports it, the API error's `rate_limit_info.resetsAt`, else the
+ * last rejected `rate_limit_event` of the error's own window (`rateLimitType`, kept as `limitType`); null otherwise.
+ * `retryAt` (ms): when the provider says to go again, a 429's only and only from the error's own fields: Claude's API
+ * error `api_error_params.rate_limit_info.resetsAt`; Copilot's `auto_mode_switch.requested` that follows the
+ * `session.error` with the same `errorCode`, its `retryAfterSeconds` from that event's time. Never an unrelated event.
+ */
+export function providerError(harness, events) {
   let r = null;
   let reset = null;
   let retryAt = null;
@@ -331,31 +353,29 @@ function providerError(harness, events, { rollout = null, since = null } = {}) {
     const res = [...events].reverse().find((e) => e?.type === "result");
     const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
     const status = num(res?.api_error_status) ?? num(api?.api_error_status);
-    if (res?.is_error !== true || status === null) return null;
+    if (res?.is_error !== true || (!api && status === null)) return null;
     r = { status, type: str(api?.error), code: str(res.api_error) ?? str(api?.api_error), message: str(res.result) };
     // The limit's window (`rateLimitType`, e.g. five_hour) as the API error names it; the fallback reset is that window's.
     const info = api?.api_error_params?.rate_limit_info;
     const limitType = str(info?.rateLimitType);
     const rejected = [...events].reverse().find((e) => e?.type === "rate_limit_event" && e.rate_limit_info?.status === "rejected" && (!limitType || e.rate_limit_info.rateLimitType === limitType));
     reset = epochMs(info?.resetsAt) ?? epochMs(rejected?.rate_limit_info?.resetsAt);
+    if (status === 429) retryAt = epochMs(info?.resetsAt);
     if (limitType && USAGE_LIMIT_KINDS.has(r.code)) r.limitType = limitType;
   } else if (harness === "codex") {
     r = codexError(events);
-    if (!r) {
-      const limit = codexLimit(events, rollout, since);
-      if (!limit) return null;
-      ({ reset, ...r } = limit);
-    }
+    if (!r) return null;
   } else if (harness === "copilot") {
-    const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
+    const at = events.findLastIndex((e) => e?.type === "session.error" && !e.agentId);
+    const d = events[at]?.data;
     if (!d || typeof d !== "object") return null;
     r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode), message: str(d.message) };
-    const ask = [...events].reverse().find((e) => e?.type === "auto_mode_switch.requested" && !e.agentId);
+    const ask = r.status === 429 && r.code ? events.slice(at + 1).find((e) => e?.type === "auto_mode_switch.requested" && !e.agentId && str(e.data?.errorCode) === r.code) : null;
     const after = num(ask?.data?.retryAfterSeconds);
-    const at = Date.parse(ask?.timestamp);
-    if (after !== null && after >= 0 && Number.isFinite(at)) retryAt = at + after * 1000;
+    const t = Date.parse(ask?.timestamp);
+    if (after !== null && after >= 0 && Number.isFinite(t)) retryAt = t + after * 1000;
   } else return null;
-  return { ...r, reset, retryAt };
+  return { harness, ...r, reset, retryAt };
 }
 
 /**

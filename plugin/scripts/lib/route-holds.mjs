@@ -327,6 +327,8 @@ const heldText = (store, name, t) => {
  *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
  *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
+ * - `hold(r)`: the stage waits in place for a busy provider's time (harness.mjs runBusy, `r.resetAt`): its account is
+ *   held until then, so automatic choice passes it over for other Objectives while this one waits.
  */
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
@@ -362,6 +364,10 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       if (noReset) return { note: `Every other ${who} account this repository declares is held too: ${others.map((n) => heldText(store, n, t)).join("; ")}.` };
       const first = Math.min(...others.map((n) => store.avoidUntil(n, t)));
       return { note: `Every other ${who} account this repository declares is held too, the first until ${iso(first)}.` };
+    },
+    async hold(r) {
+      const { until } = await writeHold(repo, { kind: "limit", harness, account, reset: r.resetAt, window: r.limitType ?? null, now: now() }, opts);
+      log(`${who} account ${account} is busy until ${iso(r.resetAt)}; held until ${iso(until)} while this stage waits for it`);
     },
     async spent(limitRefused) {
       const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now() }, opts);

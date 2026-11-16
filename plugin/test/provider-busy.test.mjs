@@ -7,9 +7,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { jsonLines, parseUsage, providerBusy, providerRefusal, requestRefused } from "../scripts/lib/usage.mjs";
+import { jsonLines, noResetLimit, parseUsage, providerBusy, providerError, providerRefusal, refusalCause, requestRefused } from "../scripts/lib/usage.mjs";
 import { crashed, outageExit, usageLimitExit } from "../scripts/lib/session.mjs";
-import { BUSY_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
+import { BUSY_PASS_PROMPT, LIMIT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
 import { OUTAGE, resetNetwork, serverDown, unreachable, waitOutages } from "../scripts/lib/network.mjs";
 import { endedNotLost, needsWorkStep, workStepNumber } from "../scripts/lib/relaunch.mjs";
 
@@ -40,10 +40,47 @@ test("providerBusy: 408, 425, 429 and 5xx with no refusal kind are busy, never a
   assert.deepEqual({ ...rec.busy, message: undefined }, { harness: "claude", status: 429, type: "rate_limit", code: null, message: undefined, retryAt: RESET_S * 1000 });
   assert.equal(crashed(rec), false);
   assert.equal(parseUsage("claude", claudeBusy(529, "overloaded_error"), null).busy.status, 529);
-  // Copilot: its rate limit, with the retry time its auto-mode switch request gives.
-  const at = "2026-11-15T10:00:00.000Z";
-  const events = [{ type: "auto_mode_switch.requested", timestamp: at, data: { requestId: "r", errorCode: "user_global_rate_limited", retryAfterSeconds: 120 } }, { type: "session.error", data: { statusCode: 429, errorType: "rate_limit", errorCode: "user_global_rate_limited", message: "m" } }];
-  assert.equal(providerBusy("copilot", events).retryAt, Date.parse(at) + 120_000);
+});
+
+// Copilot 1.0.107's session.error (copilot-sdk session-events.d.ts ErrorData), as its schema gives a rate limit.
+const COPILOT_ERROR = readFileSync(join(fixtures, "copilot-1.0.107-session-error.jsonl"), "utf8");
+const copilotLimited = (code, status = 429) => COPILOT_ERROR.replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', `"errorType":"rate_limit","errorCode":"${code}","statusCode":${status}`);
+// Its auto-mode switch request after the error (AutoModeSwitchRequestedData), stamped `at`.
+const switchAsk = (code, at, seconds) => JSON.stringify({ type: "auto_mode_switch.requested", data: { requestId: "r", errorCode: code, retryAfterSeconds: seconds }, id: "00000000-0000-0000-0000-0000000000a9", timestamp: at });
+const afterError = (text, line) => text.replace(/(\{"type":"session\.error"[^\n]*\n)/, `$1${line}\n`);
+
+test("copilot: the weekly and global rate limits are usage limits with no reset reported, never busy; its other rate limits are busy", () => {
+  for (const code of ["user_weekly_rate_limited", "user_global_rate_limited"]) {
+    const rec = failed("copilot", copilotLimited(code));
+    assert.equal(rec.busy, undefined, code);
+    assert.equal(rec.refusal?.code, code);
+    assert.equal(refusalCause(rec.refusal), "provider-quota");
+    assert.equal(noResetLimit(rec.refusal), true, `${code}: the no-reset usage-limit path (runHarness, LIMIT.moves)`);
+    assert.equal(crashed(rec), false);
+  }
+  for (const code of ["rate_limited", "user_model_rate_limited", "integration_rate_limited"]) assert.equal(failed("copilot", copilotLimited(code)).busy?.status, 429, code);
+});
+
+test("a retry time is the error's own: a 429's only, from its own fields, never an earlier or unrelated event", () => {
+  const at = "2026-11-11T01:41:00.000Z";
+  // Copilot: the switch request that follows the error with the same code.
+  const own = providerError("copilot", jsonLines(afterError(copilotLimited("rate_limited"), switchAsk("rate_limited", at, 120))));
+  assert.equal(own.retryAt, Date.parse(at) + 120_000);
+  assert.equal(providerError("copilot", jsonLines(afterError(copilotLimited("rate_limited"), switchAsk("user_model_rate_limited", at, 120)))).retryAt, null, "another code's request");
+  assert.equal(providerError("copilot", jsonLines(`${switchAsk("rate_limited", at, 120)}\n${copilotLimited("rate_limited")}`)).retryAt, null, "a request from before the error");
+  assert.equal(providerError("copilot", jsonLines(afterError(copilotLimited("rate_limited", 503), switchAsk("rate_limited", at, 120)))).retryAt, null, "a 503 has none");
+  // Claude: the API error's own rate_limit_info, a 429's only; never an earlier rejected rate_limit_event.
+  assert.equal(failed("claude", claudeBusy()).busy.retryAt, RESET_S * 1000);
+  const eventOnly = claudeBusy().replace(/,"api_error_params":\{"rate_limit_info":\{[^}]*\}\}/, "");
+  assert.ok(/"type":"rate_limit_event"/.test(eventOnly));
+  assert.equal(failed("claude", eventOnly).busy.retryAt, undefined, "only an earlier rate_limit_event: no retry time");
+  assert.equal(failed("claude", claudeBusy(529, "overloaded_error")).busy.retryAt, undefined, "a 529 has none, whatever the error carries");
+  // Claude Code 2.1.325 answered 529 Overloaded (captured): busy, no retry time, so the doubling.
+  const overloaded = failed("claude", readFileSync(join(fixtures, "claude-2.1.325-529.jsonl"), "utf8"));
+  assert.deepEqual({ status: overloaded.busy.status, type: overloaded.busy.type, retryAt: overloaded.busy.retryAt }, { status: 529, type: "server_error", retryAt: undefined });
+  assert.equal(crashed(overloaded), false);
+  // The one error shape both are read from.
+  assert.deepEqual(Object.keys(providerError("claude", jsonLines(claudeBusy()))).sort(), ["code", "harness", "message", "reset", "retryAt", "status", "type"]);
 });
 
 test("requestRefused: a 400, 413 or 422 with no auth, permission, quota or billing kind refuses the session's request alone", () => {
@@ -220,6 +257,67 @@ test("runHarness, real, fake claude: a provider time past the stage's bound is a
   });
 });
 
+test("runHarness, real, fake claude: a retry time of now or past waits the doubling's minute, never a rerun at once", async () => {
+  const { bin, calls } = fakeClaudeBusy(START / 1000 - 60);
+  await inStage(bin, async ({ waits }) => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    const rec = await runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2" });
+    assert.equal(calls().length, 2);
+    assert.equal(sum(waits), 60_000);
+    assert.equal(rec.ok, true);
+  });
+});
+
+test("runHarness, real, fake claude: near the wall clock a short retry time ends on the outage path, not as a usage limit", async () => {
+  const { bin, calls } = fakeClaudeBusy(START / 1000 + 120);
+  await inStage(bin, async () => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    let thrown = null;
+    await assert.rejects(runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2", timeoutMs: 6 * 60_000 }), (e) => ((thrown = e), true));
+    assert.equal(calls().length, 1);
+    assert.ok(unreachable(thrown) && thrown.code === "HTTP 429", String(thrown?.message));
+    assert.notEqual(thrown.code, USAGE_LIMIT);
+  });
+});
+
+test("runHarness, real, fake claude: on a route, a long retry time goes through the usage limit's gate: another account free ends the stage; else the account is held while it waits", async () => {
+  const reset = START + 2 * 60 * 60_000;
+  const saved = { elsewhere: LIMIT.elsewhere, hold: LIMIT.hold };
+  try {
+    const moved = fakeClaudeBusy(reset / 1000);
+    await inStage(moved.bin, async ({ waits }) => {
+      waitOutages({ until: () => START + 6 * 60 * 60_000 });
+      const held = [];
+      Object.assign(LIMIT, { elsewhere: async () => true, hold: async (r) => held.push(r.resetAt) });
+      await assert.rejects(runHarness({ ...pass(moved.bin), harness: "claude", model: "claude-fable-5-2" }), (e) => e.code === USAGE_LIMIT && e.resetAt === reset);
+      assert.deepEqual([moved.calls().length, waits, held], [1, [], []], "no wait, no hold: the stage ends and its route moves the Objective (usageLimitExit)");
+    });
+    const stays = fakeClaudeBusy(reset / 1000);
+    await inStage(stays.bin, async ({ waits }) => {
+      waitOutages({ until: () => START + 6 * 60 * 60_000 });
+      const held = [];
+      Object.assign(LIMIT, { elsewhere: async () => false, hold: async (r) => held.push(r.resetAt) });
+      const rec = await runHarness({ ...pass(stays.bin), harness: "claude", model: "claude-fable-5-2" });
+      assert.deepEqual(held, [reset], "the account held until the provider's time, before the wait");
+      assert.equal(sum(waits), 2 * 60 * 60_000);
+      assert.equal(stays.calls().length, 2);
+      assert.equal(rec.ok, true);
+    });
+  } finally {
+    Object.assign(LIMIT, saved);
+  }
+});
+
+test("runHarness, real, fake codex: a fresh first pass rerun from its session after a busy answer, then refused for its request, gets its fresh try with its own prompt", async () => {
+  const { bin, calls } = fakeCodex([codexBody(503), codexBody(400, "invalid_request_error", "context_length_exceeded"), null]);
+  await inStage(bin, async () => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    const rec = await runHarness(pass(bin));
+    assert.deepEqual(calls().map((c) => [c.args.includes("resume"), c.prompt]), [[false, "the task"], [true, BUSY_PASS_PROMPT], [false, "the task"]]);
+    assert.equal(rec.ok, true);
+  });
+});
+
 test("runHarness, real, fake codex: a resumed pass refused 400/413/422 for its request alone runs once fresh; an account refusal does not", async () => {
   for (const status of [400, 413, 422]) {
     const { bin, calls } = fakeCodex([codexBody(status, "invalid_request_error", "context_length_exceeded"), null]);
@@ -265,17 +363,17 @@ test("endedNotLost: the work job's conclusion and steps place a vanished stage, 
   const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
   const job = (steps, conclusion = "failure") => ({ name: "work (7)", status: "completed", conclusion, runner_id: 3, runner_name: "r", steps });
   const ran = (failedAt) => job([step(1, "Set up job", failedAt === 1 ? "failure" : "success"), step(2, "Pick the account", failedAt === 2 ? "failure" : "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : failedAt < 3 ? "skipped" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt < 4 ? "skipped" : null), step(5, "Run actions/upload-artifact@v7", "success")]);
-  assert.deepEqual(endedNotLost({ job: ran(1) }), { by: "setup", step: "Set up job" }, "GitHub's set-up: no workflow needed");
+  assert.deepEqual(endedNotLost({ job: ran(1) }), { by: "setup", step: "Set up job", number: 1 }, "GitHub's set-up: no workflow needed");
   assert.equal(needsWorkStep(ran(1)), false);
-  assert.deepEqual(endedNotLost({ job: ran(2), workStep: 4 }), { by: "setup", step: "Pick the account" }, "the account step, before Factory's own");
-  assert.deepEqual(endedNotLost({ job: ran(3), workStep: 4 }), { by: "setup", step: "Get the code" });
+  assert.deepEqual(endedNotLost({ job: ran(2), workStep: 4 }), { by: "setup", step: "Pick the account", number: 2 }, "the account step, before Factory's own");
+  assert.deepEqual(endedNotLost({ job: ran(3), workStep: 4 }), { by: "setup", step: "Get the code", number: 3 });
   assert.equal(needsWorkStep(ran(3)), true);
   assert.equal(endedNotLost({ job: ran(3), workStep: null }), null, "the workflow unread: the step cannot be placed, so lost");
   assert.equal(endedNotLost({ job: ran(4), workStep: 4 }), null, "Factory's own step failed with no exit written: its network");
   const gone = job([step(1, "Set up job", "success"), step(2, "Get the code", "success"), step(3, "Build it", null, "in_progress")]);
   assert.equal(endedNotLost({ job: gone, workStep: 3 }), null, "a runner that went away: no step of its own failed");
   assert.equal(needsWorkStep(gone), false, "nothing failed: no workflow read");
-  assert.deepEqual(endedNotLost({ job: { name: "work (7)", status: "completed", conclusion: "failure", runner_id: null, runner_name: null, steps: [] } }), { by: "setup", step: null }, "GitHub never started it");
+  assert.deepEqual(endedNotLost({ job: { name: "work (7)", status: "completed", conclusion: "failure", runner_id: null, runner_name: null, steps: [] } }), { by: "setup", step: null, number: null }, "GitHub never started it");
   assert.deepEqual(endedNotLost({ job: job(ran(3).steps, "cancelled") }), { by: "cancelled" });
   assert.equal(needsWorkStep(job(ran(3).steps, "cancelled")), false);
   assert.deepEqual(endedNotLost({ job: job([], "timed_out") }), { by: "cancelled" });

@@ -850,10 +850,12 @@ export const passesRunning = () => RUNNING;
  * Run the harness once; see runOnce. A resume the provider refused for the session alone (runResumable: a Codex thread
  * written through another credential, usage.mjs rotatedPin, as an AI Gateway pin that moved between passes; or a 400,
  * 413 or 422 with no auth, permission, quota or billing kind, usage.mjs requestRefused) runs once more as a fresh
- * session with the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. A pass whose
- * provider answered busy is no death: it waits and runs again (runBusy). Only with a `freshPrompt`:
- * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
- * stands and the stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
+ * session with the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line: once for each resumed
+ * run, so a pass rerun from its session after a wait (a busy provider, a cut-off, a usage limit) may get its own fresh
+ * try. A first pass that was itself fresh gives its own `prompt` as the `freshPrompt` of those reruns. A pass whose
+ * provider answered busy is no death: it waits and runs again (runBusy). Only with a `freshPrompt`: a resumed prompt
+ * alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal stands and the
+ * stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
  * harnessShell). A pass this machine's network cut off runs again once the network is back (runCutOff), as one record.
  * A pass that ended on its subscription's usage limit (usage.mjs usageLimited) is no death, and no other model runs it,
  * since every model of the subscription draws on the same limit. In a stage (a process that waits outages out) whose
@@ -868,6 +870,8 @@ export const passesRunning = () => RUNNING;
 export async function runHarness(opts) {
   const startedAt = Date.now();
   const limited = [];
+  // A fresh first pass's own prompt is the full prompt a fresh try of its resumed reruns needs.
+  if (!opts.resume && typeof opts.freshPrompt !== "string") opts = { ...opts, freshPrompt: opts.prompt };
   let rec = await runBusy(opts);
   for (;;) {
     const r = rec.refusal;
@@ -910,9 +914,12 @@ export async function runHarness(opts) {
  * afresh on the branch (its session does not continue on another account there), so a nearer reset is worth its wait.
  * `moves`: set by a stage whose account automatic choice picked (no pin; accounts.mjs stageMoves, #332), so a usage
  * limit or quota with no reset reported ends the stage at once, for its route to move the Objective to a free account
- * or Block naming every account's hold (local.mjs spentPaused, route-holds.mjs routeLimits `limit`).
+ * or Block naming every account's hold (local.mjs spentPaused, route-holds.mjs routeLimits `limit`). `hold`: null, or,
+ * set beside `elsewhere`, an async write of the stage's account's hold until a refusal's `resetAt` (route-holds.mjs
+ * routeLimits `hold`), for a busy provider's time the stage waits out in place past `movePastMs` (runBusy), so no other
+ * Objective starts on that account meanwhile.
  */
-export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, movePastMs: 60 * 60_000, moves: false };
+export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, hold: null, movePastMs: 60 * 60_000, moves: false };
 
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
@@ -935,17 +942,21 @@ export class UsageLimitReached extends Error {
 
 /**
  * runHarness's pass with its reruns after its provider answered busy (usage.mjs providerBusy: 408, 425, 429 or a 5xx,
- * with no refusal type or code), which is no death. In a process that waits outages out, the pass waits for the
- * provider's own time to go again when the harness reported one (`retryAt`), else the outage doubling (network.mjs
- * serverWait: 1, 2, 4… minutes, up to half an hour), then runs again, from its session when it has one (a reviewer's
- * from its own prompt), on what is left of its budget and wall clock. The stage's own time bounds it, no count: a wait
- * that ends past the stage's bound (waitBound, from the first busy answer), or leaves the pass under LIMIT.minRunMs of
- * its wall clock, ends the stage instead. Past it with the provider's own time, that time is a usage limit's reset: it
- * throws UsageLimitReached, so the stage ends on it as on any usage limit (session.mjs usageLimitExit: the account held
- * until then, locally and on the route's holds record). Past it on the doubling, it throws a NetworkDown of the
- * provider's host with the status as its code, so the stage ends as on GitHub's 5xx (session.mjs outageExit: paused
- * locally, and serve resumes it on the same doubling; an `outage` Block elsewhere, which the dispatcher relaunches).
- * Outside such a process the busy pass is returned as it is.
+ * with no refusal type or code), which is no death. In a process that waits outages out, the pass waits, then runs
+ * again, from its session when it has one (a reviewer's from its own prompt), on what is left of its budget and wall
+ * clock. The wait is the outage doubling (network.mjs serverWait: 1, 2, 4… minutes, up to half an hour), or the
+ * provider's own time to go again when its error gave one (`retryAt`) and that is later, so a time of 0 or one already
+ * past never reruns at once. The stage's own time bounds it, no count: a wait that ends past the stage's bound (waitBound,
+ * from the first busy answer), or leaves the pass under LIMIT.minRunMs of its wall clock, ends the stage instead. Ended
+ * so with the provider's time at least LIMIT.minRunMs away, that time is a usage limit's reset: it throws
+ * UsageLimitReached, and the stage ends as on any usage limit (session.mjs usageLimitExit: the account held until then,
+ * locally and on the route's holds record). Otherwise (no time given, or a short one near the wall clock) it throws a
+ * NetworkDown of the provider's host with the status as its code, and the stage ends as on GitHub's 5xx (session.mjs
+ * outageExit: paused locally, and serve resumes it on the same doubling; an `outage` Block elsewhere, which the
+ * dispatcher relaunches); the provider's origin tells it from GitHub's. A provider's time the stage would wait past
+ * LIMIT.movePastMs goes through the usage limit's gate first: with another account free (LIMIT.elsewhere) the stage ends
+ * on it as a usage limit, so the Objective moves there; else the stage's account is held until then (LIMIT.hold) while
+ * it waits. Outside such a process the busy pass is returned as it is.
  */
 async function runBusy(opts) {
   const startedAt = Date.now();
@@ -955,7 +966,9 @@ async function runBusy(opts) {
   while (rec.busy && waitingOutages()) {
     const now = OUTAGE.now();
     since ??= now;
-    const waitMs = Number.isFinite(rec.busy.retryAt) ? Math.max(0, rec.busy.retryAt - now) : serverWait(busy.length + 1);
+    const r = rec.busy;
+    const given = Number.isFinite(r.retryAt) ? r.retryAt - now : null;
+    const waitMs = Math.max(given ?? 0, serverWait(busy.length + 1));
     // Nothing left of the dollar cap to run it again with: the pass ends at the cap (a cap of 0 would run uncapped).
     const spent = [...busy, rec].reduce((s, x) => s + (Number.isFinite(x.usd) ? Math.max(0, x.usd) : 0), 0);
     if (opts.maxUsd > 0 && opts.maxUsd - spent <= 0) {
@@ -964,13 +977,19 @@ async function runBusy(opts) {
     }
     const origin = providerOrigin(opts.harness, opts.env);
     if (!origin) break;
+    const label = opts.label || "run";
+    const limit = given !== null && given >= LIMIT.minRunMs ? { ...r, resetAt: r.retryAt } : null;
     const bound = waitBound(since);
     const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - waitMs : Infinity;
     if (bound === null || now + waitMs > bound || left < LIMIT.minRunMs) {
-      if (Number.isFinite(rec.busy.retryAt)) throw new UsageLimitReached({ ...rec.busy, resetAt: rec.busy.retryAt }, { since: now, label: opts.label || "run" });
-      throw new NetworkDown({ origin, code: `HTTP ${rec.busy.status}`, since });
+      if (limit) throw new UsageLimitReached(limit, { since: now, label });
+      throw new NetworkDown({ origin, code: `HTTP ${r.status}`, since });
     }
-    log(`${opts.label || "run"}: ${rec.busy.harness}'s provider was busy (${refusalFields(rec.busy)}); ${Number.isFinite(rec.busy.retryAt) ? "waiting for the time it gave" : "waiting"} (${minutesText(waitMs)}), then running the pass again`);
+    if (limit && waitMs > LIMIT.movePastMs) {
+      if (LIMIT.elsewhere && (await LIMIT.elsewhere(limit))) throw new UsageLimitReached(limit, { since: now, label });
+      if (LIMIT.hold) await LIMIT.hold(limit).catch((e) => log(`${label}: the account's hold until ${new Date(limit.resetAt).toISOString()} could not be written (${String(e?.message || e).slice(0, 120)}); waiting anyway`));
+    }
+    log(`${label}: ${r.harness}'s provider was busy (${refusalFields(r)}); ${given !== null ? "waiting for the time it gave" : "waiting"} (${minutesText(waitMs)}), then running the pass again`);
     const end = now + waitMs;
     while (OUTAGE.now() < end) {
       await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));

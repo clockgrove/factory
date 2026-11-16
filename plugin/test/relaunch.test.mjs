@@ -107,8 +107,8 @@ function fakeGitHub(open, cfg = {}) {
     const runJobs = /^\/actions\/runs\/(\d+)\/jobs$/.exec(path);
     if (method === "GET" && runJobs) return json({ jobs: cfg.jobs?.[runJobs[1]] || [] });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
-    // The workflow file at a commit (raw), when the test gives one.
-    if (method === "GET" && path === "/contents/.github/workflows/factory.yml" && typeof cfg.workflow === "string") return new Response(cfg.workflow, { status: 200 });
+    // The workflow file (raw) at the commit the test gives it at, only there.
+    if (method === "GET" && path === "/contents/.github/workflows/factory.yml" && typeof cfg.workflow === "string" && u.searchParams.get("ref") === cfg.workflowSha) return new Response(cfg.workflow, { status: 200 });
     if (method === "GET" && path === "/issues/comments") return json(cfg.spend || []);
     return json({ message: "Not Found" }, 404);
   };
@@ -137,8 +137,10 @@ function fakeGitHub(open, cfg = {}) {
 /** Run `fn` with this fake as GitHub, as the Action's dispatcher (or the sandbox route's, with `sandbox`). */
 async function on(gh, fn) {
   const realFetch = globalThis.fetch;
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID", "GITHUB_WORKFLOW_REF"].map((k) => [k, process.env[k]]));
   process.env.GITHUB_API_URL = "https://github.test";
+  // The dispatcher's own workflow (github.mjs workflowFile), whatever workflow runs these tests (CI's is quality.yml).
+  process.env.GITHUB_WORKFLOW_REF = "acme/app/.github/workflows/factory.yml@refs/heads/main";
   delete process.env.FACTORY_LOCAL;
   delete process.env.FACTORY_LOCAL_ALL;
   globalThis.fetch = gh.fetch;
@@ -428,39 +430,44 @@ test("a relaunch whose record cannot be written is tried again next tick, never 
   assert.deepEqual((await tick(gh)).relaunched.sort(), [7, 8]);
 });
 
-// #390: the work job's own steps (GitHub's jobs API, the read stintWorkJob already makes) tell a set-up failure, which
-// fails the same way every time, from a runner that went away. Factory's own step is placed from the workflow file at
-// the job's commit (Set up job is step 1, the YAML steps follow), so steps the workflow names itself are placed too.
-test("a vanished stage whose work job failed at a step before Factory's own Blocks at once with cause setup, naming the step; a lost runner is relaunched", async () => {
+// #390: the work job's own steps (GitHub's jobs API, the read stintWorkJob already makes) tell a set-up failure from a
+// runner that went away. Factory's own step is placed from the workflow file at the job's commit (Set up job is step 1,
+// the YAML steps follow), so steps the workflow names itself are placed too. One set-up failure may pass, so it is
+// relaunched once; the same step failing on the relaunch's job too Blocks with cause setup.
+test("a vanished stage whose work job failed before Factory's own step is relaunched once, then Blocks setup when the same step fails again; a lost runner is relaunched", async () => {
   const since = 20 * MIN;
   const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/factory@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/factory@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
   const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
-  const job = (n, steps) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at: ago(since - 30_000), runner_id: 3, runner_name: "GitHub Actions 3", steps });
+  const job = (n, steps, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: 3, runner_name: "GitHub Actions 3", steps });
   const ran = (failedAt) => [step(1, "Set up job", "success"), step(2, "Pick the account", "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt === 3 ? "skipped" : null, failedAt ? "completed" : "in_progress"), step(5, "Run actions/upload-artifact@v7", "success")];
-  const jobs = () => [
-    // #7: the checkout (named "Get the code" by the workflow) failed; Factory's step never ran.
-    job(7, ran(3)),
-    // #8: GitHub never started it: no step, no runner.
-    { name: "work (8)", status: "completed", conclusion: "failure", head_sha: "abc123", created_at: ago(since - 30_000), runner_id: null, runner_name: null, steps: [] },
-    // #9: the runner went away while Factory's step ran: no step of its own failed.
-    job(9, ran(null)),
-    // #10: Factory's own step failed with no exit written: its network.
-    job(10, ran(4)),
-  ];
-  const open = () => [7, 8, 9, 10].map((number) => ({ number, labels: [OBJ, "factory:running"], since }));
-  const gh = fakeGitHub(open(), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: jobs() }, workflow });
-  const r = await tick(gh);
-  assert.deepEqual([r.vanished.sort(), r.relaunched.sort((a, b) => a - b)], [[7, 8], [9, 10]]);
+  const never = (n, created_at) => ({ name: `work (${n})`, status: "completed", conclusion: "failure", head_sha: "abc123", created_at, runner_id: null, runner_name: null, steps: [] });
+  const at = ago(since - 30_000);
+  // #7: the checkout ("Get the code") failed; #8: GitHub never started it; #9: the runner went away; #10: Factory's own step failed.
+  const cfg = { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at), never(8, at), job(9, ran(null), at), job(10, ran(4), at)] }, workflow, workflowSha: "abc123" };
+  const gh = fakeGitHub([7, 8, 9, 10].map((number) => ({ number, labels: [OBJ, "factory:running"], since })), cfg);
+  const first = await tick(gh, { run: 77 });
+  assert.deepEqual([first.vanished, first.relaunched.sort((a, b) => a - b)], [[], [7, 8, 9, 10]], "a first set-up failure is relaunched");
+  assert.deepEqual(recordOf(gh, 7).tries[0].setup, { step: "Get the code", number: 3 });
+  assert.deepEqual(recordOf(gh, 8).tries[0].setup, { step: null, number: null });
+  assert.equal(recordOf(gh, 9).tries[0].setup, undefined);
+  assert.deepEqual(gh.reads.filter((x) => x.startsWith("/contents/")), ["/contents/.github/workflows/factory.yml?ref=abc123", "/contents/.github/workflows/factory.yml?ref=abc123"], "one read at the job's commit for each job that failed after its set-up (#7, #10)");
+  // The relaunched stints vanish again: #7 and #8 the same way, #9 now at the checkout (a first time for it).
+  gh.age(since);
+  const stint = (n) => gh.issue(n).timeline.filter((e) => e.label?.name === "factory:running").at(-1).created_at;
+  const after = (n) => new Date(Date.parse(stint(n)) + 10_000).toISOString();
+  cfg.jobs = { 77: [job(7, ran(3), after(7)), never(8, after(8)), job(9, ran(3), after(9))] };
+  const second = await tick(gh);
+  assert.deepEqual([second.vanished.sort((a, b) => a - b), second.relaunched.sort((a, b) => a - b)], [[7, 8], [9, 10]]);
   const seven = gh.blocks(7)[0].body;
-  assert.match(seven, /worker job failed before Factory ran: its step "Get the code" failed; a set-up failure, so it was not relaunched/);
+  assert.match(seven, /worker job failed before Factory ran: its step "Get the code" failed, as it did on the job Factory relaunched it from; a set-up failure that fails the same way every time, so it was not relaunched again/);
   assert.equal(blockCauseOf(seven), "setup");
-  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\)/);
+  assert.match(gh.blocks(8)[0].body, /GitHub never started it \(no runner was assigned\), nor the job Factory relaunched it from/);
   assert.equal(blockCauseOf(gh.blocks(8)[0].body), "setup");
-  assert.equal(gh.reads.filter((x) => x.startsWith("/contents/")).length, 2, "one workflow read for each job that failed at a step after the set-up (#7, #10)");
-  // The workflow file unread: the failed step cannot be placed, so the stage is taken as lost and relaunched.
-  const unread = fakeGitHub(open(), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: jobs() } });
+  // The workflow file unread (here: not at the job's commit): the failed step cannot be placed, so the stage is lost.
+  const unread = fakeGitHub([7].map((number) => ({ number, labels: [OBJ, "factory:running"], since })), { runs: [{ id: 55, created_at: ago(since + 30_000) }], jobs: { 55: [job(7, ran(3), at)] }, workflow, workflowSha: "other" });
   const u = await tick(unread);
-  assert.deepEqual([u.vanished, u.relaunched.sort((a, b) => a - b)], [[8], [7, 9, 10]]);
+  assert.deepEqual([u.vanished, u.relaunched], [[], [7]]);
+  assert.equal(recordOf(unread, 7).tries[0].setup, undefined, "not placed: no set-up step on the record");
 });
 
 test("the cancelled-job sign is found on a busy repository: the run that started the stint, not the ticks after it", async () => {

@@ -76,11 +76,15 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
 /**
  * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx
  * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx: usage.mjs providerBusy) past runHarness's
- * waits. Not a lost network.
+ * waits. Not a lost network. The code alone does not say whose: the outage's origin does (GitHub's is githubOrigin(); a
+ * provider pause carries the provider's, harness.mjs providerOrigin), so anything that judges GitHub guards on it.
  */
 export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code));
 
-/** The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
+/**
+ * The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up
+ * to OUTAGE.serverResumeMaxMs. serve's resume of such a pause, and runHarness's wait for a busy provider in place.
+ */
 export const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
 
 /**
@@ -107,10 +111,8 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
  * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
  * after). `serverResumeMs`, `serverResumeMaxMs`, `serverResumes`: serve resumes an Objective paused on GitHub answering
- * 5xx past the client's retries, or on a model provider busy past runHarness's waits (serverDown), after 1, 2, 4…
- * minutes, doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; six
- * such resumes in a row (an hour in all) and it Blocks (local.mjs). runHarness waits a busy provider out in place on the
- * same doubling, within the stage's wait. `now`,
+ * 5xx past the client's retries (serverDown) after 1, 2, 4… minutes, doubling up to half an hour, since a probe of the
+ * host answers while one endpoint fails; six such resumes in a row (an hour in all) and it Blocks (local.mjs). `now`,
  * `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {

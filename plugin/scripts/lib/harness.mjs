@@ -15,7 +15,7 @@ import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, captu
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
 import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
-import { OUTAGE, githubOrigin, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
+import { OUTAGE, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -936,10 +936,10 @@ async function runCutOff(opts) {
   const startedAt = Date.now();
   const lost = [];
   let rec = await runResumable(opts);
-  // A pass this machine's network cut off (network.mjs passCutOff) is no death and no answer: once the network is back,
-  // the same pass runs again, resuming its session when it has one (a reviewer's runs from its own prompt), on what is
-  // left of its budget and wall clock, at most OUTAGE.passReruns times. The wait throws NetworkDown past the stage's
-  // limit: the stage then ends on it.
+  // A pass its harness reported cut off by its provider or the network (outageCut) is no death and no answer: once its
+  // provider answers, the same pass runs again, resuming its session when it has one (a reviewer's runs from its own
+  // prompt), on what is left of its budget and wall clock, at most OUTAGE.passReruns times. The wait throws NetworkDown
+  // past the stage's limit: the stage then ends on it.
   for (;;) {
     if (lost.length >= OUTAGE.passReruns) break;
     const cut = await outageCut(rec, opts);
@@ -956,7 +956,7 @@ async function runCutOff(opts) {
     }
     lost.push(rec);
     const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
-    log(`${opts.label || "run"}: the pass was cut off by this machine's network (${cut.code} reaching ${new URL(cut.origin).host}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
+    log(`${opts.label || "run"}: the pass was cut off by its provider or this machine's network (${cut.code}${cut.origin ? ` reaching ${new URL(cut.origin).host}` : ""}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
     rec = await runResumable({ ...opts, maxUsd, timeoutMs, ...(session ? { resume: session, prompt: LOST_PASS_PROMPT } : {}) });
   }
   return lost.length ? joinLost(lost, rec) : rec;
@@ -985,24 +985,23 @@ export function providerOrigin(harness, env = {}) {
 }
 
 /**
- * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
- * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
- * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
- * In a process that gave up waiting (stoppedWaiting), a pass that failed while a host it gave up on still does not answer
- * (network.mjs givenUp) is no death and runs no more: it throws that outage, which the stage ends on (session.mjs
- * outageExit). With every such host answering again, the outage it gave up on cut the pass off as any other would.
+ * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out: only a
+ * pass that failed (no answer, no cap, no stop, no provider refusal) and whose harness reported that as its own
+ * structured error (usage.mjs providerOutage: a 5xx, or a connection it could not make); then the provider's API is
+ * probed to know whether to wait for it before the pass runs again (network.mjs passCutOff). A pass that failed any
+ * other way is no cut, whatever the network did meanwhile. In a process that gave up waiting (stoppedWaiting), such a
+ * pass while a host it gave up on still does not answer (network.mjs givenUp) runs no more: it throws that outage, which
+ * the stage ends on (session.mjs outageExit). With every such host answering again, it runs again as any other would.
  */
 async function outageCut(rec, { harness, env }) {
-  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun || !rec.providerOutage) return null;
   const gaveUp = stoppedWaiting();
   if (gaveUp) {
     const down = await givenUp();
     if (down) throw down;
   }
   if (!gaveUp && !waitingOutages()) return null;
-  const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
-  const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
-  return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);
+  return passCutOff(rec.providerOutage, providerOrigin(harness, env));
 }
 
 /**

@@ -11,6 +11,7 @@ import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
+import { refusingOrigin } from "./ports.mjs";
 import { accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
@@ -283,6 +284,8 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   globalThis.fetch = async (url, init = {}) => {
+    // GitHub's status page goes to the fake a test serves it from (GITHUB_STATUS_URL).
+    if (process.env.GITHUB_STATUS_URL && String(url).startsWith(process.env.GITHUB_STATUS_URL)) return realFetch(url, init);
     const u = new URL(url);
     const method = init.method || "GET";
     const p = u.pathname.replace("/repos/acme/app", "");
@@ -998,43 +1001,115 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
   }
 });
 
-test("#353 review: a stage paused on GitHub's 5xx is resumed after a doubling wait, not on a probe; the count holds across resumes however far apart, and the seventh pause Blocks naming the request and status", async () => {
+/**
+ * GitHub's status page served on this machine (GITHUB_STATUS_URL): `answer()` is {status, components} per request, the
+ * components as {name: status}; `close` stops it and clears the variable. Each request is counted in `asked()`.
+ */
+async function statusPage(answer) {
+  let n = 0;
+  const server = createServer((req, res) => {
+    n += 1;
+    const a = answer();
+    res.writeHead(a.status ?? 200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ page: { id: "x", name: "GitHub" }, components: Object.entries(a.components ?? {}).map(([name, status]) => ({ id: name, name, status })) }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  process.env.GITHUB_STATUS_URL = `http://127.0.0.1:${server.address().port}`;
+  return { asked: () => n, close: () => (delete process.env.GITHUB_STATUS_URL, new Promise((r) => server.close(r))) };
+}
+const parts = (api, rest = "operational") => ({ "Git Operations": "major_outage", "API Requests": api, Issues: rest, "Pull Requests": rest });
+
+/** A loop with an Objective paused on GitHub's 5xx, whose resumed stage pauses on the same 5xx again (runObjective). */
+async function serverPaused() {
+  const loop = await claimLoop();
+  const first = Date.parse("2026-11-14T08:47:00Z");
+  const at = { t: first };
+  loop.clock = () => at.t;
+  const endpoint = "POST repos/acme/app/issues/7/labels";
+  // GitHub's host answers a probe (github.test answers every request) while that one request keeps failing.
+  const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint } });
+  let tries = 0;
+  // The resumed stage runs longer than a network outage's carry-over before it meets the 5xx again.
+  loop.runObjective = (n) => ((tries += 1), (at.t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
+  await loop.withClaim(7, paused());
+  // Each resume is due after its doubling wait, not on the probe.
+  const next = async () => {
+    const off = loop.offline.get(7);
+    at.t += 30_000;
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "not resumed on the probe");
+    at.t = off.server.at + Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** (off.server.pauses - 1));
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed after its wait");
+    return loop.resume(7);
+  };
+  return { loop, first, at, next, tries: () => tries };
+}
+
+test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page reports an incident or does not answer, past any count of resumes, and Blocks at 12 h as an outage", async () => {
   const gh = claimGitHub();
+  // An incident on the API, then the page itself down (no JSON, then a refused connection), then one without Issues.
+  let mode = "degraded";
+  const page = await statusPage(() => (mode === "degraded" ? { components: parts("degraded_performance") } : mode === "503" ? { status: 503 } : { components: { "API Requests": "operational" } }));
+  const refusing = await refusingOrigin();
   try {
-    const loop = await claimLoop();
-    const first = Date.parse("2026-11-14T08:47:00Z");
-    let t = first;
-    loop.clock = () => t;
-    const endpoint = "POST repos/acme/app/issues/7/labels";
-    // GitHub's host answers a probe (github.test answers every request) while that one request keeps failing.
-    const paused = (at) => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at).toISOString(), endpoint } });
-    for (let i = 1; i <= OUTAGE.serverResumes; i++) {
-      await loop.withClaim(7, paused(t));
-      const off = loop.offline.get(7);
-      assert.deepEqual({ since: off.since, pauses: off.server.pauses }, { since: first, pauses: i });
-      t += 30_000;
-      assert.deepEqual(await loop.pausedHere(new Map()), [], `pause ${i}: not resumed on the probe`);
-      t = off.server.at + Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** (i - 1));
-      assert.deepEqual(await loop.pausedHere(new Map()), [7], `pause ${i}: resumed after its wait`);
-      off.resumedAt = t;
-      // The resumed stage runs longer than a network outage's carry-over before it meets the 5xx again.
-      t += OUTAGE.stageWaitMs + 60_000;
+    const { loop, first, at, next, tries } = await serverPaused();
+    for (let i = 1; i <= 12; i++) {
+      mode = ["degraded", "503", "missing"][i % 3];
+      const served = process.env.GITHUB_STATUS_URL;
+      if (i === 6) process.env.GITHUB_STATUS_URL = refusing.origin;
+      assert.notEqual((await next()).exit, "blocked", `resume ${i}: no Block while the page says nothing is operational`);
+      process.env.GITHUB_STATUS_URL = served;
+      assert.equal(loop.offline.get(7).server.pauses, i + 1);
+      assert.equal(loop.offline.get(7).since, first);
     }
-    await loop.withClaim(7, paused(t));
-    assert.deepEqual(await loop.pausedHere(new Map()), [7], "past the resumes: taken up at once");
+    assert.equal(tries(), 12, "every resume ran the stage again");
+    assert.equal(page.asked(), 11, "the page was asked at each resume (the one to the refusing origin aside)");
+    assert.ok(!gh.writes.some((w) => w.includes("factory:block")));
+    // Twelve hours from the first pause: taken up at once and Blocked as an outage, whatever the page says.
+    at.t = first + OUTAGE.blockMs;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
     assert.equal((await loop.resume(7)).exit, "blocked");
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"'));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 7 pauses/);
+    assert.equal(tries(), 12);
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Factory's 12 h bound for GitHub failing/);
+    assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
+    assert.ok(!loop.offline.has(7));
+  } finally {
+    await refusing.close();
+    await page.close();
+    gh.restore();
+  }
+});
+
+test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports its parts operational gets one more try, then Blocks naming the request; an incident between starts the try afresh", async () => {
+  const gh = claimGitHub();
+  let api = "operational";
+  const page = await statusPage(() => ({ components: parts(api) }));
+  try {
+    const { loop, next, tries } = await serverPaused();
+    // Operational: one more try. Then an incident: wait on. Operational again: one more try, not a Block.
+    assert.notEqual((await next()).exit, "blocked");
+    api = "partial_outage";
+    assert.notEqual((await next()).exit, "blocked");
+    api = "operational";
+    assert.notEqual((await next()).exit, "blocked");
+    assert.equal(tries(), 3);
+    // That try met the 5xx again, and the page still says operational: Blocked, naming the request, the status and the page.
+    assert.equal((await next()).exit, "blocked");
+    assert.equal(tries(), 3, "no try after the one more");
+    assert.equal(page.asked(), 4);
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 4 pauses over \d+ min; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
+    assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+    assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     assert.ok(!loop.offline.has(7));
     // A stage that ends any other way starts the count again.
     gh.labels.delete("factory:blocked");
     gh.labels.add("factory:running");
-    await loop.withClaim(7, paused(t));
+    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date().toISOString() } }));
     await loop.withClaim(7, async () => ({ exit: "delivered" }));
     assert.ok(!loop.offline.has(7));
-    await loop.withClaim(7, paused(t));
-    assert.equal(loop.offline.get(7).server.pauses, 1);
   } finally {
+    await page.close();
     gh.restore();
   }
 });

@@ -55,6 +55,19 @@ Rules:
 - **Errors are codes** from `DECIDER_ERRORS` (`auth`, `rate_limited`, `unavailable`, `invalid`, `refused`, `no_answer`, `vendor`), with no verdict. Callers decide on the verdict and the code, never a message.
 - **The key never leaves Factory's process.** On Actions it is the `ai_gateway_api_key` input; locally only the file `~/.config/factory/ai-gateway-key`. `scrubbedEnv` keeps it out of every child.
 
+## GitHub status
+
+Contract: `plugin/scripts/lib/adapters/github-status.mjs`. Vendor: GitHub's status page, githubstatus.com, an Atlassian Statuspage read through its public v2 JSON API (`/api/v2/components.json`, plain `fetch`, no key, no SDK). `GITHUB_STATUS_URL` sets its base URL, as `GITHUB_API_URL` does the API's. Used by `serve` for an Objective paused on GitHub answering 5xx past the client's retries (LOCAL.md).
+
+| Operation | Does |
+| --- | --- |
+| `githubStatus()` → `{state, components, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, `operational` when all three have it, and null when the page cannot say: no answer, no JSON, or one of them missing. `error` is then the reason as a code (`HTTP 503`, a connect-level code, `invalid`, `missing <name>`). Never throws. |
+
+Rules:
+
+- **Decided on the components' `status` field**, never on an incident's words.
+- **A page that cannot be read counts as an incident**: Factory waits on within its bound rather than Block on a guess.
+
 ## Codex model provider
 
 Contract: Codex's own model-provider configuration, set by flags (`lib/harness.mjs` `codexGatewayArgs`), so no Factory module talks to the vendor. Vendors: the direct OpenAI API (`CODEX_API_KEY`) and the Vercel AI Gateway (`FACTORY_CODEX_GATEWAY_KEY`, the `codex_gateway_key` input; it wins when both are set). A second gateway is another provider block and key name beside these.

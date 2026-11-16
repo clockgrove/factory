@@ -98,3 +98,23 @@ process.exit(1);
     process.env.PATH = saved;
   }
 });
+
+// Claude Code 2.1.325 against a provider that refused the connection, and one that answered 529 (overloaded).
+test("providerOutage: a failed run's provider or network failure is read from the harness's own structured error, never its words", () => {
+  const refused = failed("claude", fixture("claude-2.1.325-connection-refused.jsonl"));
+  assert.deepEqual(refused.providerOutage, { harness: "claude", status: null, type: "server_error", code: "connection_failed" });
+  assert.equal(refused.refusal, undefined);
+  assert.deepEqual(failed("claude", fixture("claude-2.1.325-529.jsonl")).providerOutage, { harness: "claude", status: 529, type: "server_error", code: null });
+  assert.equal(failed("claude", fixture("claude-2.1.321-401.jsonl")).providerOutage, undefined, "a refusal is no outage");
+  // Codex: a provider's JSON error body with a 5xx is one; its prose (a 503 and a lost stream, as codex-cli 0.167 prints them) is not.
+  const body = (status) => JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "server_error", code: null, message: "m" }, status }) } });
+  assert.deepEqual(failed("codex", body(503)).providerOutage, { harness: "codex", status: 503, type: "server_error", code: null });
+  assert.equal(failed("codex", body(429)).providerOutage, undefined);
+  for (const prose of ["unexpected status 503 Service Unavailable: Service Unavailable, url: http://127.0.0.1:8080/v1/responses", "stream disconnected before completion: error sending request"]) {
+    assert.equal(failed("codex", JSON.stringify({ type: "turn.failed", error: { message: prose } })).providerOutage, undefined, prose);
+  }
+  // Copilot: session.error's statusCode.
+  const copilot = fixture("copilot-1.0.107-session-error.jsonl").replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', '"errorType":"server","errorCode":"bad_gateway","statusCode":502');
+  assert.deepEqual(failed("copilot", copilot).providerOutage, { harness: "copilot", status: 502, type: "server", code: "bad_gateway" });
+  assert.equal(failed("copilot", fixture("copilot-1.0.107-session-error.jsonl")).providerOutage, undefined);
+});

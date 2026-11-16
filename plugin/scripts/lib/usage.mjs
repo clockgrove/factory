@@ -317,6 +317,33 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
 }
 
 /**
+ * A failed run's provider or network failure, as the harness reported it in structure: {harness, status, type, code},
+ * else null. It is one when the status is a 5xx (529 included), or, with no status, the type is a server error: Claude
+ * Code reports a connection it could not make or a request that timed out as an API error message whose `error` is
+ * `server_error` with no `api_error_status` (2.1.325). Read from the same fields as providerRefusal, never the words:
+ *   claude  : the result line with is_error, its `api_error_status` (else the API error message's), and the API error
+ *             message's `error` as the type and `api_error` as the code
+ *   codex   : the last `turn.failed` (else `error`) event's JSON error body (codexError); Codex 0.167 reports an HTTP
+ *             5xx and a lost connection as prose only, so those are no such failure
+ *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode}
+ */
+export function providerOutage(harness, events) {
+  let r = null;
+  if (harness === "claude") {
+    const res = [...events].reverse().find((e) => e?.type === "result");
+    const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
+    if (res?.is_error !== true || !api) return null;
+    r = { status: num(res.api_error_status) ?? num(api.api_error_status), type: str(api.error), code: str(res.api_error) ?? str(api.api_error) };
+  } else if (harness === "codex") r = codexError(events);
+  else if (harness === "copilot") {
+    const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
+    if (d && typeof d === "object") r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode) };
+  }
+  if (!r || !(r.status !== null ? r.status >= 500 && r.status < 600 : r.type === "server_error")) return null;
+  return { harness, status: r.status, type: r.type, code: r.code };
+}
+
+/**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by
  * component on the bench's scorecard.
@@ -377,6 +404,8 @@ export function parseClaude(stdout, model) {
   rec.cache = { first };
   const refusal = providerRefusal("claude", lines);
   if (refusal) rec.refusal = refusal;
+  const outage = refusal ? null : providerOutage("claude", lines);
+  if (outage) rec.providerOutage = outage;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -517,6 +546,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   rec.error = failed;
   const refusal = rec.ok ? null : providerRefusal("codex", events, { rollout, since });
   if (refusal) rec.refusal = refusal;
+  const outage = rec.ok || refusal ? null : providerOutage("codex", events);
+  if (outage) rec.providerOutage = outage;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
   rec.usd = priceCodex(rec.model, rec.tokens);
@@ -672,6 +703,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   const p = priceCredits(a, creditUsd);
   const refusal = rec.ok ? null : providerRefusal("copilot", events);
   if (refusal) rec.refusal = refusal;
+  const outage = rec.ok || refusal ? null : providerOutage("copilot", events);
+  if (outage) rec.providerOutage = outage;
   if (p.aiu !== null) rec.aiu = p.aiu;
   if (p.lowerBound) rec.usdLowerBound = true;
   rec.sessionStartTime = a.sessionStartTime;

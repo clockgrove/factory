@@ -9,7 +9,7 @@ import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
 import { reviewPost, reviewsCover } from "../scripts/lib/handoff.mjs";
 import { parseReview } from "../scripts/lib/logic.mjs";
-import { FOUNDATION_AGENT, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
+import { FOUNDATION_AGENT, answerList, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
 import { AGENT_DIRS, agentModel } from "../scripts/lib/checkout.mjs";
 import { harnessCommand } from "../scripts/lib/harness.mjs";
 
@@ -135,7 +135,7 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.ok(at("const foundation = !!chosen.foundation;") > at("await choiceGate("), "the mark from the trusted choice");
   const pass = at("if (foundationDue) {");
   assert.ok(pass > at("const answer = alreadyReviewed ? reviewRec : reviewAnswer(") && pass > at("if (!answer) {"), "after the first pass has a review");
-  assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })") > pass, "posted with the first pass's comments");
+  assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed })") > pass, "posted with the first pass's comments");
   const block = src.slice(pass, at("const post = !alreadyReviewed"));
   assert.match(block, /over: \(\) => over\(\) \|\| overBudget,/, "max_usd: the job's own cap");
   assert.match(block, /maxUsd: Math\.max\(0, inputs\.maxUsd - sumSpend\(records\)\),/, "each call capped at what is left");
@@ -240,11 +240,14 @@ test("a PR reviewed before the foundation label gets the foundation pass alone a
   // The review job: the pass is due on a trusted foundation Objective whose reviews lack the marker, reviewed or not; on
   // an already reviewed PR it is posted alone; the earlier review's open comments are still answered.
   const src = readFileSync(join(ROOT, "plugin", "scripts", "review.mjs"), "utf8");
-  assert.match(src, /const covered = reviewsCover\(await rest\(`repos\/\$\{repo\.full\}\/pulls\/\$\{pr\.number\}\/reviews\?per_page=100`, \{ \.\.\.token, paginate: true \}\), issue\);\n\s+const alreadyReviewed = covered\.reviewed;\n\s+const foundationDue = foundation && !covered\.foundation;/);
+  assert.match(src, /const covered = reviewsCover\(reviews, issue\);/);
+  // A head with commits since the review (#350) gets the foundation pass again, on those commits, with the first pass.
+  assert.match(src, /const alreadyReviewed = scope\.covered;\n\s+const foundationDue = foundation && \(!alreadyReviewed \|\| !covered\.foundation\);/);
   assert.match(src, /\n  if \(foundationDue\) \{\n/);
   assert.doesNotMatch(src, /foundation && !alreadyReviewed/);
   assert.match(src, /: found\n\s+\? reviewPost\(\{ issue, review: null, diff, foundation: found\.review \}\)\n\s+: null;/);
-  assert.match(src, /const noneOwn = placeholder && !alreadyReviewed;\n\s+const toAnswer = \(await unaddressedReviewComments\([^\n]*\)\)\.filter\(\(c\) => !noneOwn \|\| c\.from\);/);
+  // The foundation pass alone, with nothing found, on a PR already reviewed: the earlier review's open comments are still answered.
+  assert.deepEqual(answerList([{ id: 1 }, { id: 2, from: "greptile-apps[bot]" }], { placeholder: true, first: false }).map((c) => c.id), [1, 2]);
   // The worker's rebase keeps a review only when it covers a foundation Objective's foundation pass.
   const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");
   assert.ok(worker.indexOf("const foundation = !!chosen.foundation;") > worker.indexOf("await choiceGate("));

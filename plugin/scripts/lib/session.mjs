@@ -1536,16 +1536,114 @@ export function leadDetail(lead, output) {
  * throws too, so no caller reads a cut diff as the whole one.
  */
 export async function mirrorDiff(mgit, from, to, { mergeBase = false, maxBytes = 16 * 1024 * 1024 } = {}) {
-  for (const sha of [from, to]) {
-    if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new Error(`not a commit id: ${String(sha).slice(0, 20)}`);
-    if ((await mgit(["cat-file", "-e", `${sha}^{commit}`])).code === 0) continue;
-    const f = await mgit(["fetch", "-q", "--no-tags", "origin", sha]);
-    if (f.code !== 0) throw new Error(`commit ${sha.slice(0, 7)} could not be fetched`);
-  }
+  for (const sha of [from, to]) await mirrorCommit(mgit, sha);
   const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", ...(mergeBase ? [`${from}...${to}`] : [from, to])], { maxBytes });
   if (d.code !== 0) throw new Error(`git diff failed (${d.code})`);
   if (d.truncated) throw new Error(`the diff is over ${maxBytes} bytes`);
   return String(d.stdout);
+}
+
+/** A commit in Factory's mirror, fetched by its id when the mirror lacks it; throws when it cannot be had. */
+async function mirrorCommit(mgit, sha) {
+  if (!/^[0-9a-f]{40,64}$/.test(String(sha))) throw new Error(`not a commit id: ${String(sha).slice(0, 20)}`);
+  if ((await mgit(["cat-file", "-e", `${sha}^{commit}`])).code === 0) return;
+  const f = await mgit(["fetch", "-q", "--no-tags", "origin", sha]);
+  if (f.code !== 0) throw new Error(`commit ${sha.slice(0, 7)} could not be fetched`);
+}
+
+/**
+ * The head Factory's review covers (#350): the later, by GitHub's times, of the head its last review read (the review's
+ * `commit_id`; reviews from Factory or someone who can push, carrying the review marker) and Factory's own covered record
+ * (recordCovered). `{sha, at, answer}`, or null with neither. `answer`: the record says the commits after it are an
+ * answer pass's that went over the answer bound (review.mjs answerGate): the pass that reads them is that answer's review.
+ */
+export function coveredHead({ reviews = [], comments = [], issue }) {
+  const seen = [];
+  for (const r of reviews || []) {
+    if (trustedAuthor(r) && (r.body || "").includes(marker(issue, "review")) && /^[0-9a-f]{40,64}$/.test(r.commit_id || "")) seen.push({ sha: r.commit_id, at: r.submitted_at, answer: false });
+  }
+  for (const c of comments || []) {
+    const m = isSelf(c) ? COVERED_RE.exec(c.body || "") : null;
+    if (m && Number(m[1]) === Number(issue)) seen.push({ sha: m[2], at: c.updated_at || c.created_at, answer: m[3] === ":answer" });
+  }
+  const time = (x) => (Number.isFinite(Date.parse(x.at)) ? Date.parse(x.at) : 0);
+  return seen.sort((a, b) => time(a) - time(b)).at(-1) ?? null;
+}
+
+/**
+ * The covered head's own change, from where it left the default branch (`base`, its head now), replayed onto `head`'s
+ * merge base with it (git merge-tree), in Factory's mirror: `{tree, headTree}`, or `{why}` when a commit cannot be had or
+ * the replay conflicts.
+ */
+async function replayOnto(mgit, { base, covered, head }) {
+  try {
+    for (const sha of [base, covered, head]) await mirrorCommit(mgit, sha);
+  } catch (e) {
+    return { why: String(e?.message || e).slice(0, 160) };
+  }
+  const one = async (args) => {
+    const r = await mgit(args);
+    return r.code === 0 ? String(r.stdout).split("\n")[0].trim() : "";
+  };
+  const [from, onto, headTree] = [await one(["merge-base", base, covered]), await one(["merge-base", base, head]), await one(["rev-parse", "--verify", `${head}^{tree}`])];
+  if (!from || !onto || !headTree) return { why: "the reviewed head shares no history with the default branch" };
+  const replay = await mgit(["merge-tree", "--write-tree", "--no-messages", `--merge-base=${from}`, onto, covered]);
+  // Exit 1 is git's conflict; any other failure is git's own (a git before 2.40 has no --merge-base).
+  if (replay.code === 1) return { why: `the reviewed head ${covered.slice(0, 7)} does not replay cleanly onto ${onto.slice(0, 7)}` };
+  const tree = replay.code === 0 ? String(replay.stdout).split("\n")[0].trim() : "";
+  if (!tree) return { why: `git merge-tree failed (exit ${replay.code}) replaying ${covered.slice(0, 7)}` };
+  return { tree, headTree };
+}
+
+/**
+ * What the PR's `head` adds to the head Factory's review covers (`covered`, coveredHead), decided on trees in Factory's
+ * mirror (#350, replayOnto). `{rebase: true}`: head is the covered head, or exactly its replay (a clean rebase, GitHub's
+ * update-branch merge). Else `{rebase: false, diff}`: head against the replay, which is the commits written since without
+ * the default branch's changes, or `diff` null when the replay conflicts or a commit cannot be had (then the whole PR is
+ * reviewed again), with `why`.
+ */
+export async function sinceReview(mgit, { base, covered, head, maxBytes = 16 * 1024 * 1024 }) {
+  if (covered === head) return { rebase: true };
+  const r = await replayOnto(mgit, { base, covered, head });
+  if (r.why) return { rebase: false, diff: null, why: r.why };
+  if (r.tree === r.headTree) return { rebase: true };
+  const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", r.tree, head], { maxBytes });
+  if (d.code !== 0 || d.truncated) return { rebase: false, diff: null, why: d.truncated ? `the diff since the reviewed head is over ${maxBytes} bytes` : `git diff failed (${d.code})` };
+  return { rebase: false, diff: String(d.stdout) };
+}
+
+/**
+ * What was written on the branch from `from` to `head`, the default branch's changes left out (replayOnto), as git's own
+ * count: `{files: [{path, lines}], lines}` (lines added and removed; a binary file counts none), or null when it cannot
+ * be told (a conflicting replay, a commit that cannot be had).
+ */
+export async function writtenSince(mgit, { base, from, head }) {
+  if (from === head) return { files: [], lines: 0 };
+  const r = await replayOnto(mgit, { base, covered: from, head });
+  if (r.why) return null;
+  const d = await mgit(["diff", "--numstat", "--no-renames", "-z", r.tree, head]);
+  if (d.code !== 0) return null;
+  const files = String(d.stdout)
+    .split("\0")
+    .filter(Boolean)
+    .map((l) => /^(-|\d+)\t(-|\d+)\t(.+)$/s.exec(l))
+    .filter(Boolean)
+    .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0) }));
+  return { files, lines: files.reduce((n, f) => n + f.lines, 0) };
+}
+
+/**
+ * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Factory review yet), `covered`
+ * (the head is the head Factory's review covers, or only a rebase of it: no second pass), or neither, when commits were
+ * written after it (the work stage answering a Question, a maintainer's push, an answer pass that applied maintainers'
+ * decisions or went over the answer bound): then `since` is the covered head and `diff` the changes since it
+ * (sinceReview), or null for the whole PR. `head`: the head it was decided for; `answer`: coveredHead's.
+ */
+export async function reviewScope(mgit, { reviews, comments, issue, base, head, maxBytes }) {
+  const at = coveredHead({ reviews, comments, issue });
+  if (!at) return { head, first: true, covered: false, since: null, diff: null, answer: false };
+  const s = await sinceReview(mgit, { base, covered: at.sha, head, maxBytes });
+  return s.rebase ? { head, first: false, covered: true, since: at.sha, diff: null, answer: at.answer } : { head, first: false, covered: false, since: at.sha, diff: s.diff, answer: at.answer, why: s.why ?? null };
 }
 
 /**
@@ -2114,12 +2212,13 @@ export async function postHandedOff(repo, prNumber, issue, sha, { token }) {
 /**
  * What Factory recorded on the PR about `sha`, from Factory's own comments or those of someone who can push, in one
  * read: `validated` (its validation was green) and `handedOff` (the worker handed it to the review with its checks running,
- * after its commands, if any, ran green). An unreadable list is neither.
+ * after its commands, if any, ran green). An unreadable list is neither. `comments`: the list read, for the other
+ * records on it (coveredHead).
  */
 export async function headMarks(repo, prNumber, issue, sha, { token }) {
   const comments = (await rest(`repos/${repo.full}/issues/${prNumber}/comments?per_page=100`, { token, paginate: true }).catch(() => [])) || [];
   const has = (m) => comments.some((c) => trustedAuthor(c) && (c.body || "").includes(m));
-  return { validated: has(validatedMarker(issue, sha)), handedOff: has(handedOffMarker(issue, sha)) };
+  return { validated: has(validatedMarker(issue, sha)), handedOff: has(handedOffMarker(issue, sha)), comments };
 }
 
 // ------------------------------------------------------------------ the merge
@@ -2132,6 +2231,22 @@ export async function recordMergeable(repo, prNumber, issue, sha, opts) {
   const mine = (await listComments(repo, prNumber, opts)).find((c) => isSelf(c) && (c.body || "").startsWith(MERGEABLE(issue)));
   if (mine) return rest(`repos/${repo.full}/issues/comments/${mine.id}`, { ...opts, method: "PATCH", body: { body } });
   return prComment(repo, prNumber, body, opts);
+}
+
+const COVERED = (issue) => `<!-- factory:${issue}:covered:`;
+const COVERED_RE = /^<!-- factory:(\d+):covered:([0-9a-f]{40,64})(:answer)? -->/;
+
+/**
+ * Record on the PR the head Factory's review covers (#350, coveredHead): the head its review stage leaves after its own
+ * answer and fix passes, which answer the reviewer's findings and the red checks and get no review of their own. A
+ * later commit beyond a rebase of it gets a review pass before the merge (reviewScope). `answer`: the commits after `sha`
+ * are an answer pass's over the answer bound (review.mjs answerGate), which the next pass reads. One comment, edited in place.
+ */
+export async function recordCovered(repo, prNumber, issue, sha, opts, { answer = false } = {}) {
+  const said = answer
+    ? `Factory: ${sha.slice(0, 7)} is covered by Factory's review; the answer pass's commits after it go over the answer bound and get a review pass before the merge.`
+    : `Factory: ${sha.slice(0, 7)} is covered by Factory's review (its reviewed head with the answer and fix passes that followed); later commits beyond a rebase get a review pass before the merge.`;
+  await upsertComment(repo, prNumber, COVERED(issue), said, opts, { head: `${sha}${answer ? ":answer" : ""} -->` });
 }
 
 /** The head recorded as mergeable on the PR, from Factory's own comment only, or null. */

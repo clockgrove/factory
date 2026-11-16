@@ -75,6 +75,9 @@ import {
   questionRaisedAt,
   answeredDuringJob,
   recordMergeable,
+  recordCovered,
+  reviewScope,
+  writtenSince,
   mergeBlockCause,
   mergeBlockReason,
   mergeReadyOne,
@@ -88,10 +91,17 @@ import {
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
-import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
+import { asksQuestion, namesPath, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
+
+/**
+ * What a pass on the commits since the reviewed head is told (#350): the rest of the PR was reviewed at `since`, the diff
+ * holds only what changed after it, and the acceptance entries are still judged on the PR as it now stands.
+ */
+export const sinceBrief = (since, { judge = true } = {}) =>
+  `Factory's reviewer already reviewed this PR at ${since.slice(0, 7)}, and commits were written after that review. This pass reviews those changes: the diff below is the PR's head against that reviewed head's change replayed on the current default branch, so neither the code reviewed then nor the default branch's changes are in it. Comment only on what this diff adds or changes; read the rest of the PR in the checkout as you need to${judge ? ", and still judge every acceptance entry on the PR as it now stands" : ""}.`;
 
 /**
  * The reviewer's prompt: the skill does the work; the JSON shape is what the job
@@ -102,7 +112,7 @@ const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
  * that leaves work for the next (handoff.mjs isSplitPart): the prompt says so, so the reviewer judges the entries the
  * PR body assigns to a later part as deferred; the last part and a one-PR Objective get the prompt without it.
  */
-export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null, handover = null }) {
+export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, decisions = [], part = null, handover = null, since = null }) {
   const agentFile = `${AGENT_DIRS[harness]}/reviewer${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   const entries = acceptanceEntries(issueBody);
   const brief = (t) => (t.length > 160 ? `${t.slice(0, 159)}…` : t);
@@ -115,6 +125,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
       ? `The issue's acceptance entries, by the ids to use (the full text is in the issue below):\n${entries.map((e) => `- ${e.id}: ${brief(e.text)}`).join("\n")}`
       : "Name each acceptance entry the issue states by its own label, or by its position when it has none.",
     ...(part ? [splitPartBrief(part)] : []),
+    ...(since ? [sinceBrief(since)] : []),
     "",
     "## Issue",
     issueBody || "(no body)",
@@ -123,7 +134,7 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
     "## PR body",
     prBody || "(no body)",
     "",
-    "## Diff",
+    since ? `## Diff since ${since.slice(0, 7)}` : "## Diff",
     "```diff",
     promptDiff(diff),
     "```",
@@ -138,13 +149,14 @@ export function reviewerPrompt({ issue, issueTitle, issueBody, prBody, diff, har
  * and shared test fixtures against isolation (factory-review-pr reference.md, "Foundation review"). It returns comments
  * only: the first pass judges the acceptance entries.
  */
-export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, harness }) {
+export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, harness, since = null }) {
   const agentFile = `${AGENT_DIRS[harness]}/${FOUNDATION_AGENT}${harness === "codex" ? ".toml" : harness === "copilot" ? ".agent.md" : ".md"}`;
   return [
     `You are the Factory reviewer's foundation pass for the pull request on issue #${issue}: ${issueTitle}. The Objective is labelled \`factory:foundation\`: later work builds on what it adds.${harness === "codex" ? ` Act as the reviewer agent defined in ${agentFile} and` : ""} Follow the factory-review-pr skill (in .claude/skills/factory-review-pr and .agents/skills/factory-review-pr), its reference.md section "Foundation review", exactly. Another pass reviews the rest of the PR and judges the acceptance entries; this pass does neither.`,
     "Read the repository as you need to: the callers are in the checkout, on the PR's head. Do NOT post anything to GitHub yourself: the job posts your findings with the other pass's. Your final message must be only a JSON object of this shape, with no prose around it:",
     '```json\n{"comments": [{"path": "src/errors.ts", "line": 12, "entry": "foundation", "body": "foundation review: ..."}]}\n```',
     "`comments` may be empty. `line` is a line number on the new side of the diff, on the contract or fixture the finding concerns; a caller outside the diff is named in the body as `path:line`. `entry` is the acceptance entry the finding falls under, else `foundation`.",
+    ...(since ? [sinceBrief(since, { judge: false })] : []),
     "",
     "## Issue",
     issueBody || "(no body)",
@@ -152,7 +164,7 @@ export function foundationPrompt({ issue, issueTitle, issueBody, prBody, diff, h
     "## PR body",
     prBody || "(no body)",
     "",
-    "## Diff",
+    since ? `## Diff since ${since.slice(0, 7)}` : "## Diff",
     "```diff",
     promptDiff(diff),
     "```",
@@ -344,6 +356,80 @@ export function workOwnsBranch({ action = null, sender = null, issue = null }) {
   if (action !== "ready_for_review" || sender?.type === "Bot" || !issue) return null;
   const state = stateOf(issue, null);
   return state === "Queued" || state === "Running" ? `marked ready while the Objective is ${state}: its work stage owns factory/${issue.number}` : null;
+}
+
+/**
+ * What the reviewer reads and where its review goes up (#350): `head`, the head Factory's checkout is on when the reviewer
+ * starts (after any fix pass before it), never a head GitHub shows later. The scope decided at the stage's start
+ * (`scope`, reviewScope) is decided again (`rescope`) when the head moved since. `diff`: the PR's whole diff at `head`
+ * (`wholeDiff`), which the review's comments are fitted to; `reviewDiff`: what the reviewer reads, the changes since the
+ * covered head (`since`) when that is all that is new, else the whole diff.
+ */
+export async function reviewRead({ scope, head, rescope, wholeDiff }) {
+  const now = scope.head === head ? scope : await rescope(head);
+  const since = !now.covered && now.since && now.diff !== null ? now.since : null;
+  const diff = await wholeDiff(head);
+  return { head, scope: now, since, diff, reviewDiff: since ? now.diff : diff };
+}
+
+/**
+ * The PR's head on GitHub when it is not `own` (Factory's last head: a push by anyone else since), else null. Moved,
+ * `before` runs first (the stage's stop check, which parks a stopped stage), then the review label goes back on, so the
+ * review runs again on the new head.
+ */
+export async function headMovedFrom({ repo, prNumber, own, token, before = null }) {
+  const now = await getPr(repo, prNumber, token);
+  if (now.head.sha === own) return null;
+  await before?.();
+  await removeLabel(repo, prNumber, REVIEW_LABEL, token).catch(() => {});
+  await addLabels(repo, prNumber, [REVIEW_LABEL], token);
+  return now.head.sha;
+}
+
+/**
+ * The review comments the answer pass gets: every open one, but after a first review that found nothing (its
+ * placeholder) only the third-party reviewers' and code scanning's (`from`). A later pass that found nothing leaves the
+ * earlier reviews' open findings to answer.
+ */
+export const answerList = (open, { placeholder, first }) => open.filter((c) => !(placeholder && first) || c.from);
+
+/** The most lines an answer pass and the fix passes after a review may write before their commits get a review pass (answerGate). */
+export const ANSWER_REVIEW_LINES = 150;
+
+/**
+ * Whether what a review stage's answer and fix passes wrote after the review (`written`, session.mjs writtenSince) stays
+ * the review's answer (#350): every file it changed is one a comment it answered is on or names, or one a red it fixed
+ * names (`texts`: the comments' bodies and the failures' output), and it changed at most ANSWER_REVIEW_LINES lines.
+ * Otherwise, or when what was written cannot be told (`written` null), `review` is true: those commits get a review pass.
+ */
+export function answerGate({ written, comments = [], texts = [] }) {
+  if (!written) return { review: true, why: "what the answer and fix passes wrote could not be told from the default branch's changes" };
+  const named = (p) => comments.some((c) => c.path === p) || [...texts, ...comments.map((c) => c.body)].some((t) => typeof t === "string" && (namesPath(t, p) || namesPath(t, p.split("/").at(-1))));
+  const outside = written.files.map((f) => f.path).filter((p) => !named(p));
+  if (outside.length) return { review: true, why: `the answer and fix passes changed ${outside.slice(0, 5).join(", ")}${outside.length > 5 ? ` and ${outside.length - 5} more` : ""}, which no finding or failure names` };
+  if (written.lines > ANSWER_REVIEW_LINES) return { review: true, why: `the answer and fix passes changed ${written.lines} lines, over ${ANSWER_REVIEW_LINES}` };
+  return { review: false, why: "" };
+}
+
+/**
+ * What a review stage's review covers as it ends (#350): the head it leaves (`head`; null when a push was refused), its
+ * own answer and fix passes being the review's answer, with no review of their own. Two kinds of commits are new work
+ * that gets a review pass before the merge (`review` true): an answer pass's that applied maintainers' decisions
+ * (`answerQuestion`: a Question's answer, a comment no pass had read) and committed (`answerTo` past `answerFrom`), the
+ * stage covering up to `answerFrom` (up to `reviewedAt` when what came before that pass is over the bound); and answer
+ * and fix passes over the bound (`gate`, answerGate, of what was written up to `answerFrom` when the answer applied
+ * decisions, else up to `head`), the stage covering up to the head its review read (`reviewedAt`), recorded as `answer` so the pass that reads them is their review and its
+ * own answer is not gated again (`answering`: this stage's review is that pass). `record`: the head to record (session.mjs
+ * recordCovered) when the review's own commit_id does not already say it, else null.
+ */
+export function coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate = null, answering = false }) {
+  if (answerQuestion && answerTo && answerTo !== answerFrom) {
+    // What came before that answer pass (a fix pass after the review) over the bound too: the pass reads from the review.
+    if (gate?.review && !answering) return { review: true, answer: true, record: reviewedAt, why: gate.why };
+    return { review: true, answer: false, record: answerFrom !== reviewedAt ? answerFrom : null };
+  }
+  if (head && head !== reviewedAt && gate?.review && !answering) return { review: true, answer: true, record: reviewedAt, why: gate.why };
+  return { review: false, answer: false, record: head && head !== reviewedAt ? head : null };
 }
 
 /** The worker's prompt for the one pass that answers the review. */
@@ -750,12 +836,10 @@ async function main() {
     await finish("blocked", reason);
     return;
   }
-  // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. A PR
-  // reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
-  const covered = reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }), issue);
-  const alreadyReviewed = covered.reviewed;
-  const foundationDue = foundation && !covered.foundation;
-  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass; ${foundationDue ? "the foundation pass runs alone, then " : ""}validating and merging without a second pass`);
+  // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. Whether
+  // the head still needs a pass is decided once the branch is in Factory's mirror (reviewScope, below).
+  const reviews = await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true });
+  const covered = reviewsCover(reviews, issue);
 
   // Factory's git runs only in its own mirror (lib/outbox.mjs): the branch reaches the agent's checkout as a bundle, and
   // every git command there runs in the agent's sandbox (on Actions, as the agent uid). What this stage answers for
@@ -931,6 +1015,8 @@ async function main() {
 
   // A red the answer pass fixes with the review's comments (validationLoop `held`, or the merge queue's: readQueueRed), else null.
   let heldRed = null;
+  // The failures this stage's fix passes were given: what they may change stays the review's answer (answerGate).
+  const fixTexts = [];
   // The pre-review pass still waiting for the checks while the reviewer runs (reviewOverlap), else null.
   let overlap = null;
   // The pre-review pass's end (validationLoop's result): its fix passes booked and pushed; a PR that started conflicting
@@ -938,6 +1024,7 @@ async function main() {
   // (heldRed), and a green head gets the validated marker. False when the stage has ended here.
   const preSettled = async (pre) => {
     records.push(...pre.usage);
+    if (pre.usage.length && pre.lastOutput) fixTexts.push(pre.lastOutput);
     passes += pre.passes;
     if (pre.usage.length) {
       await outbox.push();
@@ -983,6 +1070,18 @@ async function main() {
   // gets its fix passes first, as does any head when no reviewer runs or the validation is the commands alone; a red
   // there that stays red is Blocked before any review.
   const marks = await headMarks(repo, pr.number, issue, pr.head.sha, token);
+  // One review pass per chunk of work (#350). A head Factory's review covers (the head it read, with that stage's own
+  // answer and fix passes after it: session.mjs coveredHead), or only a rebase of it, gets no second pass: it is
+  // validated and merged, and only what is still unanswered is answered. Commits written after it (the work stage
+  // answering a Question, a maintainer's push, an answer pass that applied maintainers' decisions) get a pass on the
+  // changes since that head, the default branch's left out; one that cannot be told apart from the rest gets the whole PR.
+  // A PR reviewed before its Objective was labelled a foundation one gets the foundation pass alone, as its own review.
+  const startHead = outbox.expected() || pr.head.sha;
+  const scope = await reviewScope(outbox.git, { reviews, comments: marks.comments, issue, base: outbox.base, head: startHead, maxBytes: REVIEW_DIFF_BYTES });
+  const alreadyReviewed = scope.covered;
+  const foundationDue = foundation && (!alreadyReviewed || !covered.foundation);
+  if (alreadyReviewed) log(`PR #${pr.number} already has Factory's one review pass${scope.since === startHead ? "" : ` (its head only rebases the covered ${scope.since.slice(0, 7)})`}; ${foundationDue ? "the foundation pass runs alone, then " : ""}validating and merging without a second pass`);
+  else if (scope.since) log(`PR #${pr.number}: commits since the head Factory's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
     const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress) }), drift, checksOnlyFirst: marks.handedOff };
@@ -1035,10 +1134,21 @@ async function main() {
   if (!alreadyReviewed && over()) return blockedAtCap("the reviewer");
   const reviewTimeout = reviewCallTimeout(remainingMs(deadlineAt));
   if (!alreadyReviewed && reviewTimeout === null) return blockedAtTime("the reviewer");
-  // From Factory's mirror (no file limit); GitHub's files API only when the mirror cannot make it.
-  const prd = await prDiff(repo, pr, token, { diffOf: (base, head) => mirrorDiff(outbox.git, base, head, { mergeBase: true, maxBytes: REVIEW_DIFF_BYTES }) });
-  if (prd.source !== "history") log(`the PR's diff came from GitHub's files API (Factory's mirror: ${prd.historyError})${prd.unlisted ? `; ${prd.unlisted} file(s) are past the API's listing` : ""}`);
-  const diff = prd.text;
+  // What the reviewer reads and where its review goes up (#350, reviewRead): the head Factory's checkout is on now, never
+  // a head GitHub shows later. The PR's whole diff from Factory's mirror (no file limit; GitHub's files API only when the
+  // mirror cannot make it), and the changes since the covered head when that is all that is new.
+  const read = await reviewRead({
+    scope,
+    head: outbox.expected() || pr.head.sha,
+    rescope: (head) => reviewScope(outbox.git, { reviews, comments: marks.comments, issue, base: outbox.base, head, maxBytes: REVIEW_DIFF_BYTES }),
+    wholeDiff: async (head) => {
+      const prd = await prDiff(repo, { ...pr, head: { ...pr.head, sha: head } }, token, { diffOf: (base, to) => mirrorDiff(outbox.git, base, to, { mergeBase: true, maxBytes: REVIEW_DIFF_BYTES }) });
+      if (prd.source !== "history") log(`the PR's diff came from GitHub's files API (Factory's mirror: ${prd.historyError})${prd.unlisted ? `; ${prd.unlisted} file(s) are past the API's listing` : ""}`);
+      return prd.text;
+    },
+  });
+  // Comments are fitted to the whole diff either way: they go on the PR's lines.
+  const { diff, reviewDiff, since: sinceReviewed } = read;
   // The workflow hand-over Factory published for this Objective (handoff.mjs handoverPosted), reviewed with the diff.
   const handoverPatch = (await handoverPosted(repo, issue, token).catch(() => null))?.patch ?? null;
   if (!alreadyReviewed) {
@@ -1051,7 +1161,7 @@ async function main() {
     harness: inputs.harness,
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,
-    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part, handover: handoverPatch }),
+    prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness, decisions, part, handover: handoverPatch }),
     maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
     reviewer: true,
@@ -1099,7 +1209,7 @@ async function main() {
       harness: inputs.harness,
       model: again.model,
       effort: again.effort,
-      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness, decisions, part, handover: handoverPatch }),
+      prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness, decisions, part, handover: handoverPatch }),
       maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
       reviewer: true,
@@ -1149,7 +1259,7 @@ async function main() {
             effort,
             label,
             timeoutMs,
-            prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff, harness: inputs.harness }),
+            prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness }),
             maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
             cwd: checkout,
             env: harnessEnv,
@@ -1187,17 +1297,46 @@ async function main() {
     if (!(await preSettled(pre))) return;
   }
   const post = !alreadyReviewed
-    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null })
+    ? reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed })
     : found
       ? reviewPost({ issue, review: null, diff, foundation: found.review })
       : null;
   if (post?.unjudged.length) log(`reviewer left ${post.unjudged.length} of ${entries.length} acceptance entr${entries.length === 1 ? "y" : "ies"} unjudged: ${post.unjudged.join(", ")}`);
   const comments = post ? post.comments : [];
   const placeholder = !!post?.placeholder;
+  // The review goes up on the head the reviewer read (its commit_id is the head Factory's review covers from here:
+  // coveredHead), and only while GitHub's head is still Factory's: a push by anyone else since (a maintainer's) is no
+  // head this review read, so nothing is posted and the review runs again on it, as validatedOn does.
+  let postedAt = null;
   if (comments.length) {
-    const posted = await postReview(repo, pr.number, { body: post.body, comments, commitId: pr.head.sha }, token);
+    // A stop comes first (stop.mjs confirmRunning): a stopped Objective gets no review label back and no exit of this stage.
+    const moved = await headMovedFrom({ repo, prNumber: pr.number, own: outbox.expected() || read.head, token, before: () => beforeExit?.() });
+    if (moved) {
+      const reason = `PR #${pr.number}'s head moved to ${moved.slice(0, 7)} while the reviewer read ${read.head.slice(0, 7)}; nothing is posted and the review runs again on the new head`;
+      log(reason);
+      await finish("delivered", reason);
+      return;
+    }
+    const posted = await postReview(repo, pr.number, { body: post.body, comments, commitId: read.head }, token);
+    postedAt = read.head;
     log(`posted review with ${comments.length} comment(s)${placeholder ? " (placeholder: nothing to answer)" : ""}${posted.moved ? `; ${posted.moved} moved to a line GitHub takes` : ""}${posted.inBody ? `; ${posted.inBody} in the review body${posted.retried ? ` (GitHub answered ${posted.retried} to the line comments)` : " (no line GitHub can take)"}, answered from there` : ""}`);
   }
+  // What this stage's review covers as it goes (#350, coverAfter), recorded on the PR (recordCovered): its own answer and
+  // fix passes, unless they applied maintainers' decisions in new commits or went over the answer bound (answerGate);
+  // the answer to a pass that read commits over that bound (`scope.answer`) is not gated again.
+  // Where it starts: on a covered PR the head it was found covered at (the fix passes before the answer pass are the
+  // stage's own), else the head the review went up on.
+  const reviewedAt = alreadyReviewed ? startHead : (postedAt ?? read.head);
+  const settleCover = async ({ answerQuestion = false, answerFrom, answerTo, comments: answered }) => {
+    const head = outbox.failed ? null : outbox.expected();
+    const answering = !!scope.answer && !alreadyReviewed;
+    // An answer that applied decisions is reviewed anyway: the bound is on what this stage wrote before it.
+    const upTo = answerQuestion && answerTo && answerTo !== answerFrom ? answerFrom : head;
+    const gate = upTo && upTo !== reviewedAt && !answering ? answerGate({ written: await writtenSince(outbox.git, { base: outbox.base, from: reviewedAt, head: upTo }), comments: answered, texts: [...fixTexts, ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }) : null;
+    const c = coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate, answering });
+    if (c.record) await recordCovered(repo, pr.number, issue, c.record, token, { answer: c.answer }).catch((e) => log(`covered record: ${String(e?.message || e).slice(0, 120)}`));
+    return c;
+  };
   const reviewerLogin = app.appSlug ? `${app.appSlug}[bot]` : null;
   // A pass with nothing to answer (the reviewer's JSON had no comments: Factory's placeholder went up) skips the worker pass.
   // Factory's own reviews on this PR (the marker in the body, from Factory or someone who can push): their comments are the reviewer's.
@@ -1221,6 +1360,8 @@ async function main() {
     await holdIfStopped();
     const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels: issueData.labels, token });
     if (ended.ok) {
+      // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
+      await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
       const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
       log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
       await finish("waiting", reason);
@@ -1234,8 +1375,7 @@ async function main() {
   // Factory's placeholder (no finding of its own) still leaves a named reviewer's or code scanning's comments to answer.
   // The foundation pass posted alone with nothing found (a PR reviewed before its label) leaves the earlier review's open
   // comments too.
-  const noneOwn = placeholder && !alreadyReviewed;
-  const toAnswer = (await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty })).filter((c) => !noneOwn || c.from);
+  const toAnswer = answerList(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), { placeholder, first: scope.first });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   // A red required check the stage held (heldRed: the checks the reviewer ran beside, or the merge queue's run) is the
@@ -1258,6 +1398,10 @@ async function main() {
   // The answer pass put back toolchain files its fix needs and asked a Question (holdScope): no validation pass follows.
   let heldQuestion = false;
   let jobRead = {};
+  // The heads before and after the answer pass's own push (#350): commits it made applying maintainers' decisions are
+  // new work, which gets a review pass before the merge (coverAfter).
+  const answerFrom = outbox.expected() || pr.head.sha;
+  let answerTo = answerFrom;
   if (answering) {
     // The pass reads its comments and the PR from $FACTORY_IN; an exit record from an earlier pass must not speak for it.
     io.set({ reviewComments: toAnswer });
@@ -1339,6 +1483,7 @@ async function main() {
     if (!(await outbox.push())) log(`push refused: ${outbox.error}`);
     const pushed = !outbox.failed;
     if (pushed) pr = await publish(pr);
+    if (pushed) answerTo = outbox.expected() || answerFrom;
     // The queue's fix pass committed and is on GitHub: its record counts toward the bound now. One that committed nothing
     // leaves the drop handed, for the next stage.
     if (queueFix && pushed && headBefore && answered && answered !== headBefore) {
@@ -1376,6 +1521,7 @@ async function main() {
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;
+  if (validation.usage.length && validation.lastOutput) fixTexts.push(validation.lastOutput);
   if (validation.usage.length) {
     if (!(await outbox.push())) log(`push refused: ${outbox.error}`);
     if (!outbox.failed) pr = await publish(pr);
@@ -1432,6 +1578,9 @@ async function main() {
   // The exit begins here (stop.mjs confirmRunning `commit`): a stop after this read ends nothing, and the dispatcher's
   // stopped pass tidies what this exit leaves; the merge pass reads the issue once more before any merge.
   await beforeExit?.(true);
+  // What this stage's review covers as it ends (#350, coverAfter): its own answer and fix passes, unless the answer pass
+  // applied maintainers' decisions in new commits, which get a review pass before any merge.
+  const cover = await settleCover({ answerQuestion, answerFrom, answerTo, comments: toAnswer });
   // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first, not a cap of Factory's.
   if (decision.exit === "blocked") {
     decision.reason = relayReason(decision.reason);
@@ -1466,6 +1615,14 @@ async function main() {
       decision.reason = `${late.length} maintainer comment(s) arrived during the review; the review runs again to apply them`;
       await exitStep(decision, `${late.length} maintainer comment(s) arrived during the review and the review label could not be re-applied to run it again`, () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }
+  }
+  // The answer pass applied maintainers' decisions in new commits (#350): no merge before a review pass reads them. The
+  // review runs again (the label re-applied) on the changes since the head this stage covers.
+  if (decision.exit === "delivered" && !decision.rerun && !conflict && cover.review) {
+    decision.rerun = true;
+    decision.reason = cover.answer ? `${cover.why}; the review runs again on the commits after ${reviewedAt.slice(0, 7)} before the merge` : `the answer pass applied the maintainers' decisions in new commits after ${answerFrom.slice(0, 7)}; the review runs again on them before the merge`;
+    log(decision.reason);
+    await exitStep(decision, "the answer pass's new commits need a review pass and the review label could not be re-applied to run it", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
   }
   let stoppedAtMerge = null;
   if (decision.exit === "delivered" && !decision.rerun && !conflict) {

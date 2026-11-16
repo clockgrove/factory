@@ -285,13 +285,13 @@ test("what ran is recorded: the progress comment's harness line and doctor's def
   for (const p of Object.values(CHOICE_PREFIXES)) assert.ok(d.detail.includes(p), p);
 });
 
-test("the work and review stages: the choice after the trust check, then the plan check on the chosen harness, doctor for that harness, all before any harness", () => {
+test("the work and review stages: the choice after the trust check, then doctor for that harness, all before any harness", () => {
   for (const file of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(ROOT, "plugin", "scripts", file), "utf8");
     const run = src.indexOf("async function run()");
     const at = (s) => src.indexOf(s, run);
-    // The plan check after the choice: an edit is judged on the harness the labels chose (objective-trust.mjs planGate).
-    assert.ok(at("await authorGate(") < at("await choiceGate(") && at("await choiceGate(") < at("await planGate("), file);
+    // The plan check after the choice (an edit is judged on the harness the labels chose) is driven in edit-check-stage.test.mjs.
+    assert.ok(at("await authorGate(") < at("await choiceGate("), file);
     assert.match(src.slice(at("await choiceGate("), at("await choiceGate(") + 700), /if \(!chosen\.ok\) \{\n\s+log\(chosen\.reason\);\n\s+await finish\("blocked", chosen\.reason\);\n\s+return;\n\s+\}\n\s+Object\.assign\(inputs, chosen\.inputs\);/, `${file} stops on a refusal, else runs on the choice`);
     for (const later of ["jobChecks(", "installPlugin(", "credentialEnv(", "openHandoff(", "runHarness(", "validationLoop("]) {
       const i = at(later);

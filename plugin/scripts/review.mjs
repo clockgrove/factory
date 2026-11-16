@@ -989,9 +989,20 @@ async function main() {
   // this harness's credential, read only when a question is due.
   let decisionEnv = null;
   const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  // The harness's credential, read once for the stage (the edit check may read it first): `cred`, which every stop and
+  // end masks. Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
+  let credRead = null;
+  const readCred = () =>
+    (credRead ??= (async () => {
+      const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
+      cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
+      return cred;
+    })());
+  // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
   const editCheck = async () => {
+    if (inputs.decisionRoute === "off") return openEditCheck({ inputs });
     try {
-      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env };
+      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await readCred()).env };
     } catch (e) {
       log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
       return openEditCheck({ inputs });
@@ -1001,7 +1012,7 @@ async function main() {
   // The text its plan was made from (objective-trust.mjs planGate), before anything is set up for it: changed since, the
   // review, the answer pass and the merge do not go on with code made for the earlier text, and the stage Blocks. An
   // edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review", check: editCheck });
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review", check: editCheck, progress });
   if (!planned.ok) {
     log(planned.reason);
     await finish("blocked", planned.reason);
@@ -1112,9 +1123,8 @@ async function main() {
     await finish(applied?.exit ?? "question", applied?.reason ?? reason);
     return;
   }
-  // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
-  const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
-  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
+  // The harness's credential, read once (readCred: the edit check may have read it already).
+  await readCred();
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   io.set({ decisions, prNumber: pr.number });

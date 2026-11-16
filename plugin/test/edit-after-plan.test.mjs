@@ -164,7 +164,7 @@ test("edit after plan: the merge Blocks on an edit, cause work, as every other m
   assert.equal(mergeBlockCause("edited"), "work");
   const src = readFileSync(join(SCRIPTS, "lib", "session.mjs"), "utf8");
   const merge = src.slice(src.indexOf("export async function mergeReadyOne("));
-  const at = merge.lastIndexOf("await editedSincePlan(repo, issue, opts, { check: editCheck })");
+  const at = merge.lastIndexOf("await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) })");
   assert.ok(at > merge.indexOf('return "unread"'), "checked once the checks are green, before any merge");
   assert.ok(merge.indexOf("await mergeVerified(") > at, "the merge only after the check");
 });

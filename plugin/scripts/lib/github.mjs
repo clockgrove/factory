@@ -627,16 +627,19 @@ export async function listComments(repo, number, opts) {
 
 /**
  * Post a comment, or update the one carrying `marker` when it exists (idempotent on rerun). `head`: Factory's own text
- * after the marker on its first line (the plan comment's record, handoff.mjs planTextMarker); `keepHead` keeps the one an
- * existing comment has instead.
+ * after the marker on its first line (the plan comment's record, handoff.mjs planTextMarker), or a function making it
+ * from the head the comment has now; `keepHead` keeps the one an existing comment has instead.
  */
 export async function upsertComment(repo, number, mark, body, opts, { head = "", keepHead = false } = {}) {
   // Only Factory's own comment, the marker on its first line, is ours to edit: anyone can paste the marker into theirs.
   // Before Factory knows its login (a failed read), one by someone who can push is.
   const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(mark);
   const existing = (await listComments(repo, number, opts)).find(ours);
-  // keepHead: the head the comment has now stays (a writer that knows none never erases one).
-  if (keepHead && existing) head = /^[^\n]*/.exec(existing.body)[0].slice(mark.length).replace(/\r$/, "");
+  const now = existing ? /^[^\n]*/.exec(existing.body)[0].slice(mark.length).replace(/\r$/, "") : null;
+  // keepHead: the head the comment has now stays (a writer that knows none never erases one). A function `head` makes
+  // the head from the one the comment has now (null with no comment).
+  if (keepHead && existing) head = now;
+  if (typeof head === "function") head = head(now);
   const text = `${mark}${head}\n${body}`;
   if (existing) return rest(`repos/${repo.full}/issues/comments/${existing.id}`, { ...opts, method: "PATCH", body: { body: text } });
   return rest(`repos/${repo.full}/issues/${number}/comments`, { ...opts, method: "POST", body: { body: text } });

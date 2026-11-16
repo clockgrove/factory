@@ -3079,6 +3079,12 @@ async function conversationsGate(repo, ctx, report, opts) {
 }
 
 /**
+ * Where the merge pass says an edit it judged wording only (objective-trust.mjs editedSincePlan): a progress comment of
+ * its own on the issue, stage `merge`, one line, no spend.
+ */
+const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, opts, { stage: "merge", soFar: null })(line);
+
+/**
  * An edit since the plan that the merge pass could not judge (objective-trust.mjs editedSincePlan "unjudged"): the
  * review label goes back on, so a review stage, whose start judges the edit with its own decider (planGate), decides
  * whether the PR still merges. Returns "text-edit".
@@ -3149,7 +3155,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     if (!st?.stalled) {
       // The Objective edited since its plan while its PR waits in the queue: taken out, so it does not merge (the
       // caller Blocks, or the review stage judges the edit). A dequeue GitHub refuses is logged.
-      const text = await editedSincePlan(repo, issue, opts, { check: editCheck });
+      const text = await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) });
       if (text !== "same") {
         await dequeuePr(repo, pr.node_id, opts).catch((e) => log(`#${issue}: PR #${prNumber} could not be taken out of the merge queue (${errCode(e)})`));
         return text === "unjudged" ? textEdit(repo, issue, prNumber, opts) : "edited";
@@ -3207,7 +3213,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   }
   // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
   // earlier text does not merge; the caller Blocks. An edit no decider here could judge goes to the review stage.
-  const text = await editedSincePlan(repo, issue, opts, { check: editCheck });
+  const text = await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) });
   if (text === "changed") return "edited";
   if (text === "unjudged") return textEdit(repo, issue, prNumber, opts);
   // A PR the queue dropped (its checks never ran on the queue's commit, or failed there) goes back in once; dropped

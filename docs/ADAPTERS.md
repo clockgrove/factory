@@ -85,7 +85,7 @@ The `harness` vendor:
   - The answer gate asks once per review stage whose answer and fix passes committed.
   - The finding check asks once per reviewer finding the answer pass replied to.
   - The rebase check asks once per file a send-back's conflict pass left other than the branch's version.
-  - The edit check asks once per distinct text of an Objective edited after its plan was made, its verdict kept on the plan comment.
+  - The edit check asks once per distinct title and body of an Objective edited after its plan was made (a label change is never asked about), its verdict kept on the plan comment.
   - On Copilot each call is a premium request.
   - All of it counts toward max_usd, the validation loop's budget included.
   - `decision_route` `gateway` uses the gateway only. `off` runs no decision call: every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass (the answer gate), a reply resolves its reviewer finding unjudged (the finding check), a send-back's conflict pass is checked by matching commits rather than by content (the rebase check), and any edit to an Objective's text after its plan makes the plan and code stale (the edit check).

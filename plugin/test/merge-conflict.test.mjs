@@ -581,6 +581,8 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: wording }, { token: "t" }), "queued");
     assert.equal(asked.length, 1);
     assert.match(gh.comments[2].find((c) => c.id === 900).body, /"verdicts":\{"[0-9a-f]{64}":"wording"\}/);
+    // Said on the issue: a merge progress comment naming the verdict, the decider and its confidence.
+    assert.ok(gh.comments[2].some((c) => c.body.startsWith("<!-- factory:2:progress:merge:") && /edit judged wording-only by given \(perplexity\/pplx-decider-v1\.2\) \(0\.90\); plan kept/.test(c.body)), gh.comments[2].map((c) => c.body).join("\n---\n"));
   });
 });
 

@@ -436,19 +436,21 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
  * work stage last started from that text (planGate), `text` that text itself ({title, body, labels}: what an edit's
  * before is, #400) and `verdicts`, the edit check's verdict for each later text by its hash (edit-check.mjs). Only
  * Factory writes it: harness text never carries `<!--` (sanitize), only Factory's own comment is read, and `<` and `>`
- * in the record are JSON escapes, so no text in it closes the comment. `room`: the most characters the line may take
- * (the comment's limit less the plan); a record too long for it goes without its text, then without its verdicts.
+ * in the record are JSON escapes, so no text in it closes the comment. `room`: the most UTF-8 bytes the line may take
+ * (the comment's limit less the plan, recordRoom); a record too long for it drops its verdicts before its text (a
+ * verdict dropped is asked again; the text gone would end the edit check), then its text.
  */
 export function planTextMarker(rec, room = Infinity) {
   const line = (o) => `<!-- factory:plan-text ${JSON.stringify(o).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
   const base = { sha256: rec.sha256, label: rec.label ?? null };
+  const text = rec.text ? { text: rec.text } : {};
   const verdicts = rec.verdicts && Object.keys(rec.verdicts).length ? { verdicts: rec.verdicts } : {};
-  const fits = [{ ...base, ...(rec.text ? { text: rec.text } : {}), ...verdicts }, { ...base, ...verdicts }].map(line).find((l) => l.length <= room);
+  const fits = [{ ...base, ...text, ...verdicts }, { ...base, ...text }, { ...base, ...verdicts }].map(line).find((l) => Buffer.byteLength(l) <= room);
   return fits ?? line(base);
 }
 const PLAN_TEXT = /^<!-- factory:plan-text (\{[^\n]*\}) -->$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-/** GitHub's own limit on a comment's body, in characters. */
+/** GitHub's own limit on a comment's body, 65,536 characters: counted here as UTF-8 bytes, never more than its characters. */
 export const COMMENT_MAX = 65_536;
 /** The verdicts a record keeps (edit-check.mjs EDIT_VERDICTS). */
 const VERDICTS = new Set(["wording", "requirement"]);
@@ -473,8 +475,19 @@ export function planTextOf(head) {
   }
 }
 
-/** The room a plan-text record has on the plan comment of issue `issue` holding `body` (planTextMarker). */
-const recordRoom = (issue, body) => COMMENT_MAX - marker(issue, "plan").length - 1 - String(body ?? "").length;
+/** The room, in UTF-8 bytes, a plan-text record has on the plan comment of issue `issue` holding `body` (planTextMarker). */
+export const recordRoom = (issue, body) => COMMENT_MAX - Buffer.byteLength(`${marker(issue, "plan")}\n${String(body ?? "")}`);
+
+/**
+ * The plan comment's head for `record` (planTextMarker, within recordRoom), given the head the comment has now
+ * (upsertComment): the edit check's verdicts that comment holds for the same text, written by another process since this
+ * one read it (the merge pass, a stage), are kept beside this record's own.
+ */
+const recordHead = (issue, body, record) => (now) => {
+  const was = planTextOf(now);
+  const verdicts = was && was.sha256 === record.sha256 && was.verdicts ? { ...was.verdicts, ...(record.verdicts || {}) } : record.verdicts;
+  return planTextMarker({ ...record, ...(verdicts ? { verdicts } : {}) }, recordRoom(issue, body));
+};
 
 /**
  * The Objective's plan comment among `comments`: the newest written (its last update) of those that carry the marker on
@@ -538,7 +551,7 @@ export function planSync(repo, issue, opts, record = null) {
     const body = sanitize(text.trim());
     if (body === last) return false;
     // A stage that knows no record keeps the one the comment has: it never erases it.
-    await upsertComment(repo, issue, marker(issue, "plan"), body, opts, record ? { head: planTextMarker(record, recordRoom(issue, body)) } : { keepHead: true });
+    await upsertComment(repo, issue, marker(issue, "plan"), body, opts, record ? { head: recordHead(issue, body, record) } : { keepHead: true });
     last = body;
     return true;
   };
@@ -546,7 +559,7 @@ export function planSync(repo, issue, opts, record = null) {
 
 /** Write `record` with the plan `plan` (planOf) on this login's own plan comment, its text unchanged. */
 export async function stampPlan(repo, issue, plan, record, opts) {
-  await upsertComment(repo, issue, marker(issue, "plan"), plan.text, opts, { head: planTextMarker(record, recordRoom(issue, plan.text)) });
+  await upsertComment(repo, issue, marker(issue, "plan"), plan.text, opts, { head: recordHead(issue, plan.text, record) });
 }
 
 /** Post note.md, the harness's account of what blocked it, as one comment on the issue. */

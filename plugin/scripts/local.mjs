@@ -3534,7 +3534,10 @@ async function deliver(issue, flags) {
     }
   })();
   if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
-  const planRecord = given === null ? null : { sha256: trusted.sha, label: labeledAt, text: recordText({ ...issueData, labels: trusted.labels }) };
+  // An edit since the plan the edit check keeps (as `factory issue` judged it, on the gateway alone) keeps the plan's own
+  // record, its text the baseline the next edit is judged against; else the text the session was given.
+  const kept = given === null ? null : await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }));
+  const planRecord = given === null ? null : kept.state === "same" && kept.record && kept.record.sha256 !== trusted.sha ? { ...kept.record, label: labeledAt } : { sha256: trusted.sha, label: labeledAt, text: recordText({ ...issueData, labels: trusted.labels }) };
   const out = resolve(flags.out || process.env.FACTORY_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-out"));
   const { files, refused } = await readOut({ out }, process.env);
   if (refused.length) log(`hand-off files refused: ${refused.join(", ")}`);

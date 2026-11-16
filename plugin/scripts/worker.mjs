@@ -404,9 +404,21 @@ async function main() {
   // check alone, the env every child starts from with this harness's credential, read only when a question is due.
   let decisionEnv = null;
   const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  // The harness's credential, read once for the stage (the edit check may read it first): `cred`, which every stop and
+  // end masks. Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
+  let credRead = null;
+  const readCred = () =>
+    (credRead ??= (async () => {
+      const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
+      cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
+      credentialBasis = cred.basis;
+      return cred;
+    })());
+  // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
   const editCheck = async () => {
+    if (inputs.decisionRoute === "off") return openEditCheck({ inputs });
     try {
-      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env };
+      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await readCred()).env };
     } catch (e) {
       log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
       return openEditCheck({ inputs });
@@ -416,13 +428,16 @@ async function main() {
   // The text its plan was made from (objective-trust.mjs planGate), before anything acts on the text: changed since, with
   // no label applied after the last work stage started from it, the stage Blocks; with one, the plan is made again from
   // this text. An edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck });
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck, progress });
   if (!planned.ok) {
     log(planned.reason);
     await finish("blocked", planned.reason);
     return;
   }
   if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
+  // The text a paused pass is held to (continue.mjs): the plan's own when this text is that plan's (the same, or an edit the
+  // edit check kept), so a kept edit does not discard the pause; else the text read now.
+  const planText = planned.state === "same" && planned.record?.sha256 ? planned.record.sha256 : trusted.sha;
 
   // One repository per Objective (lib/one-repo.mjs): a body that names another repository (declaredQuestion) is a
   // Question before any branch work or harness spend. An open PR the Objective already has goes back to a draft with
@@ -492,7 +507,7 @@ async function main() {
       ? await enterStage({
           ws: join(usageDir, ".."),
           own: usageDir,
-          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
+          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: planText, harness: inputs.harness, login: loginOf(inputs.harness) }),
           holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
           putOn,
           clean,
@@ -616,10 +631,8 @@ async function main() {
   }
 
   // 5. The prompt, the hand-off and the harness.
-  // Codex through the AI Gateway: one session id for the Objective's Running stint, so its resumes keep their credential.
-  const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
-  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
-  credentialBasis = cred.basis;
+  // The harness's credential, read once (readCred: the edit check may have read it already).
+  await readCred();
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
@@ -721,7 +734,7 @@ async function main() {
   };
   // The work pass's pause, while it runs (not a send-back's conflict pass): the four guards as they stand when it ends on
   // its usage limit, which the next work stage here weighs (lib/continue.mjs).
-  if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: trusted.sha, harness: inputs.harness });
+  if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: planText, harness: inputs.harness });
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);

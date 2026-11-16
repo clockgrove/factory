@@ -29,7 +29,7 @@ A test that fails identically on the untouched base commit is not yours. Before 
 
 ## Iterate locally
 
-Run every validation command on the task card and the budget command, read every failure, fix, and run again, as many times as it takes, before you hand off. Factory pushes your commits and re-runs validation, sending each red back while your fixes make progress; a fix that commits nothing, leaves the same failures or brings back an earlier red Blocks the Objective. Your own iterations are cheap; Factory's are not. Run the formatter before the final run.
+Run every validation command on the task card and the budget command in the foreground and wait for each; never stop while one runs. Read every failure, fix, and run again until green before you hand off. Factory pushes your commits and re-runs validation, sending each red back while your fixes make progress; a fix that commits nothing, leaves the same failures or brings back an earlier red Blocks the Objective. Your own iterations are cheap; Factory's are not. Run the formatter before the final run.
 
 ## Comments
 

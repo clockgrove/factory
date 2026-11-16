@@ -621,6 +621,37 @@ export function parseClaude(stdout, model) {
 }
 
 /**
+ * The worker's own background commands still running when its harness process ended, from the harness's stream:
+ * `[{id, description, command}]` in start order, [] when there are none. Claude Code reports each command it runs as a
+ * `local_bash` task: a `task_started` event (`is_backgrounded` when it runs in the background, set later by a
+ * `task_updated` patch for a command moved there) and, when the command ends, a `task_notification` for the same
+ * `task_id`; a `-p` session stays open while its background commands run and its model is woken when they end. A
+ * backgrounded task with no notification in the stream was still running when the process ended, and was stopped with
+ * it. `command` is the Bash call's own input (the task's `tool_use_id`), null when the stream does not have it. Codex
+ * reports no background command (a command it starts with `&` is an item that completed), and Copilot's stream names a
+ * still-running background shell's id in no start event, so for both this is [].
+ */
+export function backgroundJobs(harness, stdout) {
+  if (harness !== "claude") return [];
+  const calls = new Map();
+  const tasks = new Map();
+  for (const e of jsonLines(stdout)) {
+    if (e?.type === "assistant") {
+      for (const c of e.message?.content || []) if (c?.type === "tool_use" && typeof c.id === "string") calls.set(c.id, c.input);
+      continue;
+    }
+    if (e?.type !== "system" || typeof e.task_id !== "string") continue;
+    if (e.subtype === "task_started" && e.task_type === "local_bash") tasks.set(e.task_id, { id: e.task_id, call: e.tool_use_id ?? null, description: typeof e.description === "string" ? e.description : "", backgrounded: e.is_backgrounded === true });
+    else if (e.subtype === "task_updated" && e.patch?.is_backgrounded === true && tasks.has(e.task_id)) tasks.get(e.task_id).backgrounded = true;
+    else if (e.subtype === "task_notification") tasks.delete(e.task_id);
+  }
+  return [...tasks.values()].filter((t) => t.backgrounded).map((t) => {
+    const command = calls.get(t.call)?.command;
+    return { id: t.id, description: t.description, command: typeof command === "string" ? command : null };
+  });
+}
+
+/**
  * The cache split of the first model request of a Claude run: its first assistant message's `usage` (stream-json
  * repeats one message per content block, all with the same usage). `cache_creation` splits the writes by TTL, so the
  * record shows which TTL the request used. Null when the run printed no assistant message with usage.

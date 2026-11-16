@@ -33,7 +33,7 @@ const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { LOCAL_BOUNDS, holdSecrets, input, localBound, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -121,8 +121,6 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
  * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
  */
 export const PAUSED_BEAT_MS = 60 * 60_000;
-/** The lapse in a row that Blocks even when the lapse check judges it `transient` (Local.lapse). */
-export const LAPSE_TRANSIENT_MAX = 3;
 
 /** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
@@ -449,38 +447,43 @@ export const REFUSED_PROBE = { ms: 60_000 };
 /** Where the local token comes from, to name in a log line: the variable or the file, never the value. */
 const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
 
-/**
- * The most other repositories checkToken probes: a token that lists more is refused, never passed on a partial check.
- * Each probe is one write request against the token's API quota.
- */
-export const TOKEN_PROBE_MAX = 100;
+/** Whether a listed repository's `permissions` (its person's, as GitHub lists them) let that person push to it. */
+const personPushes = (p) => !!(p.push || p.maintain || p.admin);
 
 /**
- * The token can write to this repository and nothing else. A fine-grained token lists every public repository it
- * may read, and the listed permissions are the person's, not the token's, so write reach is probed instead: an
- * issue with no title is refused before anything is created, with 422 where the token may write and 403 or 404
- * where it may not. Every listed repository is probed; a listing that fails, more than `max` others, or a probe that
- * gets any other answer refuses the token, since its reach is then unknown.
+ * The token can write to this repository and nothing else. A fine-grained token lists every public repository it may
+ * read, with its person's permissions on each, not the token's. The token can push only where its person can, so a
+ * listed repository whose permissions show its person cannot push (no push, maintain or admin) is out of its write
+ * reach; every other listed one, and one listed with no permissions, is probed: an issue with no title is refused
+ * before anything is created, with 422 where the token may write and 403 or 404 where it may not. A listing that
+ * fails, more than `max` repositories to probe (FACTORY_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer
+ * (GitHub's rate limit included: one probe at a time, each thrown at once rather than waited out) refuses the token,
+ * since its reach is then unknown; that error carries `again`, as a check worth making again later.
  */
-export async function checkToken(repoFull, token, { max = TOKEN_PROBE_MAX } = {}) {
+export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback } = {}) {
   if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
+  const unknownReach = (message) => Object.assign(new Error(message), { again: true });
   let reach;
   try {
     reach = await rest("user/repos?per_page=100", { token, paginate: true });
   } catch (e) {
-    throw new Error(`the repositories the local token can reach could not be listed (${e.status || String(e.message).slice(0, 80)}), so its reach is not verified`);
+    throw unknownReach(`the repositories the local token can reach could not be listed (${e.rateLimited ? "GitHub's rate limit" : e.status || String(e.message).slice(0, 80)}), so its reach is not verified`);
   }
-  const others = (Array.isArray(reach) ? reach : []).map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase());
-  if (others.length > max) throw new Error(`the local token lists ${others.length} other repositories, more than the ${max} Factory probes for write access; make a token whose repository access is limited to ${repoFull}`);
+  const others = (Array.isArray(reach) ? reach : []).filter((r) => String(r?.full_name || "").toLowerCase() !== repoFull.toLowerCase());
+  const toProbe = others.filter((r) => !r.permissions || typeof r.permissions !== "object" || personPushes(r.permissions)).map((r) => r.full_name);
+  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories you can push to, more than the ${max} Factory probes for write access (FACTORY_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
   const writable = [];
   const unknown = [];
-  for (const name of others) {
-    const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {} }).then(() => 201, (e) => e.status || 0);
+  for (const name of toProbe) {
+    const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {}, noRateWait: true }).then(
+      () => 201,
+      (e) => (e.rateLimited ? "rate limited" : e.status || 0),
+    );
     if (status === 422 || status === 201) writable.push(name);
     else if (status !== 403 && status !== 404) unknown.push(`${name}: ${status || "no answer"}`);
   }
   if (writable.length) throw new Error(`the local token can write to ${writable.length} other repositor${writable.length === 1 ? "y" : "ies"} (${writable.slice(0, 3).join(", ")}${writable.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
-  if (unknown.length) throw new Error(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);
+  if (unknown.length) throw unknownReach(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);
 }
 
 /** The issue a PR is a review trigger for: on factory/<issue>, labelled factory:review, not a draft; else 0. */
@@ -714,11 +717,24 @@ export class Local {
     for (const line of layerLines(settingLayers({ workflow: this.workflowWf, variables: this.variables || {}, machine: machineSettings(process.env) }))) log(`  ${line}`);
   }
 
+  /**
+   * A bounded local setting (inputs.mjs LOCAL_BOUNDS) as this loop takes it now: this machine's environment over the
+   * repository's settings; a value it cannot take is its default, logged once.
+   */
+  bounded(name) {
+    const r = localBound(name, process.env[name] ?? this.wf?.[name]);
+    if (r.problem && !(this.boundSaid ??= new Set()).has(r.problem)) {
+      this.boundSaid.add(r.problem);
+      log(r.problem);
+    }
+    return r.value;
+  }
+
   /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
   async init({ serve = false } = {}) {
     await this.startVariables({ serve });
     this.takeSettings();
-    await checkToken(this.repoFull, this.token);
+    await checkToken(this.repoFull, this.token, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") });
     if (this.notice) {
       const minted = await this.notice().catch((e) => {
         throw new Error(`local mode cannot start: the Factory App (FACTORY_LOCAL_APP_ID ${process.env.FACTORY_LOCAL_APP_ID}) gave no token for ${this.repoFull}: ${e.message.slice(0, 200)}; check the id, the key, and that the App is installed on this repository`);
@@ -1798,7 +1814,7 @@ export class Local {
    * its log on this machine, so the cause reaches GitHub and nothing retries forever. Whether to start it again is the
    * lapse check's (lib/lapse-check.mjs, a decision call on the AI Gateway): given this end and the one before it, would
    * the same stage started again end the same way? `same_again` Blocks at once; `transient` resumes it, and the
-   * LAPSE_TRANSIENT_MAX-th lapse in a row Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
+   * FACTORY_LOCAL_LAPSE_MAX-th lapse in a row (3 by default) Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
    * once and a second lapse in a row Blocks. A throw names what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else
    * the local loop itself; never the work; and the error as postedError has it. The count is this loop's memory:
    * another serve on the machine resumes the Objective afresh.
@@ -1823,7 +1839,7 @@ export class Local {
     const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
     const count = (before?.count ?? 0) + 1;
     const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
-    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < LAPSE_TRANSIENT_MAX : count < 2;
+    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("FACTORY_LOCAL_LAPSE_MAX") : count < 2;
     if (resume) {
       lapsed.set(issue, { count, facts });
       log(`#${issue}: ${what}${judged}; the claim stays and this loop resumes it (lapse ${count} in a row)${where}`);
@@ -3370,10 +3386,22 @@ export class Local {
     let refused = null;
     let tried = null;
     let probeAt = 0;
+    // When a new token whose check could not tell its reach (checkToken's `again`: a rate limit, a failed listing) is
+    // checked again; a token the check refused is not, until its source changes.
+    let againAt = Infinity;
     while (!this.stopping) {
       if (refused !== null) {
         const now = localToken(this.repoFull);
-        let fresh = now && now !== refused && now !== tried ? await checkToken(this.repoFull, now).then(() => true, (e) => log(`the new token in ${tokenSource(this.repoFull)} is not taken: ${e.message.slice(0, 200)}`)) : false;
+        const check = () =>
+          checkToken(this.repoFull, now, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") }).then(
+            () => true,
+            (e) => {
+              againAt = e.again ? Date.now() + REFUSED_PROBE.ms : Infinity;
+              log(`the new token in ${tokenSource(this.repoFull)} is not taken: ${e.message.slice(0, 200)}${e.again ? "; it is checked again in a minute" : ""}`);
+              return false;
+            },
+          );
+        let fresh = now && now !== refused && (now !== tried || Date.now() >= againAt) ? await check() : false;
         if (!fresh && now === refused && Date.now() >= probeAt) {
           probeAt = Date.now() + REFUSED_PROBE.ms;
           fresh = await rest(`repos/${this.repo.full}`, { token: refused, noRateWait: true }).then(() => true, () => false);

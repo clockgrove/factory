@@ -418,6 +418,18 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict: "same_again", confidence: 0.5 }) } });
     await loop.withClaim(7, died);
     assert.equal(loop.lapsed.get(7).count, 1);
+    // FACTORY_LOCAL_LAPSE_MAX sets the transient lapse in a row that Blocks: 4 here, so the third resumes.
+    loop.lapsed.delete(7);
+    gh.labels.delete("factory:blocked");
+    loop.wf = { ...loop.wf, FACTORY_LOCAL_LAPSE_MAX: "4" };
+    verdict = "transient";
+    loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict, confidence: 0.9 }) } });
+    const blocks = gh.writes.filter((w) => w.includes("factory:block")).length;
+    for (let i = 0; i < 3; i += 1) await loop.withClaim(7, died);
+    assert.equal(loop.lapsed.get(7).count, 3);
+    assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, blocks);
+    await loop.withClaim(7, died);
+    assert.match(gh.writes.filter((w) => w.includes("factory:block")).at(-1), /4 times in a row on this machine/);
   } finally {
     gh.restore();
   }

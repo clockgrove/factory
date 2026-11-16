@@ -444,7 +444,7 @@ test("gitTransport: transport words count only without a refusal and without the
  * The real serve loop against a GitHub that answers 401 while `refuses(authorization)` says so. `onRefused(file)` runs
  * once the refusal is logged; the loop stops after its first dispatch read GitHub answers, or after `stopMs`.
  */
-async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
+async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = null }) {
   const home = mkdtempSync(join(tmpdir(), "factory-home-"));
   const file = join(home, ".config", "factory", "tokens", "o", "r");
   mkdirSync(join(file, ".."), { recursive: true });
@@ -454,6 +454,9 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (refuses(req.headers.authorization)) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://x");
+    // The test's own answer, when it gives one (`answer(req, url)`: [status, body, headers] or null).
+    const own = answer?.(req, url);
+    if (own) return res.writeHead(own[0], { "content-type": "application/json", ...(own[2] || {}) }).end(JSON.stringify(own[1]));
     if (url.pathname === "/repos/o/r/issues") reads += 1;
     return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
   });
@@ -514,6 +517,21 @@ test("serve: a 401 on the local token stops new work and names its source; a ren
   assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
   assert.equal(run.token, "github_pat_new");
   assert.ok(run.reads > 0, "the dispatcher read GitHub again with the new token");
+});
+
+test("#421: serve: a new token whose write check GitHub's rate limit turned away is checked again a minute later, and taken once it passes", async () => {
+  let limited = 0;
+  const answer = (req, url) => {
+    if (req.headers.authorization !== "Bearer github_pat_new") return null;
+    if (url.pathname === "/user/repos") return [200, [{ full_name: "o/r", permissions: { admin: true, push: true } }, { full_name: "o/other", permissions: { push: true } }]];
+    if (url.pathname === "/repos/o/other/issues" && req.method === "POST") return (limited += 1) === 1 ? [403, { message: "You have exceeded a secondary rate limit" }, { "retry-after": "60" }] : [404, { message: "Not Found" }];
+    return null;
+  };
+  const run = await serveThrough401({ refuses: (auth) => auth !== "Bearer github_pat_new", onRefused: (file) => writeFileSync(file, "github_pat_new\n"), answer });
+  assert.ok(run.lines.some((l) => /the new token in .* is not taken: .*o\/other: rate limited.*; it is checked again in a minute/.test(l)), "the first check got no clear answer");
+  assert.equal(limited, 2, "checked again, once");
+  assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
+  assert.equal(run.token, "github_pat_new");
 });
 
 test("serve: a 401 GitHub gives for a moment does not stop the loop: the same token, tried again, resumes it", async () => {

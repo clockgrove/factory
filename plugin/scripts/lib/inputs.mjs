@@ -104,7 +104,27 @@ export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "c
  * Local mode's own settings a repository's workflow env block may set (docs/LOCAL.md, Configuration); the developer's
  * shell wins over each.
  */
-export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB"];
+export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB", "FACTORY_LOCAL_LAPSE_MAX", "FACTORY_LOCAL_TOKEN_PROBE_MAX"];
+/**
+ * Local mode's bounded whole-number settings (docs/LOCAL.md, Configuration), each its default, least and most:
+ * `FACTORY_LOCAL_LAPSE_MAX`, the lapse in a row that Blocks a stage the lapse check judges transient (local.mjs lapse);
+ * `FACTORY_LOCAL_TOKEN_PROBE_MAX`, the most repositories the local token's check probes (local.mjs checkToken).
+ */
+export const LOCAL_BOUNDS = Object.freeze({
+  FACTORY_LOCAL_LAPSE_MAX: Object.freeze({ fallback: 3, min: 2, max: 10 }),
+  FACTORY_LOCAL_TOKEN_PROBE_MAX: Object.freeze({ fallback: 100, min: 1, max: 1000 }),
+});
+/**
+ * A LOCAL_BOUNDS setting's value (`name`, as set: unset or empty is the default): `{value, problem}`, where a value that is
+ * no whole number within the bounds is the default and `problem` names it for the log.
+ */
+export function localBound(name, value) {
+  const b = LOCAL_BOUNDS[name];
+  const v = String(value ?? "").trim();
+  if (v === "") return { value: b.fallback, problem: null };
+  if (/^\d+$/.test(v) && Number(v) >= b.min && Number(v) <= b.max) return { value: Number(v), problem: null };
+  return { value: b.fallback, problem: `${name} ${JSON.stringify(v)} is not a whole number from ${b.min} to ${b.max}; using ${b.fallback}` };
+}
 /** DEFAULTS keys that are no input of the Action (action.yml): Factory's own, or a run's argument. */
 const NOT_INPUTS = ["action", "objective_label", "repo"];
 /**
@@ -246,6 +266,7 @@ const VALUE_RULES = (() => {
     FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, `a list of hours, each a number above 0, at most ${GUESS_MAX_HOURS}`],
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
+    ...Object.fromEntries(Object.entries(LOCAL_BOUNDS).map(([k, b]) => [k, [(v) => localBound(k, v).problem === null, `a whole number from ${b.min} to ${b.max}`]])),
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
     FACTORY_SIBLING_HOLD: oneOf("on", "off"),
     FACTORY_DECISION_ROUTE: oneOf("auto", "gateway", "off"),

@@ -900,7 +900,8 @@ test("#449 dispatcher: a re-applied factory:objective requeues a Question only f
       assert.ok(gh.labels(n).includes("factory:question"), `${route}: #${n} stays a Question`);
       const said = refusals(gh, n);
       assert.equal(said.length, 1, `${route}: #${n} one note`);
-      assert.match(said[0].body, new RegExp(`\`factory:objective\` re-applied by ${who.login.replace(/[[\]]/g, "\\$&")} was not taken, so the Objective stays Question`));
+      const line = `\`factory:objective\` re-applied by ${who.login} was not taken, so the Objective stays Question`;
+      assert.ok(said[0].body.includes(line), `${route}: #${n} names who: ${said[0].body}`);
     }
     // The next tick changes nothing and says nothing more: the note is on the timeline it reads.
     const posts = gh.comments(7).length + gh.comments(8).length;
@@ -975,7 +976,8 @@ test("#448 Actions: a live-jobs list that cannot be read holds a re-applied Ques
   const held = await tick(gh);
   assert.ok(!held.ready.includes(7) && gh.labels(7).includes("factory:question"), "a review job of it may still run");
   assert.ok(held.deadlines.some((d) => d.kind === "retry"));
-  gh.age(7, STOP_GRACE_MS);
+  // A minute past the grace: the fake's event times run up to a few ms ahead of the clock, as GitHub's may.
+  gh.age(7, STOP_GRACE_MS + MIN);
   const past = await tick(gh);
   assert.ok(past.ready.includes(7) && !gh.labels(7).includes("factory:question"), "past the grace the go is taken");
 });
@@ -993,7 +995,7 @@ test("#449 dispatcher: Blocked and In review take a writer's re-apply; a triager
     const r = await tick(gh);
     assert.ok(!r.ready.includes(7) && gh.labels(7).includes(state), `${state}: the triager's re-apply changes nothing`);
     assert.equal(refusals(gh, 7).length, 1);
-    assert.match(refusals(gh, 7)[0].body, new RegExp(`stays ${state === "factory:blocked" ? "Blocked" : "In review"}`));
+    assert.ok(refusals(gh, 7)[0].body.includes(`stays ${state === "factory:blocked" ? "Blocked" : "In review"}`));
     assert.ok(r.ready.includes(8) && !gh.labels(8).includes(state), `${state}: the writer's requeues it`);
   }
 });

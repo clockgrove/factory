@@ -439,9 +439,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (!again) continue;
     if (state === "Question" && backend().name === "actions" && !sandbox) {
       const jobs = await liveJobs();
-      // A list that cannot be read is waited out for as long as a stopping stage takes (STOP_GRACE_MS from the go),
-      // then the go is taken: a review job still alive by then has had its own start check.
-      const unreadPast = jobs.failed && (!goAt || Date.now() - Date.parse(goAt) >= STOP_GRACE_MS);
+      // A list that cannot be read is waited out for as long as a stopping stage takes (STOP_GRACE_MS from the go, on
+      // GitHub's clock: githubNow), then the go is taken: a review job still alive by then has had its own start check.
+      const unreadPast = jobs.failed && (!goAt || githubNow() - Date.parse(goAt) >= STOP_GRACE_MS);
       if (jobs.failed && !unreadPast) {
         recoveryWaits.add(n);
         log(`  #${n}: ${inputs.objectiveLabel} re-applied, but the live jobs could not be read to see whether a review job of it runs; next tick`);

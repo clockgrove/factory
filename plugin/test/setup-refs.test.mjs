@@ -292,3 +292,17 @@ test("setupGuard: an install in a workspace fences every member's lifecycle; ign
   assert.ok(!(await setupGuard("pnpm install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "pnpm reads it too");
   assert.ok((await setupGuard("yarn install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "Yarn Berry reads no .npmrc for it: still fenced");
 });
+
+test("commandRefs: a package manager's computed word is unresolved only where a script name is read; other commands' fence nothing (#387 final)", () => {
+  for (const c of ['npm config set //r/:_authToken "$T"', 'npm whoami "$T"', 'npm view "$T"', 'npm install "$PKG"', 'pnpm add "$PKG"', 'pnpm config set store-dir "$S"', 'yarn config set npmAuthToken "$T"', 'npm --registry "$R" run build', 'npm i -g "$PKG"']) assert.deepEqual(unresolved(c), [], c);
+  for (const c of ["npm run $X", "npm exec $X", "pnpm $X", "yarn workspace web $S", "turbo run $T"]) assert.equal(unresolved(c).length, 1, c);
+  for (const c of ["pnpm config set x y", "yarn config set x y", "pnpm whoami", "yarn npm login"]) assert.deepEqual(commandRefs(c).scripts, [], `${c}: no script`);
+  assert.ok(commandRefs("pnpm build").scripts.some((x) => x.name === "build"), "a name pnpm has no command for is a script");
+  assert.ok(commandRefs("npm --workspace=$W run build").scripts.some((x) => x.pkg === "*" && x.name === "build"));
+});
+
+test("commandRefs: where a command's output is run, an option's value is no run position, only an operand (#387 final)", () => {
+  assert.deepEqual(paths("find scripts -type f | xargs chmod +x"), ["scripts"], "-type f: f is the option's");
+  assert.deepEqual(unresolved('find scripts -name "$N" | xargs bash'), [], "-name's computed value is data");
+  assert.deepEqual(paths("cat setup | bash"), ["setup"], "an operand still is");
+});

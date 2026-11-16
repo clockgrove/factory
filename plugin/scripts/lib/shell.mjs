@@ -59,6 +59,13 @@ const NODE_EXTENSIONS = [".js", ".mjs", ".cjs", ".json", ".node"];
 const FIND_RUNS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 // npm's subcommands that run a package script (its own command list: run and its aliases, the start/stop/restart/test
 // shorthands, an install's lifecycle, exec): any other (config, login, view, …) runs none.
+// pnpm's and yarn's own commands (their command lists): `pnpm X`/`yarn X` runs script X only where X is none of
+// them, or through one of their runners; `yarn workspace(s)` runs one in a member.
+const PM_BUILTINS = {
+  pnpm: new Set(["add", "approve-builds", "audit", "bin", "cache", "cat-file", "cat-index", "config", "create", "dedupe", "deploy", "dist-tag", "dlx", "doctor", "env", "exec", "fetch", "find-hash", "get", "i", "ignored-builds", "import", "info", "init", "install", "install-test", "it", "licenses", "link", "list", "login", "logout", "ls", "outdated", "owner", "pack", "patch", "patch-commit", "patch-remove", "prune", "publish", "rebuild", "recursive", "remove", "restart", "rm", "root", "run", "run-script", "search", "self-update", "server", "set", "setup", "start", "store", "t", "test", "unlink", "up", "update", "version", "view", "whoami", "why"]),
+  yarn: new Set(["add", "audit", "autoclean", "bin", "cache", "check", "config", "constraints", "create", "dedupe", "dlx", "exec", "explain", "generate-lock-entry", "global", "help", "import", "info", "init", "install", "licenses", "link", "list", "login", "logout", "node", "npm", "outdated", "owner", "pack", "patch", "patch-commit", "plugin", "policies", "publish", "rebuild", "remove", "run", "search", "set", "stage", "start", "tag", "team", "test", "unlink", "unplug", "up", "upgrade", "upgrade-interactive", "version", "versions", "why", "workspace", "workspaces"]),
+};
+const PM_RUNNERS = { pnpm: new Set(["run", "run-script", "test", "t", "start", "restart", "exec", "recursive"]), yarn: new Set(["run", "test", "start", "exec", "workspace", "workspaces"]) };
 const NPM_RUNS = new Set(["run", "run-script", "rum", "urn", "start", "stop", "restart", "test", "t", "tst", "install", "i", "isntall", "add", "ci", "clean-install", "ic", "install-clean", "exec", "x"]);
 // pip's install sources: a directory is built through its build backend files.
 const BACKEND = ["pyproject.toml", "setup.py", "setup.cfg"];
@@ -773,6 +780,9 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     // Every other argument: a path when it is a fixed path-looking string; data otherwise.
     for (let k = 1; k < words.length; k += 1) {
       const w = words[k];
+      // Where the command's output is run, its operands are what runs; an option's value (`-type f`) is not.
+      const before = literal(words[k - 1]) ? words[k - 1].value : "";
+      const operand = !(before.startsWith("-") && before !== "-" && before !== "--" && !before.includes("="));
       const r0 = role.get(w);
       if (r0 === "code" || r0 === "skip" || r0 === "named" || r0 === "global") continue;
       if (!literal(w)) {
@@ -790,7 +800,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         }
         // Where its output feeds a shell, an argument is what that shell runs; elsewhere a computed word is a path
         // when Factory resolves it, and data when it cannot.
-        if (mode.feeds) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
+        if (mode.feeds && operand) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
         else argWord(w, cwds, mode.spec);
         continue;
       }
@@ -805,7 +815,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         continue;
       }
       if (SPEC.test(v) && !v.includes("/")) continue;
-      if (mode.feeds && !URL_SCHEME.test(v)) execWord(w, cwds, mode.spec);
+      if (mode.feeds && operand && !URL_SCHEME.test(v)) execWord(w, cwds, mode.spec);
       else argWord(w, cwds, mode.spec);
       if (MAYBE_CODE.test(v)) code(v, cwds, { ...mode, spec: true });
     }
@@ -877,17 +887,21 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     let sub = null;
     let ignoreScripts = false;
     let global = false;
+    // The words in operand places, in order: the subcommand first.
+    const operands = [];
     for (k += 1; k < words.length; k += 1) {
       const w = words[k];
       if (!literal(w)) {
         role.set(w, "skip");
-        // A computed option or option value is data; a computed script name may be any script.
+        // A computed option or option value is data; a computed operand is decided once the subcommand is known.
         const prev = k > 0 && literal(words[k - 1]) ? words[k - 1].value : "";
         const lead = segments(w)[0]?.lit ?? "";
-        const r = resolve(w);
         // A workspace option Factory cannot read may pick any package.
         if (PM_WORKSPACE.test(lead) || (PM_WORKSPACE.test(prev) && !prev.includes("="))) anyPackage = true;
-        if (!lead.startsWith("-") && !(prev.startsWith("-") && !prev.includes("=")) && !r.spec && !r.outside) unknown(w.text, "a script Factory cannot name", mode.spec);
+        if (!lead.startsWith("-") && !(prev.startsWith("-") && !prev.includes("="))) {
+          operands.push(w);
+          first = false;
+        }
         continue;
       }
       const v = w.value;
@@ -916,8 +930,22 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (RUN_ALL.has(pm) && /[*?{]/.test(v)) unknown(v, "scripts Factory cannot name", mode.spec);
       if (first) sub = v;
       if (!RUN_WORDS.has(v) || !first) names.push(v);
+      operands.push(w);
       first = false;
     }
+    // A computed word is unresolved only where a script name (or exec's command) is read: the subcommand of a
+    // manager that runs a script by its bare name, the operand of run or exec, or any of turbo's or npm-run-all's.
+    // Anything else (a package name, a config value) is data.
+    const runsByName = pm !== "npm";
+    const nameAt = (w, i) => {
+      if (literal(w)) return;
+      const r = resolve(w);
+      if (r.spec || r.outside) return;
+      const lead = operands[0] && literal(operands[0]) ? operands[0].value : null;
+      const scriptPlace = RUN_ALL.has(pm) || pm === "turbo" ? true : i === 0 ? runsByName || pm === "npm" : (i === 1 && lead !== null && (RUN_WORDS.has(lead) || lead === "exec" || lead === "x")) || (i === 2 && pm === "yarn" && lead === "workspace");
+      if (scriptPlace && !global) unknown(w.text, "a script Factory cannot name", mode.spec);
+    };
+    operands.forEach((w, i) => nameAt(w, i));
     // A global install, or an npm subcommand that runs no package script (config, login, view, …), fences nothing.
     if (global) {
       // Its package names are no runners either (`npm i -g pnpm`).
@@ -927,7 +955,9 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     const pkgs = anyPackage ? ["*"] : packages(dirs).map((d) => (d ? `${d}/package.json` : "package.json"));
     // An install's own scripts are its lifecycle (below); its other words are package names, no scripts.
     const install = INSTALLS[pm]?.has(sub) || (pm === "yarn" && sub === null);
-    if (!install && (pm !== "npm" || NPM_RUNS.has(sub))) for (const n of names) addScript(pkgs, n);
+    // npm runs a script only through its own runners; pnpm and yarn through theirs, or by a name none of their commands has.
+    const runs = pm === "npm" ? NPM_RUNS.has(sub) : PM_BUILTINS[pm] ? sub === null || !PM_BUILTINS[pm].has(sub) || PM_RUNNERS[pm].has(sub) : true;
+    if (!install && runs) for (const n of names) addScript(pkgs, n);
     // An install runs the package's install lifecycle scripts (npm's documented list), and in a workspace each
     // member's too (setupGuard reads whether there is one), unless scripts are off: by `--ignore-scripts`, or for npm
     // and pnpm by `ignore-scripts=true` in the .npmrc they read (setupGuard). Bare `yarn` installs.

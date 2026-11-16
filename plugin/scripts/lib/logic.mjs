@@ -796,7 +796,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
  *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
  *              pass was given after a fix pass changed nothing on it, when the red after it is the last), stalled?: string
- *              (why the fix pass before the last red made no progress, naming that red: session.mjs validationLoop)}
+ *              (why the fix pass before the last red made no progress, or could not be judged, naming that red: session.mjs
+ *              validationLoop), stalledCause?: its Block's cause (`work`; `factory` or `outage` when the judgement was not made)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -880,7 +881,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
       ? `validation red on Factory's pass ${validation.passes}${validation.command ? ` (${validation.command})` : ""}: ${validation.stalled}${fresh}`
       : `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
-    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
+    // A progress judgement the decider could not make is Factory's (or its vendor's outage), never the work's.
+    const cause = validation.stalled && Object.hasOwn(BLOCK_CAUSES, validation.stalledCause ?? "") ? validation.stalledCause : "work";
+    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause };
   }
   const open = question !== undefined ? question : record?.exit === "question";
   // A Question the answer pass raised stands with findings still open: it carries them to a maintainer. Otherwise

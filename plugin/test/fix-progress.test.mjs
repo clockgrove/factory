@@ -12,19 +12,50 @@ import { validationLoop } from "../scripts/lib/session.mjs";
 const sig = (id, line = `not ok 1 - ${id}`) => ({ id, line, lines: [line] });
 const red = (head, ...jobs) => ({ head, jobs: jobs.map(([name, s = null]) => ({ name, sig: s })) });
 
-test("redProgress: nothing committed is none; a disjoint set or a strict subset is progress; the same set failing the same way is none; the rest is undecided", () => {
+test("redProgress: nothing committed is none; the same jobs with the same lines is none; fewer or other failing counts only when the jobs that failed now pass", () => {
   const before = red("a", ["lint", sig("l1")], ["test", sig("t1")]);
+  const pass = (r, ...passed) => ({ ...r, passed });
   assert.deepEqual(redProgress(before, red("a", ["test", sig("t1")])), { progress: false, why: "it committed nothing" });
-  assert.deepEqual(redProgress(before, red("b", ["build", sig("b1")])), { progress: true, why: "a different set of jobs fails" });
-  assert.deepEqual(redProgress(before, red("b", ["test", sig("t2")])), { progress: true, why: "fewer jobs fail" });
-  assert.deepEqual(redProgress(before, red("b", ["test", sig("t1")], ["lint", sig("l1")])), { progress: false, why: "the same jobs fail the same way" });
+  assert.deepEqual(redProgress(before, pass(red("b", ["build", sig("b1")]), "lint", "test")), { progress: true, why: "the jobs that failed now pass, and a different set fails" });
+  assert.deepEqual(redProgress(before, pass(red("b", ["test", sig("t2")]), "lint")), { progress: true, why: "fewer jobs fail, and the ones that stopped failing pass" });
+  assert.deepEqual(redProgress(before, red("b", ["test", sig("t1")], ["lint", sig("l1")])), { progress: false, why: "the same jobs fail with the same failure lines" });
+  // A build break that hides the tests: lint and test did not run, so they did not pass.
+  assert.equal(redProgress(before, red("b", ["build", sig("b1")])), null, "a disjoint set whose earlier jobs did not run");
+  assert.equal(redProgress(before, pass(red("b", ["build", sig("b1")]), "lint")), null, "one of them passed, the other did not run");
+  assert.equal(redProgress(before, red("b", ["test", sig("t2")])), null, "fewer, with lint not run");
   assert.equal(redProgress(before, red("b", ["lint", sig("l1")], ["test", sig("t2")])), null, "the same set, another failure");
   assert.equal(redProgress(before, red("b", ["lint", sig("l1")], ["test", sig("t1")], ["build", sig("b1")])), null, "a superset");
   assert.equal(redProgress(red("a", ["test"]), red("b", ["test"])), null, "no signature matches another");
+  assert.equal(redProgress(red("a", ["ci"]), red("b")), null, "nothing comparable left (only roll-ups failed)");
   assert.equal(redProgress(red("", ["test", sig("t1")]), red("", ["test", sig("t2")])), null, "heads unread: the sets decide");
 });
 
-test("the progress question: closer at the confidence floor or more is progress; under it, not_closer, no answer or no decider is none", async () => {
+test("redProgress: the same signature with other failure lines as logged is not the same red; it goes to the decision model (tsc, Go subtests, node --test, 3 failures to 1)", async () => {
+  const { failureSignature } = await import("../scripts/lib/triage.mjs");
+  // Each case: three failures as logged, then one of them left.
+  const tsc = (n) => `src/a.ts(${n},5): error TS2322: Type 'string' is not assignable to type 'number'.`;
+  const cases = {
+    tsc: [[tsc(3), tsc(7), tsc(9)], [tsc(9)]],
+    go: [["--- FAIL: TestParse (0.00s)", "    --- FAIL: TestParse/case_1 (0.00s)", "    --- FAIL: TestParse/case_2 (0.00s)", "    --- FAIL: TestParse/case_3 (0.00s)", "FAIL"], ["--- FAIL: TestParse (0.00s)", "    --- FAIL: TestParse/case_3 (0.00s)", "FAIL"]],
+    node: [["not ok 1 - parses row 1", "not ok 2 - parses row 2", "not ok 3 - parses row 3", "# fail 3"], ["not ok 3 - parses row 3", "# fail 1"]],
+  };
+  for (const [kind, [lines, left]] of Object.entries(cases)) {
+    const all = failureSignature("test", lines.join("\n"));
+    const fewer = failureSignature("test", left.join("\n"));
+    assert.equal(all.id, fewer.id, `${kind}: the fold makes them one class`);
+    assert.notDeepEqual(all.lines, fewer.lines, `${kind}: the lines as logged differ`);
+    const before = red("a", ["test", all]);
+    const after = red("b", ["test", fewer]);
+    assert.equal(redProgress(before, after), null, `${kind}: not "the same jobs fail the same way"`);
+    const asked = [];
+    const check = openProgressCheck({ inputs: {}, decider: { name: "fake", decide: async (input) => (asked.push(input), { verdict: "closer", confidence: 0.9 }) } });
+    assert.equal((await check.judge({ before, after })).progress, true, kind);
+    assert.equal(asked.length, 1, `${kind}: the decision model judged it`);
+    assert.deepEqual(redProgress(before, red("b", ["test", failureSignature("test", lines.join("\n"))])), { progress: false, why: "the same jobs fail with the same failure lines" }, `${kind}: the same lines are the same red`);
+  }
+});
+
+test("the progress question: closer at the confidence floor or more is progress; under it or not_closer is none; no answer leaves it unjudged, Factory's or the outage's", async () => {
   const before = red("a", ["test", sig("t1", "not ok 1 - parses the header")]);
   const after = red("b", ["test", sig("t2", "not ok 4 - writes the footer")]);
   const asked = [];
@@ -33,29 +64,32 @@ test("the progress question: closer at the confidence floor or more is progress;
   assert.equal(asked[0].q, PROGRESS_QUESTION);
   assert.match(asked[0].input, /Before the fix pass:\n<<<BEGIN (\w+)>>>\nFailing: test\n\n--- test: not ok 1 - parses the header/);
   assert.match(asked[0].input, /After the fix pass:\n<<<BEGIN \w+>>>\nFailing: test\n\n--- test: not ok 4 - writes the footer/);
-  assert.match(asked[0].input, /git diff --stat\):\n<<<BEGIN \w+>>>\n src\/a\.mjs \| 2 \+-/);
+  assert.match(asked[0].input, /own commits \(git log --stat, merges left out\):\n<<<BEGIN \w+>>>\n src\/a\.mjs \| 2 \+-/);
   assert.equal((await check({ verdict: "closer", confidence: 0.5 }).judge({ before, after })).progress, false);
-  assert.equal((await check({ verdict: "not_closer", confidence: 0.9 }).judge({ before, after })).progress, false);
-  assert.deepEqual(await check({ verdict: null, confidence: null, error: "vendor" }).judge({ before, after }), { progress: false, why: "the decision model (perplexity/pplx-decider-v1.2) gave no answer (vendor)" });
+  assert.deepEqual(await check({ verdict: "not_closer", confidence: 0.9 }).judge({ before, after }), { progress: false, why: "the decision model (perplexity/pplx-decider-v1.2) judged it no closer to green at 0.90" });
+  assert.deepEqual(await check({ verdict: null, confidence: null, error: "vendor" }).judge({ before, after }), { progress: false, undecided: true, cause: "factory", why: "the decision model (perplexity/pplx-decider-v1.2) gave no answer (vendor)" });
+  assert.equal((await check({ verdict: null, confidence: null, error: "unavailable" }).judge({ before, after })).cause, "outage");
   const off = openProgressCheck({ inputs: { decisionRoute: "off" } });
   assert.equal(off.off, "route-off");
-  assert.deepEqual(await off.judge({ before, after }), { progress: false, why: "the failing jobs changed without getting fewer, and no decision model can judge it (route-off)" });
+  assert.deepEqual(await off.judge({ before, after }), { progress: false, why: "the failing jobs changed without fewer of them failing and the rest passing, and no decision model can judge it (route-off)" });
   // The exact checks never ask.
   asked.length = 0;
-  assert.equal((await check({ verdict: "closer", confidence: 0.9 }).judge({ before, after: red("b") })).why, "a different set of jobs fails");
+  assert.equal((await check({ verdict: "closer", confidence: 0.9 }).judge({ before, after: { ...red("b", ["lint", sig("l1")]), passed: ["test"] } })).why, "the jobs that failed now pass, and a different set fails");
   assert.equal(asked.length, 0);
   assert.doesNotMatch(progressInput({ before, after, diff: null }), /undefined/);
 });
 
 /**
  * The real validationLoop on the commands route in a git checkout, with a fake Codex whose call n does `steps[n - 1]`:
+ * merges a side branch adding its `merge` file (as Factory's catch-up merge brings in the default branch's commits),
  * writes its `write` files, deletes its `remove` files and, with `commit`, commits everything (git add -A). `base`: files
- * the first commit holds. `seen`: the stage's reds, passed to the loop. `before(git, work)`: a loop of the same stage
+ * the first commit holds. `before(git, work)`: a loop of the same stage, with the same `progressCheck` (and so the same
+ * seen reds)
  * first, its first red held for the stage's next pass (holdRed), then `before` (that pass's commit). Returns the result
  * (or the error it rejected with, as `error`), the earlier loop's result (`held`), the harness calls made and the phase
  * lines.
  */
-async function commandsLoop({ commands, steps, progressCheck = null, base = {}, seen = undefined, before = null }) {
+async function commandsLoop({ commands, steps, progressCheck = null, base = {}, before = null }) {
   const root = mkdtempSync(join(tmpdir(), "fix-progress-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -75,6 +109,16 @@ const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(calls)}, "x");
 const n = fs.readFileSync(${JSON.stringify(calls)}, "utf8").length;
 const step = ${JSON.stringify(steps)}[n - 1] || {};
+if (step.merge) {
+  const { execFileSync } = require("node:child_process");
+  const git = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...a]);
+  git("checkout", "-q", "-b", "side");
+  fs.writeFileSync(step.merge, "upstream\\n");
+  git("add", "-A");
+  git("commit", "-qm", "upstream change");
+  git("checkout", "-q", "-");
+  git("merge", "-q", "--no-ff", "side", "-m", "catch-up merge");
+}
 for (const [f, c] of Object.entries(step.write || {})) fs.writeFileSync(f, c);
 for (const f of step.remove || []) fs.rmSync(f);
 if (step.commit) {
@@ -93,7 +137,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   const phases = [];
   try {
     let error = null;
-    const args = { checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, ...(seen ? { seen } : {}), onPhase: async (l) => phases.push(l) };
+    const args = { checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, onPhase: async (l) => phases.push(l) };
     let held = null;
     if (before) {
       held = await validationLoop({ ...args, label: "pre-review-validation", holdRed: () => true });
@@ -112,7 +156,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
 }
 // A command that fails with its own TAP line until `file` holds `want` (any content when none), and what it prints.
 const needs = (file, want = null) => `parallel: test -f ${file}${want ? ` && grep -qx ${want} ${file}` : ""} || { echo "not ok 1 - ${file} is missing its fix: $(cat ${file} 2>/dev/null || echo none)"; exit 1; }`;
-const exitOf = (r) => decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: r.passes, green: false, command: r.command, stalled: r.stalled } });
+const exitOf = (r) => decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: r.passes, green: false, command: r.command, stalled: r.stalled, stalledCause: r.stalledCause } });
 
 test("validation loop: while each fix pass leaves fewer jobs failing, it goes on past two passes to green (#399)", async () => {
   // Three commands red; each fix pass fixes one, so each red is a strict subset of the one before.
@@ -121,7 +165,7 @@ test("validation loop: while each fix pass leaves fewer jobs failing, it goes on
   assert.equal(r.result.green, true, r.phases.join("\n"));
   assert.equal(r.result.passes, 4);
   assert.equal(r.calls, 3, "three fix passes, never capped at two");
-  assert.ok(r.phases.some((l) => /^validation pass 3 red: .*; fix run \(progress: fewer jobs fail\)$/.test(l)), r.phases.join("\n"));
+  assert.ok(r.phases.some((l) => /^validation pass 3 red: .*; fix run \(progress: fewer jobs fail, and the ones that stopped failing pass\)$/.test(l)), r.phases.join("\n"));
 });
 
 test("validation loop: a fix pass that committed, with the same command failing the same way after it, Blocks naming the red (#399)", async () => {
@@ -129,7 +173,7 @@ test("validation loop: a fix pass that committed, with the same command failing 
   assert.equal(r.result.green, false);
   assert.equal(r.calls, 1, "no second fix pass");
   const cmd = "test -f fixed || { echo \"not ok 1 - fixed is missing its fix: $(cat fixed 2>/dev/null || echo none)\"; exit 1; }";
-  assert.equal(r.result.stalled, `the fix pass before it made no progress: the same jobs fail the same way; failing: ${cmd} (${cmd}: not ok 1 - fixed is missing its fix: none)`);
+  assert.equal(r.result.stalled, `the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: ${cmd} (${cmd}: not ok 1 - fixed is missing its fix: none)`);
   assert.deepEqual(exitOf(r.result), { exit: "blocked", reason: `validation red on Factory's pass 2 (${cmd}): ${r.result.stalled}`, cause: "work" });
 });
 
@@ -146,7 +190,8 @@ test("validation loop: the same command failing another way asks the decision mo
   const answers = [{ verdict: "closer", confidence: 0.9 }, { verdict: "not_closer", confidence: 0.8 }];
   const asked = [];
   const progressCheck = openProgressCheck({ inputs: {}, decider: { name: "fake", decide: async (input) => (asked.push(input), answers[asked.length - 1]) } });
-  const steps = ["one", "two", "done"].map((x) => ({ write: { state: `${x}\n` }, commit: true }));
+  // The first fix pass also takes a catch-up merge of upstream.txt: the question shows only the pass's own commits.
+  const steps = ["one", "two", "done"].map((x, i) => ({ write: { state: `${x}\n` }, commit: true, ...(i === 0 ? { merge: "upstream.txt" } : {}) }));
   const r = await commandsLoop({ commands: [needs("state", "done")], steps, progressCheck });
   assert.equal(r.result.green, false);
   assert.equal(asked.length, 2);
@@ -154,7 +199,8 @@ test("validation loop: the same command failing another way asks the decision mo
   assert.equal(r.result.passes, 3);
   assert.match(asked[0], /Before the fix pass:\n<<<BEGIN \w+>>>\nFailing: test -f state[^\n]*\n\n--- [^\n]*: not ok 1 - state is missing its fix: none/);
   assert.match(asked[0], /After the fix pass:\n<<<BEGIN \w+>>>\nFailing: [^\n]*\n\n--- [^\n]*: not ok 1 - state is missing its fix: one/);
-  assert.match(asked[0], /git diff --stat\):\n<<<BEGIN \w+>>>\n state \| 1 \+/);
+  assert.match(asked[0], /own commits \(git log --stat, merges left out\):\n<<<BEGIN \w+>>>\n[0-9a-f]{7,} fix 1\n\n state \| 1 \+/);
+  assert.doesNotMatch(asked[0], /upstream/, "nothing of the catch-up merge");
   assert.ok(r.phases.some((l) => /^validation pass 2 red: .*; fix run \(progress: the decision model \(perplexity\/pplx-decider-v1\.2\) judged it closer to green at 0\.90\)$/.test(l)), r.phases.join("\n"));
   assert.match(r.result.stalled, /^the fix pass before it made no progress: the decision model \(perplexity\/pplx-decider-v1\.2\) judged it no closer to green at 0\.80; failing: .*state is missing its fix: two\)$/);
 });
@@ -165,18 +211,19 @@ test("validation loop: with no decider, a red the exact checks cannot judge coun
     const r = await commandsLoop({ commands: [needs("state", "done")], steps, progressCheck });
     assert.equal(r.result.green, false);
     assert.equal(r.calls, 1);
-    assert.match(r.result.stalled, /^the fix pass before it made no progress: the failing jobs changed without getting fewer, and no decision model can judge it( \(route-off\))?; failing: /);
+    assert.match(r.result.stalled, /^the fix pass before it made no progress: the failing jobs changed without fewer of them failing and the rest passing, and no decision model can judge it( \(route-off\))?; failing: /);
   }
 });
 
-test("redProgress: a red equal to one seen earlier in the stage is no progress, naming both; a seen red unsigned never matches (#399)", () => {
+test("redProgress: a red equal to one seen earlier in the stage is no progress, naming both; unsigned jobs match by name (#399)", () => {
   const a = { ...red("1", ["lint", sig("l1")]), at: "pass 1 on 1111111" };
   const b = { ...red("2", ["test", sig("t1")]), at: "pass 2 on 2222222" };
-  const again = { ...red("3", ["lint", sig("l1")]), at: "pass 3 on 3333333" };
+  const again = { ...red("3", ["lint", sig("l1")]), at: "pass 3 on 3333333", passed: ["test"] };
   assert.deepEqual(redProgress(b, again, [a, b]), { progress: false, why: "it brought back the red of pass 1 on 1111111: lint, failing the same way, after the red it was handed (pass 2 on 2222222: test)" });
-  assert.deepEqual(redProgress(b, again, []), { progress: true, why: "a different set of jobs fails" }, "without the history, a disjoint set");
-  assert.deepEqual(redProgress(b, red("3", ["lint", sig("l2")]), [a, b]), { progress: true, why: "a different set of jobs fails" }, "the same job failing another way is not that red");
-  assert.deepEqual(redProgress(b, red("3", ["lint"]), [red("1", ["lint"]), b]).progress, true, "no signature, no match");
+  assert.deepEqual(redProgress(b, again, []), { progress: true, why: "the jobs that failed now pass, and a different set fails" }, "without the history, a disjoint set");
+  assert.deepEqual(redProgress(b, { ...red("3", ["lint", sig("l2")]), passed: ["test"] }, [a, b]).progress, true, "the same job failing another way is not that red");
+  assert.equal(redProgress(b, { ...red("3", ["lint"]), passed: ["test"] }, [red("1", ["lint"]), b]).progress, false, "unsigned on both sides: matched by name");
+  assert.equal(redProgress(b, { ...red("3", ["lint"]), passed: ["test"] }, [a, b]).progress, true, "unsigned against signed: no match");
 });
 
 test("validation loop: a red that flips back to one seen before (A, then B, then A) Blocks, naming both (#399)", async () => {
@@ -187,7 +234,7 @@ test("validation loop: a red that flips back to one seen before (A, then B, then
   assert.equal(r.result.green, false);
   assert.equal(r.calls, 2, "no third fix pass");
   const [ca, cb] = commands.map((c) => c.replace(/^parallel: /, ""));
-  assert.ok(r.phases.some((l) => l.startsWith("validation pass 2 red: ") && l.endsWith("(progress: a different set of jobs fails)")), r.phases.join("\n"));
+  assert.ok(r.phases.some((l) => l.startsWith("validation pass 2 red: ") && l.endsWith("(progress: the jobs that failed now pass, and a different set fails)")), r.phases.join("\n"));
   const reason = `it brought back the red of validation pass 1 on ${"x".repeat(7)}: ${ca}, failing the same way, after the red it was handed (validation pass 2 on ${"y".repeat(7)}: ${cb})`;
   const said = r.result.stalled.replace(/validation pass 1 on [0-9a-f]{7}/, `validation pass 1 on ${"x".repeat(7)}`).replace(/validation pass 2 on [0-9a-f]{7}/, `validation pass 2 on ${"y".repeat(7)}`);
   assert.ok(said.startsWith(`the fix pass before it made no progress: ${reason}; failing: ${ca} (`), said);
@@ -224,18 +271,26 @@ test("validation loops of one stage share their reds: A held by the first, B aft
     g("commit", "-q", "-m", "answer");
   };
   const steps = [{ write: { fb: "ok\n" }, remove: ["fa"], commit: true }, { write: { fa: "ok\n" }, commit: true }];
-  const shared = await commandsLoop({ commands, steps, base: { fb: "ok\n" }, seen: [], before: answer });
+  // One progress check for the stage's loops, as review.mjs opens it once and passes it to both.
+  const shared = await commandsLoop({ commands, steps, base: { fb: "ok\n" }, progressCheck: openProgressCheck({ inputs: { decisionRoute: "off" } }), before: answer });
   assert.ok(shared.held.held, "the first loop held its red for the stage's pass");
   assert.equal(shared.calls, 1, "one fix pass in the second loop, then the Block");
   assert.match(shared.result.stalled, /^the fix pass before it made no progress: it brought back the red of pre-review-validation pass 1 on [0-9a-f]{7}: test -f fa .*, failing the same way, after the red it was handed \(validation pass 1 on [0-9a-f]{7}: test -f fb /);
-  // Each loop on its own list: the second loop never saw A, so it reads as a new set and gets another pass.
+  // Each loop on its own list (no check shared): the second loop never saw A, so it reads as a new set and gets another pass.
   const apart = await commandsLoop({ commands, steps, base: { fb: "ok\n" }, before: answer });
   assert.equal(apart.calls, 2);
 });
 
-test("review.mjs passes one list of seen reds to its pre-review loop and its answer pass's loop", () => {
-  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
-  assert.equal(src.match(/const seenReds = \[\];/g)?.length, 1);
-  assert.match(src, /const preArgs = \{[^\n]*progressCheck: openProgressCheck\(\{ inputs, stage: decisionStage \}\), seen: seenReds,/);
-  assert.match(src, /\? await validationLoop\(\{[^\n]*label: "review-validation"[^\n]*progressCheck: openProgressCheck\(\{ inputs, stage: decisionStage \}\), seen: seenReds \}\)/);
+test("validation loop: a decision model that gives no answer leaves the judgement unmade: the Block is Factory's, or the outage's, never the work's (#399 review)", async () => {
+  const steps = ["one", "done"].map((x) => ({ write: { state: `${x}\n` }, commit: true }));
+  for (const [error, cause] of [["vendor", "factory"], ["unavailable", "outage"]]) {
+    const progressCheck = openProgressCheck({ inputs: {}, decider: { name: "fake", decide: async () => ({ verdict: null, confidence: null, error }) } });
+    const r = await commandsLoop({ commands: [needs("state", "done")], steps, progressCheck });
+    assert.equal(r.calls, 1);
+    assert.equal(r.result.stalledCause, cause);
+    assert.match(r.result.stalled, new RegExp(`^the fix pass before it could not be judged for progress: the decision model \\(perplexity/pplx-decider-v1\\.2\\) gave no answer \\(${error}\\); failing: `));
+    const exit = exitOf(r.result);
+    assert.equal(exit.cause, cause);
+    assert.match(exit.reason, /could not be judged for progress/);
+  }
 });

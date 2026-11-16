@@ -82,7 +82,7 @@ import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { exactJudge, redNames } from "./fix-progress.mjs";
+import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
 import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
@@ -1077,18 +1077,20 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, seen = [], onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
   // The decision calls' spend during this loop (triage, the drift advisory: decisionSpend) is taken off what is left too.
   const decisionsAtStart = decisionSpend();
   const usage = [];
   let passes = 0;
   let last = null;
   // The red the last fix pass was handed, as the progress check reads it (redShape), and why the loop stopped without
-  // progress. `seen`: every red the stage has seen, this loop's added as it goes (one seen again after a committed pass
-  // is no progress); a stage that runs several loops passes them one list. No progressCheck (no decider wired): only
-  // the exact checks decide, and what they cannot is no progress.
+  // progress (`stalled`, with its Block's cause). `seen`: every red the stage has seen, the progress check's one list
+  // for all the stage's loops, this loop's added as it goes (one seen again after a committed pass is no progress). No
+  // progressCheck (no decider wired): only the exact checks decide, and what they cannot is no progress.
   let handed = null;
+  const seen = progressCheck?.seen ?? [];
   let stalled = "";
+  let stalledCause = "work";
   const judgeProgress = progressCheck?.judge ?? exactJudge;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
@@ -1233,7 +1235,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const infra = a.rerun ? (await isInfra(before)) && (await isInfra(r.failedRuns)) : !!a.already && (await isInfra(before));
       // The rerun's own red, when one was made: it can fail another way than the red the fix pass had (a checkout that
       // got through, then a test), and a fresh worker pass is handed that one.
-      return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command, ...(a.rerun ? { rerunRed: { fromChecks: true, sha, failedRuns: r.failedRuns, failed: { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } } } : {}) };
+      return { green: false, again: true, unchanged: { ...a, sha, red: !!a.rerun, infra }, command, ...(a.rerun ? { rerunRed: { fromChecks: true, sha, failedRuns: r.failedRuns, runs: r.runs, failed: { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } } } : {}) };
     }
     // A required check whose job GitHub never started (no step, no runner: a billing lock, a spending limit, a runner
     // label nothing serves) is infrastructure no change can fix: no triage, no rerun, no fix pass; the stage Blocks.
@@ -1264,7 +1266,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       }
     }
     // `waitedMs`: how long this head's checks took, triage's rerun included (a fresh worker pass's floor, freshPassDenied).
-    return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, refusal: triaged, waitedMs: Date.now() - waitedFrom, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
+    return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, runs: r.runs, refusal: triaged, waitedMs: Date.now() - waitedFrom, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
   };
   /**
    * What a red hands a fix pass: for one the required checks found, each failing job's whole log, whether the default
@@ -1285,22 +1287,27 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // last green head.
   const failureText = (red) => redLines(red, { files: !!io });
   /**
-   * A red as the progress check reads it (fix-progress.mjs): the head validated, its failing jobs (every failed required
-   * check run, each with its signature when reds.mjs read its log) or failing commands (each signed from its output),
-   * and the failure lines a decision call shows (`lead`, else each one's own line).
+   * A red as the progress check reads it (fix-progress.mjs): the head validated; its failing jobs (every failed check
+   * run, each with its signature when reds.mjs read its log, a roll-up with no failure line of its own left out: it only
+   * repeats the jobs it gathers) or failing commands (each signed from its output); what passed on it (the check runs
+   * that concluded success, or the commands that ran and passed: one in a later group that never ran is no pass); and
+   * the failure lines a decision call shows (`lead`, else each one's own line).
    */
   const redShape = (v, { detail, failures, lead }) => {
-    const sigs = new Map((detail?.jobs || []).map((j) => [j.id, j.sig]));
+    const byId = new Map((detail?.jobs || []).map((j) => [j.id, j]));
     const jobs = v.fromChecks
-      ? (v.failedRuns?.length ? v.failedRuns : [{ name: `required checks ${checks.names.join(", ")}` }]).map((r) => ({ name: r.name, sig: sigs.get(r.id) ?? null }))
+      ? (v.failedRuns?.length ? v.failedRuns : [{ name: `required checks ${checks.names.join(", ")}` }]).filter((r) => !byId.get(r.id)?.aggregate).map((r) => ({ name: r.name, sig: byId.get(r.id)?.sig ?? null }))
       : failures.map((f) => ({ name: f.command, sig: failureSignature(f.command, f.full || f.output || "") }));
+    const passed = v.fromChecks ? (v.runs || []).filter((r) => r.conclusion === "success").map((r) => r.name) : (v.results || []).filter((r) => r.ok).map((r) => r.command);
     const head = v.sha || v.head || "";
-    return { head, at: `${label} pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
+    return { head, at: `${label} pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, passed, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
   };
-  // What the fix pass between two reds changed, as git's --stat (null when it cannot be read).
+  // What the fix pass between two reds committed, as each of its own commits' --stat: the first-parent line from `from` to
+  // `to`, merges left out, so a catch-up merge of Factory's own brings in nothing of the default branch (null when it
+  // cannot be read).
   const diffStat = async (from, to) => {
     if (!from || !to) return null;
-    const args = ["diff", "--stat", "--no-color", from, to];
+    const args = ["log", "--first-parent", "--no-merges", "--stat", "--no-color", "--format=%h %s", `${from}..${to}`];
     const r = await (outbox?.agentGit ? outbox.agentGit(args) : git(checkout, args)).catch(() => null);
     return r?.code === 0 ? String(r.stdout) : null;
   };
@@ -1485,7 +1492,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (judged) log(`${label} pass ${passes}: the fix pass before it ${judged.progress ? "made progress" : "made no progress"}: ${judged.why}`);
     if (judged && !judged.progress) {
       const first = String(shape.lead).split("\n")[0].replace(/^--- /, "");
-      stalled = `the fix pass before it made no progress: ${judged.why}; failing: ${redNames(shape).join(", ")}${first ? ` (${first})` : ""}`;
+      stalled = `the fix pass before it ${judged.undecided ? "could not be judged for progress" : "made no progress"}: ${judged.why}; failing: ${redNames(shape).join(", ") || failed.command}${first ? ` (${first})` : ""}`;
+      // An unmade judgement (the decider gave no answer) is Factory's, or its vendor's outage, never the work's.
+      if (judged.undecided) stalledCause = judged.cause || "factory";
       if (onPhase) await onPhase(`${label} pass ${passes} red: ${stalled}`);
       break;
     }
@@ -1510,7 +1519,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const ended = await fixPass(lastFix);
     if (ended) return ended;
   }
-  return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(stalled ? { stalled } : {}), ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
+  return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(stalled ? { stalled, stalledCause } : {}), ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
 }
 
 /**
@@ -2632,6 +2641,8 @@ export const QUEUE_RED_READS = 2;
 /** How far back from a drop the PR's merge-group runs are listed at most (one page of runs, newest first). */
 export const QUEUE_RED_LOOKBACK_MS = 6 * 3600_000;
 
+/** The most characters of a queue red's failure lines its record keeps (the progress question's before-red). */
+export const QUEUE_LEAD_CHARS = 1200;
 const QUEUE_RED_RECORD = (issue) => `<!-- factory:${issue}:queue-red-record `;
 /** The marker of Factory's record of one red queue drop on the issue, keyed by the drop's time (one comment per drop). */
 export const queueRedMarker = (issue, at) => marker(issue, "queue-red", String(at).replace(/[^0-9TZ:.-]/g, ""));
@@ -2645,7 +2656,8 @@ const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocke
  * fix pass; `ends`: how each of those tries ended that recorded an end (queueTryEnd: `committed`, or `idle` when it ran
  * and committed nothing; a try with none recorded ended early: a crash, a stop, a pause, a cap or a limit); `reads`: the stages that found no run of it yet. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
  * decided it, or its fix pass has committed), `fixed` (the PR's own change, and its fix pass
- * committed: `sigs` its failure classes, `jobs` its failing jobs as [name, signature id]), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
+ * committed: `sigs` its failure classes, `jobs` its failing jobs (queueJobs), `lead` their failure lines for a decision
+ * call, at most QUEUE_LEAD_CHARS), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
  * as any drop), `blocked` (the PR's own change, its fix pass before it making no progress) or `superseded` (the PR's head moved on before a stage read it).
  */
 export function queueRedBody(issue, prNumber, rec) {
@@ -2657,7 +2669,7 @@ export function queueRedBody(issue, prNumber, rec) {
     blocked: "the PR's own change, past its fix passes: Blocked",
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
-  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(Array.isArray(rec.ends) ? { ends: rec.ends } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
+  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.lead ? { lead: String(rec.lead).slice(0, QUEUE_LEAD_CHARS) } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(Array.isArray(rec.ends) ? { ends: rec.ends } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
   return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
@@ -2675,7 +2687,7 @@ export function queueRedRecords(comments, issue) {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
       if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
       const count = (x) => (Number.isInteger(x) && x > 0 ? x : 0);
-      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id]) => [name, typeof id === "string" ? id : null]) : null, tries: count(v.tries), ends: Array.isArray(v.ends) ? v.ends.filter((e) => QUEUE_TRY_ENDS.includes(e)) : null, reads: count(v.reads) };
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id, raw]) => [name, typeof id === "string" ? id : null, typeof raw === "string" ? raw : null]) : null, lead: typeof v.lead === "string" ? v.lead.slice(0, QUEUE_LEAD_CHARS) : "", tries: count(v.tries), ends: Array.isArray(v.ends) ? v.ends.filter((e) => QUEUE_TRY_ENDS.includes(e)) : null, reads: count(v.reads) };
       const key = new Date(Date.parse(v.at)).toISOString();
       const had = byAt.get(key);
       const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 1_000_000 + r.tries * 10_000 + (r.ends?.length ?? 0) * 100 + r.reads;
@@ -2693,6 +2705,19 @@ const sameDrop = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) <= 60_000;
 /** Write (or update) the record of the drop at `rec.at` on the issue. */
 export const writeQueueRed = (repo, issue, prNumber, rec, opts) => upsertComment(repo, issue, queueRedMarker(issue, rec.at), queueRedBody(issue, prNumber, rec), opts);
 
+/**
+ * A queue red's failing jobs as its record keeps them for the progress check: [name, signature id, digest of its failure
+ * lines as logged] (fix-progress.mjs signed; null for a job with no failure line), a roll-up with none of its own left
+ * out (reds.mjs `aggregate`: it only repeats the jobs it gathers).
+ */
+export const queueJobs = (jobs) =>
+  (jobs || [])
+    .filter((j) => !j.aggregate)
+    .map((j) => {
+      const x = signed(j.sig);
+      return [j.name, x?.id ?? null, x?.raw ?? null];
+    });
+
 /** A failure class of the queue's red: the failing job's failure signature (triage.mjs failureSignature), else its name. */
 export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job:${job?.name}`);
 
@@ -2707,8 +2732,8 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
  * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
  * (`none`), or triage is off and no failure names a file or test the PR changes (`unclassified`, triage.mjs
  * namesChange). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
- * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass) and `jobs` (each failing job's name
- * and signature id, [name, id|null]: what the progress check compares).
+ * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass), `jobs` (queueJobs: what the
+ * progress check compares) and `passed` (the check runs that concluded success on the queue's commit).
  */
 export async function queueRedOf({ repo, issue, prNumber, base, at, after = null, names = [], triage = null, token, actionsToken = token }) {
   const opts = { token };
@@ -2724,7 +2749,10 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   const run = runs.find((r) => Date.parse(r.at) > Date.parse(floor) && !(Date.parse(r.at) > Date.parse(at) + 60_000));
   if (!run) return unreadable ? { kind: "none", sha: null, reason: `the PR's merge-queue runs could not be read (${unreadable})` } : { kind: "unread", sha: null, reason: "no merge-queue run of this drop is listed yet" };
   const sha = run.sha;
-  const failedRuns = (await checkRuns(repo, sha, opts).catch(() => []))
+  const allRuns = await checkRuns(repo, sha, opts).catch(() => []);
+  // The check runs that passed on the queue's commit: what the progress check counts as fixed (fix-progress.mjs).
+  const passed = allRuns.filter((r) => r.status === "completed" && r.conclusion === "success").map((r) => r.name);
+  const failedRuns = allRuns
     .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
     .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
   if (!failedRuns.length) return run.status && run.status !== "completed" ? { kind: "unread", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)} yet` } : { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
@@ -2750,7 +2778,7 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   if (!verdict || verdict.off) {
     if (!verdict?.named) return { kind: "unclassified", sha, reason: `${first}; triage is off and no failure names a file or test the PR changes` };
   }
-  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: detail.jobs.map((j) => [j.name, j.sig?.id ?? null]) };
+  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: queueJobs(detail.jobs), passed };
 }
 
 /**
@@ -2765,7 +2793,7 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
  * `idle` in `ends` (recordQueueIdle), Blocks, as no progress; a record without `ends` Blocks at two tries). Null when nothing is pending. `names()` gives the required checks,
  * read only then.
  */
-export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
+export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, diffStat = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
   const records = queueRedRecords(await listComments(repo, issue, { token }), issue);
   const pending = records.at(-1);
   if (pending?.state !== "handed") return null;
@@ -2792,24 +2820,28 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   // The fix passes since the Objective's last re-entry (an unread timeline counts every one).
   const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:restart", "factory:blocked"], { token }).catch(() => null);
   const fixes = records.filter((r) => r.state === "fixed" && !(Date.parse(entered) > Date.parse(r.at)));
-  // The red the last fix pass was handed, and every one fixed since the re-entry, against this one (fix-progress.mjs).
-  // A fix pass is recorded only once it committed (recordQueueFix), so the heads are not compared.
-  const shape = (r, jobs) => ({ head: "", at: `the merge queue's run red at ${r.at}`, jobs: jobs.map(([name, id]) => ({ name, sig: id ? { id } : null })), lead: "" });
+  // The red the last fix pass was handed, and every one fixed since the re-entry, against this one (fix-progress.mjs),
+  // with what passed on the queue's commit, and for a decision call the before-red's failure lines and the fix pass's own
+  // commits (`diffStat(from, to)`: from the PR head that drop was of to this one's). A fix pass is recorded only once it
+  // committed (recordQueueFix), so the heads are not compared.
+  const shape = (r, jobs, more = {}) => ({ head: "", at: `the merge queue's run red at ${r.at}`, jobs: jobs.map(([name, id, raw]) => ({ name, sig: id ? { id, raw } : null })), lead: r.lead || "", ...more });
   const last = fixes.at(-1);
   const judge = progressCheck?.judge ?? exactJudge;
-  const p = last?.jobs?.length ? await judge({ before: shape(last, last.jobs), after: { ...shape(pending, q.jobs), lead: q.red.lead || "" }, seen: fixes.slice(0, -1).filter((r) => r.jobs?.length).map((r) => shape(r, r.jobs)) }) : null;
+  const diff = last?.jobs?.length && diffStat && last.head && pending.head ? await Promise.resolve(diffStat(last.head, pending.head)).catch(() => null) : null;
+  const p = last?.jobs?.length ? await judge({ before: shape(last, last.jobs), after: shape(pending, q.jobs, { lead: q.red.lead || "", passed: q.passed }), seen: fixes.slice(0, -1).filter((r) => r.jobs?.length).map((r) => shape(r, r.jobs)), diff }) : null;
   // The stage harness's usage limit stopped the question: the drop stays handed, and the stage ends on the limit.
   if (p?.limited) throw new UsageLimitReached(p.limited, { since: Date.now(), label: "fix-progress check" });
   // A try that ran and committed nothing is no progress; one that ended early is not counted (the stage's own bounds,
   // relaunches, usage holds and max_usd, cover those). A record from before `ends` was kept: two tries.
   const idle = Array.isArray(pending.ends) ? pending.ends.includes("idle") : pending.tries >= 2;
-  const over = p && !p.progress ? `fix pass, which made no progress: ${p.why}` : idle ? (Array.isArray(pending.ends) ? "fix pass that ran and committed nothing for it" : `${pending.tries} fix passes that committed nothing for it`) : "";
+  const over = p && !p.progress ? `fix pass, which ${p.undecided ? "could not be judged for progress" : "made no progress"}: ${p.why}` : idle ? (Array.isArray(pending.ends) ? "fix pass that ran and committed nothing for it" : `${pending.tries} fix passes that committed nothing for it`) : "";
   if (over) {
-    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs }, { token });
-    return { state: "blocked", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead }, { token });
+    // An unmade judgement (the decider gave no answer) is Factory's, or its vendor's outage, never the work's.
+    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "factory" : "work", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
-  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, tries: pending.tries + 1, ends: pending.ends ?? [] };
+  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [] };
   await writeQueueRed(repo, issue, prNumber, record, { token });
   return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; the PR's own change, one fix pass (the answer pass)`, red: q.red, record };
 }
@@ -2825,15 +2857,31 @@ export const QUEUE_TRY_ENDS = Object.freeze(["committed", "idle"]);
 
 /**
  * How the queue's fix pass (review.mjs's answer pass) ended, from structure: `committed` when the checkout's HEAD moved
- * (`before`, `after`) and the push went up; `idle` when it ran to its end (`rec` ok: no crash, error, stop, time or
- * dollar cap, unmetered run or provider refusal, and no Question: `question`) with the HEAD where it was; else null, an early end recorded as
- * nothing (a refused push, an unreadable HEAD included).
+ * (`before`, `after`) and the push went up; `idle` when the pass ran (its harness started and returned: `rec`, ok or
+ * not, a crash, an error, a cap or a refusal included) and the HEAD is where it was. Else null, an early end recorded as
+ * nothing: no pass ran (`rec` null), its commit did not go up, the HEAD could not be read, or it committed nothing and
+ * was stopped or asked a Question (`question`: a person answers, and the Objective goes on from there).
  */
 export function queueTryEnd({ before, after, pushed, rec, question = false }) {
-  if (!before || !after) return null;
+  if (!before || !after || !rec) return null;
   if (after !== before) return pushed ? "committed" : null;
-  const early = !rec?.ok || rec.stopped || rec.timedOut || rec.budgetExceeded || rec.unmetered || rec.refusal || question;
-  return early ? null : "idle";
+  return rec.stopped || question ? null : "idle";
+}
+
+/** Record how the queue's fix pass ended (queueTryEnd): `committed` (recordQueueFix), `idle` (recordQueueIdle), or nothing. Returns the end. */
+export async function recordQueueTry(repo, issue, prNumber, record, pass, opts) {
+  const end = queueTryEnd(pass);
+  if (end === "committed") await recordQueueFix(repo, issue, prNumber, record, opts);
+  if (end === "idle") await recordQueueIdle(repo, issue, prNumber, record, opts);
+  return end;
+}
+
+/** What a fix pass committed between two heads in Factory's mirror: its own commits' --stat, first-parent with merges left out (a catch-up merge brings in nothing of the default branch). */
+export async function mirrorOwnStat(mgit, from, to) {
+  for (const sha of [from, to]) await mirrorCommit(mgit, sha);
+  const r = await mgit(["log", "--first-parent", "--no-merges", "--stat", "--no-color", "--format=%h %s", `${from}..${to}`], { maxBytes: 1024 * 1024 });
+  if (r.code !== 0) throw new Error(`git log failed (${r.code})`);
+  return String(r.stdout);
 }
 
 /**

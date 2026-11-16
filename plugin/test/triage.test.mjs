@@ -608,8 +608,9 @@ test("triage: a flaky verdict whose rerun GitHub refuses comes back with the ver
 });
 
 test("the last red, triaged flaky with its rerun refused, Blocks naming the verdict, the refusal and the remedy, quoting the failing job's own line first", async () => {
-  // The fix pass commits (the head moves on, as Factory pushes it) and the same jobs fail; the roll-up's log has no
-  // failure line, so no signature: only a decider could judge it, and with none it is no progress.
+  // The fix pass commits (the head moves on, as Factory pushes it) and the same jobs fail. The roll-up (quality) has no
+  // failure line of its own and only repeats the job it gathers, so it is left out of the comparison: test failing with
+  // the same lines is the same red, no progress.
   const { validationLoop, DETAIL_CHARS } = await import("../scripts/lib/session.mjs");
   const { decideExit } = await import("../scripts/lib/logic.mjs");
   const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
@@ -642,7 +643,7 @@ test("the last red, triaged flaky with its rerun refused, Blocks naming the verd
   assert.equal(result.usage.length, 1, "one fix pass");
   assert.equal(result.triageRefused, refusedRerunText(refused));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, command: result.command, triageRefused: result.triageRefused, stalled: result.stalled } });
-  assert.equal(exit.reason, `validation red on Factory's pass 2 (required checks quality on ddddddd): the fix pass before it made no progress: the failing jobs changed without getting fewer, and no decision model can judge it; failing: test, quality (quality (required check), from test: ${supplyChain}); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label`);
+  assert.equal(exit.reason, `validation red on Factory's pass 2 (required checks quality on ddddddd): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: test (quality (required check), from test: ${supplyChain}); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label`);
   // What the Blocked notice quotes (applyExit keeps the last DETAIL_CHARS): the failing job's own line leads it.
   const shown = result.lastOutput.slice(-2500);
   assert.equal(DETAIL_CHARS, 2500);
@@ -1289,7 +1290,7 @@ test("validation loop: a fresh pass's commit red again the same way is no progre
   assert.equal(red.calls.length, 2, "no third harness run");
   assert.equal(red.result.freshPass, "9".repeat(40));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: red.result.passes, green: false, command: red.result.command, unchanged: red.result.unchanged, freshPass: red.result.freshPass, stalled: red.result.stalled } });
-  assert.deepEqual(exit, { exit: "blocked", reason: `validation red on Factory's pass 2 (required checks quality on bbbbbbb): the fix pass before it made no progress: the same jobs fail the same way; failing: quality (quality (required check): ${supplyChain}); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
+  assert.deepEqual(exit, { exit: "blocked", reason: `validation red on Factory's pass 2 (required checks quality on bbbbbbb): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality (quality (required check): ${supplyChain}); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
 });
 
 test("validation loop: a red on Factory's own catch-up merge gets its fix pass unjudged; the red after that pass is judged (#399)", async () => {
@@ -1325,13 +1326,53 @@ test("validation loop: a red on Factory's own catch-up merge gets its fix pass u
   const caught = await go(true);
   assert.equal(caught.calls, 2, "the red on the merge got its fix pass");
   assert.ok(caught.phases.includes("validation pass 2 red: required checks quality on bbbbbbb; fix run"), caught.phases.join("\n"));
-  assert.match(caught.result.stalled, /^the fix pass before it made no progress: the same jobs fail the same way; failing: quality /);
+  assert.match(caught.result.stalled, /^the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality /);
   assert.equal(caught.result.passes, 3);
   // Not Factory's merge: the same red after the first fix pass is no progress.
   const own = await go(false);
   assert.equal(own.calls, 1);
   assert.equal(own.result.passes, 2);
-  assert.match(own.result.stalled, /^the fix pass before it made no progress: the same jobs fail the same way; failing: quality \(quality \(required check\): /);
+  assert.match(own.result.stalled, /^the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality \(quality \(required check\): /);
+});
+
+test("validation loop: another job failing counts as progress only when the jobs that failed before now pass; a build break that skips them does not (#399 review)", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const [first, next, last] = ["9", "b", "e"].map((c) => c.repeat(40));
+  const buildLog = ["##[group]Run npm run build", "src/a.ts(3,5): error TS2322: Type 'string' is not assignable to type 'number'.", "##[error]Process completed with exit code 1."].join("\n");
+  const run = (id, name, conclusion = "failure") => ({ id, name, status: "completed", conclusion, check_suite: { id: 9 }, started_at: "2026-11-11T21:55:00Z", completed_at: "2026-11-11T21:57:00Z" });
+  const go = async (quality) => {
+    const id = (freshId += 10);
+    const codex = recordingCodex();
+    const phases = [];
+    try {
+      // First quality fails; after the fix pass the build fails, and quality `passed` or was skipped behind it.
+      const heads = { [next]: [run(id + 1, "build"), run(id + 2, "quality", quality)], [last]: [run(id + 3, "build"), run(id + 4, "quality", quality)] };
+      const result = await withHead({ runs: [run(id, "quality")], heads, jobs: Object.fromEntries([id, id + 1, id + 3].map((j) => [j, { ...testFailed, id: j }])), logs: { [id]: failingLog, [id + 1]: buildLog, [id + 3]: buildLog } }, () =>
+        validationLoop({
+          checkout: codex.work,
+          commands: [],
+          harness: "codex",
+          maxUsd: 0,
+          session: {},
+          taskCard: "",
+          env: codex.env,
+          deadlineAt: Date.now() + 10 * 60_000,
+          checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality", "build"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
+          outbox: { push: async () => true, expected: () => [first, next, last][Math.min(codex.calls().length, 2)] },
+          onPhase: async (l) => phases.push(l),
+        }),
+      );
+      return { result, phases, calls: codex.calls().length };
+    } finally {
+      codex.putBack();
+    }
+  };
+  const passed = await go("success");
+  assert.equal(passed.calls, 2, "quality passed: the build break is progress, and gets its fix pass");
+  assert.ok(passed.phases.some((l) => l.endsWith("fix run (progress: the jobs that failed now pass, and a different set fails)")), passed.phases.join("\n"));
+  const skipped = await go("skipped");
+  assert.equal(skipped.calls, 1, "quality skipped behind the build break: no pass, so no progress without a decider");
+  assert.match(skipped.result.stalled, /^the fix pass before it made no progress: the failing jobs changed without fewer of them failing and the rest passing, and no decision model can judge it; failing: build /);
 });
 
 test("validation loop: the session after a fresh pass is the fresh one when it committed, the worker's own thread when it committed nothing", async () => {

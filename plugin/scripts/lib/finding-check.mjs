@@ -9,12 +9,12 @@
 // reaches code; the finding, the reply, the diff and the rules are data between random-tag markers, never instructions.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { openDecider } from "./adapters/decider.mjs";
+import { openDecider } from "./decider.mjs";
 import { rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
-import { log, mask, redactSecrets } from "./inputs.mjs";
+import { log, redactSecrets } from "./inputs.mjs";
 import { acceptanceEntries, isBodyFindingId, marker } from "./logic.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, triageKeyState } from "./triage.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
 
 /** The one question each answered finding is asked. */
 export const FINDING_QUESTION = {
@@ -93,28 +93,27 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
 }
 
 /**
- * The finding check: `{model, off, judge}`. Without a key `off` is why (triage.mjs triageKeyState's code) and there is no
- * `judge`: a reply then answers its finding (checkAnswers). `judge(items, ctx)` asks one question per item ({id, path,
- * line, body, from?, reply, diff}, findingInput's), CONCURRENCY at a time, and returns `[{id, verdict, confidence,
- * error}]` in their order; a call that fails is no verdict with its code, and once the gateway refuses the key
- * (`auth`), no further question is asked in this process.
+ * The finding check: `{model, off, judge}`, asked through the one decision interface (decider.mjs openDecider): the
+ * AI Gateway's `triage_model` with a key, else the stage's own harness (`stage`). With neither, `off` is why (the key's
+ * code, or `route-off`) and there is no `judge`: a reply then answers its finding (checkAnswers). `judge(items, ctx)`
+ * asks one question per item ({id, path, line, body, from?, reply, diff}, findingInput's), CONCURRENCY at a time, and
+ * returns `[{id, verdict, confidence, error}]` in their order; a call that fails is no verdict with its code, and once
+ * the decider refuses (`auth`, `billing`, or the stage harness's `rate_limited`), no further question is asked in this process.
  */
-export function openFindingCheck({ inputs = {}, env = process.env, home = homedir(), decider = null } = {}) {
-  const { key, code } = decider ? { key: null, code: null } : triageKeyState({ inputs, env, home });
-  const model = inputs?.triageModel || TRIAGE_MODEL;
-  if (!decider && !key) return { model, off: code || "no-key" };
-  if (key) mask(key);
-  let ask = decider;
-  const state = { refused: false };
+export function openFindingCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
+  const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
+  const { model } = ask;
+  if (ask.off) return { model, off: ask.off };
+  const state = { refused: null };
   const one = async (it, ctx) => {
-    if (state.refused) return { id: it.id, verdict: null, confidence: null, error: "auth" };
+    if (state.refused) return { id: it.id, verdict: null, confidence: null, error: state.refused };
     const a = await Promise.resolve(ask.decide(findingInput({ ...ctx, finding: it, reply: it.reply, diff: it.diff }), FINDING_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
-    if (a?.error === "auth") state.refused = true;
+    // A refused key or credits, or the stage harness's usage limit, ends the questions; a gateway's 429 does not.
+    if (a?.error === "auth" || a?.error === "billing" || (a?.error === "rate_limited" && ask.asked?.().name === "harness")) state.refused = a.error;
     const verdict = FINDING_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
     return { id: it.id, verdict, confidence: verdict && typeof a?.confidence === "number" ? a.confidence : null, error: verdict ? null : a?.error || "no_answer" };
   };
   const judge = async (items, { repo, prNumber, issue = "", rules = "" } = {}) => {
-    ask ??= await openDecider({ key, model });
     const out = new Array(items.length);
     let next = 0;
     const worker = async () => {
@@ -126,7 +125,9 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker));
     return out;
   };
-  return { model, off: null, judge };
+  // `asked()`: who answered (decider.mjs), named by a Block; `limited()`: the stage harness's usage limit that stopped
+  // the questions, which ends the stage as a pass meeting it does (review.mjs).
+  return { model, off: null, judge, asked: () => ask.asked(), limited: () => ask.limited() };
 }
 
 /**

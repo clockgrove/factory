@@ -5,9 +5,9 @@
 // MIN_CONFIDENCE or more keeps the path; anything else names it as dropped. This runs in Factory's own process, never
 // in a harness. The diffs are the worker's text: they go in delimited, as data the model is told not to follow.
 import { randomBytes } from "node:crypto";
-import { openDecider } from "./adapters/decider.mjs";
-import { log, mask, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, triageKey } from "./triage.mjs";
+import { openDecider } from "./decider.mjs";
+import { log, redactSecrets } from "./inputs.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
 
 /** The one question asked about each path. */
 export const KEPT_QUESTION = {
@@ -37,19 +37,18 @@ export function keptInput({ path, conflicted = false, branch, base, head }, tag 
 }
 
 /**
- * The judge rebaseLeft asks, or null when there is no key (rebaseLeft then matches commits instead). judge(item)
- * resolves {kept, why}: `why` says, when not kept, what the model answered; it never throws.
+ * The judge rebaseLeft asks, or null when there is no decider (decider.mjs openDecider: no AI Gateway key and no
+ * `stage`, or `decision_route` off; rebaseLeft then matches commits instead). judge(item) resolves {kept, why}: `why`
+ * says, when not kept, what the model answered; it never throws.
  */
-export function openKeptCheck({ inputs, env = process.env, decider = null, min = MIN_CONFIDENCE }) {
-  const key = decider ? null : triageKey({ inputs, env });
-  if (!decider && !key) return null;
-  mask(key);
-  const model = inputs?.triageModel || TRIAGE_MODEL;
-  let ask = decider;
+export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = MIN_CONFIDENCE }) {
+  // The one decision interface (decider.mjs): the AI Gateway's `triage_model` with a key, else the stage's own harness.
+  const ask = openDecider({ inputs, env, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
+  if (ask.off) return null;
+  const { model } = ask;
   const judge = async (item) => {
     let a;
     try {
-      ask ??= await openDecider({ key, model });
       a = await ask.decide(keptInput(item), KEPT_QUESTION);
     } catch (e) {
       log(`rebase check (${model}): the decision model could not be asked: ${String(e?.message || e).slice(0, 160)}`);
@@ -63,5 +62,7 @@ export function openKeptCheck({ inputs, env = process.env, decider = null, min =
     if (a.verdict === "lost") return { kept: false, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
     return { kept: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
   };
-  return { model, judge };
+  // `limited()`: the stage harness's usage limit that stopped its questions (decider.mjs); the send-back then ends as a
+  // pass meeting the limit does (worker.mjs sendBackGuard), never on a "not kept" its unanswered question would read as.
+  return { model, judge, limited: () => ask.limited?.() ?? null };
 }

@@ -24,7 +24,7 @@ Factory acts on an issue only when its author, its last editor once the body was
 2. Each one counted must have `__typename` `User`: an App or bot never vouches.
 3. For each login, `gh api repos/OWNER/NAME/collaborators/<login>/permission --jq '.permission + " " + .role_name'` must show `admin`, `maintain` or `write`, or the login is one of the workflow's maintainers.
 
-When a check fails, or a login cannot be read, do not start it. Say who and why: an author who fails means a person who can push files it again as a new issue; a last editor who fails means a person who can push reads the body and saves it, becoming its last editor; a renamer who fails means a person who can push reads the title and renames the issue.
+When a check fails, or a login cannot be read, do not start it. Say who and why: an author who fails means a person who can push files it again as a new issue; a last editor who fails means a person who can push reads the body and saves it, becoming its last editor; a renamer who fails means a person who can push reads the title and changes it (the same title records no rename).
 
 ## Ask
 

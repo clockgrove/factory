@@ -40,9 +40,6 @@ export const objectiveSha = (title, body, labels = []) => {
 /** An actor as a login a person can read: an App as `<slug>[bot]`. */
 const shown = (a) => (a?.__typename === "Bot" ? `${a.login}[bot]` : a.login);
 
-/** A REST timeline event's actor in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches. */
-const timelineActor = (a) => (a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null);
-
 /**
  * Who set the issue's title as it is now: the actor of its latest rename (`rename`: {actor, to}, the actor in vouches'
  * shape) when that rename names `title`, else null (no one can be named for it).
@@ -80,7 +77,9 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
     if (!actor?.login) return { ok: false, role, reason: `the issue's ${role} could not be read, so ${what}`, body };
     if (!(await vouches(repo, actor, opts, gh))) return { ok: false, role, reason: `the issue's ${role} \`${shown(actor)}\` cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`, body };
   }
-  const title = typeof node?.title === "string" ? node.title : null;
+  // The title the stage acts on is this read's, never another: none here, no title can be vouched for.
+  if (typeof node?.title !== "string") return { ok: false, role: "title renamer", reason: `the issue's title could not be read, so ${what}`, body };
+  const title = node.title;
   const people = roles.map(([role, a]) => [role, a.login]);
   // The title, vouched for as the body is: a read without the rename list has no one to name for it.
   const renames = node?.renames?.nodes;
@@ -105,19 +104,19 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
 export const AUTHOR_FIX = {
   author: "Editing this issue cannot fix that, since its author is checked on every run: a person who can push files the Objective as a new issue and labels that one `factory:objective`.",
   "last editor": "Fix by having a person who can push read the body and save it (they become its last editor), then re-apply `factory:objective`.",
-  "title renamer": "Fix by having a person who can push read the title and rename the issue (they become its latest renamer), then re-apply `factory:objective`.",
+  "title renamer": "Fix by having a person who can push read the title and change it (saving the same title records no rename; they become its latest renamer), then re-apply `factory:objective`.",
 };
 
 /**
  * The issue as a stage acts on it: `issueData` (the REST read) with the title and body read with the people who vouch
- * for them, `labels` (the label names from that same read), `sha` (that text's objectiveSha) and `editedAt` (the body's last edit, GitHub's), or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
+ * for them (objectiveTrusted: author, last editor, latest title renamer), `labels` (the label names from that same read), `sha` (that text's objectiveSha) and `editedAt` (the body's last edit, GitHub's), or {ok: false, reason, fix} for the stage to Block on before any harness sees the text: `fix` (AUTHOR_FIX)
  * the Blocked notice's remedy for who failed.
  */
 export async function trustedIssue(repo, issue, issueData, opts, gh) {
   const t = await objectiveTrusted(repo, issue, opts, { what: "Factory acts on none of its text", ...(gh ? { gh } : {}) });
   // An untrusted author is checked again on a resume and on a restart alike: the notice says neither gets past it.
   if (!t.ok) return { ok: false, reason: t.reason, fix: AUTHOR_FIX[t.role], ...(t.role === "author" ? { next: "none" } : {}) };
-  return { ok: true, issueData: { ...issueData, title: t.title ?? issueData?.title, body: t.body }, labels: t.labels, sha: t.sha, editedAt: t.editedAt, people: t.people };
+  return { ok: true, issueData: { ...issueData, title: t.title, body: t.body }, labels: t.labels, sha: t.sha, editedAt: t.editedAt, people: t.people };
 }
 
 /**
@@ -197,42 +196,25 @@ export function planTextState({ sha, plan, labeledAt = null, editedAt = null, wo
 export const recordText = ({ title = null, body = "", labels = [] } = {}) => ({ title: typeof title === "string" ? title : null, body: typeof body === "string" ? body : "", labels: choiceLabels(labels) });
 
 /**
- * Whether the person who changed the Objective's title from `before` to `after` vouches for it: the actor of the
- * issue's latest rename, that rename naming the title now, who can push or is a pinned maintainer. No title change, no
- * read. The body is the caller's: the text it passes was read with its author and last editor vouched for. `gh`
- * (timeline, permission) is a test's own.
- */
-async function titleVouched(repo, issue, before, after, opts, gh = {}) {
-  if (settled(before.title) === settled(after.title)) return true;
-  const events = (await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [];
-  const r = events.filter((e) => e.event === "renamed").sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
-  const by = renamer({ actor: timelineActor(r?.actor), to: r?.rename?.to }, after.title);
-  if (!by) return false;
-  return vouches(repo, by, opts, { permission: gh.permission ?? collaboratorPermission });
-}
-
-/**
- * The edit check's answer for the Objective's text now (`now`: {sha, title, body, labels}, read with its author and last
- * editor vouched for) against the plan's record (#400). Judged only when the record keeps the text it was made from
- * (and that text is the one its hash names), the harness, model and host labels are the same (a change to one is a
- * changed requirement as it stands), the title's change is vouched for (titleVouched), and `check` (edit-check.mjs
+ * The edit check's answer for the Objective's text now (`now`: {sha, title, body, labels}) against the plan's record
+ * (#400). `now` must be objectiveTrusted's text: its title and body read with their author, last editor and latest
+ * title renamer vouched for. Every caller holds that guarantee (planGate's and planStateNow's stages pass trustedIssue's
+ * text, editedSincePlan reads objectiveTrusted first), so no edit by anyone else is ever judged here. Judged only when
+ * the record keeps the text it was made from (and that text is the one its hash names), the harness, model and host
+ * labels are the same (a change to one is a changed requirement as it stands), and `check` (edit-check.mjs
  * openEditCheck, or a function returning one, opened only then) is not `route-off`: otherwise planTextState's rule as
  * ever. A verdict the record already has for this text is used, never asked again. Returns {kept, record, unjudged,
  * said}: `kept` for `wording`; `record` the record with a verdict newly asked (to be written with the plan); `unjudged`
  * when no decider here could ask and another process may (the check's `elsewhere`); `said` the progress line of a kept
  * edit newly judged (edit-check.mjs keptLine).
  */
-export async function judgedEdit({ repo, issue, record, now, check = null, opts, gh = {} }) {
+export async function judgedEdit({ issue, record, now, check = null }) {
   const none = { kept: false, record: null, unjudged: false, said: null };
   if (!record || record.sha256 === now.sha || !record.text) return none;
   const before = recordText(record.text);
   if (objectiveSha(before.title, before.body, before.labels) !== record.sha256) return none;
   const after = recordText(now);
   if (JSON.stringify(before.labels) !== JSON.stringify(after.labels)) return none;
-  if (!(await titleVouched(repo, issue, before, after, opts, gh))) {
-    log(`#${issue}: the Objective's title was changed since its plan by someone who cannot push and is not a pinned maintainer, so the edit is not judged`);
-    return none;
-  }
   const c = typeof check === "function" ? await check() : check;
   // No decider at all (decision_route off): any edit is a change, a verdict stored before included.
   if (!c || c.off === "route-off") return none;
@@ -264,7 +246,7 @@ const sameRecord = (a, b) => !!a && !!b && planTextMarker(a) === planTextMarker(
  * a re-applied label between the two reads then count as after the plan), and writes it at once on a plan made from the
  * same text (or an edit judged wording only, the record then keeping the plan's text), so a later edit with no new label
  * is told from one the person re-applied the label after; the review stage keeps the plan's record. `read`
- * (planComment, labeledAt, changedAt, timeline, permission) is a test's own.
+ * (planComment, labeledAt, changedAt) is a test's own.
  */
 export async function planGate({ repo, issue, sha, text = null, editedAt = null, labeledAt, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, check = null, progress = null, read = {} }) {
   await knowSelf(opts);
@@ -272,7 +254,7 @@ export async function planGate({ repo, issue, sha, text = null, editedAt = null,
   const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? startedAt)(repo, issue, objectiveLabel, opts)) : null;
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
   const relabeled = work && !!posted?.record && after(label, posted.record.label);
-  const judged = text && !relabeled ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, ...text }, check, opts, gh: read }) : { kept: false, record: null, said: null };
+  const judged = text && !relabeled ? await judgedEdit({ issue, record: posted?.record, now: { sha, ...text }, check }) : { kept: false, record: null, said: null };
   const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work, kept: judged.kept });
   if (judged.said && progress) await progress(judged.said);
   // The plan's record as it stands now: with a verdict newly asked, written with the plan's text.
@@ -301,13 +283,13 @@ export async function planGate({ repo, issue, sha, text = null, editedAt = null,
  * The plan comment and planTextState's answer for a stage that never plans again (a session's `factory issue`,
  * `deliver` and `post-review`): {posted, state, record}. `sha`, `editedAt` and the text (`issueData`, `labels`) from
  * trustedIssue; `check` the edit check (judgedEdit), whose verdict is not written here: `record` is the plan's record
- * with it, for `deliver` to write with the plan. `read` (planComment, changedAt, timeline, permission) a test's own.
+ * with it, for `deliver` to write with the plan. `read` (planComment, changedAt) a test's own.
  */
 export async function planStateNow(repo, issue, { sha, editedAt = null, issueData = null, labels = [] }, opts, read = {}, check = null) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
-  const judged = issueData ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check, opts, gh: read }) : { kept: false, record: null };
+  const judged = issueData ? await judgedEdit({ issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check }) : { kept: false, record: null };
   return { posted, state: planTextState({ sha, plan: posted, editedAt: edited, kept: judged.kept }), record: judged.record ?? posted?.record ?? null };
 }
 
@@ -330,11 +312,11 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
   const editedAt = posted.record ? null : await textEditedAt(repo, issue, node.lastEditedAt ?? null, opts, changed);
   let judged = { kept: false, record: null, unjudged: false, said: null };
   if (posted.record?.text && posted.record.sha256 !== sha) {
-    // Judged only on text read with its author and last editor vouched for (objectiveTrusted): else as ever.
+    // Judged only on text read with its author, last editor and latest title renamer vouched for (objectiveTrusted): else as ever.
     const t = await objectiveTrusted(repo, issue, opts, { gh: { graphql: gh.graphql, permission: gh.permission ?? collaboratorPermission } });
     if (t.ok) {
       sha = t.sha;
-      judged = await judgedEdit({ repo, issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check, opts, gh });
+      judged = await judgedEdit({ issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check });
     }
   }
   if (judged.record && posted.text !== null) await stampPlan(repo, issue, posted, judged.record, opts);

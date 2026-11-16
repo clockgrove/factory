@@ -121,7 +121,7 @@ test("objective trust: a triager's rename before the first plan Blocks, naming t
   assert.equal(t.issueData, undefined, "no title or body for a harness");
   assert.match(t.reason, /^the issue's title was last renamed by `reader`, who cannot push to acme\/app and is not a pinned maintainer, so Factory acts on none of its text$/);
   assert.deepEqual(applied, [{ issue: 7, pr: null, exit: "blocked", reason: t.reason, fix: AUTHOR_FIX["title renamer"], cause: "setup", notify: "boss", stage: "author" }], "Blocked as an untrusted body is, resumed once a writer renames it");
-  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and rename the issue .* re-apply `factory:objective`/);
+  assert.match(blockedLine({ issue: 7, stage: "author", reason: t.reason, fix: AUTHOR_FIX["title renamer"] }), /person who can push read the title and change it \(saving the same title records no rename; .* re-apply `factory:objective`/);
   const stranger = await trustedIssue(repo, 7, rest, {}, gh({ author: user("kirk"), renamed: [user("stranger")] }));
   assert.match(stranger.reason, /title was last renamed by `stranger`, who cannot push/);
 });
@@ -152,6 +152,9 @@ test("objective trust: an App's rename never vouches for the title, nor a rename
   assert.match(other.reason, /^who set the issue's title as it is now could not be read/, "a latest rename that names another title vouches for nothing");
   const unread = await trustedIssue(repo, 7, rest, {}, { ...gh({ author: user("kirk") }), graphql: async () => ({ repository: { issue: { body: "x", title: "Objective", author: user("kirk"), labels: { nodes: [] } } } }) });
   assert.match(unread.reason, /^who set the issue's title could not be read/, "a read without the rename list names no one for the title");
+  const untitled = await trustedIssue(repo, 7, rest, {}, { ...gh({ author: user("kirk") }), graphql: async () => ({ repository: { issue: { body: "x", author: user("kirk"), labels: { nodes: [] }, renames: { nodes: [] } } } }) });
+  assert.equal(untitled.issueData, undefined, "never the REST read's title");
+  assert.match(untitled.reason, /^the issue's title could not be read/);
 });
 
 // The session's route (local.mjs issue, deliver, post-review) against a GitHub that answers like the real one.
@@ -238,7 +241,7 @@ test("session route: `factory issue` hands a session only a body its author and 
     const r = await run(["issue", "7", "--out", out], envFor(renamed.url, c.root), c.work);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /#7 is not given to this session: the issue's title was last renamed by `reader`, who cannot push to acme\/app/);
-    assert.match(r.stderr, /read the title and rename the issue/);
+    assert.match(r.stderr, /read the title and change it/);
     assert.equal(existsSync(out), false, "no title reaches the session");
   } finally {
     await renamed.close();

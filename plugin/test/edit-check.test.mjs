@@ -33,12 +33,11 @@ function fakeDecider(verdict, confidence = 0.95, error = null) {
 /** Factory's plan comment on issue 7 with `record`. */
 const planComment = (record, plan = "## Plan\n- [ ] item") => ({ id: 2, user: { login: SELF }, body: `<!-- factory:7:plan -->${planTextMarker(record)}\n${plan}`, created_at: L0 });
 
-const person = (login, type = "User") => ({ login, id: login.length, type });
 /** Permission reads: `kirk` and `dev` can push, anyone else cannot. */
 const permission = async (_r, login) => (["kirk", "dev"].includes(login) ? "write" : "read");
 
 /** planGate against comments `list`, with `now` the issue's text read with its writers, GitHub's writes recorded. */
-async function gate(list, { now = TYPO, work = false, labeledAt = L0, check = null, timeline = [] }) {
+async function gate(list, { now = TYPO, work = false, labeledAt = L0, check = null }) {
   const applied = [];
   const writes = [];
   const said = [];
@@ -55,7 +54,7 @@ async function gate(list, { now = TYPO, work = false, labeledAt = L0, check = nu
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   try {
-    const r = await planGate({ repo, issue: 7, sha: objectiveSha(now.title, now.body, now.labels), text: now, work, pr: { number: 9 }, notify: "boss", opts: { token: "t" }, apply: async (_, exit) => applied.push(exit), stage: work ? "work" : "review", check, progress: async (line) => said.push(line), read: { planComment: async () => planOf(list, 7), labeledAt: async () => labeledAt, timeline: async () => timeline, permission } });
+    const r = await planGate({ repo, issue: 7, sha: objectiveSha(now.title, now.body, now.labels), text: now, work, pr: { number: 9 }, notify: "boss", opts: { token: "t" }, apply: async (_, exit) => applied.push(exit), stage: work ? "work" : "review", check, progress: async (line) => said.push(line), read: { planComment: async () => planOf(list, 7), labeledAt: async () => labeledAt } });
     return { r, applied, writes, said };
   } finally {
     globalThis.fetch = real;
@@ -209,35 +208,42 @@ test("edit check: today's rule with no decider, no verdict, a record without its
   assert.equal(unasked.asked.length, 0);
 });
 
-test("edit check: a title changed by someone who cannot push is never judged; a harness, model or host label changed is a changed requirement, never asked", async () => {
+test("edit check: a harness, model or host label changed is a changed requirement, never asked; a vouched rename is judged", async () => {
   setSelf(SELF);
   const record = { sha256: A, label: L0, text: recordText(BEFORE) };
-  const renamed = { ...BEFORE, title: "Objective, renamed" };
-  const rename = (actor) => [{ event: "renamed", actor, created_at: L1, rename: { from: "Objective", to: renamed.title } }];
   const model = "factory:model:claude-opus-5-5";
   const labelled = { ...BEFORE, labels: [model] };
-  const byKirk = [{ event: "labeled", label: { name: model }, actor: person("kirk"), created_at: L1 }];
   const cases = [
-    ["a rename by a triager", record, renamed, rename(person("triager"))],
-    ["a rename by an App", record, renamed, rename(person("other-app[bot]", "Bot"))],
-    ["a rename the timeline does not show", record, renamed, []],
-    ["a model label added by a person who can push", record, labelled, byKirk],
-    ["a model label removed by a person who can push", { sha256: objectiveSha(labelled.title, labelled.body, labelled.labels), label: L0, text: recordText(labelled) }, BEFORE, byKirk.map((e) => ({ ...e, event: "unlabeled" }))],
-    ["a typo fixed and a model label added", record, { ...TYPO, labels: [model] }, byKirk],
+    ["a model label added", record, labelled],
+    ["a model label removed", { sha256: objectiveSha(labelled.title, labelled.body, labelled.labels), label: L0, text: recordText(labelled) }, BEFORE],
+    ["a typo fixed and a model label added", record, { ...TYPO, labels: [model] }],
   ];
-  for (const [name, from, now, timeline] of cases) {
+  for (const [name, from, now] of cases) {
     const d = fakeDecider("wording");
-    const { r, applied } = await gate([planComment(from)], { now, check: d.check, timeline });
+    const { r, applied } = await gate([planComment(from)], { now, check: d.check });
     assert.deepEqual([r.ok, applied[0]?.reason, d.asked.length], [false, EDITED_REASON, 0], name);
   }
-  // A rename by a person who can push is judged.
+  // A rename that reached planGate passed the trust check (objectiveTrusted vouches for its renamer): it is judged.
   const d = fakeDecider("wording");
-  assert.deepEqual([(await gate([planComment(record)], { now: renamed, check: d.check, timeline: rename(person("kirk")) })).r.ok, d.asked.length], [true, 1]);
-  // A verdict stored for a text a writer made is not used once someone who cannot push made that text again.
-  const stored = { ...record, verdicts: { [objectiveSha(renamed.title, renamed.body)]: "wording" } };
-  const check = fakeDecider("wording").check;
-  assert.equal((await gate([planComment(stored)], { now: renamed, check, timeline: rename(person("triager")) })).r.ok, false);
-  assert.equal((await gate([planComment(stored)], { now: renamed, check, timeline: rename(person("kirk")) })).r.ok, true);
+  assert.deepEqual([(await gate([planComment(record)], { now: { ...BEFORE, title: "Objective, renamed" }, check: d.check })).r.ok, d.asked.length], [true, 1]);
+});
+
+test("edit check: every stage hands the edit check only text the trust check read", () => {
+  // planGate's and planStateNow's text is the trust check's (trustedIssue), read after it passed: judgedEdit checks no writer itself.
+  for (const file of ["worker.mjs", "review.mjs"]) {
+    const src = readFileSync(join(SCRIPTS, file), "utf8");
+    const gateAt = src.indexOf("await authorGate(");
+    const planAt = src.indexOf("await planGate(");
+    assert.ok(gateAt > 0 && planAt > gateAt, `${file}: planGate only after the trust check`);
+    assert.match(src.slice(planAt, planAt + 300), /planGate\(\{ repo, issue, sha: trusted\.sha, text: \{ title: issueData\.title, body: issueData\.body, labels: trusted\.labels \}/, `${file}: the trust check's text`);
+    assert.match(src.slice(gateAt, planAt), /issueData = trusted\.issueData|const \{ issueData \} = trusted;/, `${file}: issueData is the trust check's`);
+  }
+  const local = readFileSync(join(SCRIPTS, "local.mjs"), "utf8");
+  for (const m of local.matchAll(/planStateNow\((\w+\.repo|repo), issue, (\w+),/g)) assert.ok(["t", "trusted"].includes(m[2]), `local.mjs planStateNow on the trust check's answer, not ${m[2]}`);
+  assert.equal([...local.matchAll(/planStateNow\(/g)].length, [...local.matchAll(/planStateNow\((\w+\.repo|repo), issue, (t|trusted),/g)].length, "every call");
+  const trust = readFileSync(join(SCRIPTS, "lib", "objective-trust.mjs"), "utf8");
+  const merge = trust.slice(trust.indexOf("export async function editedSincePlan("));
+  assert.ok(merge.indexOf("objectiveTrusted(") < merge.indexOf("judgedEdit("), "the merge pass judges only after its own trust check");
 });
 
 test("edit check: a session's `factory issue` and post-review judge on the gateway's check and write nothing", async () => {
@@ -256,7 +262,7 @@ test("edit check: a session's `factory issue` and post-review judge on the gatew
 });
 
 /** The merge pass's read of issue 7: its text and who wrote it, the plan comment, and GitHub's writes. */
-async function merged(list, { now = TYPO, editor = "kirk", check = null, timeline = [] }) {
+async function merged(list, { now = TYPO, editor = "kirk", renamer = null, check = null }) {
   const writes = [];
   const said = [];
   const real = globalThis.fetch;
@@ -266,9 +272,9 @@ async function merged(list, { now = TYPO, editor = "kirk", check = null, timelin
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   const actor = (login) => ({ __typename: "User", login, databaseId: login.length });
-  const node = { title: now.title, body: now.body, lastEditedAt: L1, author: actor("kirk"), editor: actor(editor), labels: { nodes: now.labels.map((name) => ({ name })) }, renames: { nodes: [] } };
+  const node = { title: now.title, body: now.body, lastEditedAt: L1, author: actor("kirk"), editor: actor(editor), labels: { nodes: now.labels.map((name) => ({ name })) }, renames: { nodes: renamer ? [{ actor: actor(renamer), currentTitle: now.title }] : [] } };
   try {
-    return { how: await editedSincePlan(repo, 7, { token: "t" }, { gh: { graphql: async () => ({ repository: { issue: node } }), permission, timeline: async () => timeline }, read: async () => planOf(list, 7), check, progress: async (l) => said.push(l) }), writes, said };
+    return { how: await editedSincePlan(repo, 7, { token: "t" }, { gh: { graphql: async () => ({ repository: { issue: node } }), permission }, read: async () => planOf(list, 7), check, progress: async (l) => said.push(l) }), writes, said };
   } finally {
     globalThis.fetch = real;
   }
@@ -292,6 +298,12 @@ test("edit check: the merge pass judges on the gateway, hands an edit it cannot 
   const d = fakeDecider("wording");
   assert.deepEqual([(await merged([planComment(record)], { editor: "triager", check: d.check })).how, d.asked.length], ["changed", 0]);
   assert.equal((await merged([planComment(record)], { now: BEFORE, check: d.check })).how, "same");
+  // A triager's rename since the plan: never judged, a verdict stored for that text by a writer's rename included.
+  const renamed = { ...BEFORE, title: "Objective, renamed" };
+  assert.deepEqual([(await merged([planComment(record)], { now: renamed, renamer: "triager", check: d.check })).how, d.asked.length], ["changed", 0]);
+  const stored = { ...record, verdicts: { [objectiveSha(renamed.title, renamed.body)]: "wording" } };
+  assert.equal((await merged([planComment(stored)], { now: renamed, renamer: "triager", check: d.check })).how, "changed");
+  assert.equal((await merged([planComment(stored)], { now: renamed, renamer: "kirk", check: d.check })).how, "same", "a writer's rename keeps the verdict");
 });
 
 test("edit check: the merge passes hand an unjudged edit to review; a kept edit keeps a local paused pass", () => {

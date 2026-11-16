@@ -11,6 +11,10 @@
 // more against that quota until the reset (plus a little jitter), one sleep and two log lines for all its callers, no
 // probe. Its other quotas, and other tokens, go on.
 import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import { BlockList, isIP } from "node:net";
 import { log } from "./inputs.mjs";
 import { BARE_BUSY_TYPES } from "./usage.mjs";
 
@@ -115,7 +119,8 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; it waits on up
  * to `blockMs`, and for GitHub's own 5xx GitHub's status page decides whether the request gets one more try and then
  * Blocks (adapters/github-status.mjs, local.mjs resume). runHarness waits a busy provider out in place on the same
- * doubling. `now`, `sleep` and `random` are replaced in tests.
+ * doubling. `lookup` (the resolver) and `check` (a set-up step's general check, freshProbe) are what a set-up step's
+ * judgement uses (stepCutOff). `now`, `sleep`, `random`, `lookup` and `check` are replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
@@ -130,6 +135,8 @@ export const OUTAGE = {
   serverResumeMaxMs: 30 * 60_000,
   now: () => Date.now(),
   random: Math.random,
+  lookup: (host, opts, cb) => dnsLookup(host, opts, cb),
+  check: (origin) => freshProbe(origin),
   sleep: (ms, signal) =>
     new Promise((resolve) => {
       const done = () => {
@@ -325,21 +332,21 @@ export async function unreachableNow(origins) {
  * The outage on `origin` under way, or a new one: its probe loop runs until the host answers or the limit passes. With
  * `resetAt` (ms), quota `key`'s spent rate limit: one sleep to the reset instead (spentEpisode).
  */
-function episode(origin, code, resetAt = null, key = origin) {
+function episode(origin, code, resetAt = null, key = origin, check = probe) {
   const known = EPISODES.get(key);
   if (known) return known;
   if (Number.isFinite(resetAt)) return spentEpisode(origin, resetAt, key);
   // A host lost again within OUTAGE.flapMs of answering (a network that comes and goes): the same outage, its first loss
   // and its limit carried over, and no new log line, so a flapping network neither floods the log nor waits afresh. One
   // that then stays down past OUTAGE.flapMs is a loss of its own in the log: one line when it has, one when it answers.
-  const last = RECENT.get(origin);
+  const last = RECENT.get(key);
   const flap = !!last && !Number.isFinite(last.resetAt) && OUTAGE.now() - last.back < OUTAGE.flapMs;
   const since = flap ? last.since : OUTAGE.now();
   const end = flap ? last.end : MODE.until(since);
   const stop = new AbortController();
   const gen = GEN;
   const ep = { origin, code: flap ? last.code : code, since, end, stop, back: null };
-  EPISODES.set(origin, ep);
+  EPISODES.set(key, ep);
   const host = hostOf(origin);
   if (!flap) log(`network: ${host} is unreachable from this machine (${code || "no answer"}); waiting for it to answer again${Number.isFinite(end) ? `, for up to ${minutesText(end - since)}` : ""}`);
   const lostAt = OUTAGE.now();
@@ -350,10 +357,10 @@ function episode(origin, code, resetAt = null, key = origin) {
       if (left <= 0 || stop.signal.aborted) break;
       await OUTAGE.sleep(Math.min(OUTAGE.probeMs[Math.min(i, OUTAGE.probeMs.length - 1)], left), stop.signal);
       if (stop.signal.aborted) break;
-      if ((await probe(origin)) === null) {
+      if ((await check(origin)) === null) {
         ep.back = OUTAGE.now();
         if (!quiet) log(`network: ${host} answers again after ${minutesText(ep.back - lostAt)} (unreachable since ${iso(lostAt)}${flap ? `; on and off since ${iso(since)}` : ""})`);
-        if (gen === GEN) RECENT.set(origin, { since, end, code: ep.code, back: ep.back });
+        if (gen === GEN) RECENT.set(key, { since, end, code: ep.code, back: ep.back });
         return true;
       }
       if (quiet && OUTAGE.now() - lostAt >= OUTAGE.flapMs) {
@@ -367,11 +374,11 @@ function episode(origin, code, resetAt = null, key = origin) {
       // goes on gets its next unreachable request's error at once, not a fresh wait of its own.
       stopWaiting();
     }
-    if (gen === GEN) GIVEN_UP.set(origin, { origin, code: ep.code, since });
+    if (gen === GEN) GIVEN_UP.set(key, { origin, code: ep.code, since });
     return false;
   })().finally(() => {
     if (gen !== GEN) return;
-    EPISODES.delete(origin);
+    EPISODES.delete(key);
     PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now(), kind: "network" });
     if (PAST.length > 20) PAST.shift();
   });
@@ -430,16 +437,17 @@ function spentEpisode(origin, resetAt, key) {
  * Wait for `origin` to answer again after a request to it failed with `code` (unreachable): resolves once a probe gets
  * an answer; throws NetworkDown when the process's limit or `deadlineAt` comes first, or the process stops waiting.
  * With `resetAt` (ms), quota `key`'s primary rate limit is spent until then: resolves once the reset has passed; a
- * reset past `deadlineAt` throws at once, since that wait cannot end in time.
+ * reset past `deadlineAt` throws at once, since that wait cannot end in time. `check`: the probe the wait makes, `probe`
+ * unless the caller waits on another reading of the network under a `key` of its own (machineDown).
  */
-export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt = null, key = origin } = {}) {
+export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt = null, key = origin, check = probe } = {}) {
   if (!waitingOutages()) {
     const since = OUTAGE.now();
     // Stopped waiting: the rate limit is recorded as the one this process gave up on, for the stage's end (outageOf).
     if (Number.isFinite(resetAt) && MODE !== null) GIVEN_UP.set(key, { origin, key, code: RATE_LIMIT_SPENT, since, resetAt });
     throw new NetworkDown({ origin, code, since, resetAt, ...(Number.isFinite(resetAt) ? { key } : {}) });
   }
-  const ep = episode(origin, code, resetAt, key);
+  const ep = episode(origin, code, resetAt, key, check);
   let back;
   if (Number.isFinite(deadlineAt) && deadlineAt < ep.end) {
     if (Number.isFinite(ep.resetAt)) back = false;
@@ -515,37 +523,92 @@ export const pastKey = ({ origin, since }) => `${origin} ${since}`;
 /** Every ended outage of this machine's network this process keeps, as pastKey names them. */
 export const pastKeys = () => PAST.filter((p) => p.kind === "network").map(pastKey);
 
-const LOOPBACK = (host) => host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "[::1]" || host === "0.0.0.0";
+// The addresses no probe of a set-up step connects to: loopback, private, link-local, carrier-grade NAT, unspecified and
+// unique-local ones (IPv4, IPv6, and IPv4 mapped into IPv6).
+const PRIVATE = new BlockList();
+for (const [net, bits] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.168.0.0", 16]]) PRIVATE.addSubnet(net, bits, "ipv4");
+for (const [net, bits] of [["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10]]) PRIVATE.addSubnet(net, bits, "ipv6");
+/** Whether `address` (an IP) is one no probe connects to (PRIVATE). */
+export const privateAddress = (address) => {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
+  const ip = mapped || address;
+  const family = isIP(ip);
+  return family === 0 || PRIVATE.check(ip, family === 4 ? "ipv4" : "ipv6");
+};
 
 /**
- * The origins of the http(s) URLs in a command's output (an install's error naming the URL it could not fetch), this
- * machine's own (loopback) left out: a service on this machine is no network.
+ * The resolver codes that say the lookup could not be made for now (the resolver unreachable or timing out), never
+ * that the name does not exist: getaddrinfo's EAI_AGAIN.
  */
-export function namedOrigins(text) {
-  const found = new Set();
-  for (const [url] of String(text || "").matchAll(/\bhttps?:\/\/[^\s"'`<>()[\]{}|\\^,]+/g)) {
-    const origin = originOf(url.replace(/[.,;:]+$/, ""));
-    if (origin && !LOOPBACK(new URL(origin).hostname)) found.add(origin);
-  }
-  return [...found];
+export const TEMPORARY_DNS = new Set(["EAI_AGAIN"]);
+
+/** The most allowed hosts a set-up step's judgement looks up. */
+export const STEP_HOSTS_MAX = 4;
+
+/**
+ * One reachability check on a fresh connection: its own DNS lookup (OUTAGE.lookup) and its own socket (no agent, so no
+ * pooled connection answers for a network that is gone), a HEAD to `origin`. null when it gets any HTTP answer, else
+ * why not (a connect-level code, or "no answer"). An origin whose name resolves to a private, loopback or link-local
+ * address (privateAddress) is not connected to: null, no claim either way.
+ */
+export function freshProbe(origin) {
+  const u = new URL(origin);
+  // An address given as such is never looked up: judged as written.
+  const literal = u.hostname.replace(/^\[|\]$/g, "");
+  if (isIP(literal) && privateAddress(literal)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let refused = false;
+    const lookup = (host, opts, cb) =>
+      OUTAGE.lookup(host, opts, (err, address, family) => {
+        if (err) return cb(err);
+        const list = Array.isArray(address) ? address : [{ address, family }];
+        if (list.some((a) => privateAddress(a.address))) {
+          refused = true;
+          return cb(Object.assign(new Error(`${host} resolves to a private address`), { code: "PRIVATE_ADDRESS" }));
+        }
+        cb(null, address, family);
+      });
+    const req = (u.protocol === "https:" ? https : http).request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent: false, lookup, headers: { "user-agent": "clockgrove-factory" } }, (res) => {
+      res.resume();
+      resolve(null);
+    });
+    req.setTimeout(OUTAGE.probeTimeoutMs, () => req.destroy(Object.assign(new Error("no answer"), { code: "" })));
+    req.on("error", (e) => resolve(refused ? null : causeCode(e) || "no answer"));
+    req.end();
+  });
+}
+
+/** The first of `hosts` (at most STEP_HOSTS_MAX) whose lookup fails with a temporary resolver code, as {host, code}, or null. */
+export async function resolverDown(hosts) {
+  const list = [...new Set(hosts)].slice(0, STEP_HOSTS_MAX);
+  const codes = await Promise.all(list.map((h) => new Promise((done) => OUTAGE.lookup(h, {}, (err) => done(err ? causeCode(err) : "")))));
+  const i = codes.findIndex((c) => TEMPORARY_DNS.has(c));
+  return i < 0 ? null : { host: list[i], code: codes[i] };
 }
 
 /**
- * Whether a set-up step that needs the network (the repository's install or setup), run from `startedMs` to `endedMs`
- * and failed, met this machine's network down. `cut` ({origin, code, since, ongoing}) when it did: an outage this
- * process recorded meanwhile (lostDuring), or the first of `origins` (the hosts the step needs) not answering a probe
- * now while `general` (this machine's reachability check, GitHub's origin) does not answer either. An ended outage in
- * `seen` (pastKey) was answered by a run since: it counts no more. Else `cut` is null and the network was up:
- * `answered`, the origins that answered, and `unanswered` ({origin, code}), the one host the step needs that did not
- * while the general check did, if any (that host's own trouble, never the machine's outage).
+ * This machine's network, as a set-up step's wait reads it: the general check (OUTAGE.check, a fresh connection to
+ * `general`, GitHub's origin) failing, else one of `hosts` (the stage's own allowed hosts, never one a step named) failing
+ * its lookup with a temporary resolver code. null when both answer, else the code.
  */
-export async function stepCutOff(origins, { startedMs, endedMs = OUTAGE.now(), seen = new Set(), general = githubOrigin() }) {
+export const machineDown = async (general, hosts) => (await OUTAGE.check(general)) ?? (await resolverDown(hosts))?.code ?? null;
+
+/** The key a set-up step's wait for this machine's network goes under (networkBack `key`), apart from GitHub's calls'. */
+export const machineKey = (general) => `${general} machine`;
+
+/**
+ * Whether a set-up step that needs the network (the repository's install or setup), run from `startedMs` to `endedMs`
+ * and failed, met this machine's network down: {origin, code, since, ongoing}, or null (the network was up). Down is an
+ * outage this process recorded meanwhile, on any host, that is not in `seen` (lostDuring; pastKey: one a run since has
+ * answered), or the general check failing now (`general`, GitHub's origin, on a fresh connection), or one of `hosts`
+ * (the stage's own allowed hosts) failing its lookup with a temporary resolver code. Nothing the step printed and
+ * nothing its checkout configures is ever probed.
+ */
+export async function stepCutOff(hosts, { startedMs, endedMs = OUTAGE.now(), seen = new Set(), general = githubOrigin() }) {
   const met = lostDuring(startedMs, endedMs, seen);
-  if (met) return { cut: met };
-  const down = await unreachableNow(origins);
-  if (!down) return { cut: null, answered: origins };
-  if (down.origin !== general && (await probe(general)) === null) return { cut: null, answered: [general], unanswered: down };
-  return { cut: { ...down, since: OUTAGE.now(), ongoing: true } };
+  if (met) return met;
+  const code = await machineDown(general, hosts);
+  return code === null ? null : { origin: general, code, since: OUTAGE.now(), ongoing: true };
 }
 
 /**

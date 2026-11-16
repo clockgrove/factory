@@ -18,7 +18,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh, throughOutages, upText } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -1081,13 +1081,12 @@ async function main() {
   if (inputs.setup) {
     await progress("setup");
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
-    // A setup that fails while this machine's network is down runs again once it is back (checkout.mjs throughOutages).
+    // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
     const tree = access.agent ? await outbox.defaultTree() : checkout;
-    const setupOpts = access.agent ? { env: { ...childBase, TMPDIR: tmp.factory }, asRunner: true } : { env: childBase };
-    const s = await throughOutages("setup", () => sh(tree, inputs.setup, { ...setupOpts, timeoutMs: remainingMs(deadlineAt) }), { deadlineAt });
+    const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.factory } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed before review:" });
     if (!s.ok) {
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}${upText(s)}`, cause: "setup", notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: s.reason, cause: "setup", notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", "setup failed");
       return;
     }

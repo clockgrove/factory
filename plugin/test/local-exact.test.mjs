@@ -150,3 +150,16 @@ test("#421: a claim holder's boot is proc.mjs bootId's (macOS: the boot time's e
   // Linux: the boot_id, as liveStage and the slots read it, in the holder's 12 characters.
   if (process.platform === "linux") assert.equal(machineIdentity().boot, readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().replace(/-/g, "").slice(0, 12));
 });
+
+test("#421 with #413: the plan-answer and lapse checks read their verdicts at the floor set beside the triage model", async () => {
+  const { openPlanAnswerCheck } = await import("../scripts/lib/plan-answer.mjs");
+  const { openLapseCheck } = await import("../scripts/lib/lapse-check.mjs");
+  const inputs = { triageModel: "t/m", triageMinConfidence: 0.9 };
+  const at = (name, verdict, confidence) => ({ name, decide: async () => ({ verdict, confidence }) });
+  assert.equal(await openPlanAnswerCheck({ inputs, decider: at("ai-gateway", "answered", 0.8) }).judge("x"), null, "0.8 is under the set floor");
+  assert.equal(await openPlanAnswerCheck({ inputs, decider: at("ai-gateway", "answered", 0.95) }).judge("x"), true);
+  assert.equal(await openLapseCheck({ inputs, decider: at("ai-gateway", "transient", 0.8) }).judge("x"), null);
+  assert.equal(await openLapseCheck({ inputs: { triageModel: "t/m", triageMinConfidence: 0.5 }, decider: at("ai-gateway", "same_again", 0.6) }).judge("x"), "same_again", "a lower floor set for the model");
+  // The stage's harness is another model: the default floor reads its verdict.
+  assert.equal(await openPlanAnswerCheck({ inputs, decider: at("harness", "open", 0.8) }).judge("x"), false);
+});

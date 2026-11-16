@@ -1,8 +1,8 @@
 // The plan-answer check: whether the maintainers' comments since Factory asked its plan-time Question about another
 // repository (one-repo.mjs planNeeds) answer how to handle the need for that repository. It is a decision call through
 // the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's model setting and confidence floor
-// (triage.mjs). Given: Factory's own question line for the repository and each maintainer comment since the ask. A
-// confident `answered` adds the repository to the answered set, a confident `open` leaves it out; no verdict, a lower
+// (triage.mjs confidenceFloor). Given: Factory's own question line for the repository and each maintainer comment
+// since the ask. A confident `answered` adds the repository to the answered set, a confident `open` leaves it out; no verdict, a lower
 // confidence or no decider falls back to the exact rule (one-repo.mjs answeredRepos: a comment naming the repository).
 // This runs in Factory's own process, never in a harness: the comments are data between random-tag markers.
 import { randomBytes } from "node:crypto";
@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { redactSecrets } from "./inputs.mjs";
 import { NEED_KEY, answeredRepos, planNeeds } from "./one-repo.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question asked about each repository a plan-time Question named. */
 export const PLAN_ANSWER_QUESTION = {
@@ -60,7 +60,8 @@ export function planAnswerInput({ need, question, comments }, tag = randomBytes(
 
 /**
  * The plan-answer check's decider (decider.mjs openDecider, triage's `triage_model`): `{off, judge(input), asked()}`.
- * `judge` never throws: `true` for `answered` at MIN_CONFIDENCE or more, `false` for `open` at it or more, else null.
+ * `judge` never throws: `true` for `answered` at the confidence floor (triage.mjs confidenceFloor) or more, `false`
+ * for `open` at it or more, else null.
  * With no decider, `off` is why and `judge` answers null.
  */
 export function openPlanAnswerCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
@@ -68,7 +69,7 @@ export function openPlanAnswerCheck({ inputs = {}, env = process.env, home = hom
   const judge = async (input) => {
     if (ask.off) return null;
     const a = await Promise.resolve(ask.decide(input, PLAN_ANSWER_QUESTION)).catch(() => null);
-    if (typeof a?.confidence !== "number" || a.confidence < MIN_CONFIDENCE) return null;
+    if (typeof a?.confidence !== "number" || a.confidence < confidenceFloor(inputs, ask).min) return null;
     return a.verdict === "answered" ? true : a.verdict === "open" ? false : null;
   };
   return { off: ask.off, judge, asked: () => ask.asked() };

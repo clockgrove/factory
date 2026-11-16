@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question an edit is asked. */
 export const EDIT_QUESTION = {
@@ -54,7 +54,7 @@ export function editInput(before, after, tag = randomBytes(8).toString("hex")) {
  * is why (the key's code, or `route-off`) and there is no `judge`; `elsewhere` then says whether another process may
  * still judge the edit: a stage's harness on the `auto` route, or on Actions on the `gateway` route a stage job, which
  * may hold the key this job does not (a local process reads the one key file every stage reads). `judge(before, after)`
- * asks once and returns {verdict, confidence, error}: `wording` only for that choice at MIN_CONFIDENCE (triage.mjs) or
+ * asks once and returns {verdict, confidence, error}: `wording` only for that choice at the confidence floor (triage.mjs confidenceFloor) or
  * more, `requirement` for any other choice, and no verdict (with its code) when the call failed or a text is too long to
  * show whole (`too_long`). `asked()`: who answered (decider.mjs), for the line a kept edit leaves (keptLine).
  */
@@ -67,7 +67,7 @@ export function openEditCheck({ inputs = {}, env = process.env, home = homedir()
     if (!editFits(before, after)) return { verdict: null, error: "too_long" };
     const a = await Promise.resolve(ask.decide(editInput(before, after), EDIT_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     if (!EDIT_QUESTION.choices.some((c) => c.value === a?.verdict)) return { verdict: null, error: a?.error || "no_answer" };
-    const wording = a.verdict === "wording" && typeof a.confidence === "number" && a.confidence >= MIN_CONFIDENCE;
+    const wording = a.verdict === "wording" && typeof a.confidence === "number" && a.confidence >= confidenceFloor(inputs, ask).min;
     return { verdict: wording ? "wording" : "requirement", confidence: typeof a.confidence === "number" ? a.confidence : null, error: null };
   };
   return { model, off: null, elsewhere: false, judge, asked: () => ask.asked() };

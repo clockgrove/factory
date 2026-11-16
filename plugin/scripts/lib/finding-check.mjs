@@ -14,7 +14,7 @@ import { rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { acceptanceEntries, isBodyFindingId, marker } from "./logic.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question each answered finding is asked. */
 export const FINDING_QUESTION = {
@@ -31,8 +31,8 @@ export const FINDING_QUESTION = {
   ],
 };
 
-/** The verdicts that resolve a finding; `rebutted` only at MIN_CONFIDENCE (triage.mjs) or more, a missing one no. */
-export const resolves = (v) => v?.verdict === "fixed" || (v?.verdict === "rebutted" && typeof v.confidence === "number" && v.confidence >= MIN_CONFIDENCE);
+/** The verdicts that resolve a finding; `rebutted` only at the floor (`min`, triage.mjs confidenceFloor) or more, a missing one no. */
+export const resolves = (v, min = MIN_CONFIDENCE) => v?.verdict === "fixed" || (v?.verdict === "rebutted" && typeof v.confidence === "number" && v.confidence >= min);
 
 /** The most characters of each part of one question's input. */
 export const INPUT_CAPS = Object.freeze({ finding: 4000, reply: 4000, diff: 12_000, other: 8000, entries: 4000, rules: 8000 });
@@ -103,7 +103,8 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
 export function openFindingCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
-  if (ask.off) return { model, off: ask.off };
+  const floor = () => confidenceFloor(inputs, ask);
+  if (ask.off) return { model, off: ask.off, floor };
   const state = { refused: null };
   const one = async (it, ctx) => {
     if (state.refused) return { id: it.id, verdict: null, confidence: null, error: state.refused };
@@ -127,7 +128,7 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
   };
   // `asked()`: who answered (decider.mjs), named by a Block; `limited()`: the stage harness's usage limit that stopped
   // the questions, which ends the stage as a pass meeting it does (review.mjs).
-  return { model, off: null, judge, asked: () => ask.asked(), limited: () => ask.limited() };
+  return { model, off: null, floor, judge, asked: () => ask.asked(), limited: () => ask.limited() };
 }
 
 /**
@@ -155,13 +156,14 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     for (const from of new Set(answered.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
     const items = answered.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), reply: replies.get(String(f.id)), diff: diffs.get(f.raisedOn || since) ?? null }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules });
+    const floor = check.floor?.() ?? confidenceFloor();
     const byId = new Map(verdicts.map((v) => [String(v.id), v]));
     yes = new Set();
     for (const it of items) {
       const v = byId.get(String(it.id));
-      const said = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}${v.verdict === "rebutted" && !resolves(v) ? ` (under ${MIN_CONFIDENCE}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
+      const said = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}${v.verdict === "rebutted" && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
       log(`finding check (${check.model}): ${findingPlace(it)} (comment ${it.id}): ${said}`);
-      if (resolves(v)) yes.add(String(it.id));
+      if (resolves(v, floor.min)) yes.add(String(it.id));
       else if (!v?.verdict) unjudged.push({ id: it.id, error: v?.error || "no_answer" });
     }
     const left = items.filter((it) => !yes.has(String(it.id)));

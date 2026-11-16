@@ -1,8 +1,8 @@
 // The lapse check: whether a local stage that ended with no exit record (killed, crashed, or Factory's set-up of it
 // threw) would most likely end the same way if started again on this machine with nothing changed. It is a decision
 // call through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's model setting and
-// confidence floor (triage.mjs). The local loop asks it where no stage runs, so only the AI Gateway answers (as the
-// answer check in the dispatcher). Given: the stage, its exit code or signal, the set-up error's code, the end of its
+// confidence floor (triage.mjs confidenceFloor). The local loop asks it where no stage runs, so only the AI Gateway
+// answers (as the answer check in the dispatcher). Given: the stage, its exit code or signal, the set-up error's code, the end of its
 // log (stageRelay already redacted it) and the machine's pressure at the end, and the same for the lapse before it.
 // This runs in Factory's own process, never in a harness: the log is data between random-tag markers.
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { redactSecrets } from "./inputs.mjs";
 import { pressureLine } from "./machine.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question a lapse is asked. */
 export const LAPSE_QUESTION = {
@@ -86,14 +86,15 @@ export function lapseInput(now, before = null, tag = randomBytes(8).toString("he
 
 /**
  * The lapse check's decider (decider.mjs openDecider, triage's `triage_model`, no stage: the AI Gateway only):
- * `{off, judge(input), asked()}`. `judge` never throws: `same_again` or `transient` at MIN_CONFIDENCE or more, else null.
+ * `{off, judge(input), asked()}`. `judge` never throws: `same_again` or `transient` at the confidence floor
+ * (triage.mjs confidenceFloor) or more, else null.
  */
 export function openLapseCheck({ inputs = {}, env = process.env, home = homedir(), decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, decider });
   const judge = async (input) => {
     if (ask.off) return null;
     const a = await Promise.resolve(ask.decide(input, LAPSE_QUESTION)).catch(() => null);
-    if (typeof a?.confidence !== "number" || a.confidence < MIN_CONFIDENCE) return null;
+    if (typeof a?.confidence !== "number" || a.confidence < confidenceFloor(inputs, ask).min) return null;
     return LAPSE_QUESTION.choices.some((c) => c.value === a.verdict) ? a.verdict : null;
   };
   return { off: ask.off, judge, asked: () => ask.asked() };

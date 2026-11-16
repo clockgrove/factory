@@ -200,6 +200,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
       const x = Object.values(state.prs).find((y) => y.pr.number === Number(m[1]));
       Object.assign(x.pr, { state: "closed", merged: true });
       state.mergedPrs = [...(state.mergedPrs || []), x.pr.number];
+      state.onMerge?.(x.pr.number);
       return json({ merged: true });
     }
     if (method !== "GET") return json({}, 200);
@@ -1067,6 +1068,27 @@ test("#439: a hand-off, and the rebase of one that conflicts by then, do not wai
   const q = await tick(b);
   assert.deepEqual([q.reviewHeld, q.reviewResumed], [[8], []]);
   assert.deepEqual(prLabels(b, 8), []);
+});
+
+test("#439: a waiting hand-off whose sibling merges in the same tick is decided on its PR as read after that merge: one that conflicts by then goes back for its rebase, not to review", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  // No merge queue: #7 is reviewed (its head recorded mergeable, its checks green, no review label), so the merge pass
+  // merges PR #12 this tick; #8's hand-off waits for #7, and its PR #13 conflicts with the default branch once #12 merged.
+  const prs = { ...PR7(), 8: PR8() };
+  prs[7].pr.labels = [];
+  const mergeable = { id: 970, user: { login: SELF, type: "Bot" }, body: `${marker(7, "mergeable", H7)}\nFactory: mergeable.`, created_at: new Date(since - 3600_000).toISOString() };
+  // GitHub lists the newest first: #8 is read before #7.
+  const w = world([issue(8, ["factory:in-review"], 2), issue(7, ["factory:in-review"])], { comments: { 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 12: [mergeable], 13: [holdRecord(8, 7, since)] }, prs });
+  w.state.reviewedAt = new Date(since - 3600_000).toISOString();
+  w.state.onMerge = (n) => {
+    if (n === 12) w.state.prs[8].pr.mergeable_state = "dirty";
+  };
+  const r = await tick(w, { ciChecks: ["ci"] });
+  assert.deepEqual(w.state.mergedPrs, [12]);
+  assert.deepEqual([r.reviewHeld, r.reviewResumed, r.sentBack], [[], [], [8]]);
+  assert.deepEqual(prLabels(w, 8), [], "no review of a head that conflicts with the default branch");
+  assert.equal(reviewWaitOf(w.state.comments[13], 8)?.released, true);
 });
 
 test("#340: `factory run` on an Objective whose hand-off waits reviews it now: the label goes on, the record is released", async () => {

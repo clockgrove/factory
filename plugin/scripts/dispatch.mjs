@@ -850,7 +850,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const mergeHow = {};
   // A PR whose hand-off waits for a sibling (overlap.mjs reviewHold) is settled after every other In-review PR's merge
   // pass, which says which siblings a person holds out of the merge queue (personHeld): none of those is ahead of it.
-  // Its reads are kept from its first turn, by issue.
+  // Its reads are kept from its first turn, by issue, with the count of PRs merged by then: when one merged since, its
+  // PR is read again, as that merge can have made it conflict with the default branch.
   const waitsLast = new Map();
   const dirty = [];
   const rebaseHeld = [];
@@ -896,7 +897,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           continue;
         }
-        const pr = kept ? kept.pr : await getPrSettled(repo, open.number, opts).catch(() => null);
+        const pr = kept && kept.landed === landed.length ? kept.pr : await getPrSettled(repo, open.number, opts).catch(() => null);
         // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
         // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
         // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
@@ -904,7 +905,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = marks;
         const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
         if (!kept && !reviewing && reviewWait && !reviewWait.released && pr) {
-          waitsLast.set(issue.number, { open, pr, marks });
+          waitsLast.set(issue.number, { open, pr, marks, landed: landed.length });
           pass.push(issue);
           continue;
         }

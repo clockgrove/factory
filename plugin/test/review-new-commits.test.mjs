@@ -658,7 +658,7 @@ test("#350: the worker's rebase keeps the review only for a rebase of the covere
   assert.match(src, /await headMovedFrom\(\{[^\n]*before: \(\) => beforeExit\?\.\(\) \}\)/);
   assert.ok(src.indexOf("await settleCover({") < src.indexOf("let stoppedAtMerge = null;"));
   // #367: the gate asks triage's decision model about what the stage wrote since the head its review read.
-  assert.match(src, /const answerAsk = answerDecider\(\{ inputs \}\);/);
+  assert.match(src, /const answerAsk = answerDecider\(\{ inputs, stage: decisionStage \}\);/);
   assert.match(src, /const said = answerGateLine\(gate, answerAsk\);\n\s+if \(said\) log\(said\);/);
   assert.match(src, /await answerSettle\(outbox\.git, \{ base: outbox\.base, reviewedAt, head, answerQuestion, answerFrom, answerTo, answering, comments: answered, checks: \[\.\.\.fixTexts, \.\.\.\(heldRed \? \[heldRed\.tail\] : \[\]\)\], ask: answerAsk \}\)/);
   assert.match(src, /const covering = conflict \? null : coverExit\(decision, cover, \{ reviewedAt, answerFrom, prNumber: pr\.number \}\);/);

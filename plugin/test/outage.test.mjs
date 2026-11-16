@@ -143,25 +143,28 @@ test("rest: past the stage's limit the wait ends with NetworkDown (offline, its 
   );
 });
 
-test("passCutOff: a failed pass counts as cut off when an outage was under way near its end, or its host does not answer now", async () => {
+test("passCutOff: a reported provider failure is a cut, the probe saying whether to wait; with no structured error only a provider that does not answer now is", async () => {
   let down = true;
   await offline(
     (req) => (req.origin === "https://api.anthropic.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
     async ({ now }) => {
       waitOutages({ until: () => Infinity });
-      assert.deepEqual(await passCutOff(now() - 60_000, now(), ["https://api.anthropic.test", "https://api.github.test"]), { origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: now(), ongoing: true });
-      assert.equal(await passCutOff(now() - 60_000, now(), ["https://api.github.test"]), null, "every host answers: the pass failed on its own");
-      // An outage that ended near the pass's end counts; one over before the pass began does not (a pass run again after it).
+      const lost = { harness: "claude", status: null, type: "server_error", code: "connection_failed" };
+      // No structured error and the provider does not answer a probe: cut off, waiting for it.
+      assert.deepEqual(await passCutOff(null, "https://api.anthropic.test"), { origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: now(), ongoing: true });
+      const start = now();
       const ep = networkBack("https://api.anthropic.test", "EAI_AGAIN");
+      assert.deepEqual(await passCutOff(lost, "https://api.anthropic.test"), { origin: "https://api.anthropic.test", code: "EAI_AGAIN", since: start, ongoing: true }, "the outage under way");
       down = false;
       await ep;
-      const back = now();
-      assert.equal((await passCutOff(back - 60_000, back + 30_000, ["https://api.anthropic.test", "https://api.github.test"]))?.origin, "https://api.anthropic.test");
-      assert.equal(await passCutOff(back + 1, back + 30_000, ["https://api.anthropic.test", "https://api.github.test"]), null);
+      // The provider answers again: its 5xx (or a connection the harness lost) runs the pass again at once; a pass with no
+      // structured error failed on its own.
+      assert.deepEqual(await passCutOff({ harness: "claude", status: 529, type: "server_error", code: null }, "https://api.anthropic.test"), { origin: "https://api.anthropic.test", code: "HTTP 529", since: now(), ongoing: false });
+      assert.equal((await passCutOff(lost, "https://api.anthropic.test")).code, "connection_failed");
+      assert.equal(await passCutOff(null, "https://api.anthropic.test"), null);
     },
   );
 });
-
 test("outageExit: locally the stage ends paused with the outage and writes nothing to GitHub; elsewhere it Blocks naming the host and since when", async () => {
   const e = new NetworkDown({ origin: "https://api.github.test", code: "EAI_AGAIN", since: Date.parse("2026-11-14T08:47:00Z") });
   for (const local of [true, false]) {
@@ -189,9 +192,13 @@ test("outageExit: locally the stage ends paused with the outage and writes nothi
   }
 });
 
-const LOST_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}\n`;
-// A run that did a turn's work (its usage reported) before its stream was lost.
-const SPENT_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.completed","usage":{"input_tokens":16151,"cached_input_tokens":12288,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}\n{"type":"turn.started"}\n{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}\n`;
+// A Codex run whose turn failed on its provider failing, as a JSON error body with no status and the type
+// `server_error` (its turn.failed message): the structure usage.mjs outageError reads. With a status it would be the
+// provider busy instead (providerBusy).
+const SERVER_DOWN = JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "server_error", code: null, message: "Service Unavailable" } }) } });
+const LOST_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${SERVER_DOWN}\n`;
+// A run that did a turn's work (its usage reported) before its provider failed.
+const SPENT_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.completed","usage":{"input_tokens":16151,"cached_input_tokens":12288,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}\n{"type":"turn.started"}\n${SERVER_DOWN}\n`;
 
 /** A fake codex: its first `fail` runs print `lost` and exit 1, every later one completes; argv logged. */
 function fakeCodex({ fail = 1, lost = LOST_RUN } = {}) {
@@ -251,6 +258,132 @@ test("runHarness: without the outage wait (a process that does not wait outages 
   }
 });
 
+// Codex 0.167 against a provider answering 503: prose only (captured against a local fake server).
+const PROSE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"error","message":"unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses"}\n{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses"}}\n`;
+// A structured 4xx that is neither a refusal nor busy: the provider's JSON body with a 409.
+const LIMITED_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "conflict", code: null, message: "m" }, status: 409 }) } })}\n`;
+
+// A bare body with no status and a type that names neither an outage nor the provider busy: a structured error that
+// goes to the probe as a pass with no structure does.
+const BARE_UNKNOWN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "api_error", message: "m" } }) } })}\n`;
+// The AI Gateway's bare body for an unavailable provider: its 5xx type with no status, the provider busy.
+const BARE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "service_unavailable_error", message: "m" } }) } })}\n`;
+
+test("runHarness: a pass that ended on the gateway's bare service_unavailable_error (no status) is the provider busy: it waits the doubling and runs again, no probe", async () => {
+  const { bin, calls } = fakeCodex({ lost: BARE_503 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    await offline(
+      () => new Response(null, { status: 200 }),
+      async ({ seen, waits }) => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60 * 60_000, label: "work-1" });
+        assert.equal(calls().length, 2, "the busy pass, then its run after the wait");
+        assert.equal(rec.ok, true);
+        assert.equal(rec.busyWaits, 1);
+        assert.equal(rec.lostToOutage, undefined);
+        assert.ok(waits.includes(OUTAGE.serverResumeMs), `waited the doubling's first minute: ${waits}`);
+        assert.deepEqual(seen.filter((r) => r.probe), [], "no probe: the provider said it is busy");
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+for (const [what, lost, up] of [["printed its 503 as prose only", PROSE_503, false], ["printed its 503 as prose only", PROSE_503, true], ["ended on a bare error type with no status that names no outage", BARE_UNKNOWN, false], ["ended on a bare error type with no status that names no outage", BARE_UNKNOWN, true]]) {
+  test(`runHarness: a pass whose harness ${what} is a cut exactly when its provider ${up ? "answers a probe: no, its failure stands" : "does not answer a probe: it runs again once the provider answers"}`, async () => {
+    const { bin, calls } = fakeCodex({ lost });
+    const saved = process.env.PATH;
+    process.env.PATH = `${bin}:${saved}`;
+    let probes = 0;
+    try {
+      await offline(
+        (req) => (req.origin === "https://chatgpt.com" && !up && ++probes < 3 ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+        async ({ seen }) => {
+          waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+          const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+          assert.ok(seen.some((r) => r.probe && r.origin === "https://chatgpt.com"), "the provider was probed");
+          if (up) {
+            assert.equal(calls().length, 1, "not run again");
+            assert.equal(rec.ok, false);
+            assert.equal(rec.lostToOutage, undefined);
+          } else {
+            assert.equal(calls().length, 2, "the cut-off pass, then its run after the provider answered");
+            assert.ok(calls()[1].args.includes("resume"));
+            assert.equal(rec.ok, true);
+            assert.equal(rec.lostToOutage, 1);
+          }
+        },
+      );
+    } finally {
+      process.env.PATH = saved;
+    }
+  });
+}
+
+test("passCutOff: a pass with no structured error is a cut when this process lost any host to its network while it ran, though every host answers now", async () => {
+  let down = true;
+  await offline(
+    (req) => (req.origin === "https://api.github.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+    async ({ now }) => {
+      waitOutages({ until: () => Infinity });
+      const before = now();
+      const ep = networkBack("https://api.github.test", "EAI_AGAIN");
+      down = false;
+      await ep;
+      const back = now();
+      // GitHub lost for a few seconds while the pass ran: its outage, though over and short.
+      assert.deepEqual(await passCutOff(null, "https://chatgpt.com", { startedMs: before - 60_000, endedMs: back + 1_000 }), { origin: "https://api.github.test", code: "EAI_AGAIN", since: before, ongoing: false });
+      // One over before the pass began is no part of it; nor of a pass that reported its failure in structure.
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: back + 1, endedMs: back + 60_000 }), null);
+      assert.equal((await passCutOff({ harness: "codex", status: 503, type: "server_error", code: null }, "https://chatgpt.com", { startedMs: before - 60_000, endedMs: back + 1_000 })).origin, "https://chatgpt.com");
+    },
+  );
+});
+
+test("passCutOff: GitHub answering 5xx while a pass ran is no cut of it; its provider answering busy meanwhile is, another provider's is not", async () => {
+  const net = await import("../scripts/lib/network.mjs");
+  await offline(
+    (req) => (req.origin === "https://api.github.test" && !req.probe ? json({ message: "Bad Gateway" }, 502) : new Response(null, { status: 200 })),
+    async ({ now }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const start = now();
+      // GitHub answers 502 to every try of a request while the pass runs: GitHub failing, not this machine's network.
+      const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+      assert.match(String(e.code), /^HTTP 502$/);
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), null, "a GitHub 5xx is no cut of a Codex pass");
+      // The pass's own provider answered another pass busy meanwhile: an outage of its host.
+      net.noteBusy("https://api.anthropic.test", "HTTP 529", now());
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), null, "another provider's busy answer is none");
+      net.noteBusy("https://chatgpt.com", "HTTP 429", now());
+      assert.deepEqual(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), { origin: "https://chatgpt.com", code: "HTTP 429", since: now(), ongoing: false });
+    },
+  );
+});
+
+test("runHarness: a pass that ended on a structured 4xx (a 409) is no cut, and nothing probes, though its provider does not answer", async () => {
+  const { bin, calls } = fakeCodex({ lost: LIMITED_RUN });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    await offline(
+      (req) => (req.origin === "https://chatgpt.com" ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+      async ({ seen, lines }) => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
+        assert.equal(calls().length, 1, "not run again");
+        assert.equal(rec.ok, false);
+        assert.equal(rec.lostToOutage, undefined);
+        assert.deepEqual(seen.filter((r) => r.probe), [], "no probe: the harness said what ended it");
+        assert.deepEqual(netLines(lines), []);
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
 test("outbox: a push while the remote's host does not answer waits for it and goes again, no try counted", async () => {
   const quiet = { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const root = mkdtempSync(join(tmpdir(), "outbox-outage-"));
@@ -393,22 +526,6 @@ test("runHarness: a pass that fails on its own after each outage runs again at m
   } finally {
     process.env.PATH = saved;
   }
-});
-
-test("passCutOff: a short outage on another host than the pass's provider (a heartbeat's GitHub blip) does not cut the pass off", async () => {
-  let down = true;
-  await offline(
-    (req) => (req.origin === "https://api.github.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
-    async ({ now }) => {
-      waitOutages({ until: () => Infinity });
-      const start = now();
-      const ep = networkBack("https://api.github.test", "EAI_AGAIN");
-      down = false;
-      await ep;
-      assert.equal(await passCutOff(start, now() + 1000, ["https://chatgpt.com", "https://api.github.test"]), null, "five seconds on GitHub: not the pass's outage");
-      assert.equal((await passCutOff(start, now() + 1000, ["https://api.github.test", "https://chatgpt.com"]))?.origin, "https://api.github.test", "on the pass's own provider it counts");
-    },
-  );
 });
 
 test("runHarness: a cut-off run that leaves no budget for another counts its spend once", async () => {

@@ -43,6 +43,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
+import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
@@ -95,12 +96,42 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
 // `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
 // already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
 let beforeExit = null;
-const applyExit = async (...args) => {
+// A stage's exit, once it is committed to (a stop that came first parks it).
+const settleExit = async () => {
   await holdIfStopped();
   await beforeExit?.();
   if (!commitExit()) await parked();
+};
+const applyExit = async (...args) => {
+  await settleExit();
   return applyExitNow(...args);
 };
+
+/**
+ * The work stage's answer check (lib/answer-check.mjs answerAtStart), before anything is set up: when the writer
+ * comments since the Question this stint resumes give no decision, the stage commits to its exit (`settle`), puts the
+ * Objective back to Question with its notice (reopenQuestion) and ends with a Question (`finish`), which a local loop
+ * holds for an answer (lib/local.mjs stopHold). A notice that cannot be written Blocks instead, naming why: a Question
+ * with no notice since its label would never resume on a comment. Returns whether the stage ended here.
+ */
+export async function answerGuard({ repo, issue, check, decisions, label, appId = null, opts, prepare = null, notify = null, settle = settleExit, finish }) {
+  const answer = await answerAtStart({ repo, issue, check, decisions, label, appId, opts, prepare });
+  if (!answer.open) return false;
+  log(`answer check: ${answer.open}; the Question stays open`);
+  await settle();
+  try {
+    await reopenQuestion(repo, { issue, notice: answer.notice, label }, opts);
+  } catch (e) {
+    const code = Number.isInteger(e?.status) ? `HTTP ${e.status}` : String(e?.message || e).slice(0, 120);
+    const reason = `the comments since the Question give no decision on it, but its notice could not be written on the issue (${code}), so no comment would resume it`;
+    log(reason);
+    await applyExitNow(repo, { issue, pr: null, exit: "blocked", reason, cause: "factory", notify, stage: "work" }, opts).catch((x) => log(`exit: ${String(x?.message || x).slice(0, 120)}`));
+    await finish("blocked", reason);
+    return true;
+  }
+  await finish("question", answer.open);
+  return true;
+}
 
 async function main() {
   const jobStartMs = Date.now();
@@ -131,8 +162,8 @@ async function main() {
   let pr = null;
   let credentialBasis = "none";
   let cred = { env: {} };
-  // The edit check's own credential read (its decision calls only), masked like `cred` in everything the stage saves.
-  let editCred = {};
+  // The early decision calls' own credential read (readyDecisionEnv), masked like `cred` in everything the stage saves.
+  let decisionCred = {};
   // The worker secrets' values (lib/worker-secrets.mjs), masked in the uploaded stream like every other secret.
   let shellSecretValues = [];
   // The gateway relay for an opted-in AI Gateway key (lib/worker-relay.mjs), closed and booked when the stage ends.
@@ -189,14 +220,14 @@ async function main() {
     await closeWorkerRelay(relay);
     const workerKey = relay ? relay.totals() : null;
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
-    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     // The gateway relay's call log (uploaded with the usage directory) carries text the caller chose: masked the same way.
-    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -312,7 +343,7 @@ async function main() {
   // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
   // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
   const endNow = (recs, why) => {
-    const secrets = [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    const secrets = [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
     if (rebaseStage) stoppedRebase(progress, rebaseStage.conflict, recs);
@@ -402,21 +433,24 @@ async function main() {
   }
 
   // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
-  // call's spend in the stage's usage. Their env is the harness env once the hand-off is open; before it, for the edit
-  // check alone, the env every child starts from with this harness's credential, read only when a question is due.
+  // call's spend in the stage's usage: one decision stage for all of them. Their env is the harness's own once the stage
+  // builds it (step 5); before that, for the edit check and the answer check at the stage's start, the env every child
+  // starts from with a credential read of their own (readyDecisionEnv), only when one asks the harness.
   let decisionEnv = null;
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
+  // That early read, once: never the passes' own, since federate() returns a key with no expiry and the passes read theirs
+  // as they start (step 5), never one minted before setup and install. Masked like `cred` in everything the stage saves.
+  const readyDecisionEnv = async () => {
+    if (decisionEnv) return;
+    decisionCred = (await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env;
+    for (const v of Object.values(decisionCred)) mask(v);
+    decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...decisionCred };
+  };
   // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
   const editCheck = async () => {
     if (inputs.decisionRoute === "off") return openEditCheck({ inputs });
     try {
-      // A read of its own, never the passes': federate() returns a key with no expiry, so the passes read theirs as they
-      // start (below), never one minted before setup and install.
-      if (!decisionEnv) {
-        editCred = (await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env;
-        for (const v of Object.values(editCred)) mask(v);
-        decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...editCred };
-      }
+      await readyDecisionEnv();
     } catch (e) {
       log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
       return openEditCheck({ inputs });
@@ -449,6 +483,24 @@ async function main() {
     await finish("question", named);
     return;
   }
+  // The answer check (lib/answer-check.mjs), first thing once the stage's decider exists: a stint that resumes a Question
+  // goes on only when the writer comments since it give a decision, so one that does not costs no branch, no Running
+  // mark, no setup, no install, no hand-off and no relay. A send-back resumes no Question; a relaunch or a continued
+  // pause finds its comment's verdict kept on the issue and asks nothing.
+  const answerCheck = openAnswerCheck({ inputs, stage: decisionStage });
+  const readyDecisions = async () => {
+    if (decisionEnv || answerCheck.asked().name !== "harness") return true;
+    try {
+      await readyDecisionEnv();
+      return true;
+    } catch (e) {
+      log(`answer check: the stage's credential is not ready (${String(e?.message || e).slice(0, 160)}); the comment resumes the Question unjudged`);
+      return false;
+    }
+  };
+  const decisionsNow = () => objectiveDecisions(repo, { issue, prNumber: prNow?.number ?? null }, token);
+  if (await answerGuard({ repo, issue, check: answerCheck, decisions: decisionsNow, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_NOTICE_APP_ID || null, opts: token, prepare: readyDecisions, notify: inputs.notify, finish })) return;
+
   // A workflow change the Objective names (handover.mjs): Factory never pushes one, so the issue says so now, before any
   // harness runs, and how it goes instead (the hand-over). Most needs show only in the plan or the work: the plan's
   // Needs-Workflow line is said as the harness writes it, and the PR's hand-over carries any found later.
@@ -648,7 +700,7 @@ async function main() {
     return;
   }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
-  // The decision calls from here run on the harness env (decisionStage).
+  // The decision calls' env from here on: the harness's own (decisionStage, above).
   decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress, stage: decisionStage });

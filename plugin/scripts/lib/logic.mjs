@@ -2259,7 +2259,9 @@ export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !fac
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker
- * comment), oldest first. Who may decide is not read from author_association: an App's token sees an organization
+ * comment), oldest first, each with its `kind` (`comment`, `review` or `line`, an inline comment on the diff) and `state`
+ * (a review's GitHub state, an inline comment's the state of the review it was posted in, else null). Who may decide is
+ * not read from author_association: an App's token sees an organization
  * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.
  */
 /**
@@ -2299,10 +2301,14 @@ export function maintainerDecisions(comments) {
     const root = lines.get(c.in_reply_to_id);
     return !!root && factoryReviews.has(root.pull_request_review_id) && factoryReviews.get(root.pull_request_review_id) === loginKey(c.user?.login);
   };
+  // Each review's state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED), its body empty or not: an inline comment
+  // carries the state of the review it was posted in.
+  const reviewStates = new Map(all.filter((c) => c?.kind === "review").map((r) => [r.id, r.state ?? null]));
+  const stateOf = (c) => (c.kind === "review" ? (c.state ?? null) : c.kind === "line" ? (reviewStates.get(c.pull_request_review_id) ?? null) : null);
   return all
     .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, seen: latest(c.created_at, c.updated_at) }));
+    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at) }));
 }
 const REVIEW_BODY = /<!-- factory:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;

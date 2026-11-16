@@ -1014,10 +1014,16 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /**
    * Record which maintainer decisions this run fed to a model (logic.mjs decisionsRead), so a later pass knows what
-   * has not reached the code yet. Written now; a failed write leaves them unread, which costs an answer pass, not a merge.
+   * has not reached the code yet. Written now, with `phase`'s line in the same write when given, so the record never
+   * lands without the line that explains it; a failed write leaves them unread, which costs an answer pass, not a merge.
    */
-  progress.decisionsRead = async (r) => {
+  progress.decisionsRead = async (r, phase = null) => {
     read = mergeRead(read, r);
+    if (phase) {
+      lines.push(`- ${clock(Date.now())} ${sanitize(phase, { max: 2000 })}`);
+      status = "";
+    }
+    await writing;
     await write();
   };
   /**
@@ -3316,21 +3322,28 @@ const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, 
 
 /**
  * Whether the unread writer comments (`unread`) let the merge go on: the comment check (comment-check.mjs judgeUnread,
- * on `check`) reads them as asking nothing. Then they are recorded as read on a progress comment of the merge pass's own
- * (stage `merge`, keyed by the newest comment's version, so no other write of the merge pass replaces it), with the
- * line that says so; a record that is not written leaves them unread, which costs one more question, never a merge.
- * Otherwise false, and the caller holds the merge for the review stage's answer pass.
+ * on `check`) reads them as asking nothing, and a fresh read after its call finds nothing it did not judge (a comment
+ * posted or edited during the call) and the Objective not stopped (stop.mjs stopCause). Then they are recorded as read on
+ * a progress comment of the merge pass's own (stage `merge`, keyed by the newest comment's version, so no other write of
+ * the merge pass replaces it), written once with the line that says so; a record that is not written leaves them
+ * unread, which costs one more question, never a merge. Returns "clear", "unread" (the caller holds the merge for the
+ * review stage's answer pass), "stopped", or "pending" (the issue could not be read again: the caller tries again).
+ * Throws when the comments cannot be read again, as unreadNow does: the caller never merges.
  */
-async function unreadCleared(repo, { issue, pr, issueData, unread, check }, opts) {
+async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, check, objectiveLabel, self }, opts) {
   const r = await judgeUnread({ check, repo, issue, issueData, pr, unread });
-  if (!r.clear) {
-    log(`#${issue}: ${unread.length} maintainer decision(s) no pass has read (${r.why}${r.limited ? `; ${r.limited}` : ""}); the review runs again to apply them`);
-    return false;
-  }
+  const held = (why) => (log(`#${issue}: ${unread.length} maintainer decision(s) no pass has read (${why}); the review runs again to apply them`), "unread");
+  if (!r.clear) return held(`${r.why}${r.limited ? `; ${r.limited}` : ""}`);
+  // The call took a while: a comment posted or edited meanwhile was never judged, and a stop may have come.
+  const judged = decisionsRead(unread);
+  const fresh = (await unreadNow(repo, { issue, prNumber, self }, opts)).unread.filter((d) => judged[d.key] !== (d.seen ?? d.at));
+  if (fresh.length) return held(`${fresh.length} arrived or changed while the comment check ran`);
+  const issueNow = await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read after the comment check (${errCode(e)}); next try`), null));
+  if (!issueNow) return "pending";
+  if (stopCause(issueNow, objectiveLabel)) return "stopped";
   const progress = progressReporter(repo, issue, opts, { stage: "merge", runId: `${progressRunId()}-${versionKey(unread.at(-1))}`, soFar: null });
-  await progress.decisionsRead(decisionsRead(unread));
-  await progress(r.line);
-  return true;
+  await progress.decisionsRead(judged, r.line);
+  return "clear";
 }
 
 /**
@@ -3457,12 +3470,15 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const state = await checksOn(repo, sha, names, opts);
   if (state.failed.length) return "red";
   if (!state.green) return "pending";
-  const { unread } = await unreadNow(repo, { issue, prNumber, self: selfLogin() || (await primeSelf(opts)) }, opts);
-  if (unread.length && !(await unreadCleared(repo, { issue, pr, issueData: issueNow, unread, check: commentCheck }, opts))) {
+  const self = selfLogin() || (await primeSelf(opts));
+  const { unread } = await unreadNow(repo, { issue, prNumber, self }, opts);
+  const cleared = unread.length ? await unreadCleared(repo, { issue, prNumber, pr, issueData: issueNow, unread, check: commentCheck, objectiveLabel, self }, opts) : "clear";
+  if (cleared === "unread") {
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
     return "unread";
   }
+  if (cleared !== "clear") return cleared;
   // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
   // earlier text does not merge; the caller Blocks. An edit no decider here could judge goes to the review stage.
   const text = await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) });

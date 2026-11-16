@@ -18,7 +18,7 @@ import { mintInstallationToken } from "./lib/app-token.mjs";
 import { choiceOf } from "./lib/choice.mjs";
 import { getIssue, repoOf } from "./lib/github.mjs";
 import { setMaintainers, setSelf } from "./lib/logic.mjs";
-import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { MODEL_DEFAULTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { labelsVouched, trustedRoutePin } from "./lib/objective-trust.mjs";
 import { pickRouteAccount, readHolds } from "./lib/route-holds.mjs";
 
@@ -33,7 +33,7 @@ import { pickRouteAccount, readHolds } from "./lib/route-holds.mjs";
  * picks as if none is held). `read` (issue, vouch, kept) is a test's own. Throws on a failed read of the issue or its
  * labeler: the step fails and the job with it, before any credential is resolved.
  */
-export async function stageAccount({ repo, issue = null, branch = "", harness, accounts, rendered = "", opts, maintainers = [], env = {}, now = Date.now(), read = {} }) {
+export async function stageAccount({ repo, issue = null, branch = "", harness, accounts, rendered = "", opts, maintainers = [], env = {}, models: given = null, now = Date.now(), read = {} }) {
   // No account: the stage is told the step ran and picked none (NO_ACCOUNT, no account's name), and gets no credential.
   const none = (why) => ({ account: NO_ACCOUNT, why });
   const declared = routeAccounts(accounts);
@@ -65,9 +65,13 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
     unread = String(e?.message || e).slice(0, 120);
   }
   const held = store ? names.map((name) => ({ name, until: store.avoidUntil(name, now) })).filter((x) => x.until !== null) : [];
-  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null, left: () => null }, issue: n, now });
-  const left = store ? store.left(pick.name, now) : null;
-  return { account: pick.name, why: null, auto: { held: held.map((x) => ({ name: x.name, until: new Date(x.until).toISOString() })), ...(pick.until !== null ? { until: new Date(pick.until).toISOString() } : {}), ...(left !== null && pick.until === null ? { left } : {}), ...(unread ? { unread } : {}) } };
+  // The Objective's models (its labels, else the repository's for that harness): this step does not know which stage it
+  // picks for, so every model one of its stages runs weighs (usage.mjs quotaWindowApplies).
+  const defaults = given && h === harness ? given : { model: MODEL_DEFAULTS[h]?.model, subagentModel: MODEL_DEFAULTS[h]?.subagent_model, reviewerModel: MODEL_DEFAULTS[h]?.reviewer_model };
+  const models = [c.choice.model || defaults.model, c.choice.subagent_model || defaults.subagentModel, c.choice.reviewer_model || defaults.reviewerModel].map((m) => m || null);
+  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null, left: () => null }, issue: n, models, now });
+  const left = store ? store.left(pick.name, now, models) : null;
+  return { account: pick.name, why: null, auto: { held: held.map((x) => ({ name: x.name, until: new Date(x.until).toISOString() })), ...(pick.until !== null ? { until: new Date(pick.until).toISOString() } : {}), ...(pick.warm ? { warm: true } : {}), ...(left !== null && pick.until === null ? { left } : {}), ...(unread ? { unread } : {}) } };
 }
 
 /** The log line for automatic choice's pick (stageAccount `auto`), naming the accounts it passed over. */
@@ -76,7 +80,7 @@ const autoLine = (r) => {
   if (a.unread) return `automatic account choice could not read the account holds (${a.unread}), so it picks as if none is held: account ${r.account}`;
   if (a.until) return `automatic account choice: every account of this harness is held, so this stage runs on account ${r.account}, whose hold ends first (${a.until}); the provider then decides, as with one account: a reset within the job's time is waited for, a later one Blocks`;
   const passed = a.held.map((x) => `${x.name} held until ${x.until}`).join(", ");
-  const left = a.left !== undefined ? `, ${Math.round(a.left * 100)}% of its quota left as its provider last reported` : "";
+  const left = `${a.warm ? ", where this Objective's previous stage's prompt cache is still warm" : ""}${a.left !== undefined ? `, ${Math.round(a.left * 100)}% of its quota left as its provider last reported` : ""}`;
   return `automatic account choice: account ${r.account}${left}${passed ? ` (${passed})` : ""}`;
 };
 
@@ -92,7 +96,7 @@ export async function accountStep({ args, env = process.env }) {
   mask(app.token);
   // Factory's own login, whose records alone count (the account holds, lib/route-holds.mjs).
   if (app.appSlug) setSelf(`${app.appSlug}[bot]`);
-  const r = await stageAccount({ repo, issue: args.issue, branch: args.branch, harness: inputs.harness, accounts: env.FACTORY_ACCOUNTS, rendered: env.FACTORY_RENDERED_ACCOUNTS, opts: { token: app.token }, maintainers: inputs.maintainers, env });
+  const r = await stageAccount({ repo, issue: args.issue, branch: args.branch, harness: inputs.harness, accounts: env.FACTORY_ACCOUNTS, rendered: env.FACTORY_RENDERED_ACCOUNTS, opts: { token: app.token }, maintainers: inputs.maintainers, env, models: { model: inputs.model, subagentModel: inputs.subagentModel, reviewerModel: inputs.reviewerModel } });
   if (r.why) log(`no account is picked for this stage, so no credential reaches it: ${r.why}; the stage Blocks with the reason`);
   else log(r.auto ? autoLine(r) : `this stage runs on account ${r.account}`);
   setOutput("account", r.account, env);

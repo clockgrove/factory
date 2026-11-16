@@ -262,6 +262,18 @@ export function promptCacheTtl(harness, env = {}) {
 }
 
 /**
+ * How long a pass's prompt cache stays warm after it ends, by the TTL Factory sets (promptCacheTtl), in ms: `1h` or `5m`
+ * as set; with none set, Claude Code's own default, which the comment above states: an hour on a plan token or a CLI
+ * login, five minutes on an API key (ANTHROPIC_API_KEY). Null for Codex and Copilot, whose caches Factory sets no
+ * lifetime for. Automatic account choice prefers the account of the Objective's previous stage while it lasts (#391).
+ */
+export function cacheLifetimeMs(harness, env = {}) {
+  if (harness !== "claude") return null;
+  const ttl = promptCacheTtl(harness, env) ?? (env.ANTHROPIC_API_KEY ? "5m" : "1h");
+  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
+}
+
+/**
  * A runner's Claude Code run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/claude-runner.mjs: Factory's HOME for Claude Code, its per-start state, the caches) and the hosts its commands
  * may reach (`allowed_domains`, and the Objective's own host labels: local.mjs openedStageHosts). Null for any other harness, in local mode and before the agent uid exists.
@@ -1271,6 +1283,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   rec.label = label;
   rec.resumed = !!resume;
   rec.cacheTtl = cacheTtl;
+  // How long its prompt cache stays warm past `ended` (cacheLifetimeMs): the stage's `cacheWarmUntil`.
+  rec.cacheWarmMs = cacheLifetimeMs(harness, env);
   rec.finalText = finalText(harness, r.stdout);
   rec.started = started;
   rec.ended = ended;

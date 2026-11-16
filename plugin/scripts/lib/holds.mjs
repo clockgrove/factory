@@ -6,7 +6,8 @@
 // reset any file names for the account; its back-off streak is the newest file's. The record holds no secret: a
 // harness, an account's name, times, a count and the limit's window when the harness named it. With automatic account
 // choice on (#266), each account also has one `<key>.started.json`, replaced whole at each stage start on it: the
-// machine's round-robin, where the last writer wins and nothing else depends on it; and one `<key>.quota.json`, the
+// machine's round-robin, which also counts the starts since the account's newest quota reading, where the last writer
+// wins; and one `<key>.quota.json`, the
 // account's last quota reading (#391: how much of each usage window the provider reported used, and when each resets),
 // replaced whole at each stage end that reported one, which automatic choice ranks the accounts by. The folder is outside
 // every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
@@ -18,6 +19,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { writeNew } from "./fsafe.mjs";
+import { quotaWindowApplies } from "./usage.mjs";
 
 /** The least a usage-limit hold lasts past now, by how many such pauses on one account came in a row (accountHolds.limit). */
 export const LIMIT_BACKOFF_MS = [2, 5, 10, 15].map((m) => m * 60_000);
@@ -77,35 +79,47 @@ function recordOf(v, account) {
 /** The most windows a quota reading keeps (usage.mjs quotaReading reads at most as many). */
 const QUOTA_WINDOWS_MAX = 8;
 
+/** The most Objectives a reading's `recent` names (accountHolds.reading): those whose cache on the account is warm now. */
+const RECENT_MAX = 64;
+
 /**
- * A quota reading (accountHolds.reading), checked: {harness, account, at, windows: {<window>: {used, resetsAt}},
- * silentAt?} with only the windows whose name, fraction used (a number, 0 or more) and reset (ms) are well formed, or
- * null. `silentAt` (ms): a stage the provider served on the account reported no reading then (accountHolds.silent).
+ * A quota reading (accountHolds.reading), checked: {harness, account, at, windows: {<window>: {used, resetsAt, at?}},
+ * silentAt?, recent?} with only the windows whose name, fraction used (a number, 0 or more) and reset (ms) are well
+ * formed, or null. A window's own `at` is when its provider reported it (a window carried over from an earlier reading
+ * keeps that one's); without one, the reading's. `silentAt` (ms): a stage the provider served on the account reported
+ * no reading then (accountHolds.silent). `recent` ({<issue>: ms}): until when each Objective's last stage on the
+ * account keeps its prompt cache warm (GitHub Actions and the cloud sandbox, which keep no stage directory).
  */
 export function readingOf(v, account = v?.account) {
   if (!v || typeof v !== "object" || typeof account !== "string" || !KEY.test(account) || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness) || !Number.isSafeInteger(v.at)) return null;
   if (!v.windows || typeof v.windows !== "object" || Array.isArray(v.windows)) return null;
   const windows = {};
   for (const [name, w] of Object.entries(v.windows).slice(0, QUOTA_WINDOWS_MAX)) {
-    if (windowOf(name) && typeof w?.used === "number" && Number.isFinite(w.used) && w.used >= 0 && Number.isSafeInteger(w.resetsAt)) windows[name] = { used: w.used, resetsAt: w.resetsAt };
+    if (windowOf(name) && typeof w?.used === "number" && Number.isFinite(w.used) && w.used >= 0 && Number.isSafeInteger(w.resetsAt)) windows[name] = { used: w.used, resetsAt: w.resetsAt, ...(Number.isSafeInteger(w.at) ? { at: w.at } : {}) };
   }
-  return { harness: v.harness, account, at: v.at, windows, ...(Number.isSafeInteger(v.silentAt) ? { silentAt: v.silentAt } : {}) };
+  const recent = v.recent && typeof v.recent === "object" && !Array.isArray(v.recent) ? Object.entries(v.recent).filter(([k, u]) => /^[1-9][0-9]{0,9}$/.test(k) && Number.isSafeInteger(u)).slice(0, RECENT_MAX) : [];
+  return { harness: v.harness, account, at: v.at, windows, ...(Number.isSafeInteger(v.silentAt) ? { silentAt: v.silentAt } : {}), ...(recent.length ? { recent: Object.fromEntries(recent) } : {}) };
 }
 
+/** When an account's newest reading was made (ms, another clock's later one as the oldest: 0), or null with none. */
+export const newestAt = (readings, now) => (readings.length ? Math.max(...readings.map((r) => (r.at > now ? 0 : r.at))) : null);
+
 /**
- * The windows of an account's readings that still stand at `now`: of each window, the newest reading's (a reading dated
- * after now, another clock's, the oldest), and only while its reset is ahead (a reading older than its window's reset is
- * stale, and a reset past the longest window is another clock's). {<window>: {used, resetsAt}}.
+ * The windows of an account's readings that still stand at `now`: of each window, the newest report (its own `at`, else
+ * its reading's; one dated after now, another clock's, the oldest), and only while its reset is ahead (a reading older
+ * than its window's reset is stale, and a reset past the longest window is another clock's). {<window>: {used, resetsAt,
+ * at}}, `at` when it was reported.
  */
 export function liveWindows(readings, now) {
   const out = {};
   const seen = {};
   for (const r of readings) {
-    const at = r.at > now ? 0 : r.at;
     for (const [name, w] of Object.entries(r.windows || {})) {
+      const made = w.at ?? r.at;
+      const at = made > now ? 0 : made;
       if (!(w.resetsAt > now && w.resetsAt <= now + HOLD_MAX_MS) || (seen[name] ?? -Infinity) > at) continue;
       seen[name] = at;
-      out[name] = w;
+      out[name] = { used: w.used, resetsAt: w.resetsAt, at: made };
     }
   }
   return out;
@@ -122,9 +136,14 @@ export function readsNothing(readings, now) {
   return Number.isSafeInteger(newest?.silentAt);
 }
 
-/** The share of its quota an account has left by `windows` (liveWindows): its tightest window's, 0 to 1; null with none. */
-export const quotaLeft = (windows) => {
-  const used = Object.values(windows).map((w) => w.used);
+/**
+ * The share of its quota an account has left by `windows` (liveWindows) for a stage that runs `models`: its tightest
+ * window's of those that limit such a stage (usage.mjs quotaWindowApplies), 0 to 1; null with none.
+ */
+export const quotaLeft = (windows, models = []) => {
+  const used = Object.entries(windows)
+    .filter(([name]) => quotaWindowApplies(name, models))
+    .map(([, w]) => w.used);
   return used.length ? Math.max(0, 1 - Math.max(...used)) : null;
 };
 
@@ -182,8 +201,10 @@ function readDir(dir, now, uid) {
         if (now - st.mtimeMs > HOLD_FORGET_MS) rmSync(file, { force: true });
         continue;
       }
+      // A declared account's quota file is never aged out: it may say the account reports nothing, a fact that does not
+      // go stale; forgetStarts removes it once the name is no longer declared. A login's goes as its start record does.
       if (STARTED.test(name) || QUOTA.test(name)) {
-        if (now - st.mtimeMs > START_FORGET_MS) rmSync(file, { force: true });
+        if (now - st.mtimeMs > START_FORGET_MS && (STARTED.test(name) || QUOTA.exec(name)[1].includes("@"))) rmSync(file, { force: true });
         continue;
       }
       const m = FILE.exec(name);
@@ -274,18 +295,27 @@ function replaceFile(dir, account, name, value, uid) {
  *   on the account is served; `until` and `held`'s holds never include it. Returns the guess's end.
  * - `avoidUntil(account, now)`: `until`, or the guess's end when that is later; null when neither is ahead.
  * - `started({harness, account, now})`: a stage starts on the account now (automatic account choice's round-robin, #266):
- *   one small file per account, replaced whole, so every serve on the machine takes turns from the same record.
+ *   one small file per account, replaced whole, so every serve on the machine takes turns from the same record. It also
+ *   counts the starts since the account's newest quota reading (`since`, that reading's `at`; `n`): `startsSince`.
+ * - `startsSince(account, now)`: how many stages started on the account after its newest quota reading (or, with none,
+ *   since the count began): automatic choice ranks an account that has started more since its reading below one that
+ *   has started fewer, since that reading no longer shows what those stages are spending (#391).
  * - `forgetStarts(keep)`: the start records and quota readings of declared accounts' names not in `keep` (no longer
  *   declared) are removed; a login's (`<harness>@…`) goes START_FORGET_MS after it was written, since another serve may
  *   run on it.
- * - `reading({harness, account, now, windows})`: a stage on the account ended, its provider having reported `windows`
- *   ({<window>: {used, resetsAt}}: usage.mjs quotaReading). Each replaces the account's last reading of that window; the
- *   reading's other windows that still stand are kept. One small file per account, replaced whole (the last writer
- *   wins). Returns the reading kept (readingOf's), or null when `windows` holds none well formed.
+ * - `reading({harness, account, now, windows, silent, issue, warmUntil})`: a stage on the account ended, its provider
+ *   having reported `windows` ({<window>: {used, resetsAt}}: usage.mjs quotaReading), or with `silent` none. Each
+ *   replaces the account's last reading of that window; the reading's other windows that still stand are kept, each
+ *   with the time it was reported. With `issue`, `recent` keeps until when that Objective's cache there is warm
+ *   (`warmUntil`), beside the other Objectives' entries still ahead. One small file per account, replaced whole (the
+ *   last writer wins). Returns the reading kept (readingOf's), or null when `windows` holds none well formed.
  * - `silent({harness, account, now})`: a stage the provider served on the account (no limit, no refusal) reported no
  *   reading: kept in the same file, with the windows that still stand. A later reading ends it.
- * - `left(account, now)`: the share of its quota the account has left (0 to 1: its tightest window's), from the windows
- *   of its readings still ahead of their reset (liveWindows); null when none is (no reading, or every one is stale).
+ * - `left(account, now, models)`: the share of its quota the account has left (0 to 1: its tightest window's that limits a
+ *   stage on `models`: quotaLeft), from the windows of its readings still ahead of their reset (liveWindows); null when
+ *   none is (no reading, or every one is stale).
+ * - `warmFor(issue, names, now)`: of `names`, the account whose reading's `recent` keeps Objective `issue`'s cache warm
+ *   latest, while that is ahead; else null.
  * - `reportsNothing(account, now)`: no window stands and its newest record is a `silent` one (readsNothing): automatic
  *   choice puts it after every account with a reading. False for an account never measured, or measured long ago.
  * - `startedAt(account, now)`: when a stage last started on the account (ms), or null; a time after `now` (another clock's,
@@ -312,6 +342,7 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     }
   }
   let kept = dir ? [] : [...seed];
+  // This process's start records ({at, since, n}), with no file, or beside one.
   const starts = new Map();
   // Quota readings kept in this process: every one with no `dir`, else those a file could not take.
   const quotas = dir ? [] : readings.filter(Boolean);
@@ -408,13 +439,26 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       return at.length ? Math.max(...at) : null;
     },
     started({ harness, account, now }) {
-      starts.set(account, now);
+      const since = newestAt(readingsOf(account), now);
+      const prev = this.startRecord(account);
+      const n = prev && prev.since === since ? prev.n + 1 : 1;
+      starts.set(account, { at: now, since, n });
       if (!dir || !KEY.test(account) || !NAME.test(harness)) return;
       try {
-        replaceFile(dir, account, START(account), { harness, account, at: now }, uid);
+        replaceFile(dir, account, START(account), { harness, account, at: now, since, n }, uid);
       } catch (e) {
         onError(e);
       }
+    },
+    startRecord(account) {
+      const mine = starts.get(account) ?? null;
+      const v = dir && KEY.test(account) ? ownFile(dir, START(account), uid) : null;
+      const file = v?.account === account && Number.isSafeInteger(v.at) ? { at: v.at, since: Number.isSafeInteger(v.since) ? v.since : null, n: Number.isSafeInteger(v.n) && v.n > 0 ? v.n : 1 } : null;
+      return !file || (mine && mine.at > file.at) ? mine : file;
+    },
+    startsSince(account, now) {
+      const r = this.startRecord(account);
+      return r && r.since === newestAt(readingsOf(account), now) ? r.n : 0;
     },
     forgetStarts(keep) {
       if (!dir) return;
@@ -428,10 +472,18 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
         onError(e);
       }
     },
-    reading({ harness, account, now, windows, silent = false }) {
+    reading({ harness, account, now, windows, silent = false, issue = null, warmUntil = null }) {
       const fresh = readingOf({ harness, account, at: now, windows, ...(silent ? { silentAt: now } : {}) });
       if (!fresh || (!silent && !Object.keys(fresh.windows).length)) return null;
-      const r = { ...fresh, windows: { ...liveWindows(readingsOf(account), now), ...fresh.windows } };
+      const before = readingsOf(account);
+      const stamped = Object.fromEntries(Object.entries(fresh.windows).map(([name, w]) => [name, { ...w, at: now }]));
+      const recent = Object.fromEntries(
+        [...before.flatMap((x) => Object.entries(x.recent || {})), ...(issue && Number.isSafeInteger(warmUntil) ? [[String(issue), warmUntil]] : [])]
+          .filter(([, u]) => u > now)
+          .sort((a, b) => a[1] - b[1])
+          .slice(-RECENT_MAX),
+      );
+      const r = { ...fresh, windows: { ...liveWindows(before, now), ...stamped }, ...(Object.keys(recent).length ? { recent } : {}) };
       const keep = () => {
         for (let i = quotas.length - 1; i >= 0; i--) if (quotas[i].account === account) quotas.splice(i, 1);
         quotas.push(r);
@@ -453,14 +505,22 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     silent({ harness, account, now }) {
       return this.reading({ harness, account, now, windows: {}, silent: true });
     },
-    left(account, now) {
-      return quotaLeft(liveWindows(readingsOf(account), now));
+    left(account, now, models = []) {
+      return quotaLeft(liveWindows(readingsOf(account), now), models);
+    },
+    warmFor(issue, names, now) {
+      let best = null;
+      for (const name of names) for (const r of readingsOf(name)) {
+        const u = r.recent?.[String(issue)];
+        if (Number.isSafeInteger(u) && u > now && (!best || u > best.u)) best = { name, u };
+      }
+      return best?.name ?? null;
     },
     reportsNothing(account, now) {
       return readsNothing(readingsOf(account), now);
     },
     startedAt(account, now = Date.now()) {
-      const mine = starts.get(account) ?? null;
+      const mine = starts.get(account)?.at ?? null;
       if (!dir || !KEY.test(account)) return mine;
       const v = ownFile(dir, START(account), uid);
       return v?.account === account && Number.isSafeInteger(v.at) ? Math.max(v.at > now ? 0 : v.at, mine ?? -Infinity) : mine;

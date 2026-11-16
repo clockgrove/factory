@@ -72,6 +72,13 @@ const onPath = (bin) => whichSync(bin) !== null;
 const readyKey = (a) => `${a.harness}:${a.name}:${a.home || a.tokenFile || ""}`;
 /** How long automatic account choice passes over an account whose harness checks failed before it checks it again. */
 export const UNREADY_RETRY_MS = 10 * 60_000;
+/**
+ * The models a `stage` runs (objective-trust.mjs objectiveInputs' inputs), whose quota windows automatic choice weighs
+ * (usage.mjs quotaWindowApplies): a work stage's worker and sub-agent models; a review stage's reviewer and, for its fix
+ * passes, the worker's.
+ */
+export const stageModels = (inputs, stage) => (stage === "review" ? [inputs?.reviewerModel, inputs?.model] : [inputs?.model, inputs?.subagentModel]).map((m) => m || null);
+
 /** How long an account automatic choice picked counts as just started in this loop before its stage's start is recorded. */
 const PICK_MS = 60_000;
 /** An account in a hold's log line and reason: the harness alone for the one named after it (none declared). */
@@ -726,11 +733,13 @@ export class Local {
    * harness's default (accountFor). A pin this machine cannot act on (an untrusted labeler, a name no account of its
    * harness has) Blocks; two pins start nothing ({ok: false, wait}: the Objective waits, never Blocked). With automatic
    * account choice on (#266) and no pin, the account is chosen (autoAccount, `auto`) among those ready here, preferring
-   * the one the Objective's last stage here paused on (pausedOn; `own`, this stage's usage directory, is not that stage);
+   * the one the Objective's last stage here paused on (pausedOn; `own`, this stage's usage directory, is not that stage),
+   * then the one its last stage here ran on while that stage's prompt cache is warm (warmOn), its quota ranked for the
+   * models `stage` runs (stageModels);
    * with none of its harness's accounts ready, it Blocks naming them.
    * {ok, harness, hosts, account, pinned, pin, auto} or {ok: false, reason, fix} or {ok: false, wait}.
    */
-  async harnessFor(issue, { own = null } = {}) {
+  async harnessFor(issue, { own = null, stage = "work" } = {}) {
     const env = this.baseEnv();
     const args = { repo: this.repoFull };
     await primeWriters(this.repo, this.opts, { maintainers: resolveInputs({ args, env }).maintainers });
@@ -745,7 +754,7 @@ export class Local {
       account = this.accountFor(harness);
       pin = await this.pinFor(issue, chosen.names, harness);
       if (this.auto && !pin.account && !pin.problem && !pin.two) {
-        const pick = this.autoAccount(harness, { prefer: this.pausedOn(issue, own), pick: true });
+        const pick = this.autoAccount(harness, { prefer: this.pausedOn(issue, own), warm: this.warmOn(issue, own), models: stageModels(chosen.inputs, stage), pick: true });
         if (pick.account) [account, auto] = [pick.account, true];
         else unready = pick.unready;
       }
@@ -788,26 +797,32 @@ export class Local {
 
   /**
    * The account a `harness` stage with no account label runs on with automatic choice on (#266; lib/accounts.mjs
-   * chooseAccount): a free one (no hold, limitUntil), `prefer` first when it is free, else by the readings kept with the
-   * holds (#391): one never measured, then the most quota left (holds.mjs left), then one that reports nothing
-   * (holds.mjs reportsNothing); of equal standing, the one limited least recently, then the one started on least recently (the machine's round-robin, kept with the holds, and
-   * this loop's picks of the last PICK_MS, whose stages are still starting); with every one held, the one whose hold ends first. Held includes a
+   * chooseAccount): a free one (no hold, limitUntil), `prefer` first when it is free, then `warm` (warmOn), else by the
+   * readings kept with the holds (#391): one never measured, then one with a reading, then one that reports nothing
+   * (holds.mjs reportsNothing); within each, the fewest stages started since its reading (holds.mjs startsSince, and this
+   * loop's picks of the last PICK_MS, whose stages are still starting), then the most quota left for `models` (holds.mjs
+   * left); then the one limited least recently, then the one started on least recently (the machine's round-robin, kept
+   * with the holds, and those picks); with every one held, the one whose hold ends first. Held includes a
    * no-reset limit's guess (holds.mjs spent). Of those, the first that is ready here (accountReady); one that is not is
    * passed over. `pick`: a stage starts on it, so this loop counts it as just started meanwhile. {account, unready:
    * [{name, problems}]}, account null when none is ready. Throws as accountFor.
    */
-  autoAccount(harness, { prefer = null, pick = false } = {}) {
+  autoAccount(harness, { prefer = null, warm = null, models = [], pick = false } = {}) {
     const now = (this.clock ?? Date.now)();
     const list = harnessAccounts(this.loadedAccounts(), harness);
     const holds = new Map(list.map((a) => [a, this.holdOf(a)]));
-    const picked = (key) => (this.picked?.get(key) > now - PICK_MS ? this.picked.get(key) : -Infinity);
+    // This loop's picks whose stages have not started yet (startedOn takes one off), of the last PICK_MS.
+    const pending = (key) => (this.picked?.get(key) || []).filter((t) => t > now - PICK_MS);
+    const store = (a) => this.holdStore(holds.get(a));
     const opts = {
       until: (a) => this.limitUntil(holds.get(a), { guess: true }),
-      left: (a) => this.holdStore(holds.get(a)).left(holds.get(a).key, now),
-      silent: (a) => this.holdStore(holds.get(a)).reportsNothing(holds.get(a).key, now),
-      limitedAt: (a) => this.holdStore(holds.get(a)).limitedAt(holds.get(a).key, now),
-      startedAt: (a) => Math.max(this.holdStore(holds.get(a)).startedAt(holds.get(a).key, now) ?? -Infinity, picked(holds.get(a).key)),
+      left: (a) => store(a).left(holds.get(a).key, now, models),
+      silent: (a) => store(a).reportsNothing(holds.get(a).key, now),
+      startsSince: (a) => store(a).startsSince(holds.get(a).key, now) + pending(holds.get(a).key).length,
+      limitedAt: (a) => store(a).limitedAt(holds.get(a).key, now),
+      startedAt: (a) => Math.max(store(a).startedAt(holds.get(a).key, now) ?? -Infinity, ...pending(holds.get(a).key)),
       prefer,
+      warm,
     };
     const left = [...list];
     const unready = [];
@@ -815,7 +830,7 @@ export class Local {
       const a = chooseAccount(left, opts);
       const problems = this.accountReady(harness, a);
       if (!problems.length) {
-        if (pick) (this.picked ??= new Map()).set(holds.get(a).key, now);
+        if (pick) (this.picked ??= new Map()).set(holds.get(a).key, [...pending(holds.get(a).key), now]);
         return { account: a, unready };
       }
       unready.push({ name: a.name, problems });
@@ -857,7 +872,10 @@ export class Local {
     const hold = this.holdOf(account);
     const store = this.holdStore(hold);
     store.started({ harness: account.harness, account: hold.key, now: (this.clock ?? Date.now)() });
-    this.picked?.delete(hold.key);
+    // One of this loop's picks of it has started: it counts in the start record from here on.
+    const left = (this.picked?.get(hold.key) || []).slice(1);
+    if (left.length) this.picked.set(hold.key, left);
+    else this.picked?.delete(hold.key);
     try {
       store.forgetStarts(Object.values(this.loadedAccounts().accounts).flat().map((a) => a.name));
     } catch {
@@ -873,6 +891,16 @@ export class Local {
   pausedOn(issue, own = null) {
     const r = lastStage(this.ws(issue), own)?.result;
     return r?.exit === "paused" && r.usageLimit && typeof r.account === "string" ? r.account : null;
+  }
+
+  /**
+   * The name of the account the Objective's newest earlier stage on this machine ran on while that stage's prompt cache
+   * is still warm (its `result.json` `cacheWarmUntil`, session.mjs cacheWarmUntil: its last pass's end plus the cache
+   * lifetime Factory sets), else null: automatic choice keeps the Objective there while it is free (#391).
+   */
+  warmOn(issue, own = null) {
+    const r = lastStage(this.ws(issue), own)?.result;
+    return typeof r?.account === "string" && Number.isSafeInteger(r.cacheWarmUntil) && r.cacheWarmUntil > (this.clock ?? Date.now)() ? r.account : null;
   }
 
   /** This machine's account declaration, read and checked afresh (loadAccounts); throws as accountFor says. */
@@ -1337,7 +1365,7 @@ export class Local {
     }
     // The harness this Objective runs on here (harnessFor): a label no writer applied, a model its harness cannot run or a
     // harness this machine cannot run Blocks before anything is set up for it.
-    const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue, { own: usageDir }) : { ok: true, harness: this.harness };
+    const runs = script === "worker.mjs" || script === "review.mjs" ? await this.harnessFor(issue, { own: usageDir, stage: script === "review.mjs" ? "review" : "work" }) : { ok: true, harness: this.harness };
     // Two account labels (#265): nothing starts and nothing Blocks; the Objective waits here for one to be left (pinWaiting).
     if (runs.wait) {
       rmSync(usageDir, { recursive: true, force: true });

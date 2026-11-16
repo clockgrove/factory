@@ -128,7 +128,7 @@ test("#391 holds: an account's quota reading is kept for every serve on the mach
   two.reading({ harness: "claude", account: "alpha", now: t + 1000, windows: { five_hour: { used: 0.9, resetsAt: t + H } } });
   assert.ok(Math.abs(one.left("alpha", t + 2000) - 0.1) < 1e-9);
   assert.equal(one.left("alpha", t + 49 * H), null, "every window past its reset: no reading");
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "alpha.quota.json"), "utf8")).windows, { five_hour: { used: 0.9, resetsAt: t + H }, seven_day: { used: 0.6, resetsAt: t + 48 * H } }, "one file per account, replaced whole");
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "alpha.quota.json"), "utf8")).windows, { five_hour: { used: 0.9, resetsAt: t + H, at: t + 1000 }, seven_day: { used: 0.6, resetsAt: t + 48 * H, at: t } }, "one file per account, replaced whole; a window carried over keeps when it was reported");
   // Well-formed numbers only; a key no file may carry stays in this process.
   assert.equal(one.reading({ harness: "claude", account: "beta", now: t, windows: { five_hour: { used: "lots", resetsAt: t + H } } }), null);
   assert.equal(one.left("beta", t), null);
@@ -194,4 +194,84 @@ test("#391 holds: a served stage with no reading is recorded as such; the accoun
   assert.equal(servedSilent({ exit: "paused", tokens: { output: 10 }, usageLimit: { harness: "claude" } }), false, "a limit is no served stage");
   assert.equal(servedSilent({ exit: "blocked", tokens: { output: 10 }, limitRefused: { harness: "copilot" } }), false);
   assert.equal(servedSilent({ exit: "delivered", tokens: { output: null }, aiCredits: 2 }), true, "Copilot's credits");
+});
+
+test("#391 chooseAccount: within a group the fewest stages started since the account's reading first, so starts before the next reading spread; then the most left; the warm account (the previous stage's, its cache still warm) after the paused-on one and ahead of quota", () => {
+  const list = ["a", "b", "c"].map((name) => ({ name }));
+  const left = { a: 0.6, b: 0.59, c: 0.3 };
+  const since = { a: 0, b: 0, c: 0 };
+  const picks = [];
+  for (let i = 0; i < 6; i++) {
+    const a = chooseAccount(list, { until: () => null, left: (x) => left[x.name], startsSince: (x) => since[x.name] }).name;
+    since[a] += 1;
+    picks.push(a);
+  }
+  assert.deepEqual(picks, ["a", "b", "c", "a", "b", "c"], "six starts before the next reading: spread, the most left first in each round");
+  const of = (m) => (x) => m[x.name] ?? null;
+  assert.equal(chooseAccount(list, { until: () => null, left: of({ a: 0.6, b: 0.59, c: 0.3 }), startsSince: of({ a: 2, b: 1, c: 1 }) }).name, "b", "fewer starts since first");
+  assert.equal(chooseAccount(list, { until: () => null, left: of({ a: 0.6, b: 0.59, c: 0.3 }), warm: "c" }).name, "c", "the warm account ahead of quota");
+  assert.equal(chooseAccount(list, { until: () => null, left: of({ a: 0.6 }), warm: "c", prefer: "b" }).name, "b", "the paused-on account ahead of the warm one");
+  assert.equal(chooseAccount(list, { until: of({ c: 5 }), left: of({ a: 0.6, b: 0.59, c: 0.3 }), warm: "c" }).name, "a", "a held warm account is passed over");
+});
+
+test("#391 holds: starts since the newest reading are counted for every serve and start again at the next reading; a declared account's quota file is never aged out (a silent key stays silent), a login's is", async () => {
+  const { utimesSync } = await import("node:fs");
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t = Date.now() - 60 * 60_000;
+  const one = accountHolds({ dir });
+  assert.equal(one.startsSince("alpha", t), 0);
+  one.started({ harness: "claude", account: "alpha", now: t });
+  one.started({ harness: "claude", account: "alpha", now: t + 1 });
+  assert.equal(accountHolds({ dir }).startsSince("alpha", t + 2), 2, "never measured: counted since the first");
+  one.reading({ harness: "claude", account: "alpha", now: t + 3, windows: { seven_day: { used: 0.2, resetsAt: t + 48 * H } } });
+  assert.equal(accountHolds({ dir }).startsSince("alpha", t + 4), 0, "a reading after them: they are in it");
+  accountHolds({ dir }).started({ harness: "claude", account: "alpha", now: t + 5 });
+  assert.equal(one.startsSince("alpha", t + 6), 1);
+  assert.equal(one.startedAt("alpha", t + 6), t + 5, "the round-robin's time is the same record's");
+  // Aging: a declared account's quota file stays past eight days; a login's goes.
+  one.silent({ harness: "claude", account: "key", now: t });
+  one.silent({ harness: "claude", account: "claude@0123456789ab", now: t });
+  const old = new Date(Date.now() - 9 * 24 * H);
+  for (const f of ["key.quota.json", "claude@0123456789ab.quota.json"]) utimesSync(join(dir, f), old, old);
+  accountHolds({ dir }).until("key", Date.now());
+  assert.equal(accountHolds({ dir }).reportsNothing("key", Date.now()), true, "still known to report nothing");
+  assert.equal(accountHolds({ dir }).reportsNothing("claude@0123456789ab", Date.now()), false, "a login's: gone with its start record");
+  one.forgetStarts(["alpha"]);
+  assert.equal(accountHolds({ dir }).reportsNothing("key", Date.now()), false, "no longer declared: removed");
+});
+
+test("#391 model windows: a per-model window limits only stages on that family (or an unknown model), overage none; left weighs only those", async () => {
+  const { quotaWindowApplies, modelFamily } = await import("../scripts/lib/usage.mjs");
+  const { stageModels } = await import("../scripts/local.mjs");
+  assert.equal(modelFamily("claude-opus-5-5"), "opus");
+  assert.equal(modelFamily("opus"), null, "an alias could run more than one family");
+  assert.equal(quotaWindowApplies("seven_day_opus", ["claude-sonnet-5-5", "claude-fable-5-2"]), false);
+  assert.equal(quotaWindowApplies("seven_day_opus", ["claude-sonnet-5-5", "claude-opus-5-5"]), true);
+  assert.equal(quotaWindowApplies("seven_day_opus", ["claude-sonnet-5-5", null]), true, "a harness default could be opus");
+  assert.equal(quotaWindowApplies("seven_day_sonnet", []), true);
+  assert.equal(quotaWindowApplies("overage", ["claude-opus-5-5"]), false);
+  assert.equal(quotaWindowApplies("seven_day", ["claude-sonnet-5-5"]), true);
+  assert.equal(quotaWindowApplies("codex/primary", ["gpt-6.1-sol"]), true);
+  const t = Date.now();
+  const holds = accountHolds();
+  holds.reading({ harness: "claude", account: "a", now: t, windows: { seven_day: { used: 0.3, resetsAt: t + H }, seven_day_opus: { used: 1, resetsAt: t + H }, overage: { used: 5, resetsAt: t + H } } });
+  assert.equal(holds.left("a", t, ["claude-sonnet-5-5", "claude-fable-5-2"]), 0.7);
+  assert.equal(holds.left("a", t, ["claude-opus-5-5"]), 0);
+  assert.deepEqual(stageModels({ model: "claude-opus-5-5", subagentModel: "claude-sonnet-5-5", reviewerModel: "claude-fable-5-2" }, "work"), ["claude-opus-5-5", "claude-sonnet-5-5"]);
+  assert.deepEqual(stageModels({ model: "claude-opus-5-5", subagentModel: "", reviewerModel: "claude-fable-5-2" }, "review"), ["claude-fable-5-2", "claude-opus-5-5"]);
+});
+
+test("#391 cache warmth: a pass's prompt cache lasts the TTL Factory sets, else Claude Code's own (an hour on a login or plan token, five minutes on an API key); the stage records until when", async () => {
+  const { cacheLifetimeMs } = await import("../scripts/lib/harness.mjs");
+  const { cacheWarmUntil } = await import("../scripts/lib/session.mjs");
+  assert.equal(cacheLifetimeMs("claude", {}), H);
+  assert.equal(cacheLifetimeMs("claude", { ANTHROPIC_API_KEY: "k" }), 5 * 60_000);
+  assert.equal(cacheLifetimeMs("claude", { ANTHROPIC_API_KEY: "k", FACTORY_PROMPT_CACHE_TTL: "auto" }), H);
+  assert.equal(cacheLifetimeMs("claude", { FACTORY_PROMPT_CACHE_TTL: "5m" }), 5 * 60_000);
+  assert.equal(cacheLifetimeMs("codex", {}), null, "none Factory sets");
+  const end = "2026-11-15T10:00:00.000Z";
+  assert.equal(cacheWarmUntil([{ ended: "2026-11-15T09:00:00.000Z", cacheWarmMs: H }, { ended: end, cacheWarmMs: 5 * 60_000 }]), Date.parse(end) + 5 * 60_000, "the last pass's");
+  assert.equal(cacheWarmUntil([{ ended: end, cacheWarmMs: null }]), null);
+  const dir = join(mkdtempSync(join(tmpdir(), "quota-usage-")), "u");
+  assert.equal(writeUsage(dir, { harness: "claude", model: null, records: [{ usd: 0, ended: end, cacheWarmMs: H }], passes: 1, exit: "delivered", reason: null, credentialBasis: null }).cacheWarmUntil, Date.parse(end) + H);
 });

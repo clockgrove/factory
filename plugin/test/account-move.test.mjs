@@ -710,6 +710,57 @@ test("#391: on, an account whose served stage reported no quota reading (an API 
   }
 });
 
+test("#391: on, the Objective's next stage stays on its previous stage's account while that stage's prompt cache is warm, ahead of quota; then quota decides", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used, warm = null) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } }, ...(warm ? { cacheWarmUntil: warm } : {}) });
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      // Each account measured through a pin: beta has the most left; alpha's stage is the last, its cache warm an hour.
+      for (const [name, used] of [["beta", 0.1], ["gamma", 0.5], ["alpha", 0.8]]) {
+        gh.apply(`factory:account:${name}`);
+        t += 1000;
+        loop.result = reading(used, name === "alpha" ? t + 60 * MIN : null);
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, name);
+        gh.remove(`factory:account:${name}`);
+      }
+      t += 1000;
+      loop.result = reading(0.8, t + 60 * MIN);
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha", "warm: it stays, though beta has more left");
+      t += 61 * MIN;
+      loop.result = delivered;
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "the cache gone cold: quota decides");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, picks made before any of their stages starts spread over the measured accounts, the most left first in each round; a start counts until the account's next reading", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      for (const [name, used] of [["alpha", 0.4], ["beta", 0.41], ["gamma", 0.7]]) loop.holds.reading({ harness: "claude", account: name, now: t - 1000, windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } });
+      const picks = [];
+      for (let i = 0; i < 6; i++) picks.push(loop.autoAccount("claude", { pick: true }).account.name);
+      assert.deepEqual(picks, ["alpha", "beta", "gamma", "alpha", "beta", "gamma"]);
+      // Their stages start: the count moves to the machine's start records, shared with every serve.
+      for (const n of picks) loop.startedOn({ name: n, harness: "claude", declared: true });
+      assert.equal(autoServe(h, () => t).holds.startsSince("alpha", t), 2);
+      assert.equal(loop.autoAccount("claude").account.name, "alpha", "two each: the most left");
+      loop.holds.reading({ harness: "claude", account: "gamma", now: t, windows: { seven_day: { used: 0.7, resetsAt: t + 48 * 60 * MIN } } });
+      assert.equal(loop.autoAccount("claude").account.name, "gamma", "gamma's new reading covers its starts: none since");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
 test("#266: on, a paused Objective resumes on a free account with no label and no person, prefers the account it paused on once that is free, and is held only while every account is", async () => {
   const h = fakeHome();
   const gh = fakeGitHub();

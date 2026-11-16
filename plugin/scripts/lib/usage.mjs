@@ -316,6 +316,30 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
+/**
+ * Claude Code's per-model windows (SDKRateLimitInfo `rateLimitType`): each limits only stages on that model family; and
+ * `overage`, which meters pay-as-you-go use past the included limits, so it is no limit on included use at all.
+ */
+const MODEL_WINDOWS = { seven_day_opus: "opus", seven_day_sonnet: "sonnet" };
+const NO_LIMIT_WINDOWS = new Set(["overage"]);
+/**
+ * A Claude model id's family, the word after `claude-` (`claude-opus-5-5`: opus); null for any other name: an alias
+ * (`opus`, `opusplan`, which runs more than one), another harness's model, or none.
+ */
+export const modelFamily = (model) => /^claude-([a-z]+)-/.exec(String(model || "").trim().toLowerCase())?.[1] ?? null;
+/**
+ * Whether a quota window limits a stage that runs `models` (its worker, sub-agent or reviewer models): `overage` never;
+ * a per-model window only when one of the models is of its family, or when any model is unknown (none, a harness
+ * default: it could be that family); every other window always.
+ */
+export function quotaWindowApplies(name, models = []) {
+  if (NO_LIMIT_WINDOWS.has(name)) return false;
+  const family = MODEL_WINDOWS[name];
+  if (!family) return true;
+  const families = models.map(modelFamily);
+  return !families.length || families.includes(null) || families.includes(family);
+}
+
 /** A usage window's name as a quota reading keeps it (the names holds.mjs windowOf accepts). */
 const QUOTA_WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 /** The most windows one reading keeps: Claude Code names five or six, Codex two. */

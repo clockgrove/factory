@@ -24,7 +24,9 @@
 // Each stage on these routes with the setting on also leaves its account's quota reading there at its end (#391): a
 // comment of its own (QUOTA_LINE) with how much of each usage window the provider reported used and when each resets
 // (usage.mjs quotaReading), which replaces the account's earlier reading (the writer deletes those), and which automatic
-// choice ranks the free accounts by. That is a read of the holds issue and a write at each such stage's end. A stage
+// choice ranks the free accounts by, with until when each Objective's last stage there keeps its prompt cache warm
+// (`recent`), which keeps that Objective on the account meanwhile. That is a read of the holds issue and a write at each
+// such stage's end. A stage
 // whose provider served it and reported none (Copilot, an API key) writes that as a fact, which ranks the account
 // after every one that reports a reading.
 //
@@ -283,22 +285,30 @@ async function recordIssue(repo, opts, { actions, now }) {
 /**
  * Record the quota reading of a stage on `account` (#391): its provider's `windows` (usage.mjs quotaReading), or with
  * `silent` that a stage the provider served reported none (holds.mjs silent), merged with the account's reading on the
- * record issue as holds.mjs reading merges them, written as a new comment there, after which the account's earlier
- * readings on it, and every reading on it that has gone stale, are deleted. Returns the reading written, or null when
- * `windows` holds none and it is no `silent` one. A failed read or write throws.
+ * record issue as holds.mjs reading merges them, with until when Objective `objective`'s prompt cache stays warm there
+ * (`warmUntil`, session.mjs cacheWarmUntil; the reading's `recent`), written as a new comment there. Then the account's
+ * earlier readings on it, every reading on it that has gone stale, and every reading of an account `declared` no longer
+ * names, are deleted. A silent record with nothing new (the account already reads as reporting nothing, and no warm
+ * cache to add) is not written again: returns the one standing. Returns the reading written, or null when `windows`
+ * holds none and it is no `silent` one. A failed read or write throws.
  */
-export async function writeReading(repo, { harness, account, windows = {}, silent = false, now = Date.now() }, opts, { actions } = {}) {
+export async function writeReading(repo, { harness, account, windows = {}, silent = false, objective = null, warmUntil = null, declared = null, now = Date.now() }, opts, { actions } = {}) {
   const found = await recordIssue(repo, opts, { actions, now });
   const issue = found.record;
   const read = await recordsOn(repo, issue, opts, now);
-  const r = accountHolds({ readings: read.readings.filter((x) => x.account === account) }).reading({ harness, account, now, windows, silent });
+  const mine = read.readings.filter((x) => x.account === account);
+  const store = accountHolds({ readings: mine });
+  const warm = Number.isSafeInteger(warmUntil) && warmUntil > now && objective;
+  if (silent && !warm && store.reportsNothing(account, now)) return mine.reduce((x, y) => (y.at > x.at ? y : x));
+  const r = store.reading({ harness, account, now, windows, silent, ...(warm ? { issue: objective, warmUntil } : {}) });
   if (!r) return null;
   const pct = (w) => `${Math.round(w.used * 100)}%`;
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const text = silent ? `Factory: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Factory: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${iso(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
   await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
   if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
-  for (const id of [...read.readings.filter((x) => x.account === account).map((x) => x.id), ...read.forgotten]) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
+  const gone = read.readings.filter((x) => x.account === account || (declared && !declared.includes(x.account))).map((x) => x.id);
+  for (const id of [...gone, ...read.forgotten]) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
   return r;
 }
 
@@ -351,25 +361,30 @@ export const routeTurn = (issue, n) => createHash("sha256").update(String(Number
 /**
  * The account automatic choice starts a stage of Objective `issue` on, of a harness's declared `names` (in order), from
  * the holds `store` at `now`: accounts.mjs chooseAccount, an account free when neither a hold nor a guess is ahead
- * (avoidUntil); of the free ones by the quota readings (#391): one never measured, then the most quota left, then one
- * that reports nothing; then of equal standing the least recently limited, then the Objective's turn, then the first declared; with
- * every one held, the one whose hold ends first. These routes keep no round-robin record (a write at every stage start):
- * the turn is a hash of the Objective's number (routeTurn), so Objectives spread across the accounts with no state, and
- * each keeps its account while that one is free. Returns {name, until} (`until`: its hold's end when every account is
- * held, else null).
+ * (avoidUntil). Of the free ones, the account the Objective's previous stage ran on while that stage's prompt cache is
+ * still warm (holds.mjs warmFor: a reading's `recent`), since a move loses the cache; else by the quota readings (#391):
+ * one never measured, then the most quota left for `models` (the Objective's models: this step does not know which
+ * stage it picks for), then one that reports nothing; then of equal standing the least recently limited, then the
+ * Objective's turn, then the first declared; with every one held, the one whose hold ends first. These routes keep no
+ * start record (a write at every stage start, by a step whose token only reads): the turn is a hash of the Objective's
+ * number (routeTurn), and stages that start before an account's next reading all weigh the same reading. Returns
+ * {name, until, warm} (`until`: its hold's end when every account is held, else null; `warm`: the warm account's name,
+ * when one is).
  */
-export function pickRouteAccount({ names, store, issue, now = Date.now() }) {
+export function pickRouteAccount({ names, store, issue, models = [], now = Date.now() }) {
   const list = names.map((name) => ({ name }));
   const n = list.length;
   const turn = routeTurn(issue, n);
+  const warm = store.warmFor?.(issue, names, now) ?? null;
   const a = chooseAccount(list, {
     until: (x) => store.avoidUntil(x.name, now),
-    left: (x) => store.left?.(x.name, now) ?? null,
+    left: (x) => store.left?.(x.name, now, models) ?? null,
     silent: (x) => store.reportsNothing?.(x.name, now) ?? false,
     limitedAt: (x) => store.limitedAt(x.name, now),
     startedAt: (x) => (list.indexOf(x) - turn + n) % n,
+    warm,
   });
-  return { name: a.name, until: store.avoidUntil(a.name, now) };
+  return { name: a.name, until: store.avoidUntil(a.name, now), ...(warm && warm === a.name ? { warm } : {}) };
 }
 
 /** An account's hold in a Block's words: until its reset, or about a guess's end when no reset was reported (holds.mjs spent). */
@@ -396,9 +411,10 @@ const heldText = (store, name, t) => {
  *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
  *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
- * - `reading(quota)`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), or `{harness,
- *   silent: true}` when its provider served it and reported none (session.mjs servedSilent), pinned or not: kept on the
- *   holds issue (writeReading) for automatic choice; one of another harness, or none, writes nothing.
+ * - `reading(quota, {warmUntil})`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), or
+ *   `{harness, silent: true}` when its provider served it and reported none (session.mjs servedSilent), pinned or not:
+ *   kept on the holds issue (writeReading) for automatic choice, with until when its prompt cache stays warm
+ *   (`warmUntil`, the usage record's `cacheWarmUntil`); one of another harness, or none, writes nothing.
  */
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
@@ -439,9 +455,9 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now() }, opts);
       log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}`);
     },
-    async reading(quota) {
+    async reading(quota, { warmUntil = null } = {}) {
       if (!quota || quota.harness !== harness || (!quota.windows && quota.silent !== true)) return null;
-      return writeReading(repo, { harness, account, ...(quota.silent === true ? { silent: true } : { windows: quota.windows }), now: now() }, opts);
+      return writeReading(repo, { harness, account, ...(quota.silent === true ? { silent: true } : { windows: quota.windows }), objective: issue, warmUntil, declared: names, now: now() }, opts);
     },
   };
 }

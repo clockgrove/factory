@@ -1707,6 +1707,15 @@ function lineageTotal(id, records) {
 }
 
 /**
+ * Until when (ms) the stage's prompt cache stays warm: its last pass that ran's end plus its cache's lifetime
+ * (harness.mjs cacheLifetimeMs); null when no pass ran or its harness has none Factory sets.
+ */
+export function cacheWarmUntil(records = []) {
+  const last = [...(records || [])].reverse().find((r) => Number.isFinite(Date.parse(r?.ended)) && !r.noRun);
+  return last && Number.isFinite(last.cacheWarmMs) ? Date.parse(last.ended) + last.cacheWarmMs : null;
+}
+
+/**
  * Whether a stage's record (writeUsage's) shows its provider served it, no usage limit or refusal ending it, and no quota
  * reading reported: the account's harness or credential reports none (holds.mjs silent).
  */
@@ -1759,6 +1768,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
   // choice passes that account over for a while.
   const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
   const quota = stageQuota(records);
+  const warm = cacheWarmUntil(records);
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1793,6 +1803,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // How much of its account's usage limits the provider reported used (stageQuota): a local serve keeps it with the
     // machine's holds, and automatic account choice prefers the account with the most left.
     ...(quota ? { quota } : {}),
+    // Until when (ms) the stage's prompt cache stays warm (cacheWarmUntil): automatic account choice prefers this account
+    // for the Objective's next stage until then.
+    ...(warm !== null ? { cacheWarmUntil: warm } : {}),
     // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once.
     ...(progressRun ? { progressRun } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.

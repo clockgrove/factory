@@ -71,15 +71,17 @@ export async function agentHomeProblem() {
 }
 
 /**
- * What the agent uid needs on Actions: passwordless sudo and systemd-run. Null when both work, else the doctor-style
- * reason (checked before anything is set up, so a runner without them Blocks with this line, not a crash).
+ * What the agent uid needs on Actions: passwordless sudo and systemd-run. Null when both work, else doctor's FAIL row
+ * for the first missing one (name, detail, fix; session.mjs doctorBlock), checked before anything is set up, so a
+ * runner without them Blocks with its fix, not a crash.
  */
 export async function agentPrereqs() {
+  const fail = (name, detail, fix) => ({ name, status: "FAIL", detail, fix });
   const home = await agentHomeProblem();
-  if (home) return `doctor: agent home (${home}; remove that user or give it that home)`;
+  if (home) return fail("agent home", home, "remove that user or give it that home");
   const s = await exec("/usr/bin/sudo", ["-n", "/usr/bin/true"], { env: { PATH: SAFE } }).catch(() => ({ code: 1 }));
-  if (s.code !== 0) return "doctor: sudo (sudo -n fails on this runner; give the runner's user passwordless sudo: Factory runs the harness as its own uid, factory-agent)";
-  if (!(await agentLauncher())) return "doctor: agent launcher (neither systemd-run nor unshare with a cgroup v2 hierarchy on this machine; the harness runs in a transient systemd unit or in its own namespaces)";
+  if (s.code !== 0) return fail("sudo", "sudo -n fails on this runner", "give the runner's user passwordless sudo: Factory runs the harness as its own uid, factory-agent");
+  if (!(await agentLauncher())) return fail("agent launcher", "neither systemd-run nor unshare with a cgroup v2 hierarchy on this machine", "run the stage on a runner with systemd, or with unshare, setpriv and a cgroup v2 hierarchy: the harness runs in a transient systemd unit or in its own namespaces");
   return null;
 }
 

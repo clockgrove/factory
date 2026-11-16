@@ -398,7 +398,7 @@ test("a vanished stage that left a sign it was not the network keeps the vanishe
   );
   const r = await tick(gh);
   assert.deepEqual([r.vanished, r.relaunched], [[7], [9]], "#9's job failed with no word: lost, relaunched");
-  assert.match(gh.blocks(7)[0].body, /worker job vanished: Running with no job in progress Fix by/);
+  assert.match(gh.blocks(7)[0].body, /worker job vanished: Running with no job in progress\. Fix by/);
   // The sandbox: #7's stage recorded its end (it reached GitHub); #9's lease ran out with no end.
   const sandboxed = (n, rec) => ({ body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", claim: "c1", at: ago(25 * MIN), launches: [{ stage: "work", event: "swept", ok: true, cue: "x", run: "1", at: ago(25 * MIN) }], ...rec })}` });
   const box = fakeGitHub([

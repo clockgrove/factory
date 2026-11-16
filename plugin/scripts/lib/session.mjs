@@ -3565,7 +3565,9 @@ async function textEdit(repo, issue, prNumber, opts) {
  * queueHungMs of the queue's own timeout; logic.mjs queueHangs), is taken out and counts
  * as a drop. `queueTimeout` is that timeout in minutes (null when unread) as the caller read it with `hungMs`, else it
  * is read here once; it also sets the deadline a hung removal's record keeps (logic.mjs queueDeadline). A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
- * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason), and
+ * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason),
+ * `checks` (`{sha, pending, missing}`: the required checks not done on the recorded head) with a "pending" for them,
+ * `entry` (`{state, head, position}`, or null when it could not be read) when the PR was read in the queue, and
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
@@ -3597,6 +3599,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       log(`#${issue}: PR #${prNumber}'s merge queue entry is unreadable (${errCode(e)}); next tick`);
       return null;
     });
+    report.entry = st && { state: st.state, head: st.head, position: st.position ?? null };
     // Still in the queue: the caller has it watched until it merges or leaves (dispatch.mjs watchQueue), so a drop is
     // seen by a run nothing holds for approval, not only by the `dequeued` event's (#2683).
     if (!st?.stalled) {
@@ -3657,7 +3660,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const names = checkNames?.length ? checkNames : await requiredChecks(repo, opts);
   const state = await checksOn(repo, sha, names, opts);
   if (state.failed.length) return "red";
-  if (!state.green) return "pending";
+  if (!state.green) {
+    report.checks = { sha, pending: state.pending, missing: state.missing };
+    return "pending";
+  }
   const self = selfLogin() || (await primeSelf(opts));
   const { unread } = await unreadNow(repo, { issue, prNumber, self }, opts);
   const cleared = unread.length ? await unreadCleared(repo, { issue, prNumber, pr, issueData: issueNow, unread, check: commentCheck, objectiveLabel, self }, opts) : "clear";

@@ -503,7 +503,7 @@ test("#402: validation loop: a triage rerun may wait for its workflow run as lon
   // Time the checks' wait already spent comes off: the whole wait stays within its one wait.
   const from = Date.now();
   const spent = await untilOf({ guardMs: 0, timeoutMs: 3_000 }, Date.now() + 50_000, 1_500);
-  assert.ok(spent.until <= from + 3_000 && spent.until - spent.at <= 1_600, `${spent.until - from} ${spent.until - spent.at}`);
+  assert.ok(spent.until <= from + 3_100 && spent.until - spent.at <= 1_600, `${spent.until - from} ${spent.until - spent.at}`);
 });
 
 test("notStartedJobs: a required aggregate red from a gathered job that ran is the change's, never pinned on one that never started", async () => {

@@ -57,13 +57,14 @@ test("claude: a 401 is a refusal from the result's api_error_status; a 429 or 5x
 });
 
 // Copilot 1.0.107's session.error event (copilot-sdk/generated/session-events.d.ts ErrorData).
-test("copilot: session.error with a 4xx status or a quota type is a refusal on a failed run; a rate limit is not", () => {
+test("copilot: session.error with a 4xx status or a quota type is a refusal on a failed run; a passing rate limit is not, the user's global one is", () => {
   const text = fixture("copilot-1.0.107-session-error.jsonl");
   const rec = failed("copilot", text);
   assert.deepEqual({ ...rec.refusal, message: undefined }, { harness: "copilot", status: 402, type: "quota", code: "quota_exceeded", message: undefined });
   assert.equal(parseUsage("copilot", text.replace('"exitCode":1', '"exitCode":0'), null, 0).refusal, undefined, "a run that exited 0 recovered");
-  const limited = text.replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', '"errorType":"rate_limit","errorCode":"user_global_rate_limited","statusCode":429');
-  assert.equal(parseUsage("copilot", limited, null, 1).refusal, undefined);
+  const limited = (code) => text.replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', `"errorType":"rate_limit","errorCode":"${code}","statusCode":429`);
+  assert.equal(parseUsage("copilot", limited("rate_limited"), null, 1).refusal, undefined);
+  assert.equal(parseUsage("copilot", limited("user_global_rate_limited"), null, 1).refusal?.code, "user_global_rate_limited", "#390: a usage limit with no reset reported");
 });
 
 test("a refusal outranks a death count and names itself in the review's account of a call", () => {

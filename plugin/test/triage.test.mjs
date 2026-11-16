@@ -9,7 +9,7 @@ import { SECRET_INPUTS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { gatewayKeyProblem, localBaseEnv } from "../scripts/lib/local.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { parseDecision } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, TRIAGE_QUESTION, changedNames, failingStep, foldPaths, repoRefs, failureSignature, jobsToTriage, mergeTriage, namesChange, openTriage, rerunWanted, sameFailure, triageInput, triageKey, triageKeyState, triageLine, triageMarker, triageOf } from "../scripts/lib/triage.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL, TRIAGE_QUESTION, changedNames, failingStep, foldPaths, repoRefs, failureSignature, jobsToTriage, mergeTriage, changedPathIn, changeMentions, openTriage, rerunWanted, sameFailure, triageInput, triageKey, triageKeyState, triageLine, triageMarker, triageOf } from "../scripts/lib/triage.mjs";
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/red-logs/${name}`, import.meta.url), "utf8");
 
@@ -106,24 +106,33 @@ test("failureSignature: Mocha, Playwright, pytest, Python and Go; files the fail
   assert.deepEqual(repoRefs("at Context.<anonymous> (file:///home/runner/work/app/app/test/x.test.js:5:12) at f (node_modules/mocha/lib/runner.js:1:1) node:internal/timers:483:21"), ["test/x.test.js"]);
 });
 
-test("namesChange: a failure that names a changed path, file name or added test is never rerun", () => {
+test("changedPathIn: only a repository file the failure points at, equal to a changed path, says the change caused it (#369)", () => {
   const names = changedNames([
     { filename: "test/x.test.mjs", patch: "@@ -1 +1,2 @@\n+test(\"adds\", () => assert.equal(1 + 1, 3));\n test(\"ok\", () => {});" },
     { filename: "src/users.ts", patch: "+export const name = () => undefined;" },
   ]);
   assert.deepEqual([...names.tests], ["adds"]);
   const node = failureSignature("test", fixture("node-test-assert.txt"));
-  assert.equal(namesChange(node, names), "adds", "the failing test is one the PR added");
-  assert.equal(namesChange(node, changedNames([{ filename: "test/x.test.mjs", patch: "-old line" }])), "x.test.mjs", "the stack and the test location name the changed test file");
-  assert.equal(namesChange(node, changedNames([{ filename: "README.md", patch: "+docs" }])), null);
-  assert.equal(namesChange(failureSignature("test", "✖ adds (1ms)\n##[error]Process completed with exit code 1."), changedNames([{ filename: "lib/a.js", patch: "+it('adds', () => {})" }])), "adds");
+  // The log's frames point at x.test.mjs at the checkout's root: another file than test/x.test.mjs, only its name.
+  assert.equal(changedPathIn(node, names), null, "a file name and a test title are no veto");
+  assert.deepEqual(changeMentions(node, names), { files: ["test/x.test.mjs"], tests: ["adds"] }, "they go to the model instead");
+  assert.equal(changedPathIn(node, changedNames([{ filename: "x.test.mjs", patch: "-old line" }])), "x.test.mjs", "the stack points at the changed file itself");
+  assert.deepEqual(changeMentions(node, changedNames([{ filename: "README.md", patch: "+docs" }])), { files: [], tests: [] });
   const infra = failureSignature("db", "curl: (22) The requested URL returned error: 504\n##[error]x");
-  assert.equal(namesChange(infra, names), null);
-  // Go's t.Errorf location and pytest's and Python's lines name changed files too.
-  assert.equal(namesChange(failureSignature("go", fixture("go-add.txt")), changedNames([{ filename: "math/math_test.go", patch: "-x" }])), "math_test.go");
-  assert.equal(namesChange(failureSignature("py", fixture("pytest-math.txt")), changedNames([{ filename: "tests/test_math.py", patch: "-x" }])), "tests/test_math.py");
-  assert.equal(namesChange(failureSignature("py", fixture("python-traceback.txt")), changedNames([{ filename: "app/models.py", patch: "-x" }])), "app/models.py");
-  assert.equal(namesChange(failureSignature("go", fixture("go-add.txt")), changedNames([{ filename: "invoice/invoice_test.go", patch: "-x" }])), null);
+  assert.equal(changedPathIn(infra, names), null);
+  // A changed index.ts named in a stack frame of another package's index.ts: no veto, a mention.
+  const frame = failureSignature("test", "##[group]Run npm test\nTypeError: Cannot read properties of undefined (reading 'id')\n    at render (/home/runner/work/app/app/packages/ui/index.ts:3:4)\n    at main (/home/runner/work/app/app/src/app.ts:9:1)\n##[error]Process completed with exit code 1.");
+  const indexTs = changedNames([{ filename: "src/index.ts", patch: "+export {};" }]);
+  assert.equal(changedPathIn(frame, indexTs), null, "index.ts in an unrelated frame never vetoes a rerun");
+  assert.deepEqual(changeMentions(frame, indexTs).files, ["src/index.ts"]);
+  assert.equal(changedPathIn(frame, changedNames([{ filename: "packages/ui/index.ts" }])), "packages/ui/index.ts", "the exact changed path still does");
+  // Go's t.Errorf location is relative to its package: a name. pytest's and Python's lines carry the repository path.
+  const go = failureSignature("go", fixture("go-add.txt"));
+  assert.equal(changedPathIn(go, changedNames([{ filename: "math/math_test.go", patch: "-x" }])), null);
+  assert.deepEqual(changeMentions(go, changedNames([{ filename: "math/math_test.go", patch: "-x" }])).files, ["math/math_test.go"]);
+  assert.equal(changedPathIn(failureSignature("py", fixture("pytest-math.txt")), changedNames([{ filename: "tests/test_math.py", patch: "-x" }])), "tests/test_math.py");
+  assert.equal(changedPathIn(failureSignature("py", fixture("python-traceback.txt")), changedNames([{ filename: "app/models.py", patch: "-x" }])), "app/models.py");
+  assert.deepEqual(changeMentions(go, changedNames([{ filename: "invoice/invoice_test.go", patch: "-x" }])), { files: [], tests: [] });
 });
 
 test("triage records: written in the progress comment, read back only from Factory's own progress comments", () => {
@@ -153,6 +162,9 @@ test("triageInput and triageLine: one job per question; the line names each verd
   assert.match(input, /2 files changed, 5 insertions\(\+\), 1 deletions\(-\)/);
   assert.match(input, /src\/a\.ts\ntest\/a\.test\.ts/);
   assert.match(input, /boom$/);
+  assert.doesNotMatch(input, /failure's lines or stack frames name/, "nothing named: no such list");
+  const named = triageInput({ repo: "o/r", prNumber: 5, sha: "a".repeat(40), job: "t", excerpt: "boom", files: [{ filename: "src/index.ts" }], mentions: { files: ["src/index.ts"], tests: ["adds"] } });
+  assert.match(named, /name \(by name: another file may share it\):\nsrc\/index\.ts\ntest "adds"\n\nLog of the failing job/);
   const line = triageLine({ sha: "abcdef1234", model: TRIAGE_MODEL, outcome: "fix pass", jobs: [{ name: "checks", ...flaky(0.93), sig: { id: "0123456789ab", line: "504 Gateway Timeout" } }, { name: "build", ...change(0.88), sig: { id: "ba9876543210", line: "" } }] });
   assert.equal(line, `triage of the red on abcdef1 (${TRIAGE_MODEL}): checks: flaky_or_infra 0.93 [0123456789ab \`504 Gateway Timeout\`]; build: change_caused 0.88 [ba9876543210] → fix pass`);
   assert.match(triageLine({ sha: "abcdef1234", model: "m", outcome: "fix pass", jobs: [{ name: "t", verdict: null, error: "auth", sig: { id: null, line: "" } }] }), /t: no verdict \(auth\) \[no failure line found\]/);
@@ -853,8 +865,26 @@ test("triage: a checkout or set-up failure is rerun once on its head without the
       const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: ask });
       assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: red(id), required: ["quality"] })).rerun, false, `job ${id}`);
       assert.equal(seen.reruns, 0);
-      // A failure naming a changed file is never asked either (namesChange); the others are asked.
-      assert.equal(ask.asked.length, prFiles.length ? 0 : 1, `job ${id}`);
+      // Each is asked; the object the PR added is named in the question, for the model to weigh (#369).
+      assert.equal(ask.asked.length, 1, `job ${id}`);
+      if (prFiles.length) assert.match(ask.asked[0], /by name: another file may share it\):\nassets\/yard\.png\n/);
+    });
+  }
+});
+
+test("triage: a changed file's name in an unrelated stack frame is asked of the model, which is told of it; a frame in the changed file itself is never asked (#369)", async () => {
+  const log = ["##[group]Run npm test", "not ok 1 - renders", "  TypeError: Cannot read properties of undefined (reading 'id')", "      at render (/home/runner/work/app/app/packages/ui/index.ts:3:4)", "##[error]Process completed with exit code 1."].join("\n");
+  for (const [prFiles, asked] of [[["src/index.ts"], 1], [["packages/ui/index.ts"], 0]]) {
+    const ask = asking({ verdict: "flaky_or_infra", confidence: 0.95 });
+    const lines = [];
+    await withHead({ runs: [], jobs: { 49: { ...testFailed, id: 49 } }, logs: { 49: log }, prFiles }, async (seen) => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: ask, progress: async (l) => lines.push(l) });
+      const r = await t.red({ sha: "d".repeat(40), failedRuns: [{ ...red41[0], id: 49 }], required: ["quality"] });
+      assert.equal(ask.asked.length, asked, prFiles[0]);
+      assert.equal(r.rerun, !!asked, prFiles[0]);
+      assert.equal(seen.reruns, asked);
+      if (asked) assert.match(ask.asked[0], /by name: another file may share it\):\nsrc\/index\.ts\n/);
+      else assert.match(lines[0], /quality: no verdict \(its failure points at packages\/ui\/index\.ts, which the PR changes\)/);
     });
   }
 });
@@ -1308,12 +1338,14 @@ test("validation loop: a checkout that fails on GitHub's side is rerun without t
   // A checkout red, then a test red after the rerun: not the same way, so the work's.
   assert.equal((await run({ key: false, after: testFailed, logAfter: failingLog })).result.unchanged.cause, "work");
 
-  // The PR added an LFS pointer without its object: the checkout's 404 names a file the PR changes. Asked of nobody,
-  // never rerun for free, and after a fix pass that commits nothing, Blocked as the work's.
-  const missing = await run({ logBefore: lfsMissingLog, prFiles: ["assets/yard.png"] });
+  // The PR added an LFS pointer without its object: the checkout's 404 names a file the PR changes. Not GitHub's side,
+  // so the model is asked, told of the file, and reads it as the change's: never rerun, and after a fix pass that
+  // commits nothing, Blocked as the work's.
+  const missing = await run({ logBefore: lfsMissingLog, prFiles: ["assets/yard.png"], answer: { verdict: "change_caused", confidence: 0.9 } });
+  assert.equal(missing.asked, 1);
   assert.equal(missing.result.reruns, 0);
   assert.equal(missing.result.unchanged.cause, "work");
-  assert.match(missing.result.unchanged.reason, /not rerun \(the failure of quality names assets\/yard\.png, which the PR changes\)/);
+  assert.match(missing.result.unchanged.reason, /not rerun \(triage read it as caused by the change: quality 0\.90\)/);
 
   // continue-on-error: the checkout failed on a 502 but a later step was cancelled: asked of the model like any red.
   const later = await run({ before: checkoutThenCancelled, answer: { verdict: "change_caused", confidence: 0.9 } });

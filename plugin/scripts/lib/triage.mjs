@@ -1,6 +1,6 @@
 // Triage of a red required check before Factory spends a fix pass on it. Each failing CI job is asked, one question per
 // job, whether the change broke it or it is infrastructure or a flake; only when every failing job reads flaky at
-// MIN_CONFIDENCE or more, and no failure names a file or test the PR changes, are the failed jobs rerun, once per head.
+// MIN_CONFIDENCE or more, and no failure points at a file the PR changes, are the failed jobs rerun, once per head.
 // Anything else (a change verdict, a low confidence, an error, a refusal, a failure signature already rerun once, an
 // earlier refused rerun, no key) goes to the fix pass exactly as before. Each triage line, and why triage is off at a red,
 // goes to the job log and the run's progress comment.
@@ -92,12 +92,16 @@ export const triageKey = (opts) => triageKeyState(opts).key;
 /** Whether this process has said triage is off: once per stage (one stage is one process). */
 let offSaid = false;
 
-/** What one failing job is asked about: the shape the replay measured, one job at a time. */
-export function triageInput({ repo, prNumber, sha, job, step = "", excerpt, files = [], maxFiles = 60 }) {
+/**
+ * What one failing job is asked about: the shape the replay measured, one job at a time. `mentions` (changeMentions):
+ * the changed files and added tests the failure's lines name, for the model to weigh.
+ */
+export function triageInput({ repo, prNumber, sha, job, step = "", excerpt, files = [], mentions = null, maxFiles = 60 }) {
   const adds = files.reduce((n, f) => n + (f.additions || 0), 0);
   const dels = files.reduce((n, f) => n + (f.deletions || 0), 0);
   const names = files.slice(0, maxFiles).map((f) => f.filename);
   const more = files.length > maxFiles ? `\n… and ${files.length - maxFiles} more files` : "";
+  const named = [...(mentions?.files || []), ...(mentions?.tests || []).map((t) => `test "${t}"`)].slice(0, maxFiles);
   return [
     `Repository: ${repo}`,
     `Pull request: #${prNumber}, head ${String(sha).slice(0, 12)}`,
@@ -108,6 +112,7 @@ export function triageInput({ repo, prNumber, sha, job, step = "", excerpt, file
     "Files changed by the pull request:",
     names.join("\n") + more,
     "",
+    ...(named.length ? ["Changed files and added tests the failure's lines or stack frames name (by name: another file may share it):", ...named, ""] : []),
     "Log of the failing job (key lines):",
     excerpt,
   ].join("\n");
@@ -253,16 +258,16 @@ export const sameFailure = (a, b) => !!a?.id && !!b?.id && a.id === b.id;
 
 // ------------------------------------------------------------------ what the PR changed
 
-/** The names a red could point at in the PR: changed paths, their file names, and tests its added lines name. */
+/** The names a red could point at in the PR: changed paths, their file names (each with its paths), and tests its added lines name. */
 export function changedNames(files) {
   const paths = new Set();
-  const bases = new Set();
+  const bases = new Map();
   const tests = new Set();
   for (const f of files || []) {
     for (const p of [f.filename, f.previous_filename].filter(Boolean)) {
       paths.add(p);
       const b = basename(p);
-      if (b.length >= 4) bases.add(b);
+      if (b.length >= 4) bases.set(b, [...(bases.get(b) || []), p]);
     }
     for (const raw of String(f.patch || "").split("\n")) {
       if (!raw.startsWith("+")) continue;
@@ -273,14 +278,30 @@ export function changedNames(files) {
   return { paths, bases, tests };
 }
 
-/** The first changed path, file name or test a failure's lines name, or null. */
-export function namesChange(sig, names) {
-  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) {
-    for (const p of names.paths) if (l.includes(p)) return p;
-    for (const b of names.bases) if (new RegExp(`(?:^|[\\s/\\\\(\`'"])${b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[\\s:)\`'"])`).test(l)) return b;
-    for (const t of names.tests) if (l.includes(t)) return t;
-  }
+/**
+ * The one exact sign the change caused a failure: a repository file its failure lines or their stack frames point at
+ * (repoRefs, as the signature reads them) that is a path the PR changes. Returns that path, or null.
+ */
+export function changedPathIn(sig, names) {
+  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) for (const p of repoRefs(l)) if (names.paths.has(p)) return p;
   return null;
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * What a failure's lines and stack frames mention of the PR, by name only: changed files (by path or by file name, a
+ * name another file may share) and tests its added lines name. Input for the decision model, never a verdict.
+ */
+export function changeMentions(sig, names) {
+  const files = new Set();
+  const tests = new Set();
+  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) {
+    for (const p of names.paths) if (l.includes(p)) files.add(p);
+    for (const [b, paths] of names.bases) if (new RegExp(`(?:^|[\\s/\\\\(\`'"])${escapeRe(b)}(?:$|[\\s:)\`'"])`).test(l)) for (const p of paths) files.add(p);
+    for (const t of names.tests) if (l.includes(t)) tests.add(t);
+  }
+  return { files: [...files], tests: [...tests] };
 }
 
 // ------------------------------------------------------------------ the record
@@ -975,10 +996,11 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return { files, names: changedNames(files), texts, sigs: new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))])) };
   };
   // A job that failed on GitHub's side: only in its set-up or checkout (setupFailure), its failed step saying a server
-  // or network failure (serverSide), and its failure naming nothing the PR changes. Returns the kind, or null.
+  // or network failure (serverSide), and its failure pointing at no file the PR changes (changedPathIn). Returns the
+  // kind, or null.
   const githubSide = async (sha, job, text, sig, names) => {
     const step = failedStep(job);
-    if (!step || !serverSide(text) || namesChange(sig, names)) return null;
+    if (!step || !serverSide(text) || changedPathIn(sig, names)) return null;
     return setupFailure(job, step.number === 1 ? null : await workflowOf(sha, job));
   };
 
@@ -1030,7 +1052,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   };
 
   // Each failing job's question (red(), classify()): its log and signature read, the model asked unless the failure
-  // failed on GitHub's side, was already rerun once on the Objective, or names what the PR changes.
+  // failed on GitHub's side, was already rerun once on the Objective, or points at a file the PR changes (changedPathIn).
+  // What else its lines name of the PR (changeMentions) is part of the question.
   const askJobs = async ({ sha, failedRuns, required, seen, actionsJob }) => {
     const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
     const names = changedNames(files);
@@ -1051,10 +1074,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         const repeat = !!sig.id && seen.sigs.has(sig.id);
         // A failure already rerun once (on any head of this Objective) is not asked again: rerunning it hides a defect.
         if (repeat) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: "already rerun once" };
-        // A failure that names what the PR changed could be the change's own intermittent defect: never rerun to green.
-        const named = namesChange(sig, names);
-        if (named) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: `its failure names ${named}, which the PR changes` };
-        const v = await ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, step, excerpt: logWindow(cleanLog(text), 4000), files }), TRIAGE_QUESTION);
+        // A failure in a file the PR changed could be the change's own intermittent defect: never rerun to green.
+        const own = changedPathIn(sig, names);
+        if (own) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: `its failure points at ${own}, which the PR changes` };
+        const v = await ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, step, excerpt: logWindow(cleanLog(text), 4000), files, mentions: changeMentions(sig, names) }), TRIAGE_QUESTION);
         return { name: r.name, sig, repeat, step, ...v };
       }),
     );
@@ -1062,7 +1085,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
 
   // A red on a commit no rerun brings back (the merge queue's, after the queue dropped the PR: session.mjs queueRedOf):
   // each failing job asked as red() asks it, nothing rerun and no rerun recorded. `flaky` when red() would have rerun
-  // it (rerunWanted); `named` when a failure names a file or test the PR changes; `off` when no model was asked. The
+  // it (rerunWanted); `named` when a failure points at a file the PR changes (changedPathIn); `off` when no model was asked. The
   // verdicts go to the log and the progress comment.
   const classify = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return { flaky: false };
@@ -1078,17 +1101,17 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     const jobs = await askJobs({ sha, failedRuns, required, seen: await known(), actionsJob });
     const flaky = rerunWanted(jobs);
     await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : "the change's: fix pass" }), {});
-    return { flaky, jobs, off: false, named: await namesChanged(failedRuns) };
+    return { flaky, jobs, off: false, named: await pointsAtChange(failedRuns) };
   };
-  // Whether a failing job's failure names a file, file name or test the PR changes (namesChange).
-  const namesChanged = async (failedRuns) => {
+  // Whether a failing job's failure points at a file the PR changes (changedPathIn).
+  const pointsAtChange = async (failedRuns) => {
     const { sigs, names } = await readRed(failedRuns);
-    return failedRuns.some((r) => !!namesChange(sigs.get(r.id), names));
+    return failedRuns.some((r) => !!changedPathIn(sigs.get(r.id), names));
   };
 
   // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
   // failed jobs are rerun once for that head (the same once-per-head record as red()), no model asked, only when nothing
-  // says the change caused the red: no change_caused verdict on this head, no failure naming what the PR changes, no
+  // says the change caused the red: no change_caused verdict on this head, no failure pointing at a file the PR changes, no
   // failure signature already rerun on the Objective, and each job either answered by the model on this head or failed
   // on GitHub's side. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
   const again = async ({ sha, failedRuns = [] }) => {
@@ -1109,8 +1132,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) {
       const sig = sigs.get(r.id);
       if (sig.id && seen.sigs.has(sig.id)) return { rerun: false, skipped: `the failure of ${r.name} was already rerun once on this Objective` };
-      const named = namesChange(sig, names);
-      if (named) return { rerun: false, skipped: `the failure of ${r.name} names ${named}, which the PR changes` };
+      const own = changedPathIn(sig, names);
+      if (own) return { rerun: false, skipped: `the failure of ${r.name} points at ${own}, which the PR changes` };
       if (!answered.has(r.name) && !(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sig, names))) return { rerun: false, skipped: `${r.name} has no triage verdict and did not fail on GitHub's side` };
     }
     const line = (outcome) => `triage: the fix pass committed nothing, so the red on ${short} is unchanged → ${outcome}`;
@@ -1124,7 +1147,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return { rerun: true, ignoreIds: new Set(failedRuns.map((r) => r.id)), jobs: failedRuns.map((r) => r.name) };
   };
   // Whether every failed job failed on GitHub's side (githubSide): its set-up or checkout only, a server or network
-  // failure, naming nothing the PR changes.
+  // failure, pointing at no file the PR changes.
   const infra = async ({ sha, failedRuns = [] }) => {
     if (!failedRuns.length) return false;
     const { notActions, jobs } = await actionsJobs(failedRuns);
@@ -1133,8 +1156,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) if (!(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sigs.get(r.id), names))) return false;
     return true;
   };
-  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure names what the PR changes.
-  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await namesChanged(r.failedRuns) : false });
+  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure points at a file the PR changes.
+  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await pointsAtChange(r.failedRuns) : false });
   if (!decider && !key) return { model, off: code, red: offRed, again, infra, classify: offClassify };
   return { model, red, again, infra, classify };
 }

@@ -716,12 +716,15 @@ test("queue red: the queue's fix passes are bounded per re-entry, whatever new f
   });
 });
 
-test("queue red: with triage off, a red is the PR's own only when its failure names what the PR changed; else it is enqueued again as any drop", async () => {
-  for (const [files, want] of [[[{ filename: "src/other.js", patch: "+x" }], "requeued"], [[{ filename: "test/x.test.mjs", patch: '+test("adds", () => {});' }], "fixing"]]) {
+test("queue red: with triage off, a red is the PR's own only when its failure points at a file the PR changed; else it is enqueued again as any drop (#369)", async () => {
+  const framed = testLog.replace("##[error]", "      at TestContext.<anonymous> (file:///home/runner/work/app/app/test/x.test.mjs:2:3)\n##[error]");
+  const added = [{ filename: "test/x.test.mjs", patch: '+test("adds", () => {});' }];
+  // The failing test's title is one the PR added, but no line points at a changed file: not known to be the PR's own.
+  for (const [i, files, log, want] of [[0, [{ filename: "src/other.js", patch: "+x" }], framed, "requeued"], [1, added, testLog, "requeued"], [2, added, framed, "fixing"]]) {
     const fake = fakeGitHub();
     await withGitHub(fake, async () => {
       fake.s.prFiles = files;
-      queueRed(fake, { id: 640 + files.length + want.length });
+      queueRed(fake, { id: 640 + i, log });
       fake.s.removals = [queueDrop(ago(5 * MIN))];
       assert.equal(await merge({}), "queue-red");
       const step = await reviewReads(fake);

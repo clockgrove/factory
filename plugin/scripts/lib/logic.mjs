@@ -2844,7 +2844,8 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
   if (ev.kind === "comment") {
     if (!ev.human) return { skip: "a comment by a bot" };
     if (!trusted) return { skip: "a comment by someone who is not a maintainer" };
-    // A maintainer's comment on a Question is the answer: back to Queued, as re-applying the label does today.
+    // A maintainer's comment on a Question may be its answer: back to Queued once the answer check lets it through
+    // (launch.mjs, lib/answer-check.mjs), as re-applying the label does.
     return state === "Question" ? { requeue: "a maintainer answered the Question" } : { skip: `${state}: a comment starts nothing` };
   }
   if (ev.kind === "checks") {
@@ -2916,9 +2917,10 @@ export function questionFormOf(comments, { issue, since }) {
 }
 
 /**
- * The answer to a Question: a maintainer decision (objectiveDecisions: people with write access, never Factory's own
- * marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the comment's own
- * launch gets that long; on any other route nothing launches on a comment, so the grace is 0).
+ * A comment that may answer a Question: a maintainer decision (objectiveDecisions: people with write access, never
+ * Factory's own marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the
+ * comment's own launch gets that long; on any other route nothing launches on a comment, so the grace is 0). Whether it
+ * gives a decision is the answer check's (lib/answer-check.mjs); with no decider, it resumes the Question.
  */
 export function missedAnswer(decisions, { questionSince, now = Date.now(), graceMs }) {
   const since = Date.parse(questionSince);

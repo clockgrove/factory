@@ -44,6 +44,7 @@ import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
+import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
@@ -95,12 +96,42 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
 // `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
 // already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
 let beforeExit = null;
-const applyExit = async (...args) => {
+// A stage's exit, once it is committed to (a stop that came first parks it).
+const settleExit = async () => {
   await holdIfStopped();
   await beforeExit?.();
   if (!commitExit()) await parked();
+};
+const applyExit = async (...args) => {
+  await settleExit();
   return applyExitNow(...args);
 };
+
+/**
+ * The work stage's answer check (lib/answer-check.mjs answerAtStart), before anything is set up: when the writer
+ * comments since the Question this stint resumes give no decision, the stage commits to its exit (`settle`), puts the
+ * Objective back to Question with its notice (reopenQuestion) and ends with a Question (`finish`), which a local loop
+ * holds for an answer (lib/local.mjs stopHold). A notice that cannot be written Blocks instead, naming why: a Question
+ * with no notice since its label would never resume on a comment. Returns whether the stage ended here.
+ */
+export async function answerGuard({ repo, issue, check, decisions, label, appId = null, opts, prepare = null, notify = null, settle = settleExit, finish }) {
+  const answer = await answerAtStart({ repo, issue, check, decisions, label, appId, opts, prepare });
+  if (!answer.open) return false;
+  log(`answer check: ${answer.open}; the Question stays open`);
+  await settle();
+  try {
+    await reopenQuestion(repo, { issue, notice: answer.notice, label }, opts);
+  } catch (e) {
+    const code = Number.isInteger(e?.status) ? `HTTP ${e.status}` : String(e?.message || e).slice(0, 120);
+    const reason = `the comments since the Question give no decision on it, but its notice could not be written on the issue (${code}), so no comment would resume it`;
+    log(reason);
+    await applyExitNow(repo, { issue, pr: null, exit: "blocked", reason, cause: "factory", notify, stage: "work" }, opts).catch((x) => log(`exit: ${String(x?.message || x).slice(0, 120)}`));
+    await finish("blocked", reason);
+    return true;
+  }
+  await finish("question", answer.open);
+  return true;
+}
 
 async function main() {
   const jobStartMs = Date.now();
@@ -420,6 +451,30 @@ async function main() {
     await finish("question", named);
     return;
   }
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
+  // call's spend in the stage's usage. Their env is the harness's own once the stage builds it (step 5); before that,
+  // the answer check readies one from the stage's credential, only when it asks the harness.
+  let decisionEnv = null;
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
+  // The answer check (lib/answer-check.mjs), first thing once the stage's decider exists: a stint that resumes a Question
+  // goes on only when the writer comments since it give a decision, so one that does not costs no branch, no Running
+  // mark, no setup, no install, no hand-off and no relay. A send-back resumes no Question; a relaunch or a continued
+  // pause finds its comment's verdict kept on the issue and asks nothing.
+  const answerCheck = openAnswerCheck({ inputs, stage: decisionStage });
+  const readyDecisions = async () => {
+    if (decisionEnv || answerCheck.asked().name !== "harness") return true;
+    try {
+      const c = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+      decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...c.env };
+      return true;
+    } catch (e) {
+      log(`answer check: the stage's credential is not ready (${String(e?.message || e).slice(0, 160)}); the comment resumes the Question unjudged`);
+      return false;
+    }
+  };
+  const decisionsNow = () => objectiveDecisions(repo, { issue, prNumber: prNow?.number ?? null }, token);
+  if (await answerGuard({ repo, issue, check: answerCheck, decisions: decisionsNow, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_NOTICE_APP_ID || null, opts: token, prepare: readyDecisions, notify: inputs.notify, finish })) return;
+
   // A workflow change the Objective names (handover.mjs): Factory never pushes one, so the issue says so now, before any
   // harness runs, and how it goes instead (the hand-over). Most needs show only in the plan or the work: the plan's
   // Needs-Workflow line is said as the harness writes it, and the PR's hand-over carries any found later.
@@ -619,9 +674,8 @@ async function main() {
     return;
   }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
-  // call's spend in the stage's usage.
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The decision calls' env from here on: the harness's own (decisionStage, above).
+  decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.

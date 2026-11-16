@@ -57,15 +57,16 @@ Rules:
 
 ## GitHub status
 
-Contract: `plugin/scripts/lib/adapters/github-status.mjs`. Vendor: GitHub's status page, githubstatus.com, an Atlassian Statuspage read through its public v2 JSON API (`/api/v2/components.json`, plain `fetch`, no key, no SDK). `GITHUB_STATUS_URL` sets its base URL, as `GITHUB_API_URL` does the API's. Used by `serve` for an Objective paused on GitHub answering 5xx past the client's retries (LOCAL.md).
+Contract: `plugin/scripts/lib/adapters/github-status.mjs`. Vendor: GitHub's status page, githubstatus.com, an Atlassian Statuspage read through its public v2 JSON API (`/api/v2/summary.json`, plain `fetch`, no key, no SDK). `GITHUB_STATUS_URL` sets its base URL, as `GITHUB_API_URL` does the API's; unset, githubstatus.com speaks only for GitHub.com (`GITHUB_API_URL` unset or `https://api.github.com`), so GitHub Enterprise Server and GHE.com get no reading. Used by `serve` for an Objective paused on GitHub answering 5xx past the client's retries (LOCAL.md).
 
 | Operation | Does |
 | --- | --- |
-| `githubStatus()` → `{state, components, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, `operational` when all three have it, and null when the page cannot say: no answer, no JSON, or one of them missing. `error` is then the reason as a code (`HTTP 503`, a connect-level code, `invalid`, `missing <name>`). Never throws. |
+| `githubStatus()` → `{state, components, incidents, maintenances, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, when the page lists an unresolved incident (any status but `resolved` or `postmortem`), or when a scheduled maintenance is `in_progress`; `operational` when none of that holds; null when the page cannot say: no page for this GitHub host, no answer, no JSON, or one of the components missing. `error` is then the reason as a code (`no page`, `HTTP 503`, a connect-level code, `no answer`, `invalid`, `missing <name>`). Never throws. |
 
 Rules:
 
-- **Decided on the components' `status` field**, never on an incident's words.
+- **Decided on the components' `status`, the incidents' and maintenances' `status` fields**, never on an incident's words.
+- **A component missing is Factory's contract with the page breaking**: logged as such, once per pause, and waited on as an incident.
 - **A page that cannot be read counts as an incident**: Factory waits on within its bound rather than Block on a guess.
 
 ## Codex model provider

@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, answeredError, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
 import { OUTAGE, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -986,25 +986,28 @@ export function providerOrigin(harness, env = {}) {
 
 /**
  * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out. Only a pass
- * that failed (no answer, no cap, no stop, no provider refusal) is asked, on its harness's structured error (usage.mjs):
- * a provider or network failure (`providerOutage`: a 5xx, or a connection it could not make) is a cut, and the provider's
- * API is probed only to know whether to wait for it before the pass runs again; any other structured error
- * (`providerError`: a 429, a 4xx the provider retries) is no cut, whatever the network did. A pass with no structured error
- * at all (a harness that prints a 5xx or a lost connection as prose only, a crash) is a cut exactly when its provider's
- * API does not answer a probe now (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a
- * pass while a host it gave up on still does not answer (network.mjs givenUp) runs no more: it throws that outage, which
- * the stage ends on (session.mjs outageExit). With every such host answering again, it is judged as any other would be.
+ * that failed (no answer, no cap, no stop, no provider refusal) is asked, on its harness's structured error (usage.mjs
+ * providerError): a provider or network failure (`providerOutage`: a 5xx, or a connection it could not make) is a cut,
+ * and the provider's API is probed only to know whether to wait for it before the pass runs again; a 4xx (the provider
+ * answered and said why: answeredError) is no cut, and nothing probes. Any other pass (no structured error at all: a
+ * harness that prints a 5xx or a lost connection as prose only, a crash; or one with no status that names no outage) is
+ * a cut exactly when this process met an outage while it ran, or its provider's API does not answer a probe now
+ * (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a pass while a host it gave up on
+ * still does not answer (network.mjs givenUp) runs no more: it throws that outage, which the stage ends on (session.mjs
+ * outageExit). With every such host answering again, it is judged as any other would be.
  */
 async function outageCut(rec, { harness, env }) {
   if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
-  if (rec.providerError && !rec.providerOutage) return null;
+  if (!rec.providerOutage && answeredError(rec.providerError)) return null;
   const gaveUp = stoppedWaiting();
   if (gaveUp) {
     const down = await givenUp();
     if (down) throw down;
   }
   if (!gaveUp && !waitingOutages()) return null;
-  return passCutOff(rec.providerOutage ?? null, providerOrigin(harness, env));
+  const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
+  const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
+  return passCutOff(rec.providerOutage ?? null, providerOrigin(harness, env), { startedMs: started, endedMs: ended });
 }
 
 /**

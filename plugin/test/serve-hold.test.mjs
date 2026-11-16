@@ -1002,20 +1002,23 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
 });
 
 /**
- * GitHub's status page served on this machine (GITHUB_STATUS_URL): `answer()` is {status, components} per request, the
- * components as {name: status}; `close` stops it and clears the variable. Each request is counted in `asked()`.
+ * GitHub's status page served on this machine (GITHUB_STATUS_URL): `answer()` is {status, components, incidents,
+ * maintenances} per request, the components as {name: status}, the others as Statuspage's summary.json lists them;
+ * `close` stops it and clears the variable. Each request is counted in `asked()`, its paths in `paths`.
  */
 async function statusPage(answer) {
   let n = 0;
+  const paths = [];
   const server = createServer((req, res) => {
     n += 1;
+    paths.push(req.url);
     const a = answer();
     res.writeHead(a.status ?? 200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ page: { id: "x", name: "GitHub" }, components: Object.entries(a.components ?? {}).map(([name, status]) => ({ id: name, name, status })) }));
+    res.end(JSON.stringify({ page: { id: "x", name: "GitHub" }, components: Object.entries(a.components ?? {}).map(([name, status]) => ({ id: name, name, status })), incidents: a.incidents ?? [], scheduled_maintenances: a.maintenances ?? [], status: { indicator: "none" } }));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   process.env.GITHUB_STATUS_URL = `http://127.0.0.1:${server.address().port}`;
-  return { asked: () => n, close: () => (delete process.env.GITHUB_STATUS_URL, new Promise((r) => server.close(r))) };
+  return { asked: () => n, paths, close: () => (delete process.env.GITHUB_STATUS_URL, new Promise((r) => server.close(r))) };
 }
 const parts = (api, rest = "operational") => ({ "Git Operations": "major_outage", "API Requests": api, Issues: rest, "Pull Requests": rest });
 
@@ -1023,11 +1026,11 @@ const parts = (api, rest = "operational") => ({ "Git Operations": "major_outage"
 async function serverPaused() {
   const loop = await claimLoop();
   const first = Date.parse("2026-11-14T08:47:00Z");
-  const at = { t: first };
+  // `endpoint`: the request the resumed stage's next 5xx meets (a test moves it on to another).
+  const at = { t: first, endpoint: "POST repos/acme/app/issues/7/labels" };
   loop.clock = () => at.t;
-  const endpoint = "POST repos/acme/app/issues/7/labels";
   // GitHub's host answers a probe (github.test answers every request) while that one request keeps failing.
-  const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint } });
+  const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint: at.endpoint } });
   let tries = 0;
   // The resumed stage runs longer than a network outage's carry-over before it meets the 5xx again.
   loop.runObjective = (n) => ((tries += 1), (at.t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
@@ -1041,7 +1044,9 @@ async function serverPaused() {
     assert.deepEqual(await loop.pausedHere(new Map()), [7], "resumed after its wait");
     return loop.resume(7);
   };
-  return { loop, first, at, next, tries: () => tries };
+  // A resume after the wait with no time moved (one skipped before it, tried again on the next tick).
+  const again = () => loop.resume(7);
+  return { loop, first, at, next, again, tries: () => tries };
 }
 
 test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page reports an incident or does not answer, past any count of resumes, and Blocks at 12 h as an outage", async () => {
@@ -1097,8 +1102,9 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
     assert.equal((await next()).exit, "blocked");
     assert.equal(tries(), 3, "no try after the one more");
     assert.equal(page.asked(), 4);
+    assert.ok(page.paths.every((u) => u === "/api/v2/summary.json"), page.paths.join(" "));
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 4 pauses over \d+ min; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
     assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     assert.ok(!loop.offline.has(7));
@@ -1111,6 +1117,84 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
   } finally {
     await page.close();
     gh.restore();
+  }
+});
+
+test("#389: a resume skipped before its stage starts (a read that fails) makes no try: the one more try is the one that runs", async () => {
+  let pullsDown = false;
+  const gh = claimGitHub({ fail: (kind) => pullsDown && kind === "pulls" });
+  const page = await statusPage(() => ({ components: parts("operational") }));
+  try {
+    const { loop, next, again, tries } = await serverPaused();
+    pullsDown = true;
+    assert.equal((await next()).exit, "skipped", "the PR read failed: nothing started");
+    assert.equal(loop.offline.get(7).server.tried, false, "no try was made");
+    pullsDown = false;
+    assert.notEqual((await again()).exit, "blocked", "the next tick makes the one more try");
+    assert.equal(tries(), 1);
+    assert.equal((await next()).exit, "blocked", "that try met the 5xx again: Blocked");
+    assert.equal(tries(), 1);
+  } finally {
+    await page.close();
+    gh.restore();
+  }
+});
+
+test("#389: the one more try belongs to the request that failed: a 5xx on another request, or a pause on anything else, starts it afresh, and the Block names the request from its own first failure", async () => {
+  const gh = claimGitHub();
+  const page = await statusPage(() => ({ components: parts("operational") }));
+  try {
+    const { loop, at, next, tries } = await serverPaused();
+    // The try gets past the labels request and meets a 5xx on another one: that request gets its own one more try.
+    at.endpoint = "GET repos/acme/app/pulls";
+    assert.notEqual((await next()).exit, "blocked");
+    assert.equal(loop.offline.get(7).server.requestSince, at.t, "the pulls request's own first failure");
+    assert.notEqual((await next()).exit, "blocked", "the pulls request's own one more try");
+    assert.equal(tries(), 2);
+    // A pause on this machine's network between: the next 5xx starts afresh too.
+    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "EAI_AGAIN", since: new Date(at.t).toISOString() } }));
+    assert.equal(loop.offline.get(7).server.tried, undefined, "no try carried over a network pause");
+    const fresh = at.t;
+    await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint: at.endpoint } }));
+    assert.equal(loop.offline.get(7).server.tried, false);
+    assert.notEqual((await next()).exit, "blocked");
+    assert.equal((await next()).exit, "blocked");
+    assert.equal(tries(), 3);
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${new Date(fresh).toISOString()};`), notice);
+    assert.doesNotMatch(notice, /from 2026-11-14T08:47:00\.000Z/, "not the first pause's request time");
+  } finally {
+    await page.close();
+    gh.restore();
+  }
+});
+
+test("#389: GitHub's status page counts an unresolved incident and a maintenance in progress as an incident; GitHub Enterprise has no page: it waits on, and nothing is fetched", async () => {
+  const { githubStatus } = await import("../scripts/lib/adapters/github-status.mjs");
+  let answer = { components: parts("operational"), incidents: [{ id: "i1", name: "Disruption with some GitHub services", status: "investigating" }] };
+  const page = await statusPage(() => answer);
+  try {
+    const one = await githubStatus();
+    assert.deepEqual([one.state, one.incidents], ["degraded", ["Disruption with some GitHub services"]]);
+    answer = { components: parts("operational"), incidents: [{ id: "i1", name: "x", status: "resolved" }], maintenances: [{ id: "m1", name: "Database upgrade", status: "in_progress" }, { id: "m2", name: "Later", status: "scheduled" }] };
+    const two = await githubStatus();
+    assert.deepEqual([two.state, two.maintenances], ["degraded", ["Database upgrade"]]);
+    answer = { components: parts("operational"), maintenances: [{ id: "m2", name: "Later", status: "scheduled" }] };
+    assert.equal((await githubStatus()).state, "operational");
+  } finally {
+    await page.close();
+  }
+  // GHES or GHE.com, no GITHUB_STATUS_URL: githubstatus.com does not speak for it.
+  const seen = [];
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url) => (seen.push(String(url)), new Response("{}"));
+  try {
+    for (const api of ["https://ghes.example.test/api/v3", "https://api.acme.ghe.com"]) assert.deepEqual(await githubStatus({ env: { GITHUB_API_URL: api } }), { state: null, components: [], incidents: [], maintenances: [], error: "no page" });
+    assert.deepEqual(seen, [], "nothing fetched");
+    await githubStatus({ env: {} });
+    assert.deepEqual(seen, ["https://www.githubstatus.com/api/v2/summary.json"], "GitHub.com's page by default");
+  } finally {
+    globalThis.fetch = inner;
   }
 });
 

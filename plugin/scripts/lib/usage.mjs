@@ -283,14 +283,39 @@ export function rotatedPin(harness, events) {
  *             the reset from that snapshot's full window
  *   copilot : no reset is reported, so a Copilot quota refusal Blocks as it is
  */
-export function providerRefusal(harness, events, { rollout = null, since = null } = {}) {
+export function providerRefusal(harness, events, opts = {}) {
+  const e = providerError(harness, events, opts);
+  // Claude Code's API error with no status (a connection it could not make, a request that timed out) refuses nothing.
+  if (!e || (harness === "claude" && e.status === null)) return null;
+  const { reset, retryAt, ...r } = e;
+  const kind = REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
+  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
+  if (!refused) return null;
+  return { ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+}
+
+/**
+ * The provider error a failed run ended on, as the harness reported it in structure: {harness, status, type, code,
+ * message, reset, retryAt} (plus `limitType` for a Claude usage limit's window), else null: the failure carries no
+ * such structure (a crash, a killed run, an error the harness printed as prose only). Every reading of a provider's
+ * error derives from this one (providerRefusal, outageError), never from the message's words. Each harness's structure:
+ *   claude  : the result line with is_error, with an `api_error_status` (the result's, else the API error message's)
+ *             or an API error message (`is_api_error_message`); the type is that message's `error`, the code the
+ *             result's (else the message's) `api_error`; `reset` a usage limit's (providerRefusal)
+ *   codex   : the last `turn.failed` (else `error`) event's JSON error body (codexError), else a usage limit read from
+ *             the thread's rollout (codexLimit, with its `reset`); Codex 0.167 prints an HTTP 5xx and a lost
+ *             connection as prose only, so those carry none
+ *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode, message}
+ * `reset` and `retryAt` (ms) are null when the harness reported none.
+ */
+export function providerError(harness, events, { rollout = null, since = null } = {}) {
   let r = null;
   let reset = null;
   if (harness === "claude") {
     const res = [...events].reverse().find((e) => e?.type === "result");
     const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
     const status = num(res?.api_error_status) ?? num(api?.api_error_status);
-    if (res?.is_error !== true || status === null) return null;
+    if (res?.is_error !== true || (status === null && !api)) return null;
     r = { status, type: str(api?.error), code: str(res.api_error) ?? str(api?.api_error), message: str(res.result) };
     // The limit's window (`rateLimitType`, e.g. five_hour) as the API error names it; the fallback reset is that window's.
     const info = api?.api_error_params?.rate_limit_info;
@@ -310,43 +335,18 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
     if (!d || typeof d !== "object") return null;
     r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode), message: str(d.message) };
   } else return null;
-  const kind = REFUSED_KINDS.has(r.type) || REFUSED_KINDS.has(r.code);
-  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
-  if (!refused) return null;
-  return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+  return { harness, ...r, reset, retryAt: null };
 }
 
 /**
- * The provider error a failed run ended on, as the harness reported it in structure: {harness, status, type, code},
- * else null (the run's failure carries no such structure: a crash, a run killed, an error reported as prose only).
- * Read from the same fields as providerRefusal, never the words:
- *   claude  : the result line with is_error and an API error message: the result's `api_error_status` (else the
- *             message's), the message's `error` as the type and `api_error` as the code
- *   codex   : the last `turn.failed` (else `error`) event's JSON error body (codexError); Codex 0.167 reports an HTTP
- *             5xx and a lost connection as prose only, so those carry none
- *   copilot : the main agent's last `session.error` event's data {statusCode, errorType, errorCode}
- */
-export function providerError(harness, events) {
-  let r = null;
-  if (harness === "claude") {
-    const res = [...events].reverse().find((e) => e?.type === "result");
-    const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
-    if (res?.is_error !== true || !api) return null;
-    r = { status: num(res.api_error_status) ?? num(api.api_error_status), type: str(api.error), code: str(res.api_error) ?? str(api.api_error) };
-  } else if (harness === "codex") r = codexError(events);
-  else if (harness === "copilot") {
-    const d = [...events].reverse().find((e) => e?.type === "session.error" && !e.agentId)?.data;
-    if (d && typeof d === "object") r = { status: num(d.statusCode), type: str(d.errorType), code: str(d.errorCode) };
-  }
-  return r ? { harness, status: r.status, type: r.type, code: r.code } : null;
-}
-
-/**
- * Whether a provider error (providerError) is a provider or network failure: a 5xx (529 included), or, with no status,
- * a server-error type. Claude Code reports a connection it could not make or a request that timed out as an API error
- * message whose `error` is `server_error` with no `api_error_status` (2.1.325).
+ * Whether a provider error (providerError) is its provider or the network failing: a 5xx (529 included), or, with no
+ * status, a server-error type. Claude Code reports a connection it could not make or a request that timed out as an API
+ * error message whose `error` is `server_error` with no `api_error_status` (2.1.325).
  */
 export const outageError = (r) => !!r && (r.status !== null ? r.status >= 500 && r.status < 600 : r.type === "server_error");
+
+/** Whether a provider error (providerError) is a 4xx: the provider answered and said why, so no probe asks the network. */
+export const answeredError = (r) => !!r && r.status !== null && r.status >= 400 && r.status < 500;
 
 /**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
@@ -554,7 +554,7 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   const refusal = rec.ok ? null : providerRefusal("codex", events, { rollout, since });
   if (refusal) rec.refusal = refusal;
   // Its provider error (providerError) when no refusal; also `providerOutage` when that is a 5xx or a lost connection.
-  const failure = rec.ok || refusal ? null : providerError("codex", events);
+  const failure = rec.ok || refusal ? null : providerError("codex", events, { rollout, since });
   if (failure) rec.providerError = failure;
   if (outageError(failure)) rec.providerOutage = failure;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.

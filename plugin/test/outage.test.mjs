@@ -262,9 +262,13 @@ const PROSE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000
 // A structured error that is no outage: the provider's JSON body with a 429.
 const LIMITED_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "m" }, status: 429 }) } })}\n`;
 
-for (const up of [false, true]) {
-  test(`runHarness: a pass whose harness printed its 503 as prose only is a cut exactly when its provider ${up ? "answers a probe: no, its failure stands" : "does not answer a probe: it runs again once the provider answers"}`, async () => {
-    const { bin, calls } = fakeCodex({ lost: PROSE_503 });
+// The AI Gateway's bare body for an unavailable provider: a structured error with no status and a type that is not
+// `server_error`, so it names no outage by itself and goes to the probe as a pass with no structure does.
+const BARE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "service_unavailable_error", message: "m" } }) } })}\n`;
+
+for (const [what, lost, up] of [["printed its 503 as prose only", PROSE_503, false], ["printed its 503 as prose only", PROSE_503, true], ["ended on the gateway's bare service_unavailable_error (no status)", BARE_503, false], ["ended on the gateway's bare service_unavailable_error (no status)", BARE_503, true]]) {
+  test(`runHarness: a pass whose harness ${what} is a cut exactly when its provider ${up ? "answers a probe: no, its failure stands" : "does not answer a probe: it runs again once the provider answers"}`, async () => {
+    const { bin, calls } = fakeCodex({ lost });
     const saved = process.env.PATH;
     process.env.PATH = `${bin}:${saved}`;
     let probes = 0;
@@ -292,6 +296,26 @@ for (const up of [false, true]) {
     }
   });
 }
+
+test("passCutOff: a pass with no structured error is a cut when this process met an outage on any host while it ran, though every host answers now", async () => {
+  let down = true;
+  await offline(
+    (req) => (req.origin === "https://api.github.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
+    async ({ now }) => {
+      waitOutages({ until: () => Infinity });
+      const before = now();
+      const ep = networkBack("https://api.github.test", "EAI_AGAIN");
+      down = false;
+      await ep;
+      const back = now();
+      // GitHub lost for a few seconds while the pass ran: its outage, though over and short.
+      assert.deepEqual(await passCutOff(null, "https://chatgpt.com", { startedMs: before - 60_000, endedMs: back + 1_000 }), { origin: "https://api.github.test", code: "EAI_AGAIN", since: before, ongoing: false });
+      // One over before the pass began is no part of it; nor of a pass that reported its failure in structure.
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: back + 1, endedMs: back + 60_000 }), null);
+      assert.equal((await passCutOff({ harness: "codex", status: 503, type: "server_error", code: null }, "https://chatgpt.com", { startedMs: before - 60_000, endedMs: back + 1_000 })).origin, "https://chatgpt.com");
+    },
+  );
+});
 
 test("runHarness: a pass that ended on a structured error that is no outage (a 429) is no cut, and nothing probes, though its provider does not answer", async () => {
   const { bin, calls } = fakeCodex({ lost: LIMITED_RUN });

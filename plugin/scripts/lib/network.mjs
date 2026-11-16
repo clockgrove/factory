@@ -177,6 +177,9 @@ export class NetworkDown extends Error {
 let MODE = null;
 let STOPPED = false;
 const EPISODES = new Map();
+// The outages on hosts this process lost that have ended, newest last ({origin, code, since, back}, ms; the last 20):
+// what passCutOff reads for an outage met while a pass ran.
+const PAST = [];
 // The outage each host was in when this process stopped waiting for it (given up, or stopWaiting): what a later request
 // to it, or the stage's end, names (downFor, outageOf), so the host and the first loss are never lost to a caller that
 // swallowed the wait's own NetworkDown.
@@ -223,6 +226,7 @@ export function resetNetwork() {
   STOPPED = false;
   GEN += 1;
   EPISODES.clear();
+  PAST.length = 0;
   GIVEN_UP.clear();
   RECENT.clear();
   SPENT.clear();
@@ -350,7 +354,10 @@ function episode(origin, code, resetAt = null, key = origin) {
     if (gen === GEN) GIVEN_UP.set(origin, { origin, code: ep.code, since });
     return false;
   })().finally(() => {
-    if (gen === GEN) EPISODES.delete(origin);
+    if (gen !== GEN) return;
+    EPISODES.delete(origin);
+    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now() });
+    if (PAST.length > 20) PAST.shift();
   });
   return ep;
 }
@@ -433,17 +440,27 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
 export const outageOn = (origin) => (origin && EPISODES.get(origin)) || null;
 
 /**
- * Whether a failed harness pass was cut off by its provider or this machine's network, `origin` being the provider's
- * API: {origin, code, since, ongoing}, else null. `failure` is the provider or network failure its harness reported as
- * its own structured error (a record's `providerOutage`, usage.mjs outageError), or null for a pass whose harness
- * reported no structured error at all (a harness that prints a 5xx or a lost connection as prose only). Ongoing when an
- * outage on that host is under way in this process or the host does not answer a probe now: the pass waits for it
- * (networkBack) before it runs again. With the host answering, a reported failure (its 5xx) runs the pass again at
- * once, its code the failure's status (`HTTP 529`), else its type; a pass with no structured error is then no cut.
+ * Whether a failed harness pass, run from `startedMs` to `endedMs`, was cut off by its provider or this machine's
+ * network, `origin` being the provider's API: {origin, code, since, ongoing}, else null. `failure` is the provider or
+ * network failure its harness reported as its own structured error (a record's `providerOutage`, usage.mjs outageError),
+ * or null for a pass whose harness reported none (a harness that prints a 5xx or a lost connection as prose only, a
+ * crash, a structured error with no status that names no outage). Such a pass is decided on exact facts instead: an
+ * outage this process itself met on any host between the pass's start and its end (one under way, or one that ended
+ * since the pass began; a spent rate limit is GitHub refusing, no outage), else the provider's API not answering a probe
+ * now. Ongoing when the outage is under way or the provider does not answer: the pass waits for it (networkBack) before
+ * it runs again. With the provider answering, a reported failure (its 5xx) runs the pass again at once, its code the
+ * failure's status (`HTTP 529`), else its type.
  */
-export async function passCutOff(failure, origin) {
-  const now = origin ? EPISODES.get(origin) : null;
-  if (now) return { origin, code: now.code, since: now.since, ongoing: true };
+export async function passCutOff(failure, origin, { startedMs = null, endedMs = null } = {}) {
+  const own = origin ? EPISODES.get(origin) : null;
+  if (own) return { origin, code: own.code, since: own.since, ongoing: true };
+  if (!failure) {
+    const end = Number.isFinite(endedMs) ? endedMs : OUTAGE.now();
+    const live = [...EPISODES.values()].find((o) => !Number.isFinite(o.resetAt) && o.since <= end);
+    if (live) return { origin: live.origin, code: live.code, since: live.since, ongoing: true };
+    const past = Number.isFinite(startedMs) ? PAST.findLast((p) => p.back >= startedMs && p.since <= end) : null;
+    if (past) return { origin: past.origin, code: past.code, since: past.since, ongoing: false };
+  }
   const code = origin ? await probe(origin) : null;
   if (code !== null) return { origin, code, since: OUTAGE.now(), ongoing: true };
   if (!failure) return null;

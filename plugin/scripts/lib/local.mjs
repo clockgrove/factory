@@ -2054,25 +2054,6 @@ export function localBaseEnv(env = process.env, extra = [], { workerSecrets = ""
   return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", ...out };
 }
 
-/** One YAML scalar from a `KEY: value` line: quoted values unquoted (double quotes JSON-decoded), comments outside quotes dropped. */
-export function yamlScalar(raw) {
-  const s = raw.trim();
-  if (s.startsWith('"')) {
-    const m = /^("(?:[^"\\]|\\.)*")\s*(?:#.*)?$/.exec(s);
-    if (!m) return null;
-    try {
-      return JSON.parse(m[1]);
-    } catch {
-      return null;
-    }
-  }
-  if (s.startsWith("'")) {
-    const m = /^'((?:[^']|'')*)'\s*(?:#.*)?$/.exec(s);
-    return m ? m[1].replace(/''/g, "'") : null;
-  }
-  return s.replace(/\s+#.*$/, "").trim();
-}
-
 /** Where local mode's token for a repository lives: ~/.config/factory/tokens/<owner>/<name> (the sandboxes hide ~/.config/factory). */
 export function tokenFile(repoFull, home = homedir()) {
   const [owner, name] = repoFull.split("/");
@@ -2092,33 +2073,45 @@ export const LOCAL_TOKEN_PERMISSIONS = "Contents, Issues and Pull requests read 
  */
 export const variablesRefusedLine = (status) => `the local token cannot read this repository's variables (HTTP ${status}), so its FACTORY_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)`;
 
+const workflowWarned = new Set();
 /**
- * The adopter workflow's top-level `env:` block, so a local run uses the repository's own
- * configuration. Only FACTORY_* keys at two-space indent are read; a value that is an Actions
- * expression (`${{ ... }}`) has no meaning off a runner and is left out.
+ * The adopter workflow's top-level `env:` block, so a local run uses the repository's own configuration, read from the
+ * parsed file (yaml.mjs parseYaml): each FACTORY_* key whose value is text. An empty value reads as "", as Actions sets
+ * it; a plain number or boolean reads as written in the file (`25`, `true`), where Actions may write a number its own
+ * way (`1.0` as `1`), so quote one to be sure. A value that is an Actions expression (`${{ ... }}`) has no meaning off a
+ * runner and is left out, and so is a mapping or a list. A file that does not parse throws (code `WORKFLOW_PARSE`);
+ * one with no env mapping to read is said through `warn`.
  */
-export function workflowEnv(text) {
+export function workflowEnv(text, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch (e) {
+    throw Object.assign(new Error(`.github/workflows/factory.yml does not parse (${e.message})`), { code: "WORKFLOW_PARSE" });
+  }
+  const mapping = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  // An empty file, a scalar, or an `env:` that is no mapping holds no settings: said, never read silently as none.
+  if (!mapping(doc) || !mapping(doc.env)) warn(`.github/workflows/factory.yml ${!mapping(doc) ? "is no mapping" : doc.env === undefined ? "has no top-level env block" : "has an env: that is no mapping"}: no settings read from it`);
+  const env = mapping(doc) && mapping(doc.env) ? doc.env : {};
   const out = {};
-  let inEnv = false;
-  for (const raw of text.split("\n")) {
-    if (/^env:\s*$/.test(raw)) {
-      inEnv = true;
-      continue;
-    }
-    if (!inEnv) continue;
-    if (/^\S/.test(raw)) break;
-    const m = /^ {2}(FACTORY_[A-Z0-9_]+):\s*(.*)$/.exec(raw);
-    if (!m) continue;
-    const v = yamlScalar(m[2]);
-    if (v === null || v.includes("${{")) continue;
-    out[m[1]] = v;
+  for (const [k, v] of Object.entries(env)) {
+    if (!/^FACTORY_[A-Z0-9_]+$/.test(k)) continue;
+    const value = v === null ? "" : v;
+    if (typeof value === "string" && !value.includes("${{")) out[k] = value;
   }
   return out;
 }
 
-export function readWorkflowEnv(dir) {
+/** The working tree's workflow env block (workflowEnv); none when the file is absent, or does not parse (said once per process, on stderr). */
+export function readWorkflowEnv(dir, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
   const file = join(dir, ".github", "workflows", "factory.yml");
-  return existsSync(file) ? workflowEnv(readFileSync(file, "utf8")) : {};
+  if (!existsSync(file)) return {};
+  try {
+    return workflowEnv(readFileSync(file, "utf8"));
+  } catch (e) {
+    warn(`warning: ${dir}'s ${e.message}; its settings are not read`);
+    return {};
+  }
 }
 
 /**
@@ -2137,8 +2130,18 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
   return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`])), branch);
 }
 
-/** committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file). */
-const committedWorkflow = (text, branch) => (text === null ? { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` } : { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text });
+/**
+ * committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file; one that does not
+ * parse is the `error`, with `parseError`, and no settings: `serve`, `run` and `review` do not start on it).
+ */
+function committedWorkflow(text, branch) {
+  if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` };
+  try {
+    return { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text };
+  } catch (e) {
+    return { wf: {}, pins: [], branch, error: `origin/${branch}'s ${e.message}`, parseError: true };
+  }
+}
 
 /**
  * The same read for a running `serve`, every few minutes (#276): the default branch serve found at its start, fetched now,

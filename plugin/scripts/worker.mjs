@@ -491,7 +491,7 @@ async function main() {
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
   let outbox;
   try {
-    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
+    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
     // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
     outbox.beforePush = () => beforeExit?.();
   } catch (e) {
@@ -707,6 +707,8 @@ async function main() {
     ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
+    // What the setup command runs, so the worker leaves it alone (the push refuses a change to it).
+    setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null,
   });
   writeOwn(join(usageDir, "task-card.md"), prompt.split("\n---\n")[0]);
   const session = { id: null, canResume: true };

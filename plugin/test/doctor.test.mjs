@@ -63,22 +63,26 @@ test("setup files: every repository file the setup command runs must be protecte
   writeFileSync(join(dir, "scripts", "ci", "setup.sh"), "");
   writeFileSync(join(dir, "scripts", "ci", "toolchain.sh"), "");
   const setup = "bash scripts/ci/setup.sh && ./scripts/ci/toolchain.sh --pin 1 && corepack enable";
-  const fail = setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/ci/setup.sh"] }, checkout: dir });
+  const fail = await setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/ci/setup.sh"] }, checkout: dir });
   assert.equal(fail.length, 1);
   assert.equal(fail[0].status, "FAIL");
   assert.match(fail[0].detail, /runs scripts\/ci\/toolchain\.sh as the runner/);
   assert.doesNotMatch(fail[0].detail, /setup\.sh/, "the protected one is not named");
   assert.match(fail[0].fix, /add \/scripts\/ci\/toolchain\.sh to protected_paths/, "the fix names the root-anchored entry");
-  assert.equal(setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/ci/"] }, checkout: dir })[0].status, "PASS", "a directory entry covers both");
-  assert.equal(setupFilesCheck({ inputs: { setup, protectedAdditions: ["setup.sh", "toolchain.sh"] }, checkout: dir })[0].status, "PASS", "a file-name entry matches at any depth, as on push");
-  assert.deepEqual(setupFilesCheck({ inputs: { setup: "sudo apt-get install -y libpq-dev", protectedAdditions: [] }, checkout: dir }), [], "a setup naming no repository file has nothing to protect");
-  assert.deepEqual(setupFilesCheck({ inputs: { setup: "bash scripts/ci/missing.sh", protectedAdditions: [] }, checkout: dir }), [], "a named path the checkout does not hold is not a repository file");
+  assert.equal((await setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/ci/"] }, checkout: dir }))[0].status, "PASS", "a directory entry covers both");
+  assert.equal((await setupFilesCheck({ inputs: { setup, protectedAdditions: ["setup.sh", "toolchain.sh"] }, checkout: dir }))[0].status, "PASS", "a file-name entry matches at any depth, as on push");
+  const [nothing] = await setupFilesCheck({ inputs: { setup: "sudo apt-get install -y libpq-dev", protectedAdditions: [] }, checkout: dir });
+  assert.equal(nothing.status, "PASS", "a setup naming no repository file has nothing to protect");
+  assert.match(nothing.detail, /^the command names no repository file it runs\. Not followed/, "and says what is never followed");
+  const [missing] = await setupFilesCheck({ inputs: { setup: "bash scripts/ci/missing.sh", protectedAdditions: [] }, checkout: dir });
+  assert.equal(missing.status, "PASS", "a named path the checkout does not hold needs no protected entry");
+  assert.match(missing.detail, /a push changing scripts\/ci\/missing\.sh is refused/, "but no push may create it (#387)");
   // Setup renders the missing ones into FACTORY_PROTECTED_PATHS whatever the route (no sandbox here).
-  const p = protectSetup({ setup, protectedAdditions: ["scripts/ci/setup.sh"] }, dir);
+  const p = await protectSetup({ setup, protectedAdditions: ["scripts/ci/setup.sh"] }, dir);
   assert.deepEqual(p.scripts, ["scripts/ci/setup.sh", "scripts/ci/toolchain.sh"]);
   assert.deepEqual(p.adding, ["/scripts/ci/toolchain.sh"], "setup adds the file anchored at the root");
   assert.deepEqual(p.protectedList, ["scripts/ci/setup.sh", "/scripts/ci/toolchain.sh"]);
-  assert.equal(setupFilesCheck({ inputs: { setup, protectedAdditions: p.protectedList }, checkout: dir })[0].status, "PASS", "what setup renders passes doctor");
+  assert.equal((await setupFilesCheck({ inputs: { setup, protectedAdditions: p.protectedList }, checkout: dir }))[0].status, "PASS", "what setup renders passes doctor");
 });
 
 test("setup files: a root setup file is protected at the root only, so a same-named file deeper in a monorepo stays the worker's", async () => {
@@ -88,9 +92,9 @@ test("setup files: a root setup file is protected at the root only, so a same-na
   const dir = mkdtempSync(join(tmpdir(), "factory-setup-root-"));
   mkdirSync(join(dir, "packages", "web"), { recursive: true });
   for (const f of ["build.mjs", ".env.example", "configure", join("packages", "web", "build.mjs"), join("packages", "web", ".env.example")]) writeFileSync(join(dir, f), "");
-  const p = protectSetup({ setup: "node build.mjs && cp .env.example .env && sh configure", protectedAdditions: [] }, dir);
+  const p = await protectSetup({ setup: "node build.mjs && cp .env.example .env && sh configure", protectedAdditions: [] }, dir);
   assert.deepEqual(p.adding, ["/build.mjs", "/.env.example", "/configure"]);
-  assert.equal(setupFilesCheck({ inputs: { setup: "node build.mjs && cp .env.example .env && sh configure", protectedAdditions: p.protectedList }, checkout: dir })[0].status, "PASS");
+  assert.equal((await setupFilesCheck({ inputs: { setup: "node build.mjs && cp .env.example .env && sh configure", protectedAdditions: p.protectedList }, checkout: dir }))[0].status, "PASS");
   const list = protectedPaths(p.protectedList);
   assert.deepEqual(protectedTouched(["packages/web/build.mjs", "packages/web/.env.example", "src/configure"], list), [], "an Objective editing a package's build.mjs does not Block");
   assert.deepEqual(protectedTouched(["build.mjs", ".env.example", "configure"], list), ["build.mjs", ".env.example", "configure"]);

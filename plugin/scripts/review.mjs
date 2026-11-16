@@ -1020,7 +1020,7 @@ async function main() {
   // starts at GitHub's head now. No GitHub token reaches a child: on Actions the agent reads with its own read-only
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
-  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
+  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
   const identity = await gitIdentity(app, keeper.getter);
@@ -1173,6 +1173,8 @@ async function main() {
     ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
+    // What the setup command runs, so the worker leaves it alone (the push refuses a change to it).
+    setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null,
     shellSecrets: Object.keys(shellSecrets),
   });
   // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer

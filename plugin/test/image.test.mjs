@@ -389,6 +389,10 @@ test("imageChange: a toolchain pin, and a file a program reads by convention, ch
   }
   const code = r.commit({ "src/a.js": "2\n" });
   assert.deepEqual(await imageChange(r.dir, from, code, { setup: "make setup", install }), { touched: null }, "source only");
+  // A path the repository's toolchain_paths setting names is toolchain to the image too.
+  const pinned = r.commit({ "tools/versions.cfg": "node 22\n" });
+  assert.deepEqual(await imageChange(r.dir, code, pinned, { setup: "make setup", install, toolchainPaths: ["/tools/"] }), { touched: "tools/versions.cfg" }, "a toolchain_paths path");
+  assert.deepEqual(await imageChange(r.dir, code, pinned, { setup: "make setup", install }), { touched: null }, "the same path without the setting");
 });
 
 test("imagePlan: the job's decision on a real clone, with an owed attempt in the record: a head that changes nothing is covered and the attempt goes; a change, a newer CLI or another Factory builds", async () => {

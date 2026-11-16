@@ -537,6 +537,46 @@ export function findingCheckRow({ inputs, env = process.env, home } = {}) {
   return WARN("finding check", `off (${kind.code}): reviewer findings are not judged; Factory's reply answers each one`, kind.route === "off" ? "set decision_route to auto (INSTALL.md)" : env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key, or set decision_route to auto (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4), or set decision_route to auto");
 }
 
+/**
+ * What a `permissions:` value gives the job token on repository contents: "read", "write" or "none" (a mapping without
+ * `contents`, `{}` included); null when it is not set, so the level above (or the repository's default) applies; and
+ * "unknown" for a value GitHub does not take.
+ */
+export function contentsAccess(perms) {
+  if (perms === undefined || perms === null) return null;
+  if (typeof perms === "string") return { "read-all": "read", "write-all": "write" }[perms.trim()] ?? "unknown";
+  if (typeof perms !== "object" || Array.isArray(perms)) return "unknown";
+  if (!Object.hasOwn(perms, "contents")) return "none";
+  const v = typeof perms.contents === "string" ? perms.contents.trim() : "";
+  return ["read", "write", "none"].includes(v) ? v : "unknown";
+}
+
+/**
+ * The job token row: whether every job of factory.yml is read-only on repository contents, from the parsed workflow. A
+ * job's own `permissions:` replaces the top level's (GitHub's rule); a job with neither gets the repository's default
+ * token, which doctor does not count on (the default is a setting outside the file).
+ */
+export function jobTokenCheck(text) {
+  const fix = "set permissions: contents: read (or none) at the top of factory.yml and in every job that sets its own; writes go through the App";
+  let doc;
+  try {
+    doc = parseYaml(text);
+  } catch (e) {
+    return FAIL("job token", `could not read the workflow's permissions: ${e.message}`, "fix factory.yml's YAML");
+  }
+  const top = contentsAccess(doc?.permissions);
+  const jobs = doc?.jobs && typeof doc.jobs === "object" && !Array.isArray(doc.jobs) ? Object.entries(doc.jobs) : [];
+  const bad = [];
+  for (const [id, job] of jobs.length ? jobs : [["(no jobs)", null]]) {
+    const own = contentsAccess(job?.permissions);
+    const access = own ?? top;
+    if (access === "read" || access === "none") continue;
+    const where = own === null ? "the top level's" : "its own";
+    bad.push(access === null ? `${id} (no permissions here or at the top level, so the repository's default token)` : access === "write" ? `${id} (contents: write, ${where})` : `${id} (${where} permissions are no value GitHub takes)`);
+  }
+  return bad.length ? FAIL("job token", `a job's token may write repository contents: ${bad.join("; ")}`, fix) : PASS("job token", "every job's token reads repository contents at most");
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -565,8 +605,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   const text = wfRead.text;
   // The job token: read-only on code. Visible only inside Actions, through the workflow file.
   if (text !== null) {
-    const ro = /contents:\s*read/.test(text) && !/contents:\s*write/.test(text);
-    out.push(ro ? PASS("job token", "contents: read in the workflow") : FAIL("job token", "the workflow grants contents: write", "set permissions: contents: read; writes go through the App"));
+    out.push(jobTokenCheck(text));
     // A pin older than local mode does not know factory:local, so its jobs would also run Objectives a local loop holds.
     const pin = releaseOf(factoryRef(text));
     if (pin) {
@@ -617,7 +656,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   const squash = [repoData.squash_merge_commit_title, repoData.squash_merge_commit_message];
   if (queue && ((squash[0] && squash[0] !== "PR_TITLE") || (squash[1] && !["PR_BODY", "BLANK"].includes(squash[1])))) out.push(FAIL("squash message", `squash commits default to ${squash.join(" and ")}`, "setup --apply protection sets them to the PR's title and body (Settings > General > Pull Requests > Allow squash merging: Default to pull request title and description)"));
   // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.
-  const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token });
+  // The CI workflow is the one whose jobs make the required checks; with none required, the one on pull_request.
+  const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token }, { checks });
   out.push(ciWorkflowCheck(ci, { queue }));
   const runner = text !== null ? runnerMatchCheck(text, ci, { commands: [inputs.setup, ...inputs.validation], checks: [...checks, ...inputs.ciChecks] }) : null;
   if (runner) out.push(runner);
@@ -797,7 +837,7 @@ export function ciRunner(ci, { commands = [], checks = [] } = {}) {
     const j = jobs.find((job) => job.commands.some((r) => r.includes(c)));
     if (j) return { runner: j.runner, linux, job: `its ${j.check} job, which runs ${c}` };
   }
-  const req = jobs.find((j) => checks.some((c) => c === j.check || c.startsWith(`${j.check} (`)));
+  const req = jobs.find((j) => checks.some((c) => makesCheck(j, c)));
   if (req) return { runner: req.runner, linux, job: `its ${req.check} job, a required check` };
   const j = (linux.length > 1 && jobs.find((x) => !/-latest"?\]?$/.test(x.runner))) || jobs[0];
   return { runner: j.runner, linux, job: `its ${j.check} job` };
@@ -808,8 +848,8 @@ export function ciRunner(ci, { commands = [], checks = [] } = {}) {
  * `ubuntu-latest` moves to a new image under them while a pinned CI keeps passing (#2600). A warning: the owner may
  * pick another runner on purpose. It also warns on a container-only runner and on a runner label it cannot read
  * (either side). Nothing to compare in sandbox mode (no runner jobs) or when the CI has no Linux job with a literal
- * runner. `ci` is the workflow on pull_request (githubChecks): a render made with setup's
- * `--ci-workflow NAME` is compared against that workflow, not NAME. `hints`: ciRunner's.
+ * runner. `ci` is the workflow that makes the required checks, else the one on pull_request (githubChecks): a render
+ * made with setup's `--ci-workflow NAME` is compared against that workflow, not NAME. `hints`: ciRunner's.
  */
 export function runnerMatchCheck(factoryText, ci, hints = {}) {
   let jobs;
@@ -840,16 +880,18 @@ export function runnerMatchCheck(factoryText, ci, hints = {}) {
 
 /**
  * Find a workflow (other than factory.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
- * that name. Each workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
+ * that name, or with `checks` (the required checks' names), each check's makers by event (checkWorkflows). Each
+ * workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
  * `unread`: the workflows that could not be read or parsed here, whose triggers are unknown (each with its reason).
  */
-export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
+export async function ciWorkflowTriggers(repo, opts, { name = "", checks = [] } = {}) {
   let list;
   try {
     list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, opts))?.workflows || [];
   } catch (e) {
     return { found: false, error: `${e.status || ""} ${e.message.slice(0, 120)}`.trim() };
   }
+  if (checks.length && !name) return checkWorkflows(repo, opts, list, checks);
   let found = null;
   const unread = [];
   // GitHub lists a workflow file it cannot parse under its path instead of its name, and runs nothing from it.
@@ -880,18 +922,111 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
   return found ? { ...found, unread } : { found: false, factoryParses, unread };
 }
 
+/** Whether a workflow job (workflowJobs) makes the check `name`: its own name, a matrix leg's, or a called workflow's job. */
+const makesCheck = (job, name) => name === job.check || name.startsWith(`${job.check} (`) || name.startsWith(`${job.check} / `);
+
+/** The events on which a check a workflow makes reaches a pull request (its own head) or the merge queue's commit. */
+const PR_EVENTS = ["pull_request", "pull_request_target"];
+
+/**
+ * ciWorkflowTriggers with the required checks known, decided per check: `byCheck` holds, for each of `checks`, the
+ * workflows (other than factory.yml) with a job that makes it (makesCheck), split by the events they run on: `pr` (on
+ * pull_request or pull_request_target), `mg` (on merge_group) and `other` (neither: a release, a schedule), each a list
+ * of {name, path}. A workflow on other events never counts as making a check a pull request or the queue gets. `unread`:
+ * the workflows that could not be read or parsed, any of which could make any check. `found`, `name`, `path` and `jobs`
+ * are the pull_request makers' (ciRunner's). The reading stops once every check has a maker on pull_request and one on
+ * merge_group: no later workflow can change the row.
+ */
+async function checkWorkflows(repo, opts, list, checks) {
+  const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
+  const factoryParses = factory ? factory.name !== factory.path : null;
+  const unread = [];
+  const byCheck = checks.map((check) => ({ check, pr: [], mg: [], other: [] }));
+  const prMakers = [];
+  for (const w of list) {
+    if (byCheck.every((c) => c.pr.length && c.mg.length)) break;
+    if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
+    let doc;
+    try {
+      doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
+    } catch (e) {
+      // Listed but not on the default branch (it ran from a branch once): nothing runs from it on the default branch.
+      if (e.status !== 404) unread.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
+      continue;
+    }
+    // Listed by its path though it sets a name: GitHub could not parse it and runs nothing from it.
+    if (w.name === w.path && typeof doc?.name === "string" && doc.name !== w.path) continue;
+    const jobs = jobsOf(doc);
+    const events = workflowEvents(doc);
+    const onPr = events.some((e) => PR_EVENTS.includes(e));
+    const onMg = events.includes("merge_group");
+    const me = { name: w.name, path: w.path };
+    let makes = false;
+    for (const c of byCheck) {
+      if (!jobs.some((j) => makesCheck(j, c.check))) continue;
+      makes = true;
+      if (onPr) c.pr.push(me);
+      if (onMg) c.mg.push(me);
+      if (!onPr && !onMg) c.other.push({ ...me, events });
+    }
+    if (makes && onPr) prMakers.push({ ...me, jobs });
+  }
+  return { found: prMakers.length > 0, name: prMakers.map((w) => w.name).join(", "), path: prMakers.map((w) => w.path).join(", "), paths: prMakers.map((w) => w.path), jobs: prMakers.flatMap((w) => w.jobs), factoryParses, unread, checks, byCheck };
+}
+
 /**
  * The ci workflow row, from ciWorkflowTriggers's result: a workflow on pull_request and merge_group, the second needed
- * only with a merge queue (`queue`). A workflow doctor could not read or parse may be the one listening: its triggers
- * are unknown, so no FAIL rests on it and the WARN names it.
+ * only with a merge queue (`queue`). With the required checks known (`byCheck`), each check on its own: a workflow on
+ * pull_request must make it, else a pull request never gets it; with a queue, one on merge_group too, else the queue's
+ * commit never does. A check no workflow doctor read makes at all is a WARN naming it, since an App's check or a
+ * workflow doctor could not read may make it; and with any workflow unread, no FAIL rests on the rest either. Without
+ * required checks, a workflow doctor could not read or parse may be the one listening: its triggers are unknown, so no
+ * FAIL rests on it and the WARN names it.
  */
 export function ciWorkflowCheck(ci, { queue = false } = {}) {
   const unread = ci.unread?.length ? `; could not read the triggers of ${ci.unread.join(", ")}` : "";
   const readFix = "make each workflow named readable to the token (contents: read) and valid YAML, then run doctor again";
   if (ci.error) return WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions");
+  if (ci.byCheck?.length) return requiredCheckRow(ci.byCheck, { queue, unread: ci.unread || [], readFix });
   if (!ci.found) return unread ? WARN("ci workflow", `no workflow doctor read listens on pull_request${unread}`, readFix) : FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit");
   if (!ci.mergeGroup) return (queue && !unread ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}${unread}`, `add "merge_group:" under on: in ${ci.path}${unread ? `, or ${readFix}` : ""}`);
   return PASS("ci workflow", `${ci.name} on pull_request and merge_group`);
+}
+
+const names = (ws) => [...new Set(ws.map((w) => w.name))].join(", ");
+const paths = (ws) => [...new Set(ws.map((w) => w.path))].join(", ");
+
+/** ciWorkflowCheck's row with the required checks known: each check's makers on pull_request and on merge_group. */
+function requiredCheckRow(byCheck, { queue, unread, readFix }) {
+  const fails = [];
+  const warns = [];
+  const fixes = [];
+  // A check no workflow doctor read makes on any event: an App's, or an unread workflow's.
+  const unknown = byCheck.filter((c) => !c.pr.length && !c.mg.length && !c.other.length);
+  // Made by a workflow, but by none on pull_request: a pull request never gets it, so it is never enqueued.
+  const noPr = byCheck.filter((c) => !c.pr.length && (c.mg.length || c.other.length));
+  // Made on pull_request, but by no workflow on merge_group: the queue's commit never gets it.
+  const noMg = byCheck.filter((c) => c.pr.length && !c.mg.length);
+  const sure = unread.length ? warns : fails;
+  for (const c of noPr) {
+    const by = [...c.mg.map((w) => ({ ...w, events: ["merge_group"] })), ...c.other];
+    sure.push(`${c.check} is made only by ${by.map((w) => `${w.name} (on ${w.events.join(", ")})`).join(", ")}, so a pull request never gets it`);
+    fixes.push(c.mg.length ? `add "pull_request:" under on: in ${paths(c.mg)}` : `make ${c.check} in a workflow on pull_request (only ${paths(c.other)} makes it now, on other events)`);
+  }
+  for (const c of noMg) {
+    (queue ? sure : warns).push(`${c.check} is made on pull_request by ${names(c.pr)} but by no workflow on merge_group${queue ? ", so the queue's commit never gets it" : " (needed only with a merge queue)"}`);
+    fixes.push(`add "merge_group:" under on: in ${paths(c.pr)}`);
+  }
+  if (unknown.length) {
+    warns.push(`no workflow doctor read makes ${unknown.map((c) => c.check).join(", ")}, so doctor cannot tell what runs ${unknown.length === 1 ? "it" : "them"} (an App's check, or a workflow doctor could not read)`);
+    fixes.push(`name each required check after a CI job (its name, else its id), or make sure what makes it (an App's check) runs on${queue ? " pull_request and merge_group" : " pull_request"}`);
+  }
+  const unreadText = unread.length ? `; could not read the triggers of ${unread.join(", ")}` : "";
+  if (unread.length && (warns.length || fails.length)) fixes.push(readFix);
+  const made = byCheck.filter((c) => c.pr.length && c.mg.length);
+  if (fails.length) return FAIL("ci workflow", [...fails, ...warns].join("; ") + unreadText, fixes.join("; "));
+  if (warns.length) return WARN("ci workflow", warns.join("; ") + unreadText, fixes.join("; "));
+  return PASS("ci workflow", `the required checks run on pull_request and merge_group: ${made.map((c) => `${c.check} (${names([...c.pr, ...c.mg])})`).join(", ")}`);
 }
 
 /**

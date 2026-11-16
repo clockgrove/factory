@@ -199,10 +199,11 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
 
 /**
  * What changed between the image's head `from` and `head` in `checkout` (the job's clone, whole history) that the image
- * is made from (lib/image.mjs imageTouch, with setupGuard's view of the `setup` and `install` commands read at `head`):
+ * is made from (lib/image.mjs imageTouch, with setupGuard's view of the `setup` and `install` commands read at `head`,
+ * and the repository's `toolchain_paths`):
  * `{touched}`, the first such path or null when none, or `{unknown}` when git cannot list the diff.
  */
-export async function imageChange(checkout, from, head, { setup = "", install = "", env = process.env } = {}) {
+export async function imageChange(checkout, from, head, { setup = "", install = "", toolchainPaths = [], env = process.env } = {}) {
   let files;
   try {
     files = execFileSync("git", ["-C", checkout, "diff", "--name-only", "--no-renames", "-z", from, head], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }).split("\0").filter(Boolean);
@@ -212,7 +213,7 @@ export async function imageChange(checkout, from, head, { setup = "", install = 
   const io = checkoutIo(checkout, env);
   const guards = [];
   for (const command of [setup, install]) if (command) guards.push(await setupGuard(command, io));
-  return { touched: imageTouch(files, guards) };
+  return { touched: imageTouch(files, guards, toolchainPaths) };
 }
 
 /** `npm view <pkg>@<spec> version`: the newest version the spec names, or null when the registry does not answer one. */
@@ -261,7 +262,7 @@ export async function imagePlan({ checkout, head, trigger, inputs, base, current
   if (!versions) notes.push(`the harness CLIs' versions for ${inputs.harnessVersion || "latest"} could not be read from the registry, so this head is not taken as unchanged`);
   const comparable = !!current && current.sha !== head && !!made && current.made === made && current.covers !== head;
   if (current && current.sha !== head && made && current.made !== made) notes.push(`${current.sha.slice(0, 7)}'s image was built otherwise (setup, install, a harness CLI's version, the base image or Factory itself), or before Factory recorded how`);
-  const change = comparable ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install, env }) : null;
+  const change = comparable ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install, toolchainPaths: inputs.toolchainPaths, env }) : null;
   if (change) notes.push(change.unknown ?? (change.touched ? `${change.touched} changed since ${current.sha.slice(0, 7)}` : `nothing the image is made from changed since ${current.sha.slice(0, 7)}`));
   const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, made, unchanged: !!change && !change.unknown && change.touched === null, maxAgeDays: inputs.imageMaxAgeDays, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes, now });
   if (current && !decision.skip && !(now.getTime() - Date.parse(current.builtAt) < inputs.imageMaxAgeDays * 86_400_000)) notes.push(`${current.sha.slice(0, 7)}'s image was built ${current.builtAt.slice(0, 10)}, image_max_age_days (${inputs.imageMaxAgeDays}) ago or more`);

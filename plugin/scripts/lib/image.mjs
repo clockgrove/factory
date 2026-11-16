@@ -101,13 +101,14 @@ const CONVENTION_FILES = new Set(["Makefile", "makefile", "GNUmakefile", "justfi
  * the setup and install commands (`guards`): the first such path, or null. Anywhere in the tree: a manifest, a lockfile
  * or a requirements list (the dependency store), a toolchain pin or package-manager configuration (logic.mjs
  * toolchainFile: `.nvmrc`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml` and the rest, what setup installs
- * from), and a file a program reads by convention (CONVENTION_FILES); any file setup or the install runs (guardCovers);
- * when either may run a file Factory cannot name (`unresolved`), any file.
+ * from, and a path the repository's `toolchain_paths` setting covers, `paths`), and a file a program reads by convention
+ * (CONVENTION_FILES); any file setup or the install runs (guardCovers); when either may run a file Factory cannot name
+ * (`unresolved`), any file.
  */
-export function imageTouch(files, guards = []) {
+export function imageTouch(files, guards = [], paths = []) {
   const unresolved = guards.some((g) => g.unresolved?.length);
   const guarded = guards.flatMap((g) => g.files ?? []);
-  return files.find((f) => unresolved || dependencyFile(f) || toolchainFile(f) || CONVENTION_FILES.has(f.split("/").at(-1)) || guarded.some((p) => guardCovers(p, f))) ?? null;
+  return files.find((f) => unresolved || dependencyFile(f) || toolchainFile(f, paths) || CONVENTION_FILES.has(f.split("/").at(-1)) || guarded.some((p) => guardCovers(p, f))) ?? null;
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */

@@ -104,6 +104,9 @@ inputs:
   protected_paths:
     description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
     required: false
+  toolchain_paths:
+    description: 'Repository-specific toolchain paths, comma-separated, beside Factory''s exact lists of lockfiles, version pins, package-manager configuration, containers and CI files: a fix pass (after a red, or the answer pass) may change one only when its scope names it, and a merge that changes one builds the sandbox image again. Matched as `protected_paths` entries are. Empty: the exact lists only.'
+    required: false
   ci_checks:
     description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
     required: false
@@ -192,7 +195,7 @@ inputs:
     description: The decision model red-check triage, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check and the edit check ask with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
     required: false
   triage_min_confidence:
-    description: 'The confidence floor, from 0 to 1, for the decision calls on `triage_model`: a verdict that acts (a flake to rerun, a red the default branch fails the same way, a rebuttal, a kept file, the answer gate''s `only_asked`, an open Question, a fix pass''s progress, a wording-only edit, the same failure) counts only at this confidence or more. Empty: 0.7, the floor measured on `perplexity/pplx-decider-v1.2`. It is the floor of the AI Gateway''s `triage_model` only: whenever the stage''s own harness answers (no key, or after the gateway refused), the floor is 0.7. It goes with the model: a settings layer that names another `triage_model` (the default resolved) drops the floor of the layers below it, and one set lower down does not carry to another model a flag or this Action''s `triage_model` input names. The verdict, its confidence and the floor go on the progress line.'
+    description: 'The confidence floor, from 0 to 1, for the decision calls on `triage_model`: a verdict that acts (a flake to rerun, a red the default branch fails the same way, a rebuttal, a kept file, the answer gate''s `only_asked`, an open Question, a fix pass''s progress, a wording-only edit, the same failure, a fenced lockfile change) counts only at this confidence or more (the fence check never under 0.7). Empty: 0.7, the floor measured on `perplexity/pplx-decider-v1.2`. It is the floor of the AI Gateway''s `triage_model` only: whenever the stage''s own harness answers (no key, or after the gateway refused), the floor is 0.7. It goes with the model: a settings layer that names another `triage_model` (the default resolved) drops the floor of the layers below it, and one set lower down does not carry to another model a flag or this Action''s `triage_model` input names. The verdict, its confidence and the floor go on the progress line.'
     required: false
   drift_model:
     description: The decision model the drift advisory asks with an AI Gateway key (an AI Gateway decision model id); `baseten/elephant-1` when empty.
@@ -422,6 +425,7 @@ runs:
         FACTORY_INPUT_VALIDATION: ${{ inputs.validation }}
         FACTORY_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
         FACTORY_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        FACTORY_INPUT_TOOLCHAIN_PATHS: ${{ inputs.toolchain_paths }}
         FACTORY_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
         FACTORY_INPUT_THIRD_PARTY_REVIEWERS: ${{ inputs.third_party_reviewers }}
         FACTORY_INPUT_THIRD_PARTY_WAIT_MINUTES: ${{ inputs.third_party_wait_minutes }}

@@ -161,9 +161,9 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
         status === "queued" || !steps
           ? []
           : [
-              { name: "Set up job", status: "completed", started_at: started, completed_at: new Date(at + wait + before).toISOString() },
-              { name: step, status: "in_progress", started_at: new Date(at + wait + before).toISOString(), completed_at: null },
-              { name: "Post Run actions/checkout@v7", status: "pending", started_at: null, completed_at: null },
+              { name: "Set up job", number: 1, status: "completed", started_at: started, completed_at: new Date(at + wait + before).toISOString() },
+              { name: step, number: 2, status: "in_progress", started_at: new Date(at + wait + before).toISOString(), completed_at: null },
+              { name: "Post Run actions/checkout@v7", number: 3, status: "pending", started_at: null, completed_at: null },
             ],
     };
   };
@@ -197,6 +197,12 @@ const readByReview = (fake, kind = "flaky") => {
   }
 };
 const MIN = 60_000;
+/** Moves every removal so far, and Factory's record of it, `ms` into the past: the next pass comes that much later. */
+const earlier = (fake, ms) => {
+  const back = (t) => new Date(Date.parse(t) - ms).toISOString();
+  for (const r of fake.s.removals) r.createdAt = back(r.createdAt);
+  for (const c of requeues(fake.s)) c.body = c.body.replace(/("at":")([^"]+)"/, (_, k, t) => `${k}${back(t)}"`);
+};
 
 test("queue watch: a PR the queue drops after its CI started ticks the dispatcher, with no dequeued run; the merge pass re-enqueues it once (#2683)", async () => {
   let now = Date.now();
@@ -278,6 +284,41 @@ test("hung queue check: tonight's case, a setup step normally ~1 min, is left at
     assert.equal(fake.s.enqueued.length, 1, "no third enqueue");
     assert.match(mergeBlockReason(how, blocked), /`Quality` \/ `Run scripts\/ci\/setup\.sh` running 16 min, normally ~1 min.*re-enqueued the PR once/);
     assert.doesNotMatch(mergeBlockReason(how, blocked), /checks_never_started/);
+  });
+});
+
+test("hung queue check: a hung removal whose step then finished green before the queue's own timeout counts toward no try; one that did not still Blocks (#437)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
+    // A cold cache: setup, normally ~1 min, runs 25; Factory takes the PR out and puts it back (try 2).
+    const first = Date.now() - 25 * MIN;
+    fake.building("d".repeat(40), first);
+    const job = fake.s.runs["d".repeat(40)][0].id;
+    assert.equal(await merge({}), "queued");
+    const record = JSON.parse(/requeue-drop (\{.*\}) -->/.exec(requeues(fake.s)[0].body)[1]);
+    assert.deepEqual(record.hung.map((h) => [h.job, h.step, h.number, h.by]), [[job, "Run scripts/ci/setup.sh", 2, new Date(first + 60 * MIN).toISOString()]], "the record names the step and the queue's deadline for its commit");
+    // That step then finished green, 24 minutes in: well before the queue's 60.
+    Object.assign(fake.s.jobs[job].steps[1], { status: "completed", conclusion: "success", completed_at: new Date(first + 24 * MIN).toISOString() });
+    earlier(fake, 20 * MIN);
+
+    // Slow again on the new queue commit: out again, and back in, not Blocked; its notice is try 3, beside try 2's.
+    fake.building("e".repeat(40), Date.now() - 25 * MIN);
+    const second = fake.s.runs["e".repeat(40)][0].id;
+    assert.equal(await merge({}), "queued");
+    assert.equal(fake.s.dequeued, 2);
+    assert.equal(fake.s.enqueued.length, 2);
+    assert.deepEqual(requeues(fake.s).map((c) => /try (\d)/.exec(c.body)[1]), ["2", "3"], "the first record stays, so its removal keeps its code");
+
+    earlier(fake, 20 * MIN);
+    // This one's step finishes green only after the queue's own timeout: it was as good as hung, and the third Blocks.
+    Object.assign(fake.s.jobs[second].steps[1], { status: "completed", conclusion: "success", completed_at: new Date(Date.now() + 40 * MIN).toISOString() });
+    fake.building("f".repeat(40), Date.now() - 25 * MIN);
+    const blocked = {};
+    const how = await merge(blocked);
+    assert.equal(how, "dropped");
+    assert.equal(fake.s.enqueued.length, 2, "no third enqueue");
+    assert.match(mergeBlockReason(how, blocked), /no progress on the merge queue's commit/);
   });
 });
 

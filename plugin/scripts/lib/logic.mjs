@@ -1925,7 +1925,8 @@ export function stepBaselineMs(durations) {
 }
 
 /**
- * Where a running Actions job is (`actions/jobs/{id}`): `{step, since}` for the step running now and its start, or
+ * Where a running Actions job is (`actions/jobs/{id}`): `{step, number, since}` for the step running now (its name and
+ * GitHub's step number) and its start, or
  * `{step: null, since}` between steps (the last step's start or end). Null for a job that is not running yet (queued or
  * waiting for a runner), has no steps yet, or is done: such a job is never stalled. Progress is a step completing or a
  * new step starting; the job's log is not read.
@@ -1936,7 +1937,7 @@ export function jobPosition(job) {
   if (!steps.length) return null;
   const cur = steps.find((x) => x?.status === "in_progress");
   // A running step with no start time has `since` NaN: jobStall then judges the job by the fallback bound.
-  if (cur) return { step: String(cur.name ?? ""), since: Date.parse(cur.started_at) };
+  if (cur) return { step: String(cur.name ?? ""), number: Number.isInteger(cur.number) ? cur.number : null, since: Date.parse(cur.started_at) };
   const times = steps.flatMap((x) => [x?.completed_at, x?.started_at]).map((t) => Date.parse(t)).filter(Number.isFinite);
   return { step: null, since: times.length ? Math.max(...times) : Date.parse(job.started_at) };
 }
@@ -2005,7 +2006,8 @@ export function queueTargets(names, checks) {
  * `hungMs` has passed since its own start. A
  * check queued or waiting for a runner never is. A required check with no run at all, and nothing in progress or
  * waiting there, is hung once `hungMs` has passed since CI first started on the commit (`headAt` when nothing has).
- * Returns `[{name, step, elapsedMs, baselineMs}]`. Decided on statuses, names and times only.
+ * Returns `[{name, step, elapsedMs, baselineMs}]`, with `job` and `number` (the Actions job's id and GitHub's step
+ * number) for a stalled step of a job read. Decided on statuses, names and times only.
  */
 export function queueHangs({ names, checks, jobs = new Map(), baselines = new Map(), headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS }) {
   const { latest, missing, targets } = queueTargets(names, checks);
@@ -2015,7 +2017,8 @@ export function queueHangs({ names, checks, jobs = new Map(), baselines = new Ma
     if (job) {
       const pos = jobPosition(job);
       const stall = jobStall(job, { baselineMs: pos?.step ? (baselines.get(stepKey(job, pos.step)) ?? null) : null, fallbackMs: hungMs, now, checkStartedAt: t.started_at });
-      if (stall) out.push({ ...stall, name: String(t.name) });
+      // A stalled step names its job and step number, so the removal's record can say later whether that step finished.
+      if (stall) out.push({ ...stall, name: String(t.name), ...(stall.step ? { job: job.id ?? t.id, number: pos.number ?? null } : {}) });
       continue;
     }
     const since = Date.parse(t.started_at);
@@ -2027,6 +2030,32 @@ export function queueHangs({ names, checks, jobs = new Map(), baselines = new Ma
   const first = starts.length ? Math.min(...starts) : Date.parse(headAt);
   if (!busy && Number.isFinite(first) && now - first > hungMs) for (const n of missing) out.push({ name: String(n), step: null, elapsedMs: now - first, baselineMs: null });
   return out;
+}
+
+/**
+ * When the merge queue's own check timeout (`timeoutMinutes`, SETUP_QUEUE_TIMEOUT_MIN's when unread) ends for the queue
+ * commit made at `headAt`: the time a check on it had to report by. An ISO string, or null with no time.
+ */
+export function queueDeadline(headAt, timeoutMinutes) {
+  const t = Number(timeoutMinutes);
+  const at = Date.parse(headAt);
+  return Number.isFinite(at) ? new Date(at + (Number.isFinite(t) && t > 0 ? t : SETUP_QUEUE_TIMEOUT_MIN) * 60_000).toISOString() : null;
+}
+
+/**
+ * Whether every step a HUNG_CODE removal judged hung (`hung`: its record's `{job, step, number, by}`) then finished
+ * green before the queue's own check timeout (`by`, queueDeadline): its job (`jobs`, id -> actions/jobs record) shows
+ * that step, by name and number, completed with `success` no later than `by`. Such a step was slow, not hung, and the
+ * queue would have taken its result. A step with no job id, an unread job, a step still running, cancelled or failed,
+ * or one that finished after `by` is not.
+ */
+export function hungFinishedGreen(hung, jobs) {
+  if (!Array.isArray(hung) || !hung.length) return false;
+  return hung.every((e) => {
+    const step = (jobs.get(e?.job)?.steps || []).find((x) => x?.name === e.step && (e.number ?? null) === (Number.isInteger(x?.number) ? x.number : null));
+    const done = Date.parse(step?.completed_at);
+    return step?.status === "completed" && step.conclusion === "success" && Number.isFinite(done) && done <= Date.parse(e.by);
+  });
 }
 
 const QUEUE_BOT = "github-merge-queue";
@@ -2054,7 +2083,9 @@ export const CONFLICT_CODE = "merge_conflict";
  * the review the merge rests on, the head's push, the last re-entry or Block) count, and a removal because it merged is
  * none. Who removed it decides what it is:
  * - Factory (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
- *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE;
+ *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE. A
+ *   HUNG_CODE removal marked `cleared` (its hung step then finished green in time: hungFinishedGreen) is no drop: it
+ *   counts as `cleared`, never toward QUEUE_TRIES or as a hold;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
@@ -2062,9 +2093,10 @@ export const CONFLICT_CODE = "merge_conflict";
  *   sibling's merge resolves into the send-back's rebase (staleDecision), so it counts toward no Block here. When the
  *   newest removal is one, `{conflict: {at}}` says so: the caller re-enqueues it only once the queue it conflicted
  *   with has moved (session.mjs mergeReadyOne).
- * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop `{at, code}`); at
- * QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop codes); `last` has
- * `factory: true` when Factory made that removal. Codes are
+ * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop or cleared removal
+ * `{at, code}`); at QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop
+ * codes); `last` has `factory: true` when Factory made that removal, `cleared: true` when it is cleared, and either
+ * answer has `cleared`, their count, when there are any. Codes are
  * GitHub's (`checks_timed_out`, `failed_checks`, ...); anything else reads `unknown`.
  */
 export function queueRetry(removals, { since, self = null }) {
@@ -2076,19 +2108,26 @@ export function queueRetry(removals, { since, self = null }) {
     .map((r) => {
       const who = botless(r.actor);
       // Factory's own removal names why: this pass's (`self`), or one read back from Factory's requeue record (`code`).
-      if (r.self === true || (me && who === me)) return { at: r.at, code: r.code ? queueCode(r.code) : STALL_CODE, drop: true, factory: true };
+      if (r.self === true || (me && who === me)) {
+        const code = r.code ? queueCode(r.code) : STALL_CODE;
+        const cleared = r.cleared === true && code === HUNG_CODE;
+        return { at: r.at, code, drop: !cleared, factory: true, ...(cleared ? { cleared } : {}) };
+      }
       const drop = r.person !== true || who === QUEUE_BOT;
       const code = queueCode(r.reason);
       return drop && code === CONFLICT_CODE ? { at: r.at, code, drop: false, conflict: true } : { at: r.at, code, drop };
     });
   const newest = after.at(-1);
   if (newest?.conflict) return { conflict: { at: newest.at }, drops: after.filter((r) => r.drop).length };
-  if (newest && !newest.drop) return { hold: { at: newest.at, code: newest.code }, drops: after.filter((r) => r.drop).length };
+  if (newest && !newest.drop && !newest.cleared) return { hold: { at: newest.at, code: newest.code }, drops: after.filter((r) => r.drop).length };
   const drops = after.filter((r) => r.drop);
-  const last = drops.length ? { at: drops.at(-1).at, code: drops.at(-1).code, ...(drops.at(-1).factory ? { factory: true } : {}) } : null;
-  if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last };
+  const tried = after.filter((r) => r.drop || r.cleared);
+  const n = tried.at(-1);
+  const last = n ? { at: n.at, code: n.code, ...(n.factory ? { factory: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
+  const cleared = tried.length - drops.length ? { cleared: tried.length - drops.length } : {};
+  if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last, ...cleared };
   const codes = [...new Set(drops.map((d) => d.code))];
-  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Factory re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes };
+  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Factory re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
 }
 
 /** GitHub Actions' app id: a required check's integration when the ruleset names none. */

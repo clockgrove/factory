@@ -84,7 +84,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungFinishedGreen, queueDeadline, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -2561,8 +2561,9 @@ export const hungChecks = (hung) =>
 const REQUEUE_RECORD = (issue) => `<!-- factory:${issue}:requeue-drop `;
 
 /**
- * The issue's comment when Factory puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, read
- * back by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Factory itself for
+ * The issue's comment when Factory puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, with
+ * `hung` for a HUNG_CODE removal: each step it judged hung, `{job, step, number, elapsedMs, baselineMs, by}`; read back
+ * by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Factory itself for
  * a stalled entry) and, for a check that hung on the queue's commit (HUNG_CODE), the check's name.
  */
 export const requeueLine = (prNumber, last, tryNo, hung = null) => {
@@ -2573,12 +2574,16 @@ export const requeueLine = (prNumber, last, tryNo, hung = null) => {
   return `Factory: ${who} (${last.code}${named}) at ${at ?? "an unknown time"}; enqueued again (try ${Number(tryNo)}).`;
 };
 
+/** A hung step as the requeue record keeps it: its job and step, its times, and the queue's deadline for it (`by`). */
+const hungRecord = (h) => ({ job: Number.isInteger(h?.job) ? h.job : null, step: typeof h?.step === "string" ? h.step : null, number: Number.isInteger(h?.number) ? h.number : null, elapsedMs: Number.isFinite(h?.elapsedMs) ? h.elapsedMs : null, baselineMs: Number.isFinite(h?.baselineMs) ? h.baselineMs : null, by: Number.isFinite(Date.parse(h?.by)) ? h.by : null });
+
 /** The comment body for that notice: the record line, then requeueLine. */
-export const requeueBody = (issue, prNumber, last, tryNo, hung = null) => `${REQUEUE_RECORD(issue)}${JSON.stringify({ at: last.at, code: last.code })} -->\n${requeueLine(prNumber, last, tryNo, hung)}`;
+export const requeueBody = (issue, prNumber, last, tryNo, hung = null) => `${REQUEUE_RECORD(issue)}${JSON.stringify({ at: last.at, code: last.code, ...(last.code === HUNG_CODE && hung?.length ? { hung: hung.map(hungRecord) } : {}) })} -->\n${requeueLine(prNumber, last, tryNo, hung)}`;
 
 /**
- * The drops Factory recorded in its own requeue comments on the issue (requeueBody): `{at, code}`. A removal Factory
- * made on an earlier pass reads its code from here, since GitHub's timeline cannot say why Factory removed it.
+ * The drops Factory recorded in its own requeue comments on the issue (requeueBody): `{at, code}`, with `hung` when the
+ * record has it. A removal Factory made on an earlier pass reads its code from here, since GitHub's timeline cannot say
+ * why Factory removed it.
  */
 export function requeueRecords(comments, issue) {
   const out = [];
@@ -2587,7 +2592,7 @@ export function requeueRecords(comments, issue) {
     const line = (c.body || "").split("\n").find((l) => l.startsWith(REQUEUE_RECORD(issue)) && l.endsWith(" -->"));
     try {
       const v = JSON.parse(line.slice(REQUEUE_RECORD(issue).length, -4));
-      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.code === "string") out.push({ at: v.at, code: v.code });
+      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.code === "string") out.push({ at: v.at, code: v.code, ...(Array.isArray(v.hung) ? { hung: v.hung.map(hungRecord) } : {}) });
     } catch {
       // no record (an older notice): the removal reads as STALL_CODE
     }
@@ -2645,6 +2650,32 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     jobs.set(t.id, job);
   }
   return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs });
+}
+
+/**
+ * Marks `cleared` each of Factory's HUNG_CODE removals after `since` whose record names the steps it judged hung and
+ * whose every such step then finished green before the queue's own deadline (logic.mjs hungFinishedGreen), reading each
+ * job once (`actions/jobs/{id}`, with `actionsToken`; with none, as on the local route, nothing is read or cleared).
+ * Decided on the jobs' recorded ids, step names and numbers, statuses and times only. Returns whether any was cleared.
+ */
+export async function clearSlowHangs(repo, { issue, prNumber, removals, since, actionsToken = null }, opts) {
+  const from = Date.parse(since);
+  const judged = (removals || []).filter((r) => r.code === HUNG_CODE && Array.isArray(r.hung) && r.hung.length && !(Date.parse(r.at) <= from));
+  if (!actionsToken || !judged.length) return false;
+  const aopts = { ...opts, token: actionsToken };
+  const jobs = new Map();
+  for (const id of new Set(judged.flatMap((r) => r.hung.map((h) => h.job)).filter(Number.isInteger))) {
+    const job = await rest(`repos/${repo.full}/actions/jobs/${id}`, aopts).catch(() => null);
+    if (job) jobs.set(id, job);
+  }
+  let any = false;
+  for (const r of judged) {
+    if (!hungFinishedGreen(r.hung, jobs)) continue;
+    r.cleared = true;
+    any = true;
+    log(`#${issue}: the step Factory judged hung when it took PR #${prNumber} out of the merge queue at ${r.at} then finished green in time; that removal counts toward no try`);
+  }
+  return any;
 }
 
 /**
@@ -3453,6 +3484,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
     stalledAt = new Date().toISOString();
     hung = st.hung || null;
+    // A stalled step of a job read gets the queue's own deadline for its commit, so a later pass can tell whether it
+    // then finished green in time (clearSlowHangs).
+    if (hung?.some((h) => h.job)) {
+      const by = queueDeadline(st.headAt ?? st.enqueuedAt, await queueCheckTimeout(repo, opts).catch(() => null));
+      hung = hung.map((h) => ({ ...h, by }));
+    }
     // Out of the queue now: until it is back in, a watch (whose first read sees it out and ticks) brings the next pass,
     // whatever this pass then returns or throws (#2683 F3).
     report.watch = true;
@@ -3496,6 +3533,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   // A PR the queue dropped (its checks never ran on the queue's commit, or failed there) goes back in once; dropped
   // again, it Blocks with the queue's reasons rather than waiting with no notice. GitHub's timeline is the record.
   let retry = null;
+  let lastHung = null;
   if (queue) {
     const removals = await mergeQueueRemovals(repo, prNumber, opts).catch((e) => {
       log(`#${issue}: PR #${prNumber}'s merge queue history is unreadable (${errCode(e)}); next tick`);
@@ -3507,12 +3545,13 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     for (const r of removals) {
       const rec = records.find((x) => Math.abs(Date.parse(x.at) - Date.parse(r.at)) <= 60_000);
       if (rec && !r.code) r.code = rec.code;
+      if (rec?.hung && !r.hung) r.hung = rec.hung;
     }
     // Factory's own removal just now, which the timeline may not show yet, counts once and with its own code.
     if (stalledAt) {
       const recent = removals.filter((r) => Date.parse(r.at) >= Date.parse(stalledAt) - 60_000).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       if (recent.length) removals.splice(removals.indexOf(recent.at(-1)), 1);
-      removals.push({ at: stalledAt, reason: STALL_CODE, code: hung ? HUNG_CODE : STALL_CODE, self: true });
+      removals.push({ at: stalledAt, reason: STALL_CODE, code: hung ? HUNG_CODE : STALL_CODE, self: true, ...(hung ? { hung } : {}) });
     }
     // Drops count from the latest of the review, the head's commit (GitHub keeps no push time for a branch push, and a
     // push is never before its commit) and the issue's last re-entry or Block: a re-entry's new head, or a re-entry with
@@ -3528,7 +3567,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       }
       since = queueSince([reviewedAt, head?.commit?.committer?.date ?? null, marks]);
     }
-    retry = queueRetry(removals, { since, self: selfLogin() || (await primeSelf(opts)) });
+    const self = selfLogin() || (await primeSelf(opts));
+    retry = queueRetry(removals, { since, self });
+    // At the Block: a hung removal whose step then finished green in time was no hang, and counts toward no try.
+    if (retry.block && (await clearSlowHangs(repo, { issue, prNumber, removals, since, actionsToken }, opts))) retry = queueRetry(removals, { since, self });
+    // The steps the newest removal judged hung, for its requeue record.
+    if (retry.last?.code === HUNG_CODE) lastHung = removals.find((r) => r.at === retry.last.at)?.hung ?? null;
     if (retry.hold) {
       log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
       return "held";
@@ -3579,7 +3623,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
           : retry.block;
       return "dropped";
     }
-    if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + 1})`);
+    if (retry.drops || retry.cleared) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + (retry.cleared || 0) + 1})`);
   }
   // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
   // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
@@ -3620,9 +3664,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // The queue's commit is made in a moment: the caller has it watched for a check run to start.
     report.watch = true;
     // A re-enqueue is said on the issue (codes and times), so a drop is visible before any Block.
-    if (retry?.drops && retry.last) {
-      const tryNo = retry.drops + 1;
-      await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, retry.last.code === HUNG_CODE ? hung : null), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));
+    // Its try counts every removal Factory put it back after, a cleared one included, so no notice takes another's place.
+    if ((retry?.drops || retry?.cleared) && retry.last) {
+      const tryNo = retry.drops + (retry.cleared || 0) + 1;
+      await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, lastHung), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));
     }
   }
   return how;

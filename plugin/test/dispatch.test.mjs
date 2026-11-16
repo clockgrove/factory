@@ -197,6 +197,41 @@ test("queueRetry: a PR the merge queue dropped goes back in once; dropped again 
   assert.deepEqual(queueRetry([stalled], { since }), { enqueue: true, drops: 1, last: { at: stalled.at, code: "dequeued" } }, "without Factory's login known, its App is still a bot: a drop, never a hold that leaves the PR out");
 });
 
+test("queueRetry: a hung removal of Factory's whose step then finished green in time counts toward no try; anything else counts (#437)", async () => {
+  const { HUNG_CODE, STALL_CODE, queueRetry } = await import("../scripts/lib/logic.mjs");
+  const since = "2026-11-09T09:30:00Z";
+  const self = "factory-app[bot]";
+  const hung = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE };
+  const again = { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true };
+  assert.ok(queueRetry([hung, again], { since, self }).block, "both count: two drops Block");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }, again], { since, self }), { enqueue: true, drops: 1, last: { at: again.at, code: HUNG_CODE, factory: true }, cleared: 1 }, "the slow step's removal leaves the tries as they were");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }], { since, self }), { enqueue: true, drops: 0, last: { at: hung.at, code: HUNG_CODE, factory: true, cleared: true }, cleared: 1 }, "a cleared removal is never a hold: the PR goes back");
+  assert.ok(queueRetry([{ ...hung, code: STALL_CODE, cleared: true }, again], { since, self }).block, "only a hung removal can be cleared");
+  const person = { at: "2026-11-09T09:40:00Z", reason: "dequeued", actor: "kirk", person: true, code: HUNG_CODE, cleared: true };
+  assert.deepEqual(queueRetry([person], { since, self }).hold, { at: person.at, code: "dequeued" }, "a person's removal stays a hold");
+  const queue = { at: "2026-11-09T09:50:00Z", reason: "checks_timed_out", actor: "github-merge-queue", code: HUNG_CODE, cleared: true };
+  assert.ok(queueRetry([queue, again], { since, self }).block, "the queue's own drop counts whatever it carries");
+});
+
+test("hungFinishedGreen: every step judged hung completed with success by the queue's deadline, matched by job, name and number (#437)", async () => {
+  const { hungFinishedGreen, queueDeadline } = await import("../scripts/lib/logic.mjs");
+  const by = queueDeadline("2026-11-10T05:00:00Z", 60);
+  assert.equal(by, "2026-11-10T06:00:00.000Z");
+  assert.equal(queueDeadline("2026-11-10T05:00:00Z", null), by, "unread: setup's 60");
+  const step = (extra) => ({ name: "Run npm test", number: 4, status: "completed", conclusion: "success", started_at: "2026-11-10T05:01:00Z", completed_at: "2026-11-10T05:40:00Z", ...extra });
+  const jobs = (s) => new Map([[9, { id: 9, steps: [{ name: "Set up job", number: 1, status: "completed", conclusion: "success" }, s] }]]);
+  const rec = [{ job: 9, step: "Run npm test", number: 4, by }];
+  assert.equal(hungFinishedGreen(rec, jobs(step())), true, "slow, then green in time");
+  assert.equal(hungFinishedGreen(rec, jobs(step({ completed_at: "2026-11-10T06:00:01Z" }))), false, "green after the queue's own timeout");
+  assert.equal(hungFinishedGreen(rec, jobs(step({ conclusion: "cancelled" }))), false, "cancelled");
+  assert.equal(hungFinishedGreen(rec, jobs(step({ status: "in_progress", conclusion: null, completed_at: null }))), false, "still running");
+  assert.equal(hungFinishedGreen(rec, jobs(step({ number: 5 }))), false, "another step of the same name");
+  assert.equal(hungFinishedGreen(rec, new Map()), false, "the job unread");
+  assert.equal(hungFinishedGreen([{ ...rec[0], job: null }], jobs(step())), false, "no job recorded (a check that is no Actions job)");
+  assert.equal(hungFinishedGreen([...rec, { job: 10, step: "Run build", number: 2, by }], jobs(step())), false, "every step judged hung must have finished");
+  assert.equal(hungFinishedGreen([], jobs(step())), false);
+});
+
 test("queueStall: a queue commit with no check run for QUEUE_STALL_MS is stalled; a fresh entry with no commit yet is watched", async () => {
   const { QUEUE_FRESH_MS, QUEUE_STALL_MS, queueStall } = await import("../scripts/lib/logic.mjs");
   const headAt = "2026-11-09T09:36:44Z";

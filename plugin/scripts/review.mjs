@@ -472,7 +472,7 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
   const reviewed = (reason, more = {}) => ({ review: true, why: reason, verdict: null, confidence: null, error: null, ...more });
   if (typeof diff !== "string") return reviewed(`what the answer and fix passes wrote could not be told from the default branch's changes${why ? ` (${why})` : ""}`);
   if (Buffer.byteLength(diff) > ANSWER_DIFF_BYTES) return reviewed(`what the answer and fix passes wrote is over ${ANSWER_DIFF_BYTES} bytes of diff, more than the decision model is given`);
-  if (!ask?.decider) return reviewed(`no decision model to judge what the answer and fix passes wrote (${ask?.off || "no key"})`);
+  if (!ask?.decider) return reviewed(`no decision model to judge what the answer and fix passes wrote (${ask?.off || "no key"})`, { off: ask?.off || "no-key" });
   let a;
   try {
     a = await ask.decider.decide(answerInput({ comments, checks, diff }), ANSWER_QUESTION);
@@ -486,9 +486,20 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
   return reviewed(`the decision model (${ask.model}) gave no answer on what the answer and fix passes wrote (${a?.error || "no_answer"})`, { error: a?.error || "no_answer" });
 }
 
-/** The answer gate's line in the job log: the model's answer and what follows from it. */
-export const answerGateLine = (gate, model) =>
-  `answer gate (${model}): ${gate.verdict ? `${gate.verdict}${typeof gate.confidence === "number" ? ` ${gate.confidence.toFixed(2)}` : ""}` : `no verdict${gate.error ? ` (${gate.error})` : ""}`} → ${gate.review ? `review pass: ${gate.why}` : "covered by the review"}`;
+/**
+ * The answer gate's line in the job log: the model's answer and what follows from it, or null when there is nothing to
+ * say. With no decision model (`gate.off`, no key) the gate is not judged and every answer that committed goes to a
+ * review pass: said once per stage (`ask`, answerDecider, remembers it), never asked of the gateway.
+ */
+export function answerGateLine(gate, ask) {
+  if (!gate || (!gate.review && !gate.verdict)) return null;
+  if (gate.off) {
+    if (ask?.offSaid) return null;
+    if (ask) ask.offSaid = true;
+    return `answer gate: off (${gate.off}), not judged without a decision model; the answer and fix passes' commits after the review get a review pass`;
+  }
+  return `answer gate (${ask?.model}): ${gate.verdict ? `${gate.verdict}${typeof gate.confidence === "number" ? ` ${gate.confidence.toFixed(2)}` : ""}` : `no verdict${gate.error ? ` (${gate.error})` : ""}`} → ${gate.review ? `review pass: ${gate.why}` : "covered by the review"}`;
+}
 
 /**
  * The answer gate on the branch (answerGate): what was written from the head the review read (`from`) to `head`, the
@@ -1429,7 +1440,8 @@ async function main() {
     // An answer that applied decisions is reviewed anyway: the gate is on what this stage wrote before it.
     const upTo = answerQuestion && answerTo && answerTo !== answerFrom ? answerFrom : head;
     const gate = upTo && upTo !== reviewedAt && !answering ? await answerCovered(outbox.git, { base: outbox.base, from: reviewedAt, head: upTo, comments: answered, checks: [...fixTexts, ...(heldRed ? [heldRed.tail] : [])], ask: answerAsk }) : null;
-    if (gate?.review || gate?.verdict) log(answerGateLine(gate, answerAsk.model));
+    const said = answerGateLine(gate, answerAsk);
+    if (said) log(said);
     const c = coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate, answering });
     if (c.record) await recordCovered(repo, pr.number, issue, c.record, token, { answer: c.answer }).catch((e) => log(`covered record: ${String(e?.message || e).slice(0, 120)}`));
     return c;

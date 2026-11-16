@@ -383,7 +383,7 @@ test("#367: the decision model judges whether the answer and fix passes wrote on
     assert.match(asked[0].input, /^\+two reviewed and fixed$/m);
     assert.doesNotMatch(asked[0].input, /reviewed feature/, "the reviewed head's own change is not in the diff");
     assert.equal(ask.model, "test/decider");
-    assert.match(answerGateLine(g, ask.model), /^answer gate \(test\/decider\): only_asked 0\.93 → covered by the review$/);
+    assert.match(answerGateLine(g, ask), /^answer gate \(test\/decider\): only_asked 0\.93 → covered by the review$/);
     assert.deepEqual(coverAfter({ answerQuestion: false, answerFrom: r.reviewed, answerTo: small, head: small, reviewedAt: r.reviewed, gate: g }), { review: false, answer: false, record: small });
     // No: a review pass, however small the diff.
     ({ ask } = fakeAsk(no));
@@ -402,9 +402,6 @@ test("#367: the decision model judges whether the answer and fix passes wrote on
       assert.deepEqual([g.review, g.verdict, g.error], [true, null, code]);
       assert.match(g.why, new RegExp(`gave no answer .*\\(${code}\\)`));
     }
-    g = await gate(small, answerDecider({ inputs: {}, env: { GITHUB_ACTIONS: "true" } }));
-    assert.equal(g.review, true);
-    assert.match(g.why, /no decision model .*\(no-key\)/);
     // A diff over the cap: a review pass, the model not asked, however it would answer.
     r.put("app.txt", Array.from({ length: 4000 }, (_, i) => `rewritten line ${i}`).join("\n") + "\n");
     r.run("commit", "-q", "-m", "a rewrite");
@@ -430,6 +427,40 @@ test("#367: the decision model judges whether the answer and fix passes wrote on
     assert.deepEqual(coverAfter({ answerQuestion: false, answerFrom: big, answerTo: x, head: x, reviewedAt: big, gate: null, answering: true }), { review: false, answer: false, record: x });
   } finally {
     setSelf(null);
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test("#367: with no AI Gateway key the answer gate is not judged: no gateway call, a review pass, said once per stage", async () => {
+  const r = repos();
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    throw new Error("no network in this test");
+  };
+  try {
+    r.put("app.txt", "one\ntwo reviewed and fixed\nthree\n");
+    r.run("commit", "-q", "-m", "answer");
+    const head = r.push();
+    // On Actions with no ai_gateway_api_key input; locally with no key file in the (fake) home.
+    for (const ask of [answerDecider({ inputs: { triageModel: "test/decider" }, env: { GITHUB_ACTIONS: "true" } }), answerDecider({ inputs: {}, env: {} })]) {
+      assert.deepEqual([ask.decider, ask.off], [null, "no-key"]);
+      const lines = [];
+      for (let i = 0; i < 3; i += 1) {
+        const g = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: r.reviewed, head, comments: [{ path: "app.txt", line: 2, body: "two is wrong" }], ask }));
+        assert.deepEqual([g.review, g.off, g.verdict], [true, "no-key", null]);
+        assert.match(g.why, /no decision model .*\(no-key\)/);
+        const c = coverAfter({ answerQuestion: false, answerFrom: r.reviewed, answerTo: head, head, reviewedAt: r.reviewed, gate: g });
+        assert.deepEqual([c.review, c.answer, c.record], [true, true, r.reviewed], "a scoped review pass, never a Block");
+        const said = answerGateLine(g, ask);
+        if (said) lines.push(said);
+      }
+      assert.deepEqual(lines, ["answer gate: off (no-key), not judged without a decision model; the answer and fix passes' commits after the review get a review pass"]);
+    }
+    assert.deepEqual(calls.filter((u) => /ai-gateway/.test(u)), [], "the gateway is never called");
+  } finally {
+    globalThis.fetch = realFetch;
     rmSync(r.root, { recursive: true, force: true });
   }
 });
@@ -531,6 +562,7 @@ test("#350: the worker's rebase keeps the review only for a rebase of the covere
   assert.ok(src.indexOf("await settleCover({") < src.indexOf("let stoppedAtMerge = null;"));
   // #367: the gate asks triage's decision model about what the stage wrote since the head its review read.
   assert.match(src, /const answerAsk = answerDecider\(\{ inputs \}\);/);
+  assert.match(src, /const said = answerGateLine\(gate, answerAsk\);\n\s+if \(said\) log\(said\);/);
   assert.match(src, /await answerCovered\(outbox\.git, \{ base: outbox\.base, from: reviewedAt, head: upTo, comments: answered, checks: \[\.\.\.fixTexts, \.\.\.\(heldRed \? \[heldRed\.tail\] : \[\]\)\], ask: answerAsk \}\)/);
   assert.match(src, /fixTexts\.push\(\.\.\.\(pre\.given \?\? \[\]\), pre\.lastOutput\)/);
   const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");

@@ -3533,7 +3533,7 @@ async function sessionInputs({ dir, repoFull, repo, opts }) {
 /** Where `factory issue` writes the issue for a session by default, and where `deliver` reads what the session was given. */
 const sessionIssueFile = (dir) => join(process.env.FACTORY_IN || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-in"), "issue.md");
 
-/** A session's refusal of an issue whose author or last editor cannot vouch for it: the Blocked notice's words. */
+/** A session's refusal of an issue whose author, last editor or latest title renamer cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
 /** A draft (factory:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
 const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Factory never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Factory Objective ${issue}")`);
@@ -3541,7 +3541,7 @@ const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (
 /**
  * `factory issue <issue> [--out FILE]`: the issue as a session reads it (/factory:factory-run --here, /factory:factory-review), written
  * to --out (default $FACTORY_IN/issue.md, else <git dir>/factory-in/issue.md) as the worker writes it: the title and
- * body read with their author and last editor, only when both can push or are pinned maintainers. Otherwise nothing is
+ * body read with their author, last editor and latest title renamer, only when each can push or is a pinned maintainer. Otherwise nothing is
  * written, the reason and its fix go to stderr, and the exit code is 1: the body never reaches the session. Without
  * --out, also plan.md beside it: the plan comment, only when the plan was made from this text (else none, and an
  * earlier one is removed). Writes nothing to GitHub.
@@ -3578,8 +3578,8 @@ async function issueForSession(issue, flags) {
 /**
  * `factory deliver <issue>`: Factory's half of an Objective worked in a session (/factory:factory-run --here). The session
  * committed on factory/<issue> in this clone and left its hand-off files in --out (default <git dir>/factory-out);
- * Factory checks the issue's author and last editor (objective-trust.mjs: a Block, nothing pushed, when either cannot
- * vouch for it), checks the protected paths, pushes, opens or updates the PR from pr.md, posts the plan comment, the
+ * Factory checks the issue's author, last editor and latest title renamer (objective-trust.mjs: a Block, nothing pushed,
+ * when one cannot vouch for it), checks the protected paths, pushes, opens or updates the PR from pr.md, posts the plan comment, the
  * replies and the note, and applies the exit record. Returns the process exit code.
  */
 async function deliver(issue, flags) {

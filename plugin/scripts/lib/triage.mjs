@@ -545,7 +545,7 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
   try {
     doc = parseYaml(String(text || ""));
   } catch {
-    return { checks: [], filters: null };
+    return { checks: [], filters: null, chained: false };
   }
   const checks = [];
   for (const [id, job] of Object.entries(doc?.jobs || {})) {
@@ -561,7 +561,9 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
   // The filter decides alone only when pull_request is the one trigger that can start the workflow on the head:
   // another (push, pull_request_target, workflow_dispatch…) may run it anyway (`sole` false).
   const sole = !!on && Object.keys(on).every((t) => t === "pull_request" || NOT_ON_HEAD.includes(t));
-  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null };
+  // `chained`: it runs on another workflow's run (`on: workflow_run`), so after the head's other runs completed.
+  const triggers = typeof doc?.on === "string" ? [doc.on] : Array.isArray(doc?.on) ? doc.on : Object.keys(on || {});
+  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null, chained: triggers.includes("workflow_run") };
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
@@ -765,7 +767,8 @@ export function filterSkips(filters, files) {
  * produce it (`producers`: name → workflow ids): a workflow of the repository (or one that ran on the head) whose file
  * at the head has a job reporting that name (workflowChecks), else the workflow of that check's run on an older commit
  * (`history()`: commit ids, newest first, read only when needed), found through its check suite. `skips`: workflow id
- * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `workflowRuns` null: they
+ * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `chained`: a workflow at the
+ * head runs `on: workflow_run`, so a check may come after every run listed completed. `workflowRuns` null: they
  * could not be read (`readError`).
  */
 export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null, cache = new Map() }) {
@@ -783,6 +786,7 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
   }
   const producers = new Map();
   const skips = new Map();
+  let chained = false;
   const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
   const missing = names.filter((n) => !latestRun(checkRuns, n));
   if (missing.length) {
@@ -798,7 +802,8 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
     let changed;
     for (const [id, path] of all) {
       if (/(^|\/)factory\.ya?ml$/.test(path)) continue;
-      const { checks, filters } = await workflowChecks(await read(path), read);
+      const { checks, filters, chained: after } = await workflowChecks(await read(path), read);
+      chained ||= after;
       const its = missing.filter((n) => checks.some((c) => reports(c, n)));
       for (const n of its) add(n, id);
       // Every producer is recorded, filtered or not: a check is filtered out only when each of them skips the change.
@@ -821,7 +826,7 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
       }
     }
   }
-  return { workflowRuns, readError: "", jobs, producers, skips };
+  return { workflowRuns, readError: "", jobs, producers, skips, chained };
 }
 
 /** GitHub Actions' own app: a check run from any other app is that service's, not Actions'. */

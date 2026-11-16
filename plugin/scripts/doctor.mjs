@@ -25,7 +25,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
-import { ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAutoSetting, routeCredentialEnv, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
+import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
 import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
@@ -33,6 +33,9 @@ import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey } from "./lib/triage.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
+import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
+import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
+import { TokenType } from "../vendor/@actions/expressions/dist/lexer.js";
 import { dropOwned } from "./lib/fsafe.mjs";
 import { loopCap, machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
@@ -299,6 +302,88 @@ export async function holdsIssueChecks({ repo, opts = {}, accounts = "", auto = 
 }
 const secretName = (n) => (Array.isArray(n) ? n.join(" or ") : n);
 
+/** The contexts and status functions a workflow's expressions use beside the expression library's own functions. */
+const EXPRESSION_CONTEXTS = ["github", "env", "vars", "secrets", "inputs", "steps", "job", "jobs", "runner", "matrix", "strategy", "needs"];
+const EXPRESSION_FUNCTIONS = [...["always", "success", "failure", "cancelled"].map((name) => ({ name, minArgs: 0, maxArgs: 0 })), { name: "hashFiles", minArgs: 1, maxArgs: 255 }];
+
+/**
+ * How a workflow file's expressions read the `secrets` context, parsed with GitHub's expression library: `names`, each
+ * secret named by its fixed name (`secrets.NAME`), and `dynamic`, each expression that reads it any other way (an index
+ * such as `secrets[format(...)]`, or the whole context): GitHub then sends the job every repository and organization
+ * secret. An expression the library cannot parse counts as dynamic when its text holds `secrets` not followed by `.NAME`.
+ */
+export function secretReferences(text) {
+  const names = new Set();
+  const dynamic = [];
+  const exprs = [];
+  const walk = (v, key) => {
+    if (typeof v === "string") {
+      for (const m of v.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) exprs.push(m[1]);
+      if (key === "if" && !v.includes("${{")) exprs.push(v);
+    } else if (Array.isArray(v)) v.forEach((x) => walk(x));
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) walk(x, k);
+  };
+  walk(parseYaml(text));
+  const visit = (n, parent) => {
+    if (!n || typeof n !== "object") return;
+    if (n instanceof ContextAccess && n.name?.lexeme?.toLowerCase() === "secrets") {
+      const named = parent instanceof IndexAccess && parent.expr === n && parent.index instanceof Literal && parent.index.token?.type === TokenType.IDENTIFIER;
+      if (named) names.add(String(parent.index.literal.coerceString()));
+      return named;
+    }
+    for (const v of Object.values(n)) {
+      if (Array.isArray(v)) {
+        for (const x of v) if (visit(x, n) === false) return false;
+      } else if (v instanceof Object && visit(v, n) === false) return false;
+    }
+    return true;
+  };
+  for (const src of exprs) {
+    let ok;
+    try {
+      ok = visit(new Parser(new Lexer(src).lex().tokens, EXPRESSION_CONTEXTS, EXPRESSION_FUNCTIONS).parse(), null) !== false;
+    } catch {
+      ok = !/\bsecrets\b(?!\s*\.\s*[A-Za-z_])/i.test(src);
+      for (const m of src.matchAll(/\bsecrets\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)/gi)) names.add(m[1]);
+    }
+    if (!ok) dynamic.push(src.trim());
+  }
+  return { names, dynamic };
+}
+
+/**
+ * The workflow file's secret references (secretReferences): a FAIL for any expression that reads `secrets` by a
+ * computed name or whole, since GitHub then sends every repository and organization secret to a job that runs
+ * model-written code; with accounts declared (its env block's FACTORY_ACCOUNTS) or rendered, a FAIL when its jobs were
+ * rendered for other accounts (an account step's `rendered_accounts`, accounts.mjs routeAccountsText) or do not name a
+ * declared account's secret (routeCredentialSecrets): a re-render is needed after every change to FACTORY_ACCOUNTS.
+ */
+export function workflowSecretChecks(text) {
+  let doc;
+  try {
+    doc = parseYaml(text) || {};
+  } catch {
+    return [];
+  }
+  const out = [];
+  const { names, dynamic } = secretReferences(text);
+  const rerender = "re-render the workflow with this release's setup (setup --apply workflow, docs/INSTALL.md, Upgrade), merge it, then run doctor";
+  if (dynamic.length) out.push(FAIL("workflow secrets", `${dynamic.length} expression(s) read secrets by a computed name or whole (${dynamic[0].slice(0, 120)}), so GitHub sends every repository and organization secret to the jobs that hold them, model-written code's included`, `${rerender}: it names each secret by its fixed name`));
+  else out.push(PASS("workflow secrets", "every secret is named by its fixed name, so a job gets only the secrets it names"));
+  const raw = doc.env?.FACTORY_ACCOUNTS;
+  const accounts = raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+  const declared = routeAccounts(accounts);
+  const steps = Object.values(doc.jobs || {}).flatMap((j) => (Array.isArray(j?.steps) ? j.steps : [])).filter((st) => st?.with?.mode === "account");
+  const rendered = [...new Set(steps.map((st) => routeAccountsText(st.with.rendered_accounts)))];
+  if (!declared.ok || (!declared.declared && rendered.every((r) => !r))) return out;
+  const want = routeAccountsText(accounts);
+  const missing = declared.declared ? [...new Set(Object.keys(ROUTE_CREDENTIAL_INPUTS).flatMap((k) => routeCredentialSecrets(k, declared).map((x) => x.secret)))].filter((n) => !names.has(n)) : [];
+  const stale = !steps.length || rendered.some((r) => r !== want);
+  if (missing.length || stale) out.push(FAIL("workflow accounts", `${declared.declared ? "FACTORY_ACCOUNTS declares other accounts than" : "FACTORY_ACCOUNTS declares none, but"} the workflow's jobs were rendered for${missing.length ? `: they do not name ${missing.join(", ")}` : ""}, so a stage on ${declared.declared ? "a declared account" : "any account"} gets no credential and Blocks`, rerender));
+  else if (declared.declared) out.push(PASS("workflow accounts", "the jobs name each declared account's secrets by name and pass a stage only its account's"));
+  return out;
+}
+
 export async function secretChecks({ inputs, repo, accounts = "" }) {
   const names = new Set();
   try {
@@ -456,6 +541,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     const vars = varsInputCheck(text);
     if (vars) out.push(vars);
     out.push(ownedTickCheck(text, env, { job }));
+    out.push(...workflowSecretChecks(text));
     const waits = longWaitCheck(repoData);
     if (waits) out.push(waits);
   }

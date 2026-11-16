@@ -10,7 +10,7 @@ import { test } from "node:test";
 // stand-in at this URL, set before the clients read it; every secret value here is a fake, and nothing reaches GitHub.
 process.env.GITHUB_API_URL = "https://github.test";
 const { RETRY } = await import("../scripts/lib/github.mjs");
-const { NO_SECRET, routeAutoAccounts, routeAutoSetting } = await import("../scripts/lib/accounts.mjs");
+const { routeAccountsText, routeAutoAccounts, routeAutoSetting } = await import("../scripts/lib/accounts.mjs");
 const { accountStep } = await import("../scripts/objective-account.mjs");
 const { routeAccountCheck } = await import("../scripts/lib/objective-trust.mjs");
 const { HOLDS_TITLE, holdLine, pickRouteAccount, readHolds, routeLimits, routeTurn, writeHold } = await import("../scripts/lib/route-holds.mjs");
@@ -122,7 +122,7 @@ const holdsIssue = (comments = [], extra = {}) => ({ number: 50, title: HOLDS_TI
 async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {} } = {}) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
-  const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_AUTO_ACCOUNT: auto, FACTORY_HARNESS: "claude", FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY, ...env };
+  const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_RENDERED_ACCOUNTS: routeAccountsText(accounts), FACTORY_AUTO_ACCOUNT: auto, FACTORY_HARNESS: "claude", FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY, ...env };
   const lines = [];
   const write = process.stderr.write;
   const writeOut = process.stdout.write;
@@ -217,7 +217,7 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   // labelled query (no holds issue yet: no other read) and the read-only token.
   assert.equal(routeTurn(8, 3), 0);
   const free = await runStep();
-  assert.deepEqual(free.outputs, { account: "claude", suffix_claude: "", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
+  assert.deepEqual(free.outputs, { account: "claude" });
   assert.match(free.log, /automatic account choice: account claude/);
   assert.deepEqual(holdReads(free.reads).map((x) => x.replace(/\?.*/, "")), ["GET /repos/acme/app/issues"]);
   assert.match(holdReads(free.reads)[0], /labels=factory%3Aholds/);
@@ -225,7 +225,6 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   const held1 = holdComment(1, { account: "claude", until: now + 2 * H, at: now - 60_000 });
   const one = await runStep({ issues: [holdsIssue([held1])] });
   assert.equal(one.outputs.account, "claude-2");
-  assert.equal(one.outputs.suffix_claude, "_CLAUDE_2");
   assert.match(one.log, /claude held until/);
   // claude-2 limited an hour ago, its hold over: never-limited claude-3 goes first, ahead of the turn.
   const old = holdComment(2, { account: "claude-2", until: now - 10 * 60_000, at: now - H });
@@ -262,7 +261,7 @@ test("with the setting off, or one account, the account step is exactly today's:
   const held = holdsIssue([holdComment(1, { account: "claude", until: Date.now() + 2 * H, at: Date.now() })]);
   for (const [auto, accounts] of [["", THREE], ["0", THREE], ["1", JSON.stringify({ claude: ["claude"], codex: ["codex-2", "codex-3"] })]]) {
     const r = await runStep({ auto, accounts, issues: [held] });
-    assert.deepEqual(r.outputs, { account: "claude", suffix_claude: "", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET }, `${auto} ${accounts}`);
+    assert.deepEqual(r.outputs, { account: "claude" }, `${auto} ${accounts}`);
     assert.deepEqual(holdReads(r.reads), [], "no holds read");
     assert.match(r.log, /this stage runs on account claude/);
   }

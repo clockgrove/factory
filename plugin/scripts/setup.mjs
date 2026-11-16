@@ -33,6 +33,7 @@ import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
 import { ciRunner, ciWorkflowTriggers, runnerLabels, setupScripts, unreadableRunners } from "./doctor.mjs";
 import { parseYaml } from "./lib/yaml.mjs";
+import { ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef } from "./lib/accounts.mjs";
 
 export const LABELS = [
   ["factory:objective", "1D76DB", "An Objective for Factory to build unattended"],
@@ -338,6 +339,9 @@ export function workflowAction({ explicit, before, latest }) {
  */
 export function workflowText({ template, inputs, args, explicit = args, before = null, latest, notify, runsOn = null, ciWorkflow, defaultBranch = "", protectedPaths: protectedList = inputs.protectedAdditions }) {
   const sandbox = String(args.sandbox || "").trim().toLowerCase();
+  // The accounts the existing file's env block declares (FACTORY_ACCOUNTS, only the file sets it): the jobs name their secrets.
+  const declared = routeAccounts(before?.env.FACTORY_ACCOUNTS);
+  if (!declared.ok) throw new Error(`${declared.problem}: fix FACTORY_ACCOUNTS in the workflow's env block (docs/INSTALL.md, Several accounts), then render again`);
   const oldNotifyId = parseMaintainer(before?.env.FACTORY_NOTIFY || "")?.id ?? null;
   const keptIds = before && explicit.maintainers === undefined ? before.ids.filter((id) => explicit.notify === undefined || id !== oldNotifyId) : [];
   const ids = [...new Set([...maintainerIds([notify, ...inputs.maintainers]).split(",").filter(Boolean), ...keptIds.map(String)])];
@@ -377,8 +381,23 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     image_daily_minutes: String(inputs.imageDailyMinutes),
     sandbox_idle_days: String(inputs.sandboxIdleDays),
     sweep_max_destroys: String(inputs.sweepMaxDestroys),
+    // The declaration the credential inputs below are rendered for: the account steps pick none under another.
+    rendered_accounts: routeAccountsText(before?.env.FACTORY_ACCOUNTS),
   };
-  return withFileEnv(renderWorkflow(template, values), { template, before, explicit });
+  return withFileEnv(accountCredentials(renderWorkflow(template, values), declared), { template, before, explicit });
+}
+
+/**
+ * The rendered `text` with each stage step's credential input (`anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`,
+ * accounts.mjs ROUTE_CREDENTIAL_INPUTS) naming every declared account's secret by its fixed name and passing the one of
+ * the account the job's account step picked (accounts.mjs routeCredentialRef), when `declared` (routeAccounts) declares
+ * accounts; unchanged with none. A secret is never looked up by a computed name: GitHub would then send the runner every
+ * secret the repository and its organization hold.
+ */
+export function accountCredentials(text, declared) {
+  if (!declared?.declared) return text;
+  const line = new RegExp(`^(\\s+)(${Object.keys(ROUTE_CREDENTIAL_INPUTS).join("|")}): \\$\\{\\{ secrets\\.([A-Z_]+) \\}\\}`, "gm");
+  return text.replace(line, (m, indent, input, secret) => (secret === ROUTE_CREDENTIAL_INPUTS[input].secret ? `${indent}${input}: ${routeCredentialRef(input, declared)}` : m));
 }
 
 /**

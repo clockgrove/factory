@@ -1,10 +1,10 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { installDeps } from "../scripts/lib/checkout.mjs";
+import { autoInstalls, installCommand, installDeps } from "../scripts/lib/checkout.mjs";
 
 // A checkout whose package.json needs `typescript` (bin tsc). `install` is a shell script standing in for the package
 // manager: the first run leaves the package's bin out (an interrupted or partial install), later runs per `heals`.
@@ -69,4 +69,30 @@ test("install: a dangling dependency link is missing; local packages, install-sc
   const r = await installDeps(dir, install, { env: process.env });
   assert.equal(r.ok, false);
   assert.deepEqual(r.missing, ["node_modules/gone"]);
+});
+
+test("auto install: every ecosystem whose lockfile is there is installed, not only the first; package.json's packageManager picks the Node.js one", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "install-all-"));
+  const bin = join(dir, ".bin");
+  mkdirSync(bin);
+  // Stand-ins for the package managers: each leaves a marker of the command it ran.
+  for (const tool of ["npm", "pnpm", "cargo", "go"]) writeFileSync(join(bin, tool), `#!/bin/sh\necho "$*" > "${join(dir, `ran-${tool}`)}"\n`, { mode: 0o755 });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", version: "1.0.0" }));
+  writeFileSync(join(dir, "package-lock.json"), "{}");
+  writeFileSync(join(dir, "Cargo.lock"), "");
+  writeFileSync(join(dir, "go.sum"), "");
+  const command = installCommand(dir);
+  assert.equal(command, "npm ci --ignore-scripts && cargo fetch --locked && go mod download");
+  const result = await installDeps(dir, command, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeoutMs: 30_000 });
+  assert.equal(result.ok, true);
+  assert.equal(readFileSync(join(dir, "ran-npm"), "utf8").trim(), "ci --ignore-scripts");
+  assert.equal(readFileSync(join(dir, "ran-cargo"), "utf8").trim(), "fetch --locked", "the Cargo.lock beside the package-lock.json is installed too");
+  assert.equal(readFileSync(join(dir, "ran-go"), "utf8").trim(), "mod download");
+  // Two Node.js lockfiles are alternatives for one package.json: one install, the one packageManager names.
+  writeFileSync(join(dir, "pnpm-lock.yaml"), "");
+  assert.deepEqual(autoInstalls(dir).map((i) => i.lockfile), ["pnpm-lock.yaml", "Cargo.lock", "go.sum"], "with no packageManager, the table's order");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "app", version: "1.0.0", packageManager: "npm@10.9.0" }));
+  assert.deepEqual(autoInstalls(dir).map((i) => i.lockfile), ["package-lock.json", "Cargo.lock", "go.sum"]);
+  assert.equal(installCommand(dir, "none"), null);
+  assert.equal(installCommand(dir, "make deps"), "make deps", "a given command wins");
 });

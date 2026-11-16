@@ -211,7 +211,7 @@ export function toolchainFile(path) {
 // named requirements or constraints (`requirements-dev.txt`, `dev-requirements.txt`, `test_constraints.in`) or under a
 // `requirements/` or `constraints/` directory (`requirements/dev.txt`).
 const DEPENDENCY_LIST = /^(?:[\w.-]*[-_.])?(?:requirements|constraints)(?:[-_.][\w.-]*)?\.(?:txt|in)$/;
-const dependencyFile = (path) => {
+export const dependencyFile = (path) => {
   const name = fileName(path);
   if (MANIFESTS.has(name) || LOCKFILES.has(name) || DEPENDENCY_LIST.test(name)) return true;
   return /\.(?:txt|in)$/.test(name) && path.split("/").slice(0, -1).some((d) => d === "requirements" || d === "constraints");

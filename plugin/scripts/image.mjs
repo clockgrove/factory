@@ -9,8 +9,9 @@
 // its image issue, with a token minted for that alone (issues: write on this repository); images beyond the newest
 // two are destroyed, found from the vendor's listing only. Runs on a push to the default branch (until today's builds
 // pass image_daily_minutes), on the first dispatcher tick of a UTC day that finds a build owed (lib/image.mjs
-// imageOwed), on the nightly schedule (the backstop), or by hand on the default branch's head. The build sandbox gets
-// no secret: the vendor's credentials and the App key stay in this process, whose environment keeps none.
+// imageOwed), on the nightly schedule (the backstop), or by hand on the default branch's head; but a head whose changes
+// since the current image's touch nothing it is made from is recorded as covered, not built (imageChange). The build
+// sandbox gets no secret: the vendor's credentials and the App key stay in this process, whose environment keeps none.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -22,10 +23,11 @@ import { installCommand, runnerFileEnv } from "./lib/checkout.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { getRepo, onDefaultBranch, repoOf, rest } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
-import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
+import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imageMade, imagePaths, imageTouch, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordCover, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
 import { SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { setSelf } from "./lib/logic.mjs";
+import { setSelf, setupGuard } from "./lib/logic.mjs";
 import { armSweepWake } from "./dispatch.mjs";
+import { checkoutIo } from "./doctor.mjs";
 
 /** The build sandbox's limits: setup that takes longer than this is not an image build. */
 const BUILD_MS = 40 * 60_000;
@@ -187,6 +189,24 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
 }
 
 /**
+ * What changed between the image's head `from` and `head` in `checkout` (the job's clone, whole history) that the image
+ * is made from (lib/image.mjs imageTouch, with setupGuard's view of the `setup` and `install` commands read at `head`):
+ * `{touched}`, the first such path or null when none, or `{unknown}` when git cannot list the diff.
+ */
+export async function imageChange(checkout, from, head, { setup = "", install = "", env = process.env } = {}) {
+  let files;
+  try {
+    files = execFileSync("git", ["-C", checkout, "diff", "--name-only", "--no-renames", "-z", from, head], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }).split("\0").filter(Boolean);
+  } catch {
+    return { unknown: `git cannot list the changes from ${from.slice(0, 7)} to ${head.slice(0, 7)}` };
+  }
+  const io = checkoutIo(checkout, env);
+  const guards = [];
+  for (const command of [setup, install]) if (command) guards.push(await setupGuard(command, io));
+  return { touched: imageTouch(files, guards) };
+}
+
+/**
  * Which kind of build this event asks for, or null: a push to the default branch, the nightly cron, a manual run
  * (`image: true`). The dispatcher's owed build (`image_owed`) is the caller's to add: it rides on any event.
  */
@@ -256,7 +276,15 @@ async function main() {
   const verified = verifiedRecords(builds, vendor.images, adapter.name);
   const todayMs = todaysBuildMs(builds);
   const current = await currentBuild(adapter, repo, verified, { token });
-  const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes });
+  const base = adapter.baseImage(inputs.nodeVersion);
+  const install = installCommand(checkout, inputs.install);
+  const made = imageMade({ setup: inputs.setup, install, harnessVersion: inputs.harnessVersion, base });
+  // Whether this head changes what the image is made from: only asked of a build made with these same settings.
+  const change = current && current.sha !== head && current.made === made && current.covers !== head ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install }) : null;
+  if (current && current.sha !== head && current.made !== made) log(`image: ${current.sha.slice(0, 7)}'s image was built with other settings (setup, install, harness version or base image), or before Factory recorded them`);
+  if (change) log(`image: ${change.unknown ?? (change.touched ? `${change.touched} changed since ${current.sha.slice(0, 7)}` : `nothing the image is made from changed since ${current.sha.slice(0, 7)}`)}`);
+  const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, made, unchanged: !!change && !change.unknown && change.touched === null, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes });
+  if (decision.covers) await recordCover(repo, { source: current.source, head, attempt }, app).catch((e) => log(`image: recording that ${head.slice(0, 7)} changes nothing failed (${e.status ?? String(e.message).slice(0, 120)})`));
   if (decision.skip) {
     summary(`### Factory sandbox image\n\nSkipped: ${decision.skip}. Today's builds: ${(todayMs / 60_000).toFixed(1)} min.`);
     return done("skipped", decision.skip);
@@ -288,7 +316,6 @@ async function main() {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
-  const base = adapter.baseImage(inputs.nodeVersion);
   log(`image: building ${repo.full}@${head.slice(0, 7)} (${trigger}) from ${base}; bundle ${(bundle.length / 1e6).toFixed(1)} MB`);
   const builtAt = attempt.builtAt;
   // The build's output is the repository's: no workflow command in it is honoured while it streams.
@@ -297,7 +324,7 @@ async function main() {
   let built;
   let failure = null;
   try {
-    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install: installCommand(checkout, inputs.install), harnessVersion: inputs.harnessVersion, tags: imageTags(repoId, head) });
+    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install, harnessVersion: inputs.harnessVersion, tags: imageTags(repoId, head) });
   } catch (e) {
     failure = e;
   } finally {
@@ -312,7 +339,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const rec = { vendor: inputs.sandbox, snapshot: built.snapshot, source: built.source, sha: head, builtAt, buildMs: built.buildMs, sizeBytes: built.sizeBytes, usd: built.usd };
+  const rec = { vendor: inputs.sandbox, snapshot: built.snapshot, source: built.source, sha: head, builtAt, buildMs: built.buildMs, sizeBytes: built.sizeBytes, usd: built.usd, made };
   let issue;
   try {
     issue = await recordImage(repo, rec, app);

@@ -394,19 +394,52 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
 }
 
 /**
- * Pick the install command from the lockfile present: the versions it pins, over the network (pnpm tries its store
- * offline first). npm, pnpm and yarn run no install scripts (--ignore-scripts); poetry and uv run a source package's
- * build. It runs with the stage's scrubbed env (sh), so no credential. `install: none` skips; a given command wins.
+ * The installs `auto` knows, a closed list (security policy: no file in the repository picks its own command), each
+ * from the versions its lockfile pins, over the network (pnpm tries its store offline first). npm, pnpm and yarn run no
+ * install scripts (--ignore-scripts); poetry and uv run a source package's build. Lockfiles of one ecosystem are
+ * alternatives for the same manifest, so one install per ecosystem: for Node.js the one package.json's
+ * `packageManager` names when its lockfile is there, else the first present in this order.
+ */
+export const INSTALLS = Object.freeze([
+  { ecosystem: "node", manager: "pnpm", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts" },
+  { ecosystem: "node", manager: "npm", lockfile: "package-lock.json", command: "npm ci --ignore-scripts" },
+  { ecosystem: "node", manager: "yarn", lockfile: "yarn.lock", command: "yarn install --frozen-lockfile --ignore-scripts" },
+  { ecosystem: "rust", lockfile: "Cargo.lock", command: "cargo fetch --locked" },
+  { ecosystem: "python", lockfile: "poetry.lock", command: "poetry install --no-root" },
+  { ecosystem: "python", lockfile: "uv.lock", command: "uv sync --frozen" },
+  { ecosystem: "go", lockfile: "go.sum", command: "go mod download" },
+]);
+
+/** The manager package.json's `packageManager` names (`pnpm@9.1.0` gives pnpm), or "". */
+function namedManager(checkout) {
+  try {
+    return /^(npm|pnpm|yarn)@/.exec(String(JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")).packageManager || ""))?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The installs `auto` runs in `checkout` (INSTALLS entries): one for every ecosystem whose lockfile is in its root, in
+ * that table's order, so a repository with a package-lock.json and a Cargo.lock gets both.
+ */
+export function autoInstalls(checkout) {
+  const present = INSTALLS.filter((i) => existsSync(join(checkout, i.lockfile)));
+  const named = namedManager(checkout);
+  const picked = [];
+  for (const i of present) {
+    if (picked.some((p) => p.ecosystem === i.ecosystem)) continue;
+    picked.push(present.find((x) => x.ecosystem === i.ecosystem && named && x.manager === named) ?? i);
+  }
+  return picked;
+}
+
+/**
+ * The install command: autoInstalls' commands joined with `&&`, for `auto`. It runs with the stage's scrubbed env (sh),
+ * so no credential. `install: none` skips; a given command wins.
  */
 export function installCommand(checkout, setting = "auto") {
   if (setting && setting !== "auto") return setting === "none" ? null : setting;
-  const has = (f) => existsSync(join(checkout, f));
-  if (has("pnpm-lock.yaml")) return "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts";
-  if (has("package-lock.json")) return "npm ci --ignore-scripts";
-  if (has("yarn.lock")) return "yarn install --frozen-lockfile --ignore-scripts";
-  if (has("Cargo.lock")) return "cargo fetch --locked";
-  if (has("poetry.lock")) return "poetry install --no-root";
-  if (has("uv.lock")) return "uv sync --frozen";
-  if (has("go.sum")) return "go mod download";
-  return null;
+  const picked = autoInstalls(checkout);
+  return picked.length ? picked.map((i) => i.command).join(" && ") : null;
 }

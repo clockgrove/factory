@@ -30,9 +30,9 @@ test("nextWake: the earliest sleeper deadline still ahead; owners' kinds, past o
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS) }] }), null);
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "quota", at: iso(T + 4 * min + WAKE_SLACK_MS + 1000) }] })?.issue, 6, "a later sleeper does not cover it");
   assert.equal(nextWake(deadlines, { now: T, armed: [{ kind: "lease", at: iso(T - 30_000) }] })?.issue, 6, "one already past its deadline (firing, or this run's own) covers nothing");
-  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sweep"]);
-  // A private repository sleeps only to the short waits: the lease, the day's turn and a third-party wait's bound wait for events and the cron.
-  assert.deepEqual(wakeKinds(true), ["lease", "quota", "start-retry", "daily-cap", "retry", "third-party"], "the sweep's and the image's kinds are theirs, not the dispatcher's");
+  assert.deepEqual(WAKE_KINDS, ["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait", "sweep"]);
+  // A private repository sleeps only to the short waits: the lease, the day's turn and a third-party or sibling wait's bound wait for events and the cron.
+  assert.deepEqual(wakeKinds(true), ["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait"], "the sweep's and the image's kinds are theirs, not the dispatcher's");
   for (const v of [false, null, undefined]) assert.deepEqual(wakeKinds(v), ["quota", "start-retry", "retry"], `visibility ${v}`);
   assert.deepEqual(nextWake(deadlines, { now: T, kinds: wakeKinds(false) }), { kind: "quota", at: iso(T + 7 * min), issue: 5 });
   assert.equal(nextWake([{ kind: "daily-cap", at: iso(nextUtcMidnight(T)) }, { kind: "lease", at: iso(T + min) }], { now: T, kinds: wakeKinds(false) }), null);

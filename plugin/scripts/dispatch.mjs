@@ -24,7 +24,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { WAIT_MAX_MS, announceStarts, orderSiblings, prFinder, reviewWaitResume, waitReason } from "./lib/overlap.mjs";
+import { WAIT_MAX_MS, announceStarts, orderSiblings, prFinder, reviewWaitResume, sayWaiting, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
@@ -744,8 +744,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const accountResumed = [];
   // Objectives whose hand-off to review waits for a sibling on the same files (overlap.mjs): still waiting this tick,
   // and whose wait ended with the review label put on.
-  const reviewHeld = new Set();
+  const reviewHeld = [];
   const reviewResumed = [];
+  // The siblings those waits read this tick (overlap.mjs siblingState), and the PRs a person took out of the merge queue.
+  const siblingsRead = new Map();
+  const personHeld = new Set();
   // Each In-review Objective's open PR (null for none) as this pass read it.
   const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
@@ -848,29 +851,35 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
       }
       // A hand-off to review waiting for a sibling on the same files (overlap.mjs reviewHold): nothing else runs on the PR
-      // (no send-back, no merge) while a sibling In review overlaps it heavily; then its review label goes on, or, when
-      // it conflicts by then, the send-back below takes it first, so it rebases once before its review.
-      if (!reviewing && reviewWait && pr) {
+      // (no send-back, no merge) while a sibling is ahead of it. Then its review label goes on or, when it conflicts by
+      // then, the send-back below takes it first, so it rebases once, before its review. Waiting hand-offs go in a fixed
+      // order (the oldest first wait first), so one rebases per sibling merge.
+      if (!reviewing && reviewWait && !reviewWait.released && pr) {
         let how;
         try {
-          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, held: reviewHeld, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)) }, opts, { dryRun, log });
+          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
         } catch (e) {
           log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
           retry(`#${issue.number}'s review wait`);
           continue;
         }
         if (how.waiting) {
-          reviewHeld.add(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: ${waitReason(how.waiting)}`);
+          reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
+          due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+          continue;
+        }
+        if (how === "unsettled") {
+          log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over, but GitHub has not worked out whether it conflicts; the next tick decides`);
+          retry(`PR #${open.number}'s mergeable state`);
           continue;
         }
         if (how === "released") {
           reviewResumed.push(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: no sibling In review shares its files now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+          log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
           continue;
         }
         if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
-        // "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
+        // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
       }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -968,6 +977,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (how === "merged" || how === "queued") merged.push(issue.number);
         // Merged now (not only queued): no longer a sibling anything waits for this tick.
         if (how === "merged") landed.push(issue.number);
+        if (how === "held") personHeld.add(issue.number);
         if (report.watch) queueWatch.push(open.number);
         if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
@@ -979,6 +989,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
 
+  // The waiting hand-offs' notes, once the merge pass has said which siblings a person holds out of the merge queue.
+  for (const h of reviewHeld) {
+    if (!h.wait.cause && personHeld.has(h.wait.on)) h.wait.cause = "a person took it out of the merge queue";
+    log(`  #${h.issue.number}: PR #${h.pr}: ${waitReason(h.wait)}`);
+    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log });
+  }
   watch.mark("review");
   // max_concurrent caps the repository as a whole (LOCAL.md): the Running count is every route's Objectives (a local
   // loop's paused ones too, which stay Running), never only the ones this route picks from. Drafts are not in `issues`.
@@ -1200,7 +1216,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, reviewHeld: [...reviewHeld], reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

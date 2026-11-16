@@ -2378,7 +2378,7 @@ export class Local {
       }
       // Its hand-off to review waits for a sibling on the same files (overlap.mjs reviewHold): a run named by hand reviews now.
       const held = reviewWaitOf(prComments, issue);
-      if (held) {
+      if (held && !held.released) {
         log(`#${issue}: PR #${pr.number}'s review waits for #${held.on}; a run named by hand reviews it now`);
         return this.withClaim(issue, async () => {
           await reviewNow(this.repo, { issue, prNumber: pr.number, wait: held }, this.opts);
@@ -2425,7 +2425,7 @@ export class Local {
     // (`unreviewed` tells sendBack it conflicts again after its rebase), or its review waits for a sibling on the same
     // files, which the dispatcher ends; a run a person named reviews now.
     const held = pr && (named || wait) ? reviewWaitOf(await listComments(this.repo, pr.number, this.opts).catch(() => []), issue) : null;
-    if (held) {
+    if (held && !held.released) {
       log(`#${issue}: PR #${pr.number}'s review waits for #${held.on}; a run named by hand reviews it now`);
       const now = await reviewNow(this.repo, { issue, prNumber: pr.number, wait: held }, this.opts).then(
         () => true,

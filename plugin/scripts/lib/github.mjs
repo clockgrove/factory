@@ -1197,20 +1197,23 @@ export async function runJobs(repo, runId, opts) {
 }
 
 /**
- * The PRs in `branch`'s merge queue now, in the queue's order: `[{pr, head}]`, `head` the commit the queue merges for
- * it. Every page (100 a page); none with no queue. Throws when it cannot be read.
+ * `branch`'s merge queue now: `{base, entries}`, `base` the branch's head commit, `entries` its PRs in the queue's order
+ * (`[{pr, head}]`, `head` the commit the queue merges for it). Every page (100 a page); none with no queue. Throws when
+ * it cannot be read.
  */
 export async function mergeQueueHeads(repo, branch, opts) {
   const out = [];
+  let base = null;
   let after = null;
   for (;;) {
-    const d = await graphql(`query($owner: String!, $name: String!, $branch: String!, $after: String) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { entries(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { position pullRequest { number } headCommit { oid } } } } } }`, { owner: repo.owner, name: repo.name, branch, after }, opts);
+    const d = await graphql(`query($owner: String!, $name: String!, $branch: String!, $ref: String!, $after: String) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { target { oid } } mergeQueue(branch: $branch) { entries(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { position pullRequest { number } headCommit { oid } } } } } }`, { owner: repo.owner, name: repo.name, branch, ref: `refs/heads/${branch}`, after }, opts);
+    base ??= d?.repository?.ref?.target?.oid ?? null;
     const got = d?.repository?.mergeQueue?.entries;
     for (const e of got?.nodes || []) if (e?.pullRequest?.number && e.headCommit?.oid) out.push({ pr: e.pullRequest.number, head: e.headCommit.oid, position: e.position ?? null });
     if (!got?.pageInfo?.hasNextPage || !got.pageInfo.endCursor) break;
     after = got.pageInfo.endCursor;
   }
-  return out.sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(({ pr, head }) => ({ pr, head }));
+  return { base, entries: out.sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(({ pr, head }) => ({ pr, head })) };
 }
 
 /** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */

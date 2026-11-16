@@ -92,7 +92,7 @@ function fakeGitHub(g) {
       const q = body.query;
       if (q.includes("isInMergeQueue")) return json(200, { data: { repository: { pullRequest: { isInMergeQueue: queued.has(body.variables.n) } } } });
       if (q.includes("timelineItems")) return json(200, { data: { repository: { pullRequest: { timelineItems: { nodes: state.removals.map((r) => ({ createdAt: r.at, reason: r.reason, actor: { login: "github-merge-queue", __typename: "Bot" } })) } } } } });
-      if (q.includes("entries(first")) return json(200, { data: { repository: { mergeQueue: { entries: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: state.entries.map((e, i) => ({ position: i + 1, pullRequest: { number: e.pr }, headCommit: { oid: e.head } })) } } } } });
+      if (q.includes("entries(first")) return json(200, { data: { repository: { ref: { target: { oid: g.main() } }, mergeQueue: { entries: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: state.entries.map((e, i) => ({ position: i + 1, pullRequest: { number: e.pr }, headCommit: { oid: e.head } })) } } } } });
       if (q.includes("mergeQueue(branch")) return json(200, { data: { repository: { ref: { target: { oid: g.main(), committedDate: state.mainAt } }, mergeQueue: { entries: { totalCount: state.waiting ?? queued.size } } } } });
       if (q.includes("resolveReviewThread")) {
         state.threads.find((t) => t.id === body.variables.id).isResolved = true;
@@ -278,17 +278,29 @@ test("#243: a PR the merge queue took out for a conflict waits while a PR in the
   });
 });
 
-test("#243: a queue-conflict wait whose queue cannot be read holds this tick; one whose trial merge cannot be computed goes back in for the queue to answer", async () => {
-  const { queueConflictWait } = await import("../scripts/lib/session.mjs");
+test("#243: a queue-conflict wait whose queue cannot be read holds this tick; one whose trial merge cannot be computed goes back in once per queue state, never again on the same queue", async () => {
+  const { queueConflictWait, queueConflictRecord } = await import("../scripts/lib/session.mjs");
   await withGitHub(async (g, gh) => {
     g.publish();
-    const removal = new Date().toISOString();
+    const t0 = Date.now();
+    const at = (s) => new Date(t0 + s * 1000).toISOString();
     const real = gh.fetch;
     globalThis.fetch = async (url, init = {}) => (/\/graphql$/.test(String(url)) && String(init.body).includes("entries(first") ? new Response(JSON.stringify({ message: "Server Error" }), { status: 502 }) : real(url, init));
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal }, { token: "t" }), "pending");
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), "pending");
     globalThis.fetch = real;
+    // A queue head no trial can read: back in, and the queue's state then recorded on the issue.
     gh.state.entries = [{ pr: 11, head: "0".repeat(40) }];
-    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal }, { token: "t" }), null);
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(1) }, { token: "t" }), null);
+    const rec = queueConflictRecord(gh.comments[2], 2);
+    assert.deepEqual([rec.pr, rec.removal], [12, at(1)]);
+    // The queue (its merge group, which pairwise trials cannot see) takes it out again, and nothing in the queue moved:
+    // it waits rather than bouncing off the same queue at event speed.
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait");
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), "queue-wait", "however often the dispatcher ticks");
+    // The queue changed (another PR joined): one more go.
+    gh.state.entries = [{ pr: 11, head: "0".repeat(40) }, { pr: 14, head: "1".repeat(40) }];
+    assert.equal(await queueConflictWait(repo, { issue: 2, prNumber: 12, head: g.main(), base: "main", removal: at(2) }, { token: "t" }), null);
+    assert.equal(queueConflictRecord(gh.comments[2], 2).removal, at(2));
   });
 });
 

@@ -3030,22 +3030,59 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
+const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
+
+/**
+ * Factory's record of the last time a PR the queue took out for a conflict went back in (queueConflictWait), from the
+ * issue's comments: `{pr, head, removal, queue}`, `queue` the default branch's head and the queue's entries then
+ * (queueState), or null.
+ */
+export function queueConflictRecord(comments, issue) {
+  const mark = marker(issue, "queue-conflict");
+  const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
+  try {
+    const v = JSON.parse(QUEUE_CONFLICT_LINE.exec(c?.body || "")?.[1] || "null");
+    return v && Number.isInteger(v.pr) && typeof v.head === "string" && typeof v.removal === "string" && typeof v.queue === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The merge queue's state as one string: the default branch's head and each entry's PR and head, in order. */
+export const queueState = ({ base, entries }) => [base ?? "", ...entries.map((e) => `${e.pr}:${e.head}`)].join(" ");
+
 /**
  * A PR the merge queue took out for a conflict (logic.mjs queueRetry `conflict`) and that does not conflict with the
  * default branch: the conflict was with a PR ahead of it. It goes back in when no PR in the queue now conflicts with it,
  * by a trial merge of the two heads against the default branch (overlap.mjs siblingTrials, git merge-tree in a scratch
- * mirror); a sibling's merge or drop ticks the dispatcher. Returns null to enqueue it now, "queue-wait" while one does,
- * or "pending" when the queue could not be read. A trial merge that cannot be computed puts it back in: the queue
- * itself then answers, and its removal for a conflict counts as no drop.
+ * mirror); a sibling's merge or drop ticks the dispatcher. Pairwise trials cannot see every conflict (one with the
+ * queue's merge group, or a trial that cannot be computed: then the queue itself answers), so each time it goes back in,
+ * Factory records on the issue the queue's state then (queueState: the default branch's head and every entry's head):
+ * taken out again for a conflict, it goes back in only once that state has changed, never on the same queue twice.
+ * Returns null to enqueue it now, "queue-wait" while it waits, or "pending" when the queue or the record could not be
+ * read or written.
  */
 export async function queueConflictWait(repo, { issue, prNumber, head, base, removal }, opts) {
-  const entries = await mergeQueueHeads(repo, base, opts).catch((e) => (log(`#${issue}: ${base}'s merge queue could not be read (${errCode(e)}); next tick`), null));
-  if (!entries) return "pending";
-  const ahead = entries.filter((e) => e.pr !== prNumber);
-  if (!ahead.length) {
-    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; the queue is empty now, so it goes back in`);
-    return null;
+  const queue = await mergeQueueHeads(repo, base, opts).catch((e) => (log(`#${issue}: ${base}'s merge queue could not be read (${errCode(e)}); next tick`), null));
+  if (!queue) return "pending";
+  const comments = await listComments(repo, issue, opts).catch((e) => (log(`#${issue}: the queue-conflict record could not be read (${errCode(e)}); next tick`), null));
+  if (!comments) return "pending";
+  const ahead = queue.entries.filter((e) => e.pr !== prNumber);
+  const state = queueState({ base: queue.base, entries: ahead });
+  const last = queueConflictRecord(comments, issue);
+  if (last && last.pr === prNumber && last.head === head && last.removal !== removal && last.queue === state) {
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict again, with the queue as it was when it went back in at ${last.removal}; it waits for the queue to change`);
+    return "queue-wait";
   }
+  const back = async (why) => {
+    const rec = { pr: prNumber, head, removal, queue: state };
+    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict; it goes back in (${why}). Taken out again for a conflict, it waits until the queue changes.`;
+    const ok = await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).then(() => true, (e) => (log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); next tick`), false));
+    if (!ok) return "pending";
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${why}, so it goes back in`);
+    return null;
+  };
+  if (!ahead.length) return back("the queue is empty now");
   const trials = siblingTrials(repo, opts);
   try {
     for (const e of ahead) {
@@ -3056,13 +3093,11 @@ export async function queueConflictWait(repo, { issue, prNumber, head, base, rem
     }
   } catch (e) {
     if (!(e instanceof TrialUnread || e instanceof TrialCap)) throw e;
-    log(`#${issue}: PR #${prNumber} could not be trial-merged with the queue's PRs (${String(e.message).slice(0, 160)}); it goes back in and the queue answers`);
-    return null;
+    return back(`no trial merge with the queue's PRs could be computed (${String(e.message).slice(0, 160)}): the queue answers`);
   } finally {
     trials.close();
   }
-  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; no PR in the queue now conflicts with it, so it goes back in`);
-  return null;
+  return back("no PR in the queue now conflicts with it by a trial merge");
 }
 
 /**

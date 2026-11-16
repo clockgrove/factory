@@ -20,7 +20,7 @@ import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
-import { CLAIM_PAUSE_MS, LOCAL_LABEL, hasLocalLabel } from "./lib/local.mjs";
+import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
@@ -1591,12 +1591,13 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A pick without factory:local where no Action runs gets the label first: one that cannot be labelled is not started.
       const issue = issues.find((x) => x.number === n);
       if (issue && adoptable(issue)) {
-        const labelled = await addLabels(repo, n, [LOCAL_LABEL], opts).then(() => true, (e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
-        if (!labelled) {
+        // Factory's mark names the exact label event, so the scorer counts it as Factory's (adoptLocal).
+        const adopted = await adoptLocal(repo, n, opts).then((id) => ({ id }), (e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
+        if (!adopted) {
           unlabelled.add(n);
           continue;
         }
-        log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}`);
+        log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.id ? "" : " (its label event was not found on the timeline, so no mark records it as Factory's)"}`);
       }
       // Named before the write: a write whose answer is lost may still have landed.
       localMarked?.(n);

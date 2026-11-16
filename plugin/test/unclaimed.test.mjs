@@ -63,7 +63,7 @@ async function fakeGitHub({ labels = ["factory:objective", "factory:local"], lis
       }
       if (p === "/repos/o/r/issues/7" && req.method === "GET") return send(200, issue());
       if (p === "/repos/o/r/issues/7/labels" && req.method === "POST") {
-        for (const l of body.labels) state.labels.add(l), state.timeline.push({ event: "labeled", label: { name: l }, actor: { login: "maintainer" }, created_at: new Date().toISOString() });
+        for (const l of body.labels) state.labels.add(l), state.timeline.push({ id: (id += 1), event: "labeled", label: { name: l }, actor: { login: "maintainer", type: "User" }, created_at: new Date().toISOString() });
         return send(200, []);
       }
       const label = /^\/repos\/o\/r\/issues\/7\/labels\/(.+)$/.exec(p);
@@ -577,6 +577,9 @@ test("serve: where no Action runs (no factory.yml workflow, or a disabled one), 
       assert.ok(fake.state.labels.has("factory:local") && fake.state.labels.has("factory:running"), String(workflow));
       const added = fake.state.writes.filter((w) => w === "POST /repos/o/r/issues/7/labels");
       assert.equal(added.length, 2, "factory:local first, then the Running mark");
+      // Factory's mark names that exact label event, so the scorer counts the label as Factory's.
+      const event = fake.state.timeline.find((e) => e.event === "labeled" && e.label.name === "factory:local");
+      assert.deepEqual(fake.state.comments.filter((c) => c.body.includes(":local-route:")).map((c) => c.body.split("\n")[0]), [`<!-- factory:7:local-route:${event.id} -->`]);
       assert.equal((log.match(/#7: no Action runs Objectives here, so this loop takes it and labels it factory:local/g) || []).length, 1, log);
       assert.match(log, /no Action runs Objectives in o\/r \(no active factory\.yml workflow\)/);
       assert.equal(process.env.FACTORY_LOCAL_ALL, undefined, "no routing flag: the label is the route");
@@ -652,6 +655,7 @@ test("local mode reads whether the Action runs for --repo's repository, whatever
     assert.equal(fake.state.workflowReads.length, 1, "read once per settings interval, never per tick");
     await loop.adoptForRun(7, { labels: [{ name: "factory:objective" }] });
     assert.ok(fake.state.labels.has("factory:local"), "factory run's Objective is this machine's to tend");
+    assert.ok(fake.state.comments.some((c) => c.body.startsWith("<!-- factory:7:local-route:")), "with Factory's mark of its label event");
     // The other way round: GitHub's Action active, no workflow file on origin.
     const bare = cloneOf();
     fake.state.workflow = "active";

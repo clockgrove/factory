@@ -596,7 +596,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
  * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
  * `writers`: the collaborators read, or a status to fail it with.
  */
-async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2, inputs = {} }) {
+async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2, inputs = {}, opts = {}, extra = () => null }) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -609,6 +609,8 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
     if (method !== "GET" && !u.pathname.endsWith("/graphql")) writes.push(`${method} ${u.pathname.replace(`/repos/${repo}`, "")}${method === "POST" ? ` ${JSON.parse(init.body).body ?? ""}` : ""}`);
+    const own = extra(u, method);
+    if (own !== null) return json(own);
     if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
     if (method === "GET" && u.pathname === `/repos/${repo}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : open);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
@@ -624,7 +626,7 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t" });
+    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t", ...opts });
     return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
   } finally {
     globalThis.fetch = realFetch;
@@ -1025,4 +1027,29 @@ test("max_concurrent caps the repository as a whole: every route's Running Objec
   assert.deepEqual((await tick({}, 4)).r.ready, [4]);
   assert.deepEqual((await tick({ FACTORY_LOCAL: "1" }, 4)).r.ready, [5]);
   assert.deepEqual((await tick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, 4)).r.ready, [4]);
+});
+
+test("local loop where no Action runs (adopt): a pick without factory:local is labelled first, and Factory's mark names that exact label event, before the Running mark (#455)", async () => {
+  const fresh = new Date().toISOString();
+  const queued = { number: 9, state: "open", labels: [{ name: "factory:objective" }], body: "", updated_at: fresh, user: { login: "maintainer" } };
+  // The timeline after the label write: the filing, a stranger's earlier factory:local event, and this login's own.
+  const timeline = () => [
+    { id: 4000, event: "labeled", label: { name: "factory:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(HOUR) },
+    { id: 4100, event: "labeled", label: { name: "factory:local" }, actor: { login: "other", type: "User" }, created_at: ago(HOUR / 2) },
+    { id: 4242, event: "labeled", label: { name: "factory:local" }, actor: { login: "maintainer", type: "User" }, created_at: fresh },
+  ];
+  // A writer (who started it), and today's spend read as none (the usage artifacts and the local spend comments).
+  const tick = (opts) => localTick({ open: [queued], timeline, writers: [{ login: "maintainer", permissions: { push: true } }], env: { FACTORY_LOCAL: "1" }, inputs: { dailyUsd: 50 }, opts, extra: (u, method) => (method !== "GET" ? null : u.pathname.endsWith("/actions/artifacts") ? { artifacts: [] } : u.pathname.endsWith("/issues/comments") ? [] : u.pathname.endsWith("/collaborators/maintainer/permission") ? { permission: "write" } : null) });
+  const t = await tick({ adopt: true, localSlots: 2 });
+  assert.deepEqual(t.r.ready, [9]);
+  const on9 = t.writes.filter((w) => w.startsWith("POST /issues/9/"));
+  assert.equal(on9[0], "POST /issues/9/labels ", "factory:local first");
+  assert.match(on9[1], /^POST \/issues\/9\/comments <!-- factory:9:local-route:4242 -->\nFactory: no Action runs Objectives in this repository/, "the mark names this login's newest factory:local event");
+  assert.ok(on9.slice(2).includes("POST /issues/9/labels "), "then the Running mark");
+  assert.deepEqual(t.r.unrouted, []);
+  // Without adopt (an Action runs, or it is unknown): not picked, not labelled, and counted for the start line.
+  const live = await tick({ localSlots: 2 });
+  assert.deepEqual(live.r.ready, []);
+  assert.deepEqual(live.writes.filter((w) => w.startsWith("POST /issues/9/")), []);
+  assert.deepEqual(live.r.unrouted, [9]);
 });

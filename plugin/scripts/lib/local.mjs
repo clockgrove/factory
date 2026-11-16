@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
-import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
+import { addLabels, listComments, primeSelf, primeWriters, prComment, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
 import { FACTORY_CONTROL_KEYS, commandFailed, isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
@@ -42,6 +42,25 @@ export const factoryCodeDirs = (home = homedir()) => [releasesDir(home)].filter(
 
 /** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
 export const LOCAL_LABEL = "factory:local";
+/**
+ * Labels Objective `n` factory:local for a local loop where no Action runs (#455), then records Factory's own mark for
+ * that exact label event: one comment whose marker names the event's id (`<!-- factory:N:local-route:ID -->`), which the
+ * scorer reads (bench/lib/objective.mjs localFactoryActions) so the label counts as Factory's, not a person's. GitHub's
+ * label write returns no event, so the issue's timeline is read once after it: the event is the newest `labeled
+ * factory:local` there by this login (selfLogin, read once if unknown; any login if it cannot be read). None found (a timeline that lags, a
+ * failed read): no mark, and the label counts as a person's. Throws when the label write fails. Returns the event id or null.
+ */
+export async function adoptLocal(repo, n, opts, { timeline = (r, k, o) => rest(`repos/${r.full}/issues/${k}/timeline?per_page=100`, { ...o, paginate: true }) } = {}) {
+  await addLabels(repo, n, [LOCAL_LABEL], opts);
+  const events = (await timeline(repo, n, opts).catch(() => null)) || [];
+  if (!selfLogin()) await primeSelf(opts).catch(() => null);
+  const mine = (e) => !selfLogin() || isSelf({ user: e.actor });
+  const id = events.filter((e) => e?.event === "labeled" && e.label?.name === LOCAL_LABEL && /^\d+$/.test(String(e.id ?? "")) && mine(e)).at(-1)?.id ?? null;
+  if (id === null) return null;
+  await prComment(repo, n, `${marker(n, "local-route", String(id))}\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`${LOCAL_LABEL}\`; it stays that machine's.`, opts);
+  return String(id);
+}
+
 export const hasLocalLabel = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === LOCAL_LABEL);
 
 /** True when this process is the local backend (factory run / serve set it). */

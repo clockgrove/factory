@@ -898,7 +898,6 @@ test("serve on a repository with a cloud sandbox: an unread sandbox record is no
   // #62: Running on the sandbox route for 20 minutes (serve --all routes it), and #63: relabelled factory:local mid-stage,
   // Running for 20 minutes. Each stage holds a live lease and no local claim. The first comments read of each (the lease
   // read, after its retries) fails; the reads after it answer, so the local claim read finds no claim.
-  const { RETRY } = await import("../scripts/lib/github.mjs");
   const extra = (h) => ({
     open: [h.iss(62, ["factory:running"]), h.iss(63, ["factory:local", "factory:running"])],
     comments: { 62: leased(h, 62), 63: leased(h, 63) },

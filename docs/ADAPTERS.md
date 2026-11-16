@@ -76,6 +76,8 @@ The `harness` vendor:
   - A stage's calls fold into one usage record, labelled `decision` (its `calls` counted), with no session and no refusal. It is in the stage's spend line, its total and its max_usd, and kept with its passes for a stopped stage.
   - It is no pass: writeUsage's `runs`, the exit line's cost by phase and the passes a rebase counts leave it out, and `mergeUsage` never takes it as the base.
 - **Usage limit or refused credential:** no answer, and no further call in that stage. It holds no account and Blocks nothing; the stage's own passes meet the limit as they always do. The drift advisory stops asking on the same answers.
+- **A runner's reap ends it:** on a runner, every pass that ends reaps the agent uid's units and processes (`reapAgent`), a decision call running beside it included (the reviewer's overlap). That call is lost as `vendor`: no verdict, so the red goes to a fix pass. That loss is the safe side.
+- **The agent can reach it:** on a runner the call runs as the same agent uid as the worker it judges, in the same PID namespace under the systemd launcher. A process the worker left could end the call, or plant a fake CLI on a world-writable PATH entry that prints a verdict. The most that buys is one CI rerun or one drift line not written; no secret the agent lacks is exposed.
 - **What it costs:** by default (`decision_route` `auto` with no key), every decision call spends the stage's own subscription or key on the stage's model:
   - Red-check triage asks one question per failing CI job.
   - The drift advisory asks every two minutes while a worker runs.

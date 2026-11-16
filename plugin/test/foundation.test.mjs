@@ -9,7 +9,7 @@ import { FOUNDATION_LABEL, foundationLabel } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, foundationTrusted, objectiveSha } from "../scripts/lib/objective-trust.mjs";
 import { reviewPost, reviewsCover } from "../scripts/lib/handoff.mjs";
 import { parseReview } from "../scripts/lib/logic.mjs";
-import { FOUNDATION_AGENT, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
+import { FOUNDATION_AGENT, answerList, foundationCall, foundationPrompt, foundationReview } from "../scripts/review.mjs";
 import { AGENT_DIRS, agentModel } from "../scripts/lib/checkout.mjs";
 import { harnessCommand } from "../scripts/lib/harness.mjs";
 
@@ -246,7 +246,8 @@ test("a PR reviewed before the foundation label gets the foundation pass alone a
   assert.match(src, /\n  if \(foundationDue\) \{\n/);
   assert.doesNotMatch(src, /foundation && !alreadyReviewed/);
   assert.match(src, /: found\n\s+\? reviewPost\(\{ issue, review: null, diff, foundation: found\.review \}\)\n\s+: null;/);
-  assert.match(src, /const noneOwn = placeholder && !alreadyReviewed;\n\s+const toAnswer = \(await unaddressedReviewComments\([^\n]*\)\)\.filter\(\(c\) => !noneOwn \|\| c\.from\);/);
+  // The foundation pass alone, with nothing found, on a PR already reviewed: the earlier review's open comments are still answered.
+  assert.deepEqual(answerList([{ id: 1 }, { id: 2, from: "greptile-apps[bot]" }], { placeholder: true, first: false }).map((c) => c.id), [1, 2]);
   // The worker's rebase keeps a review only when it covers a foundation Objective's foundation pass.
   const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");
   assert.ok(worker.indexOf("const foundation = !!chosen.foundation;") > worker.indexOf("await choiceGate("));

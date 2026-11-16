@@ -468,3 +468,172 @@ test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decis
   assert.equal(off.status, "PASS");
   assert.match(off.detail, /^off \(decision_route off\): .*a send-back's conflict pass is checked by matching commits$/);
 });
+
+test("doctor's CI row reads each workflow's parsed on: (workflowEvents), never its raw text (#386)", async () => {
+  const { ciWorkflowCheck, ciWorkflowTriggers } = await import("../scripts/doctor.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  const files = {
+    // pull_request and merge_group as keys of a step's `with:`: no trigger of this workflow.
+    ".github/workflows/decoy.yml": "name: Decoy\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: x/y@v1\n        with:\n          pull_request: 1\n          merge_group: 1\n",
+    // Both triggers in a flow mapping.
+    ".github/workflows/ci.yml": "name: CI\n\"on\": {pull_request: {}, merge_group: {}}\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: npm test\n",
+    ".github/workflows/single.yml": "name: Single\non: pull_request\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make\n",
+    ".github/workflows/broken.yml": "name: Broken\non: [pull_request, merge_group\n",
+  };
+  const run = async (paths) => {
+    globalThis.fetch = async (url) => {
+      const u = new URL(url);
+      if (u.pathname === "/repos/o/r/actions/workflows") return new Response(JSON.stringify({ workflows: paths.map((path) => ({ path, name: path.split("/").pop(), state: "active" })) }), { status: 200, headers: { "content-type": "application/json" } });
+      const path = decodeURIComponent(u.pathname.replace("/repos/o/r/contents/", ""));
+      if (path === ".github/workflows/denied.yml") return new Response(JSON.stringify({ message: "Forbidden" }), { status: 403, headers: { "content-type": "application/json" } });
+      return files[path] !== undefined ? new Response(files[path], { status: 200, headers: { "content-type": "text/plain" } }) : new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } });
+    };
+    return ciWorkflowTriggers(repo, { token: "t" });
+  };
+  try {
+    const ci = await run([".github/workflows/decoy.yml", ".github/workflows/ci.yml"]);
+    assert.deepEqual([ci.found, ci.path, ci.mergeGroup, ci.unread], [true, ".github/workflows/ci.yml", true, []], "the decoy's step inputs are no triggers; the flow mapping's are");
+    assert.deepEqual(ci.jobs, [{ check: "test", runner: "ubuntu-24.04", commands: ["npm test"] }]);
+    assert.equal(ciWorkflowCheck(ci, { queue: true }).status, "PASS");
+    const single = await run([".github/workflows/single.yml"]);
+    assert.deepEqual([single.found, single.mergeGroup], [true, false], "on: pull_request as one scalar");
+    assert.equal(ciWorkflowCheck(single, { queue: true }).status, "FAIL", "read in full: the missing merge_group is a FAIL with a queue");
+    assert.equal((await run([".github/workflows/decoy.yml"])).found, false);
+    assert.equal(ciWorkflowCheck(await run([".github/workflows/decoy.yml"]), { queue: true }).status, "FAIL");
+    // A workflow that cannot be parsed or read may be the one listening: a WARN naming it, never a FAIL on a guess.
+    const unread = await run([".github/workflows/broken.yml", ".github/workflows/denied.yml", ".github/workflows/gone.yml"]);
+    assert.equal(unread.found, false);
+    assert.deepEqual(
+      unread.unread.map((u) => u.split(" ")[0]),
+      [".github/workflows/broken.yml", ".github/workflows/denied.yml"],
+      "a listed workflow not on the default branch (404) runs nothing there",
+    );
+    const row = ciWorkflowCheck(unread, { queue: true });
+    assert.equal(row.status, "WARN");
+    assert.match(row.detail, /could not read the triggers of \.github\/workflows\/broken\.yml \(unsupported YAML.*\.github\/workflows\/denied\.yml \(HTTP 403\)/);
+    // Listed by its path though it sets a name: GitHub could not parse it and runs nothing from it. With no name, the
+    // path is GitHub's name for it.
+    files[".github/workflows/rejected.yml"] = files[".github/workflows/ci.yml"];
+    files[".github/workflows/nameless.yml"] = files[".github/workflows/ci.yml"].replace("name: CI\n", "");
+    const listing = async (entries) => {
+      globalThis.fetch = async (url) => {
+        const u = new URL(url);
+        if (u.pathname === "/repos/o/r/actions/workflows") return new Response(JSON.stringify({ workflows: entries.map((path) => ({ path, name: path, state: "active" })) }), { status: 200, headers: { "content-type": "application/json" } });
+        const path = decodeURIComponent(u.pathname.replace("/repos/o/r/contents/", ""));
+        return new Response(files[path], { status: 200, headers: { "content-type": "text/plain" } });
+      };
+      return ciWorkflowTriggers(repo, { token: "t" });
+    };
+    assert.equal((await listing([".github/workflows/rejected.yml"])).found, false, "GitHub runs nothing from it");
+    assert.deepEqual([(await listing([".github/workflows/nameless.yml"])).path, (await listing([".github/workflows/nameless.yml"])).mergeGroup], [".github/workflows/nameless.yml", true]);
+    const partial = await run([".github/workflows/single.yml", ".github/workflows/broken.yml"]);
+    assert.equal(ciWorkflowCheck(partial, { queue: true }).status, "WARN", "the unread workflow may carry merge_group");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
+});
+
+test("doctor parses setup and validation, looks up their first command and the npm or pnpm script it runs, and runs neither (#386)", async () => {
+  const { commandCheck, repositoryChecks } = await import("../scripts/doctor.mjs");
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const { chmodSync, existsSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "doctor-repo-"));
+  mkdirSync(join(dir, "scripts"));
+  writeFileSync(join(dir, "scripts", "setup.sh"), "#!/bin/sh\n");
+  chmodSync(join(dir, "scripts", "setup.sh"), 0o755);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "x" } }));
+  execFileSync("git", ["init", "-q", dir]);
+  // The package managers on this PATH are stand-ins: only bash's lookup of them is under test.
+  const bin = mkdtempSync(join(tmpdir(), "doctor-bin-"));
+  for (const pm of ["npm", "pnpm", "yarn"]) {
+    writeFileSync(join(bin, pm), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, pm), 0o755);
+  }
+  const env = { PATH: `${bin}:/usr/bin:/bin` };
+  const rows = async (settings, name) => (await repositoryChecks({ inputs: resolveInputs({ env: settings }), checkout: dir, env })).filter((c) => c.name === name);
+  const setup = async (cmd) => (await rows({ FACTORY_SETUP: cmd }, "setup"))[0];
+  // A correctly set-up command is a clean PASS, saying doctor did not run it.
+  for (const ok of ["./scripts/setup.sh", "if true; then ./scripts/setup.sh; fi", "f() { ./scripts/setup.sh; }; f", "FOO=1 ./scripts/setup.sh --ci"]) {
+    const r = await setup(ok);
+    assert.equal(r.status, "PASS", ok);
+    assert.match(r.detail, /doctor did not run it: --run-setup does/);
+  }
+  const syntax = await setup("./scripts/setup.sh && (");
+  assert.equal(syntax.status, "FAIL", "a first word that exists does not make a command bash cannot parse runnable");
+  assert.match(syntax.detail, /bash cannot parse it \(.*syntax error/);
+  const absent = await setup("no-such-tool-386 install");
+  assert.deepEqual([absent.status, absent.detail], ["WARN", "no-such-tool-386 install: no-such-tool-386 is not found here; the runner may have it"]);
+  const variable = await setup("$TOOL install");
+  assert.equal(variable.status, "WARN");
+  assert.match(variable.detail, /its first command, \$TOOL, is not a fixed word/);
+  assert.equal((await setup("npm run bootstrap")).status, "FAIL", "npm run names a script package.json lacks");
+  // Nothing is run: a setup that would leave a file leaves none.
+  assert.equal((await setup("touch ran-by-doctor")).status, "PASS");
+  assert.equal(existsSync(join(dir, "ran-by-doctor")), false);
+  // Validation: only a first command of exactly `npm|pnpm run X` is checked against package.json's scripts.
+  const commands = {
+    "npm audit --omit dev": "PASS",
+    "pnpm test --filter web": "PASS",
+    "npm run test": "PASS",
+    "npm run lint": "FAIL",
+    "pnpm run lint --fix": "FAIL",
+    "yarn run lint": "PASS",
+    "npm run lint --if-present": "PASS",
+    "cd web && npm run lint": "PASS",
+    "npm_config_if_present=true npm run lint": "PASS",
+    "no-such-tool-386 check": "WARN",
+    // A missing script fails the command only where its failure ends bash -eo pipefail.
+    "npm run lint || true": "PASS",
+    "npm run lint || echo skipped": "PASS",
+    "(npm run lint) || true": "PASS",
+    "if npm run lint; then echo ok; fi": "PASS",
+    "! npm run lint": "PASS",
+    "npm run lint &": "PASS",
+    "npm run lint && echo x; echo y": "PASS",
+    "(npm run lint)": "FAIL",
+    "{ npm run lint; }": "FAIL",
+    "npm run lint | tee out": "FAIL",
+    "FOO=1; npm run lint": "FAIL",
+    // What npm and pnpm run with no such script: npm's own env, pnpm's /regex/.
+    "npm run env": "PASS",
+    "pnpm run /^li/": "PASS",
+    "npm test )": "FAIL",
+  };
+  const val = await rows({ FACTORY_VALIDATION: Object.keys(commands).join(", ") }, "validation");
+  assert.deepEqual(Object.fromEntries(val.map((c) => [c.detail.split(":")[0].replace(/ \(.*$/, ""), c.status])), commands);
+  assert.match(val.find((c) => c.status === "FAIL").detail, /^npm run lint: no script "lint" in package\.json$/);
+  assert.match(val.at(-1).detail, /^npm test \): bash cannot parse it/);
+  assert.match(val.find((c) => c.status === "WARN").detail, /no-such-tool-386 is not found here; setup may install it$/);
+  // A line that uses extglob after one that turns it on parses.
+  assert.equal((await commandCheck("setup", "shopt -s extglob\nls @(a|b)", { checkout: dir, env, missing: "" })).status, "PASS");
+  // npm and pnpm start `node server.js` with no start script; the repository's .npmrc if-present skips a missing one.
+  writeFileSync(join(dir, "server.js"), "");
+  assert.equal((await commandCheck("validation", "npm run start", { checkout: dir, env, missing: "" })).status, "PASS");
+  writeFileSync(join(dir, ".npmrc"), "registry=https://registry.npmjs.org/\nif-present = true\n");
+  assert.equal((await commandCheck("validation", "npm run lint", { checkout: dir, env, missing: "" })).status, "PASS");
+});
+
+test("doctor never starts a bash, or any program, the repository ships, whatever PATH holds (#386)", async () => {
+  const { commandCheck, systemBash } = await import("../scripts/doctor.mjs");
+  const { chmodSync, existsSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "doctor-repo-"));
+  const marker = join(mkdtempSync(join(tmpdir(), "doctor-marker-")), "ran");
+  const plant = (rel) => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), `#!/bin/sh\ntouch ${marker}\n`);
+    chmodSync(join(dir, rel), 0o755);
+  };
+  for (const rel of ["bash", "node_modules/.bin/bash", "tool386"]) plant(rel);
+  const env = { PATH: [".", "", "node_modules/.bin", join(dir, "node_modules", ".bin"), "/usr/bin", "/bin"].join(":") };
+  const bash = systemBash(env, dir);
+  assert.ok(bash && !bash.startsWith(dir), `the system's bash, not the repository's: ${bash}`);
+  for (const cmd of ["tool386 --setup", "./tool386", "bash -c true"]) {
+    const r = await commandCheck("setup", cmd, { checkout: dir, env, missing: "" });
+    assert.equal(r.status, "PASS", `${cmd}: ${r.detail}`);
+  }
+  assert.equal(existsSync(marker), false, "nothing the repository ships ran");
+});

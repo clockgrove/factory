@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const SYNC = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tools", "deps", "sync.mjs");
 // Each library sync.mjs vendors, with one file it keeps besides its LICENSE and package.json.
-const LIBS = { "@actions/expressions": "dist/index.js", yaml: "browser/index.js", "smol-toml": "dist/index.js" };
+const LIBS = { "@actions/expressions": "dist/index.js", yaml: "browser/index.js", "smol-toml": "dist/index.js", unbash: "dist/parser.js" };
 
 /** A tree with tools/deps (sync.mjs, its lockfile, node_modules) and plugin/vendor filled by a first sync. */
 function tree() {

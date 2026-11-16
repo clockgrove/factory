@@ -1023,10 +1023,10 @@ async function main() {
     // Remove, then add: a label already present (a harness applied it early) fires no labeled event.
     if (decision.exit === "delivered") {
       if (!(rebaseMode && reviewed)) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
-      // A head no review has seen waits, unlabelled, while a sibling on the same files is ahead of it (overlap.mjs
-      // reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by then. The rebase
-      // that follows such a wait goes to review: it is next.
-      const held = await reviewHold(repo, { issue, pr, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed }, token, { log });
+      // A head no review has seen (the one Factory pushed) waits, unlabelled, while a sibling it conflicts with is ahead
+      // of it (overlap.mjs reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by
+      // then. The rebase that follows such a wait goes to review: it is next.
+      const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed }, token, { log });
       if (held) decision.reason = `PR #${pr.number} is ready; ${waitReason(held)}`;
       else await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }

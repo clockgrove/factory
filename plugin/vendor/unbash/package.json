@@ -1,0 +1,81 @@
+{
+  "name": "unbash",
+  "version": "6.0.4",
+  "description": "The best bash parser in JavaScript. Fast, complete, typed.",
+  "keywords": [
+    "ast",
+    "bash",
+    "bash-parser",
+    "lexer",
+    "parser",
+    "posix",
+    "scanner",
+    "shell",
+    "shell-parser",
+    "shell-script",
+    "shell-syntax",
+    "tokenizer",
+    "typescript"
+  ],
+  "license": "ISC",
+  "author": {
+    "name": "Lars Kappert",
+    "email": "lars@webpro.nl"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/webpro-nl/unbash.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/parser.d.ts",
+      "default": "./dist/parser.js"
+    },
+    "./printer": {
+      "types": "./dist/printer.d.ts",
+      "default": "./dist/printer.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "format": "oxfmt",
+    "lint": "oxlint",
+    "prepack": "tsc -p tsconfig.build.json",
+    "test": "node --test test/*.test.ts",
+    "test:types": "tsc -p tsconfig.build.json && tsc",
+    "playground": "pnpx rolldown src/parser.ts -f esm -m -o playground/parser.js && pnpx rolldown src/printer.ts -f esm -m -o playground/printer.js && sed -i 's/id=\"version\">[^<]*/id=\"version\">'\"$(node -p \"require('.\\x2fpackage.json').version\")\"'/' playground/index.html",
+    "bench": "pnpm build && node bench/all.ts",
+    "release": "release-it"
+  },
+  "devDependencies": {
+    "@ericcornelissen/bash-parser": "^0.5.3",
+    "@types/node": "^26.6.6",
+    "bash-parser": "^0.5.0",
+    "oxfmt": "^0.76.0",
+    "oxlint": "^1.91.0",
+    "pkg-pr-new": "0.0.93",
+    "release-it": "^21.1.2",
+    "remark": "^15.0.1",
+    "remark-preset-webpro": "^2.2.1",
+    "rolldown": "1.3.0",
+    "sh-syntax": "^0.7.0",
+    "tinybench": "6.2.3",
+    "tree-sitter": "^0.25.1",
+    "tree-sitter-bash": "^0.25.1",
+    "typescript": "^7.0.2",
+    "web-tree-sitter": "^0.27.1"
+  },
+  "remarkConfig": {
+    "plugins": [
+      "preset-webpro"
+    ]
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "packageManager": "pnpm@11.5.2"
+}

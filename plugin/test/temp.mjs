@@ -52,3 +52,6 @@ mkdirSync(home, { mode: 0o700 });
 // Its real path: local mode compares a home's folders with their real paths (lib/accounts.mjs).
 process.env.HOME = realpathSync(home);
 for (const k of Object.keys(process.env)) if (DEVELOPER_ENV.includes(k) || DEVELOPER_ENV_PREFIX.test(k)) delete process.env[k];
+// The git server Factory fetches commits from by URL (overlap.mjs gitRemote, its trial merges): a folder in this root,
+// never github.com, whatever the shell or CI sets. A test that serves a repository puts a bare one at <it>/<owner>/<name>.git.
+process.env.GITHUB_SERVER_URL = join(root, "git-server");

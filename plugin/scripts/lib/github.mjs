@@ -1375,14 +1375,20 @@ export const projectTitle = (repo) => `Factory: ${repo.name}`;
 /**
  * The repository's Factory project, or null: by identity, the board whose node id the `project` setting holds
  * (`opts.project`, local mode's settings; else FACTORY_PROJECT, the workflow's env block on Actions), which setup records
- * as it makes the board; with no id recorded, the board linked to the repository titled exactly "Factory: <repo>"
- * (projectTitle, the title setup gives it). A recorded id that names no board is no board: nothing else stands in.
+ * as it makes the board, when that board is linked to this repository; with no id recorded, the board linked to the
+ * repository titled exactly "Factory: <repo>" (projectTitle, the title setup gives it). A recorded id that names no board,
+ * or one not linked to this repository, is no board: nothing else stands in.
  */
 export async function findProject(repo, opts) {
   const id = String(opts?.project ?? process.env.FACTORY_PROJECT ?? "").trim();
   if (id) {
-    const byId = await graphql(`query($id: ID!, $owner: String!, $name: String!) { node(id: $id) { ... on ProjectV2 { ${PROJECT_FIELDS} } } repository(owner: $owner, name: $name) { id } }`, { id, owner: repo.owner, name: repo.name }, opts);
-    return byId?.node?.id && byId.repository?.id ? { ...byId.node, repositoryId: byId.repository.id } : null;
+    const byId = await graphql(`query($id: ID!, $owner: String!, $name: String!) { node(id: $id) { ... on ProjectV2 { ${PROJECT_FIELDS} repositories(first: 100) { nodes { id } } } } repository(owner: $owner, name: $name) { id } }`, { id, owner: repo.owner, name: repo.name }, opts);
+    const rid = byId?.repository?.id;
+    if (!byId?.node?.id || !rid) return null;
+    // Only a board linked to this repository: a workflow copied from another repository names that one's board.
+    const { repositories, ...board } = byId.node;
+    if (!(repositories?.nodes || []).some((r) => r?.id === rid)) return null;
+    return { ...board, repositoryId: rid };
   }
   const data = await graphql(
     `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id projectsV2(first: 20) { nodes { ${PROJECT_FIELDS} } } } }`,

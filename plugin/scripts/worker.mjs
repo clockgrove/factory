@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh, throughOutages, upText } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -621,9 +621,12 @@ async function main() {
     log(`setup: ${inputs.setup}`);
     await progress("setup");
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
-    const s = access.agent ? await sh(await outbox.defaultTree(), inputs.setup, { env: { ...childBase, TMPDIR: tmp.factory }, timeoutMs: remainingMs(deadlineAt), asRunner: true }) : await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    // A setup that fails while this machine's network is down runs again once it is back (checkout.mjs throughOutages).
+    const tree = access.agent ? await outbox.defaultTree() : checkout;
+    const setupOpts = access.agent ? { env: { ...childBase, TMPDIR: tmp.factory }, asRunner: true } : { env: childBase };
+    const s = await throughOutages("setup", () => sh(tree, inputs.setup, { ...setupOpts, timeoutMs: remainingMs(deadlineAt) }), { deadlineAt });
     if (!s.ok) {
-      const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}`;
+      const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}${upText(s.up)}`;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "setup" }, token);
       await finish("blocked", reason);
       return;

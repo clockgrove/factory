@@ -497,6 +497,53 @@ export async function passCutOff(failure, origin, { startedMs = null, endedMs = 
 }
 
 /**
+ * The outage of this machine's network this process met between `startedMs` and `endedMs` (ms), on any host: one under
+ * way, or one that ended since `startedMs` and is not in `seen` (pastKey: one the caller already answered). A spent
+ * rate limit and a host's 5xx are none. {origin, code, since, ongoing} or null.
+ */
+export function lostDuring(startedMs, endedMs = OUTAGE.now(), seen = new Set()) {
+  const lost = (o) => !Number.isFinite(o.resetAt) && !serverDown(o.code);
+  const live = [...EPISODES.values()].find((o) => lost(o) && o.since <= endedMs);
+  if (live) return { origin: live.origin, code: live.code, since: live.since, ongoing: true };
+  const past = PAST.findLast((p) => p.kind === "network" && lost(p) && p.back >= startedMs && p.since <= endedMs && !seen.has(pastKey(p)));
+  return past ? { origin: past.origin, code: past.code, since: past.since, ongoing: false } : null;
+}
+
+/** One ended outage, as lostDuring's `seen` holds it. */
+export const pastKey = ({ origin, since }) => `${origin} ${since}`;
+
+/** Every ended outage of this machine's network this process keeps, as pastKey names them. */
+export const pastKeys = () => PAST.filter((p) => p.kind === "network").map(pastKey);
+
+const LOOPBACK = (host) => host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "[::1]" || host === "0.0.0.0";
+
+/**
+ * The origins of the http(s) URLs in a command's output (an install's error naming the URL it could not fetch), this
+ * machine's own (loopback) left out: a service on this machine is no network.
+ */
+export function namedOrigins(text) {
+  const found = new Set();
+  for (const [url] of String(text || "").matchAll(/\bhttps?:\/\/[^\s"'`<>()[\]{}|\\^,]+/g)) {
+    const origin = originOf(url.replace(/[.,;:]+$/, ""));
+    if (origin && !LOOPBACK(new URL(origin).hostname)) found.add(origin);
+  }
+  return [...found];
+}
+
+/**
+ * Whether a set-up step that needs the network (the repository's install or setup), run from `startedMs` to `endedMs`
+ * and failed, met this machine's network down: an outage this process recorded meanwhile (lostDuring), else the first of
+ * `origins` (the hosts the step needs) that does not answer a probe now. An ended outage in `seen` (pastKey) was answered
+ * by a run since: it counts no more. {origin, code, since, ongoing}, or null: the network was up.
+ */
+export async function stepCutOff(origins, { startedMs, endedMs = OUTAGE.now(), seen = new Set() }) {
+  const met = lostDuring(startedMs, endedMs, seen);
+  if (met) return met;
+  const down = await unreachableNow(origins);
+  return down ? { ...down, since: OUTAGE.now(), ongoing: true } : null;
+}
+
+/**
  * The outage a NetworkDown (or a bare connect-level error) names, for an exit: {origin, host, code, since} (ms), plus
  * `resetAt` (ms) and `quota` (quotaResource's name) for GitHub's spent rate limit.
  */

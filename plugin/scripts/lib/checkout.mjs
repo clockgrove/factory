@@ -12,6 +12,8 @@ import { holdIfStopped } from "./stop.mjs";
 import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
+import { log } from "./inputs.mjs";
+import { NetworkDown, OUTAGE, downFor, githubOrigin, namedOrigins, networkBack, pastKeys, stepCutOff, stoppedWaiting, waitingOutages } from "./network.mjs";
 import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
 import { CODEX_RUNNER_HOME } from "./codex-runner.mjs";
 import { copilotRunnerLayout, prepareCopilotHome } from "./copilot-runner.mjs";
@@ -367,18 +369,77 @@ async function installGaps(checkout, opts) {
 }
 
 /**
+ * A set-up step that needs the network (`run()`, an sh result: the repository's install or setup), run again each time
+ * it fails while this machine's network is down (network.mjs stepCutOff): an outage this process recorded while it ran,
+ * or a host it needs that does not answer a probe right after. It waits for the network first (networkBack: the stage's
+ * own bounded wait, as its GitHub calls wait, which throws NetworkDown past it, so the stage ends on the outage).
+ * `hosts(result)`: the origins the step needs, decided on what it said and did (an URL its output names, its package
+ * manager's registry), never guessed; with none known, GitHub's, the probe the stages already make. A failure with the
+ * network up comes back with `up`, the origins that answered. In a process that does not wait outages out (no stage),
+ * the step runs once, as it is.
+ */
+export async function throughOutages(what, run, { hosts = async (r) => namedOrigins(r.output), deadlineAt = Infinity } = {}) {
+  // The ended outages a run already went again for: each is answered once, never a loop on the same one.
+  const seen = new Set();
+  for (;;) {
+    const startedMs = OUTAGE.now();
+    const r = await run();
+    if (r.ok || r.timedOut || !(waitingOutages() || stoppedWaiting())) return r;
+    const needed = await hosts(r);
+    const probed = needed.length ? needed : [githubOrigin()];
+    const cut = await stepCutOff(probed, { startedMs, seen });
+    if (!cut) return { ...r, up: probed };
+    // Stopped waiting (the stage is ending on an outage): the step's failure is that outage's, never a Block of its own.
+    if (stoppedWaiting()) throw downFor(cut.origin) ?? new NetworkDown(cut);
+    log(`${what}: failed while this machine could not reach ${new URL(cut.origin).host} (${cut.code}); ${cut.ongoing ? "waiting for the network, then running it again" : "the network is back, running it again"}`);
+    if (cut.ongoing) await networkBack(cut.origin, cut.code, { deadlineAt });
+    for (const key of pastKeys()) seen.add(key);
+  }
+}
+
+/** How a step's failure with the network up reads in its Block: the hosts that answered (throughOutages `up`). */
+export const upText = (up) => (up?.length ? `; the network was up (${up.map((o) => new URL(o).host).join(", ")} answered right after)` : "");
+
+// Each lockfile's package manager, asked for the registry it installs from (read from its own configuration, no network).
+const REGISTRY_OF = [
+  ["pnpm-lock.yaml", "pnpm config get registry"],
+  ["package-lock.json", "npm config get registry"],
+  ["yarn.lock", "yarn config get registry"],
+  ["go.sum", "go env GOPROXY"],
+];
+
+/**
+ * The origins the checkout's package manager installs from, as it reports them (REGISTRY_OF), or [] when it has none
+ * of those or cannot say.
+ */
+export async function registryOrigins(checkout, { env = process.env, timeoutMs = 15_000 } = {}) {
+  const ask = REGISTRY_OF.find(([file]) => existsSync(join(checkout, file)));
+  if (!ask) return [];
+  const r = await sh(checkout, ask[1], { env, timeoutMs: Math.min(15_000, timeoutMs || 15_000), echo: false });
+  return r.ok ? namedOrigins(r.output) : [];
+}
+
+/**
  * The repository's install in the checkout, checked: its exit code, then (for a Node install) whether it left a
  * linked dependency or a declared binary missing. A failed or incomplete install gets one repair: the node_modules
  * directories emptied (Factory's package caches kept) and the install run again. Returns {ok} or {ok: false, reason},
  * the reason naming the install as infrastructure, never as a validation result: what follows an install that did not
- * finish is no verdict on the branch. A timed-out install is not retried (the stage's deadline is spent).
+ * finish is no verdict on the branch. A timed-out install is not retried (the stage's deadline is spent). An install
+ * that fails while this machine's network is down is no try: it runs again once the network is back (throughOutages),
+ * and a failure that stands says the network was up.
  */
 export async function installDeps(checkout, command, { timeoutMs, env = process.env, now = Date.now } = {}) {
   const started = now();
   const left = () => (timeoutMs ? Math.max(1000, timeoutMs - (now() - started)) : timeoutMs);
+  const deadlineAt = timeoutMs ? OUTAGE.now() + timeoutMs : Infinity;
+  // The hosts an install needs: those its output names, else its package manager's registry.
+  const hosts = async (r) => {
+    const named = namedOrigins(r.output);
+    return named.length ? named : await registryOrigins(checkout, { env, timeoutMs: left() });
+  };
   const attempt = async () => {
-    const r = await sh(checkout, command, { env, timeoutMs: left() });
-    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, missing: [] };
+    const r = await throughOutages("install", () => sh(checkout, command, { env, timeoutMs: left() }), { hosts, deadlineAt });
+    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, missing: [], up: r.up };
     const missing = await installGaps(checkout, { env, timeoutMs: left() });
     return { ok: !missing.length, code: 0, timedOut: false, missing };
   };
@@ -390,7 +451,7 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
   const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" clear', { env, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
   const second = await attempt();
   if (second.ok) return { ok: true, repaired: true, first: what(first) };
-  return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}`), missing: second.missing };
+  return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}${upText(second.up)}`), missing: second.missing };
 }
 
 /**

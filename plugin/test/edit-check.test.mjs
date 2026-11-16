@@ -266,7 +266,7 @@ async function merged(list, { now = TYPO, editor = "kirk", check = null, timelin
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   };
   const actor = (login) => ({ __typename: "User", login, databaseId: login.length });
-  const node = { title: now.title, body: now.body, lastEditedAt: L1, author: actor("kirk"), editor: actor(editor), labels: { nodes: now.labels.map((name) => ({ name })) } };
+  const node = { title: now.title, body: now.body, lastEditedAt: L1, author: actor("kirk"), editor: actor(editor), labels: { nodes: now.labels.map((name) => ({ name })) }, renames: { nodes: [] } };
   try {
     return { how: await editedSincePlan(repo, 7, { token: "t" }, { gh: { graphql: async () => ({ repository: { issue: node } }), permission, timeline: async () => timeline }, read: async () => planOf(list, 7), check, progress: async (l) => said.push(l) }), writes, said };
   } finally {

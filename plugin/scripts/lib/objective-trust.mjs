@@ -1,7 +1,8 @@
-// Who wrote an Objective's text. The issue body is the prompt-injection surface: it reaches every work, fix, review and
-// answer pass. Factory acts on it only when the issue's author and, once the body was edited, its last editor can push
-// to the repository, or are one of the workflow's pinned maintainers (FACTORY_NOTIFY, FACTORY_MAINTAINERS as login#id).
-// The body acted on is the one read with those people, never a separate read a later edit could have changed. The
+// Who wrote an Objective's text. The issue's title and body are the prompt-injection surface: they reach every work,
+// fix, review and answer pass. Factory acts on them only when the issue's author, once the body was edited its last
+// editor, and once the title was renamed the person who made the latest rename can push to the repository, or are one
+// of the workflow's pinned maintainers (FACTORY_NOTIFY, FACTORY_MAINTAINERS as login#id). The text acted on is the one
+// read with those people, never a separate read a later edit could have changed. The
 // worker and the review job check it before any harness (Actions, local mode, a cloud-sandbox stage), and a session's
 // route reads the issue only through it (local.mjs `issue`, `deliver`, `post-review`).
 // What text the plan was made from (planGate): a stage never goes on with a plan and code made from one text and an
@@ -20,7 +21,8 @@ import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
 
 const WRITE = new Set(["admin", "write", "maintain"]);
 const ACTOR = "__typename login ... on User { databaseId }";
-const QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body lastEditedAt author { ${ACTOR} } editor { ${ACTOR} } title labels(first: 100) { nodes { name } } } } }`;
+// The issue's latest rename comes in the same read as its title: who set the title now (objectiveTrusted).
+const QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { issue(number: $number) { body lastEditedAt author { ${ACTOR} } editor { ${ACTOR} } title labels(first: 100) { nodes { name } } renames: timelineItems(itemTypes: [RENAMED_TITLE_EVENT], last: 1) { nodes { ... on RenamedTitleEvent { actor { ${ACTOR} } currentTitle } } } } } }`;
 /** The label names a GraphQL issue node carries. */
 const labelNames = (node) => (node?.labels?.nodes || []).map((l) => l?.name).filter((n) => typeof n === "string");
 
@@ -38,6 +40,18 @@ export const objectiveSha = (title, body, labels = []) => {
 /** An actor as a login a person can read: an App as `<slug>[bot]`. */
 const shown = (a) => (a?.__typename === "Bot" ? `${a.login}[bot]` : a.login);
 
+/** A REST timeline event's actor in the shape vouches reads: a person is `User`; an App, a mannequin or anyone else never vouches. */
+const timelineActor = (a) => (a?.login ? { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id } : null);
+
+/**
+ * Who set the issue's title as it is now: the actor of its latest rename (`rename`: {actor, to}, the actor in vouches'
+ * shape) when that rename names `title`, else null (no one can be named for it).
+ */
+const renamer = (rename, title) => (rename?.actor?.login && settled(rename.to) === settled(title) ? rename.actor : null);
+
+/** Whether two actors are the same account (their login and kind). */
+const sameActor = (a, b) => !!a?.login && !!b?.login && a.login === b.login && a.__typename === b.__typename;
+
 /** Whether this actor vouches for the text: a person who can push here, or a pinned maintainer of this repository's workflow. */
 async function vouches(repo, actor, opts, gh) {
   // An App, a mannequin or any other non-person never vouches: its GraphQL login may be a person's login without `[bot]`.
@@ -47,10 +61,11 @@ async function vouches(repo, actor, opts, gh) {
 }
 
 /**
- * Whether Factory may act on the issue's text: its author, and its last editor when the body was edited, can push to
- * `repo` or are pinned maintainers. Returns {ok, reason, body, people}: `body` from the same read as the people (the
- * caller acts on exactly the text they vouch for), `people` the [role, login] pairs who vouch for it, `reason` a fixed
- * line ending in `so <what>`. `gh` (graphql, permission) is a test's own.
+ * Whether Factory may act on the issue's text: its author, its last editor when the body was edited, and when the title
+ * was renamed the actor of its latest rename (that rename naming the title now; renamer), can push to `repo` or are
+ * pinned maintainers. A title never renamed is the author's. Returns {ok, reason, body, people}: `body` and `title` from
+ * the same read as the people (the caller acts on exactly the text they vouch for), `people` the [role, login] pairs who
+ * vouch for it, `reason` a fixed line ending in `so <what>`. `gh` (graphql, permission) is a test's own.
  */
 export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts on none of its text", gh = { graphql, permission: collaboratorPermission } } = {}) {
   const d = await gh.graphql(QUERY, { owner: repo.owner, name: repo.name, number: Number(issue) }, opts);
@@ -66,8 +81,21 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
     if (!(await vouches(repo, actor, opts, gh))) return { ok: false, role, reason: `the issue's ${role} \`${shown(actor)}\` cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`, body };
   }
   const title = typeof node?.title === "string" ? node.title : null;
+  const people = roles.map(([role, a]) => [role, a.login]);
+  // The title, vouched for as the body is: a read without the rename list has no one to name for it.
+  const renames = node?.renames?.nodes;
+  if (!Array.isArray(renames)) return { ok: false, role: "title renamer", reason: `who set the issue's title could not be read, so ${what}`, body };
+  if (renames.length) {
+    const r = renames.at(-1);
+    const by = renamer({ actor: r?.actor ?? null, to: r?.currentTitle }, title);
+    if (!by) return { ok: false, role: "title renamer", reason: `who set the issue's title as it is now could not be read, so ${what}`, body };
+    if (!roles.some(([, a]) => sameActor(a, by))) {
+      if (!(await vouches(repo, by, opts, gh))) return { ok: false, role: "title renamer", reason: `the issue's title was last renamed by \`${shown(by)}\`, who cannot push to ${repo.full} and is not a pinned maintainer, so ${what}`, body };
+      people.push(["title renamer", by.login]);
+    }
+  }
   const labels = labelNames(node);
-  return { ok: true, reason: "", body, title, labels, sha: objectiveSha(title, body, labels), editedAt: node?.lastEditedAt ?? null, people: roles.map(([role, a]) => [role, a.login]) };
+  return { ok: true, reason: "", body, title, labels, sha: objectiveSha(title, body, labels), editedAt: node?.lastEditedAt ?? null, people };
 }
 
 /**
@@ -77,6 +105,7 @@ export async function objectiveTrusted(repo, issue, opts, { what = "Factory acts
 export const AUTHOR_FIX = {
   author: "Editing this issue cannot fix that, since its author is checked on every run: a person who can push files the Objective as a new issue and labels that one `factory:objective`.",
   "last editor": "Fix by having a person who can push read the body and save it (they become its last editor), then re-apply `factory:objective`.",
+  "title renamer": "Fix by having a person who can push read the title and rename the issue (they become its latest renamer), then re-apply `factory:objective`.",
 };
 
 /**
@@ -177,9 +206,9 @@ async function titleVouched(repo, issue, before, after, opts, gh = {}) {
   if (settled(before.title) === settled(after.title)) return true;
   const events = (await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [];
   const r = events.filter((e) => e.event === "renamed").sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
-  const a = r?.actor;
-  if (!a?.login || settled(r.rename?.to) !== settled(after.title)) return false;
-  return vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, { permission: gh.permission ?? collaboratorPermission });
+  const by = renamer({ actor: timelineActor(r?.actor), to: r?.rename?.to }, after.title);
+  if (!by) return false;
+  return vouches(repo, by, opts, { permission: gh.permission ?? collaboratorPermission });
 }
 
 /**

@@ -43,10 +43,13 @@ export const transientError = (e) => !!e && (e.transport === true || e.rateLimit
 /**
  * `token` is a string or a getter (the TokenKeeper's, which re-mints during long jobs). Without one, a person's own
  * command on their machine (doctor, setup) reads GitHub as their gh login; inside Actions there is no such fallback.
+ * Anything else (a stage's request options, `{token, notice}`, passed as the token itself) is refused before any request:
+ * GitHub would read it as a bad credential (#405).
  */
 let LOGIN = undefined;
 const tokenOf = (token) => {
   const t = typeof token === "function" ? token() : token;
+  if (t && typeof t !== "string") throw new TypeError(`a GitHub call's token must be a string or a function giving one, not ${Array.isArray(t) ? "an array" : typeof t}`);
   if (t) return t;
   if (process.env.GITHUB_ACTIONS) return null;
   if (LOGIN === undefined) {
@@ -272,6 +275,91 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
   }
 }
 
+/**
+ * A refreshable token: a getter with `refresh()`, which gets a new App installation token (token-keeper.mjs, and local
+ * mode's notice token, session.mjs noticePost), and `mintedAt(token)`, when that token was minted (ms, this machine's
+ * clock, as GitHub answered the mint), or null. A fixed token (local mode's own, or one a launcher handed over) has none.
+ */
+const refreshable = (token) => typeof token === "function" && typeof token.refresh === "function";
+
+/** Why a refresh failed, for a log line: its message, cut. */
+const why = (e) => String(e?.message || e).slice(0, 160);
+
+/**
+ * `token.refresh()`, and whether the getter gives another token after it: a refresh that minted the token and then
+ * failed after (the agent's read-only token, its hand-over: token-keeper.mjs onRefresh) still replaced it. `failed` is
+ * the refresh's error, if any.
+ */
+async function refreshOf(token) {
+  const was = tokenOf(token);
+  let failed = null;
+  await token.refresh().catch((e) => {
+    failed = e;
+  });
+  return { replaced: tokenOf(token) !== was, failed };
+}
+
+/**
+ * The token a try sends: the getter's now, refreshed first when it says it is at its expiry (token-keeper.mjs `expired`),
+ * so no call goes with an expired App installation token. A refresh that fails leaves the call to GitHub's answer.
+ */
+async function currentToken(token) {
+  if (refreshable(token) && token.expired?.()) {
+    const { replaced, failed } = await refreshOf(token);
+    if (failed) log(`the App installation token was at its expiry; ${replaced ? "refreshed it, then" : "its refresh"} failed (${why(failed)})`);
+  }
+  return tokenOf(token);
+}
+
+/**
+ * GitHub can refuse an installation token with 401 for a few seconds after it made it, until the token has reached all
+ * its servers. @octokit/auth-app (8.3.1, its hook's sendRequestWithRetries) sends the same token again then: while the
+ * token was less than 5 s old when the request went, after 1 s, then 2 s, then 3 s, and the 401 stands after that.
+ * `tries` is that bound counted (the waits add to 6 s), so it holds whatever the clock does.
+ */
+export const PROPAGATION = { windowMs: 5_000, stepMs: 1_000, tries: 3 };
+
+/**
+ * `send()` (one call, its retries included) after a 401 on a refreshable token (`last()`: the token of its last try and
+ * when it went). GitHub refused an App installation token and did nothing, so any call may go again:
+ *  - the token was minted less than PROPAGATION.windowMs before the try: GitHub may not have it everywhere yet. The same
+ *    token goes again after PROPAGATION's waits, minting nothing (a burst of 401s on a new token mints no more);
+ *  - else, once per call: with the token the getter gives now when a refresh came between, else after one refresh. A
+ *    refresh counts when the getter gives a new token, even if what it does after the mint failed (logged).
+ * Each is logged by its cause, never with a token. A 401 past those, or a refresh that gave no new token, is the call's
+ * failure.
+ */
+async function refreshedOn401(what, token, last, send) {
+  let refreshed = false;
+  let waits = 0;
+  for (;;) {
+    try {
+      return await send();
+    } catch (e) {
+      if (e?.status !== 401 || !refreshable(token)) throw e;
+      const { token: was, at } = last();
+      const minted = token.mintedAt?.(was) ?? null;
+      const age = minted === null ? null : at - minted;
+      if (age !== null && age < PROPAGATION.windowMs && waits < PROPAGATION.tries) {
+        waits += 1;
+        const wait = waits * PROPAGATION.stepMs;
+        log(`GitHub ${what}: HTTP 401 on an App installation token minted ${(Math.max(0, age) / 1000).toFixed(1)} s before; GitHub may not have it everywhere yet, so the same token goes again in ${wait / 1000} s (wait ${waits} of ${PROPAGATION.tries})`);
+        await RETRY.sleep(wait);
+        continue;
+      }
+      if (refreshed || (age !== null && age < PROPAGATION.windowMs)) throw e;
+      refreshed = true;
+      const meanwhile = tokenOf(token) !== was;
+      const { replaced, failed } = meanwhile ? { replaced: true, failed: null } : await refreshOf(token);
+      if (!replaced) {
+        log(`GitHub ${what}: HTTP 401 on the App installation token, and its refresh failed (${why(failed)})`);
+        throw e;
+      }
+      log(`GitHub ${what}: HTTP 401 on the App installation token; ${meanwhile ? "it was refreshed meanwhile" : failed ? `refreshed it (what follows a mint failed: ${why(failed)})` : "refreshed it"}, trying once more`);
+    }
+  }
+}
+
 /** A 5xx: GitHub answered, and failed. */
 const serverError = (e) => Number.isInteger(e?.status) && e.status >= 500;
 
@@ -350,7 +438,8 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * A transient failure is sent again within RETRY's bound and before `deadlineAt` (ms) when the call may repeat
  * (repeatable); a create only as createAgain allows, with the caller's optional `landed` (for a comment with none,
  * commentLanded). A 5xx that outlasts the bound is thrown as GitHub's outage (outlasted). A DELETE whose retry finds
- * nothing (404) after a transient failure is done: the first try removed it. `noRateWait`: a rate limit is thrown at once,
+ * nothing (404) after a transient failure is done: the first try removed it. A 401 on a refreshable App installation
+ * token is sent again as refreshedOn401 says (GitHub's delay with a new token, else one refresh). `noRateWait`: a rate limit is thrown at once,
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
@@ -362,11 +451,14 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
   const quota = quotaKey(url, tokenOf(token));
   const conditional = cache && method === "GET" && !raw;
+  // The token each try carried and when it went: the getter is read per try, so a refresh between tries is the next try's.
+  let sent = { token: null, at: 0 };
   const one = async (n) => {
     const kept = conditional ? cache.get(url) : undefined;
+    sent = { token: await currentToken(token), at: Date.now() };
     let res;
     try {
-      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
+      res = await call(url, { method, body, token: sent.token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
     } catch (e) {
       throw transportError(`${method} ${path}`, e);
     }
@@ -395,7 +487,8 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   };
   const pages = [];
   for (;;) {
-    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota });
+    const what = `${method} ${String(path).split("?")[0]}`;
+    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota }));
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
@@ -444,15 +537,17 @@ const isMutation = (query) => /^mutation\b/.test(String(query).replace(/#[^\n]*/
 
 /**
  * GraphQL call with fetch; `variables` are passed as JSON. A query is retried like a REST read; a mutation like a
- * create (createAgain, with the caller's optional `landed`). `deadlineAt` and `noRateWait` as for rest.
+ * create (createAgain, with the caller's optional `landed`). `deadlineAt`, `noRateWait` and a 401's refresh as for rest.
  */
 export async function graphql(query, variables = {}, { token, deadlineAt = Infinity, landed = null, noRateWait = false } = {}) {
   const url = process.env.GITHUB_GRAPHQL_URL || `${API()}/graphql`;
   const quota = quotaKey(url, tokenOf(token));
+  let sent = { token: null, at: 0 };
   const one = async () => {
+    sent = { token: await currentToken(token), at: Date.now() };
     let res;
     try {
-      res = await call(url, { method: "POST", body: { query, variables }, token });
+      res = await call(url, { method: "POST", body: { query, variables }, token: sent.token });
     } catch (e) {
       throw transportError("graphql", e);
     }
@@ -485,7 +580,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
     return { data: data?.data };
   };
   const again = isMutation(query) ? createAgain(landed) : async () => true;
-  const res = await withRetry("graphql", one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota });
+  const res = await refreshedOn401("graphql", token, () => sent, () => withRetry("graphql", one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota }));
   return LANDED in res ? res[LANDED] : res.data;
 }
 
@@ -919,8 +1014,14 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
  * `ended(runs)` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends
- * the wait unfinished. `onRead(state, runs)` (optional) gets each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an
- * AbortSignal, optional) ends the wait, unfinished, at its next pause.
+ * the wait unfinished. A required name no check run has is read from the head's commit statuses too (a pending status is
+ * a check in progress, a failing one a failed run). `progress(checks)` (async, optional) is asked on a read that leaves a
+ * required check unfinished, given the checks as queueCommitChecks shapes them, and answers `{running, hung}`: hung
+ * checks (session.mjs hangsOn) end the wait unfinished, returned as `hung`, and so does `idleMs` with no required check
+ * running. `timeoutMs` is the caller's bound (the stage's wall clock); the reads back off only past `backoffAfterMs`.
+ * `onRead(state, runs)` (optional) gets
+ * each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an AbortSignal,
+ * optional) ends the wait, unfinished, at its next pause.
  */
 /** `ms` of sleep, cut short when `signal` aborts. */
 const pause = (ms, signal = null) =>
@@ -938,22 +1039,31 @@ const pause = (ms, signal = null) =>
 /** A check run as awaitChecks returns it (and checksNotStarted reads it). */
 const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
 
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, onRead = null, conflicted = null, ended = null, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
   const started = Date.now();
+  // When a required check was last seen running (progress), from the wait's start.
+  let ranAt = started;
+  // The head's commit statuses as check runs, read while a required name has no check run.
+  let statuses = [];
+  // Conditional reads (rest's ETag cache): a page unchanged since the last poll answers 304, outside the rate limit.
+  const etags = new Map();
   // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
   let pause = pollMs;
   let runs = [];
   let state = null;
   let conflict = false;
+  let hangs = [];
   // Whether a read of the check runs has succeeded since the wait began.
   let readOnce = false;
   for (;;) {
     // A failed read is no reading: once one has succeeded, the last good one stands and the wait goes on to its own
     // deadline; with none yet, the wait ends at `appearMs` as for nothing ran.
-    const read = await checkRuns(repo, sha, { token }).catch(() => null);
+    const read = await checkRuns(repo, sha, { token, cache: etags }).catch(() => null);
     if (read) {
       runs = read.filter((r) => !ignoreIds?.has(r.id));
       readOnce = true;
+      if (names.some((n) => !runs.some((r) => r.name === n))) statuses = await rest(`repos/${repo.full}/commits/${sha}/status`, { token, cache: etags }).then((st) => (st?.statuses || []).map(statusRun), () => statuses);
+      runs = [...runs, ...statuses.filter((x) => !runs.some((r) => r.name === x.name))];
     }
     state = evaluateChecks(names, runs);
     // Each reading as it is made (session.mjs validationLoop's `onRead`: whether the head is known red yet).
@@ -970,19 +1080,27 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     // optional, given the runs as returned below) says it will get none: its own workflow runs ended before their jobs
     // ran. The wait ends at once, unfinished.
     if (read && state.missing.length && runs.length > 0 && ended && (await ended(runs.map(runShape)).catch(() => false))) break;
+    // A required check that made no progress (its step past its usual duration) ends it too, and so does `idleMs` with
+    // none running (queued, waiting or not reported: GitHub's not-started bound). An unanswered reading is running.
+    if (read && progress) {
+      const p = await progress(runs.map(commitCheck)).catch(() => null);
+      if (!p || p.running) ranAt = Date.now();
+      if ((hangs = p?.hung || []).length) break;
+    }
+    if (progress && Date.now() - ranAt > idleMs) break;
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));
-    pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
+    if (elapsed >= backoffAfterMs) pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
   }
   const timedOut = !state.done && !conflict;
   const failedRuns = runs.filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
   const parts = [];
-  for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${await jobLogTail(repo, r.id, { token })}`);
+  for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${r.commitStatus ? `commit status${r.details_url ? ` ${r.details_url}` : ""}` : await jobLogTail(repo, r.id, { token })}`);
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
   // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, hung: hangs, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */
@@ -1084,6 +1202,12 @@ export async function checksStarted(repo, sha, gate, opts) {
   return gateStarted(gate, { suites });
 }
 
+/** A check run as logic.mjs queueHangs reads it (queueCommitChecks, awaitChecks' `progress`). */
+const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null });
+
+/** A commit status as a check run: `in_progress` while pending, else completed, `success` or failed; from its creation. */
+const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, details_url: x.target_url ?? null, commitStatus: true });
+
 /**
  * The checks on a queue commit as logic.mjs queueHangs reads them: each check run `{id, name, status, started_at, app}`
  * (GitHub's status: `queued`, `in_progress`, `completed`, ...; `app` its integration's id; an Actions run's id is its
@@ -1091,10 +1215,9 @@ export async function checksStarted(repo, sha, gate, opts) {
  * as "nothing running".
  */
 export async function queueCommitChecks(repo, sha, opts) {
-  const runs = (await checkRuns(repo, sha, opts, { all: true })).map((r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null }));
+  const runs = (await checkRuns(repo, sha, opts, { all: true })).map(commitCheck);
   const st = await rest(`repos/${repo.full}/commits/${sha}/status`, opts);
-  const statuses = (st?.statuses || []).map((x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", started_at: x.created_at ?? null }));
-  return [...runs, ...statuses];
+  return [...runs, ...(st?.statuses || []).map(statusRun).map(commitCheck)];
 }
 
 /**

@@ -17,7 +17,7 @@ import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, che
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, asksQuestion, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -98,7 +98,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -108,6 +108,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const sandbox = !!inputs.sandbox && backend().trigger.sandboxRoute === true;
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
+  // Conditional reads (rest's `cache`): a local loop keeps the Map across its ticks, so an unchanged page costs no quota.
+  const cached = { ...opts, cache: readCache ?? new Map() };
   // Actions reads (live jobs, usage artifacts) use the job token (actions: read), which the App has not.
   const readToken0 = { token: inputs.githubToken || token };
   const watch = stopwatch();
@@ -298,7 +300,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
     let again = inputs.issue === issue.number;
     if (!again) {
-      timelines[issue.number] = await timelineOf(repo, issue.number, opts).catch(() => null);
+      timelines[issue.number] = await timelineOf(repo, issue.number, cached).catch(() => null);
       again = !!timelines[issue.number] && relabeledIn(timelines[issue.number], inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], [DRAFT_LABEL]);
     }
     if (!again) continue;
@@ -311,34 +313,47 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
 
-  // With a cloud sandbox, a maintainer's answer to a Question requeues it through the launcher (launch.mjs). An answer
-  // whose launch was lost (an event GitHub dropped, a pending launcher a newer one replaced) leaves the Question
-  // waiting: past a grace for that launch, the sweep requeues it as the launcher would.
+  // A maintainer's answer to a Question (missedAnswer: a person with write access, after the Question was asked;
+  // Factory's own marked comments are none, so a local loop's, posted as the person's login, never answer) requeues it.
+  // With a cloud sandbox the launcher does that on the comment's event (launch.mjs): this pass takes an answer whose
+  // launch was lost (an event GitHub dropped, a pending launcher a newer one replaced), past a grace for that launch.
+  // On every other route (Actions without a sandbox, a local loop) nothing launches on a comment: this pass is the
+  // answer's cue, at the next tick, for a Question asked on the issue (no open PR, or a PR whose body asks no
+  // `QUESTION:`: the plan-time Question). A Question its PR asks waits for the PR's ready mark (review.mjs readyMark).
+  // Only a Question's issue is read here, with conditional reads (`readCache`; GitHub counts no 304).
   const answered = [];
-  if (sandbox) {
-    for (const issue of wanted) {
-      if (reset.includes(issue.number)) continue;
-      if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
-      const asked = await objectiveLabeledAt(repo, issue.number, "factory:question", opts).catch(() => null);
-      if (!asked) continue;
-      const pr = await findPr(repo, `factory/${issue.number}`, opts).catch(() => null);
-      const decisions = await objectiveDecisions(repo, { issue: issue.number, prNumber: pr?.number ?? null }, opts).catch(() => []);
-      if (!missedAnswer(decisions, { questionSince: asked, graceMs: RELAUNCH_GRACE_MS })) {
-        // An answer younger than the grace: its own launch is due first; the sweep's turn comes after.
-        const answer = decisions.find((d) => Date.parse(d.created_at ?? d.at) > Date.parse(asked));
-        if (answer) due(issue.number, "answer-grace", Date.parse(answer.created_at ?? answer.at) + RELAUNCH_GRACE_MS + 1000);
-        continue;
-      }
-      answered.push(issue.number);
-      issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
-      statuses[issue.number] = "Queued";
-      if (!dryRun) {
-        await setStateLabel(repo, issue.number, null, opts);
-        await moveCard(project, repo, issue.number, "Queued", opts).catch(() => {});
-      }
+  for (const issue of wanted) {
+    if (reset.includes(issue.number)) continue;
+    if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
+    // A stage of it this local loop runs (a review of its PR marked ready): that stage's end decides.
+    if (localHeld?.[issue.number]) continue;
+    const asked = await objectiveLabeledAt(repo, issue.number, "factory:question", cached).catch(() => null);
+    if (!asked) continue;
+    // A PR read that failed is no PR on the sandbox route (as before), and unread on the others: a Question its PR
+    // asks must not go back to work on a comment alone.
+    const pr = await findPr(repo, `factory/${issue.number}`, cached).catch(() => (sandbox ? null : undefined));
+    if (pr === undefined) {
+      retry(`#${issue.number}'s PR`);
+      continue;
     }
-    if (answered.length) log(`answered Questions with no launch since the answer, Queued again: ${answered.map((n) => `#${n}`).join(", ")}`);
+    if (!sandbox && pr && asksQuestion(pr.body)) continue;
+    const decisions = await objectiveDecisions(repo, { issue: issue.number, prNumber: pr?.number ?? null }, cached, { quiet: !sandbox }).catch(() => []);
+    const graceMs = sandbox ? RELAUNCH_GRACE_MS : 0;
+    if (!missedAnswer(decisions, { questionSince: asked, graceMs })) {
+      // An answer younger than the grace: its own launch is due first; the sweep's turn comes after.
+      const answer = sandbox && decisions.find((d) => Date.parse(d.created_at ?? d.at) > Date.parse(asked));
+      if (answer) due(issue.number, "answer-grace", Date.parse(answer.created_at ?? answer.at) + RELAUNCH_GRACE_MS + 1000);
+      continue;
+    }
+    answered.push(issue.number);
+    issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
+    statuses[issue.number] = "Queued";
+    if (!dryRun) {
+      await setStateLabel(repo, issue.number, null, opts);
+      await moveCard(project, repo, issue.number, "Queued", opts).catch(() => {});
+    }
   }
+  if (answered.length) log(`${sandbox ? "answered Questions with no launch since the answer" : "Questions a maintainer answered"}, Queued again: ${answered.map((n) => `#${n}`).join(", ")}`);
 
   watch.mark("recovery");
   // A stage that stopped to wait for CI on its branch's head is resumed by the check event; when that event is lost,

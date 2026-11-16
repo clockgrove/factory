@@ -2821,9 +2821,16 @@ export function checksResume(record, { headSha, checksDone, now = Date.now(), gr
 }
 
 /**
- * The answer to a Question the launcher missed: a maintainer decision (objectiveDecisions: people with write access,
- * never Factory) made after the Question was asked, older than `graceMs` (the comment's own launch gets that long).
+ * The answer to a Question: a maintainer decision (objectiveDecisions: people with write access, never Factory's own
+ * marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the comment's own
+ * launch gets that long; on any other route nothing launches on a comment, so the grace is 0).
  */
+/**
+ * Whether a PR body still asks a Question: an item of its Assumptions starting with `QUESTION:` (factory-deliver-pr).
+ * A Question asked on the issue (the plan-time Question) is not in the body.
+ */
+export const asksQuestion = (body) => /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUESTION:/.test(body || "");
+
 export function missedAnswer(decisions, { questionSince, now = Date.now(), graceMs }) {
   const since = Date.parse(questionSince);
   if (!Number.isFinite(since)) return null;

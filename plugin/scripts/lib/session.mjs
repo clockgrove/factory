@@ -586,8 +586,9 @@ export const commitAuthor = (identity) =>
  * comments, by people with write access or more to the repository (checked per author: an author association of
  * COLLABORATOR or MEMBER can be read-only), oldest first, minus Factory's own review threads. A failed read keeps
  * nothing from that list or author; with `strict` it throws instead, for a caller that must not merge on a partial read.
+ * `quiet` (a dispatcher tick's read, every tick) logs its count line only when a read failed.
  */
-export async function objectiveDecisions(repo, { issue, prNumber = null }, opts, { strict = false } = {}) {
+export async function objectiveDecisions(repo, { issue, prNumber = null }, opts, { strict = false, quiet = false } = {}) {
   const failed = [];
   const read = (what, p) =>
     p.catch((e) => {
@@ -615,7 +616,7 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
   }
   const kept = candidates.filter((d) => can.get(d.author));
   // Structured enough to tell "nobody answered" from "an answer was dropped" when a Question does not resume.
-  log(`decisions: ${all.length} comment(s) read, ${candidates.length} by people, ${[...can.values()].filter(Boolean).length} of ${can.size} author(s) with write access, ${kept.length} kept${failed.length ? `; read failed for ${failed.join(", ")}` : ""}`);
+  if (!quiet || failed.length) log(`decisions: ${all.length} comment(s) read, ${candidates.length} by people, ${[...can.values()].filter(Boolean).length} of ${can.size} author(s) with write access, ${kept.length} kept${failed.length ? `; read failed for ${failed.join(", ")}` : ""}`);
   return kept;
 }
 

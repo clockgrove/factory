@@ -88,7 +88,7 @@ import {
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
-import { stageSpendLine, usdText } from "./lib/logic.mjs";
+import { asksQuestion, stageSpendLine, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -831,7 +831,7 @@ async function main() {
   // answer pass applies it before anything merges, review or no review. A Question answered keeps its own rule above.
   const afterPush = humanReady && newDecisions.length ? [] : unread;
   if (afterPush.length) log(`${afterPush.length} maintainer decision(s) no pass has read yet; the answer pass applies them`);
-  if (humanReady && !newDecisions.length && /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUESTION:/.test(pr.body || "")) {
+  if (humanReady && !newDecisions.length && asksQuestion(pr.body)) {
     const reason = "marked ready, but no maintainer answer since the question; answer in a comment on the issue or the PR, then mark it ready again";
     log(`PR #${pr.number}: ${reason}`);
     await dropLabel();

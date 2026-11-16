@@ -415,6 +415,20 @@ test("#243: local --wait sends a conflicting PR back each time other PRs merged;
   assert.match(exits[1].reason, new RegExp(`rebased ${REBASE_LIMIT} times in 24 h`));
 });
 
+test("#402: local --wait sends back and Blocks at the repository's rebase_limit", async () => {
+  const pr = { number: 12, state: "open", head: { sha: "a".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty" };
+  const posted = [];
+  const exits = [];
+  const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async () => ({ exit: "delivered" }) });
+  const gh = (recent) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: recent, recent, already: false, stuck: null, record: null }), prComment: async (_r, n, body) => posted.push(body), applyExit: async (_r, x) => exits.push(x) });
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const inputs = { ...resolveInputs({ env: { FACTORY_REBASE_LIMIT: "2" } }), objectiveLabel: "factory:objective", notify: "" };
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1) }), true);
+  assert.match(posted[0], /rebase 2 of at most 2 in 24 h/);
+  assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(2) }), false);
+  assert.match(exits[0].reason, /rebased 2 times in 24 h/);
+});
+
 /** A Local loop whose GitHub calls are `gh` (sendBack's seam) and whose worker run answers `workAnswers` in turn. */
 function sendBackLoop(workAnswers) {
   const ran = [];

@@ -838,247 +838,253 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     let hungMs = null;
     const cache = {};
     for (const issue of issues) {
-      // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
-      if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
-      // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
-      if (!backend().trigger.routes(issue)) continue;
-      // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
-      if (restarting[issue.number]) continue;
-      if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
-      let prRead = true;
-      const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
-      // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
-      if (prRead) prsSeen[issue.number] = open;
-      if (!open) {
-        // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
-        if (dryRun) continue;
-        const next = await nextPart(repo, issue.number, opts).catch((e) => {
-          log(`  #${issue.number}: next part: ${String(e.message).slice(0, 120)}`);
-          return null;
-        });
-        if (next === "next") {
-          nextParts.push(issue.number);
-          issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
-          statuses[issue.number] = "Queued";
-          await setStateLabel(repo, issue.number, null, opts);
-          await moveCard(project, repo, issue.number, "Queued", opts).catch(() => {});
-          log(`  #${issue.number}: a split part merged; the next part is queued`);
-        } else if (next === "cap") {
-          statuses[issue.number] = "Blocked";
-          await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
-        }
-        continue;
-      }
-      const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
-      // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
-      // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
-      // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
-      const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
-      // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
-      // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
-      // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
-      // serve's review). The bound's end is a wake of its own; the reviewer's review ticks this job by its event.
-      const waiting = !reviewing ? await waitState({ repo, issue: issue.number, pr, wait, opts, now: Date.now(), reads: thirdPartyReads }) : null;
-      // The PR's comments unread: with third-party reviewers named it may be waiting, so nothing else runs on it this tick.
-      if (unread && !reviewing && inputs.thirdPartyReviewers?.length) {
-        retry(`PR #${open.number}'s comments`);
-        continue;
-      }
-      if (waiting?.resume) {
-        if (dryRun) continue;
-        try {
-          await addLabels(repo, open.number, [REVIEW_LABEL], opts);
-          thirdPartyResumed.push(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: ${{ reviewed: `${wait.logins.join(", ")} reviewed ${wait.sha.slice(0, 7)}`, deadline: `the third-party wait for ${wait.logins.join(", ")} has passed its bound`, head: `its head moved from ${wait.sha.slice(0, 7)} during the third-party wait` }[waiting.resume]}; the review goes on`);
-        } catch (e) {
-          log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
-          retry(`#${issue.number}'s review label`);
-        }
-        continue;
-      }
-      if (waiting?.waiting) {
-        due(issue.number, "third-party", waiting.until + WAKE_SLACK_MS);
-        if (waiting.unread) retry(`PR #${open.number}'s review label time`);
-        continue;
-      }
-      // A review waiting on two account labels (lib/account-wait.mjs, #267): its label goes back once one account label or
-      // none is left; meanwhile nothing else runs on the PR.
-      if (!reviewing && accountWait && !dryRun) {
-        let how = "waiting";
-        try {
-          // The review label's latest time on the PR: a record older than it is stale (account-wait.mjs).
-          const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts);
-          how = await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, labelledAt, opts });
-        } catch (e) {
-          log(`  #${issue.number}: the account wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
-          retry(`#${issue.number}'s review label`);
+      // One Objective whose read or decision throws is said and read again next tick; the rest of the tick goes on.
+      try {
+        // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
+        if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
+        // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
+        if (!backend().trigger.routes(issue)) continue;
+        // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
+        if (restarting[issue.number]) continue;
+        if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
+        let prRead = true;
+        const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+        // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
+        if (prRead) prsSeen[issue.number] = open;
+        if (!open) {
+          // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
+          if (dryRun) continue;
+          const next = await nextPart(repo, issue.number, opts).catch((e) => {
+            log(`  #${issue.number}: next part: ${String(e.message).slice(0, 120)}`);
+            return null;
+          });
+          if (next === "next") {
+            nextParts.push(issue.number);
+            issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
+            statuses[issue.number] = "Queued";
+            await setStateLabel(repo, issue.number, null, opts);
+            await moveCard(project, repo, issue.number, "Queued", opts).catch(() => {});
+            log(`  #${issue.number}: a split part merged; the next part is queued`);
+          } else if (next === "cap") {
+            statuses[issue.number] = "Blocked";
+            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
+          }
           continue;
         }
-        if (how === "resumed") {
-          accountResumed.push(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
+        const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
+        // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
+        // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
+        // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
+        const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+        const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
+        // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
+        // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
+        // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
+        // serve's review). The bound's end is a wake of its own; the reviewer's review ticks this job by its event.
+        const waiting = !reviewing ? await waitState({ repo, issue: issue.number, pr, wait, opts, now: Date.now(), reads: thirdPartyReads }) : null;
+        // The PR's comments unread: with third-party reviewers named it may be waiting, so nothing else runs on it this tick.
+        if (unread && !reviewing && inputs.thirdPartyReviewers?.length) {
+          retry(`PR #${open.number}'s comments`);
           continue;
         }
-        if (how === "waiting") {
-          log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
-          continue;
-        }
-        // Stale: removed, and the PR is handled as any In-review PR below.
-        log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
-      }
-      // A hand-off to review waiting for a sibling on the same files (overlap.mjs reviewHold): nothing else runs on the PR
-      // (no send-back, no merge) while a sibling is ahead of it. Then its review label goes on or, when it conflicts by
-      // then, the send-back below takes it first, so it rebases once, before its review. Waiting hand-offs go in a fixed
-      // order (the oldest first wait first), so one rebases per sibling merge.
-      if (!reviewing && reviewWait && !reviewWait.released && pr) {
-        let how;
-        try {
-          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { dryRun, log });
-        } catch (e) {
-          log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
-          retry(`#${issue.number}'s review wait`);
-          continue;
-        }
-        // Its record no longer waits ("unsettled" keeps it waiting for the next tick).
-        if (["released", "rebase", "stale", "draft"].includes(how)) holdReleased.add(issue.number);
-        if (how.waiting) {
-          reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
-          due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
-          continue;
-        }
-        if (how === "deferred") {
-          holdDeferred.add(issue.number);
-          due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
-          retry(`#${issue.number}'s trial merges`);
-          continue;
-        }
-        if (how === "unsettled") {
-          log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over, but GitHub has not worked out whether it conflicts; the next tick decides`);
-          retry(`PR #${open.number}'s mergeable state`);
-          continue;
-        }
-        if (how === "released") {
-          reviewResumed.push(issue.number);
-          log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
-          continue;
-        }
-        if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
-        // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
-      }
-      // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
-      if (sandbox && reviewing && !pr.draft) {
-        const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
-        const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
-        if (holds) leaseDue(issue.number, record);
-        if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
-        if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
-          const again = startRetryAt(record, labelledAt);
-          const flight = inFlightUntil(record, labelledAt);
-          if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
-          if (flight !== null) due(issue.number, "start-retry", flight);
-          else if (again !== null) {
-            if (Date.now() >= again) relaunch.push(issue.number);
-            else due(issue.number, "start-retry", again);
-          } else if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
-          else graceDue(issue.number, "review-grace", Date.parse(labelledAt) + RELAUNCH_GRACE_MS + 1000);
-          relaunchStage[issue.number] = "review";
-        }
-      }
-      // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
-      if (sandbox && !relaunch.includes(issue.number)) {
-        const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
-        const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
-        if (holds) leaseDue(issue.number, record);
-        if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) {
-          relaunch.push(issue.number);
-          relaunchStage[issue.number] = record.stage;
-        }
-      }
-      // Only a conflicting PR under review needs the live jobs read (once per tick).
-      // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
-      if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) {
-        liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
-        if (liveJobs.failed) retry("live jobs");
-      }
-      const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
-      if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
-      const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
-      // A send-back that waited and now has nothing to rebase (it conflicts no more, a draft, or it Blocks below): its
-      // record ends as `over` and its issue's note goes; a later conflict starts a bound of its own (overlap.mjs waitStart).
-      if (!dryRun && rebaseWait && !rebaseWait.released && (pr?.draft || decision === "stuck" || decision === "limit" || (pr?.mergeable_state && !["dirty", "unknown"].includes(pr.mergeable_state))))
-        await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: "over" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
-      // Two account labels on these routes (#267): no work stage could start on it, so nothing is sent back to one (a
-      // GitHub update of the branch runs no stage and goes ahead); it waits In review until one label or none is left.
-      if (decision === "rebase" && twoAccounts(issue)) {
-        log(`  #${issue.number}: PR #${open.number} needs a rebase, but ${routeTwoLine(accountPin(issue.labels).two)}`);
-        continue;
-      }
-      // The send-backs could not be counted (session.mjs rebaseMarkers `unread`): no update, send-back or Block this tick.
-      if (unread && decision !== "ignore") {
-        retry(`#${issue.number}'s send-backs`);
-        continue;
-      }
-      if (decision === "update") {
-        // Behind, not conflicting: one API call brings the branch up to date and its checks re-run. No worker, no
-        // model; GitHub's signed merge commit is the one new head the merge pass accepts without another review.
-        updated.push(issue.number);
-        if (!dryRun) {
+        if (waiting?.resume) {
+          if (dryRun) continue;
           try {
-            await updatePrBranch(repo, open.number, opts);
-            log(`  #${issue.number}: PR #${open.number} was behind ${pr.base?.ref}; branch updated by GitHub`);
+            await addLabels(repo, open.number, [REVIEW_LABEL], opts);
+            thirdPartyResumed.push(issue.number);
+            log(`  #${issue.number}: PR #${open.number}: ${{ reviewed: `${wait.logins.join(", ")} reviewed ${wait.sha.slice(0, 7)}`, deadline: `the third-party wait for ${wait.logins.join(", ")} has passed its bound`, head: `its head moved from ${wait.sha.slice(0, 7)} during the third-party wait` }[waiting.resume]}; the review goes on`);
           } catch (e) {
-            updated.splice(updated.indexOf(issue.number), 1);
-            if (transientError(e)) {
-              // GitHub failing for now: the next tick updates it, with no worker run.
-              log(`  #${issue.number}: update-branch failed for now (${String(e.message).slice(0, 120)}); the next tick tries again`);
-              retry(`#${issue.number}'s update-branch`);
-            } else {
-              // GitHub refused: a worker rebases it instead, under the send-back's rules (staleDecision).
-              const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue });
-              if (instead === "rebase") {
-                log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
-                sentBack.push(issue.number);
-                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h).`, opts);
+            log(`  #${issue.number}: the review label could not be put back (${String(e.message).slice(0, 120)}); the next tick tries again`);
+            retry(`#${issue.number}'s review label`);
+          }
+          continue;
+        }
+        if (waiting?.waiting) {
+          due(issue.number, "third-party", waiting.until + WAKE_SLACK_MS);
+          if (waiting.unread) retry(`PR #${open.number}'s review label time`);
+          continue;
+        }
+        // A review waiting on two account labels (lib/account-wait.mjs, #267): its label goes back once one account label or
+        // none is left; meanwhile nothing else runs on the PR.
+        if (!reviewing && accountWait && !dryRun) {
+          let how = "waiting";
+          try {
+            // The review label's latest time on the PR: a record older than it is stale (account-wait.mjs).
+            const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts);
+            how = await accountWaitResume({ repo, pr: open.number, wait: accountWait, labels: issue.labels, labelledAt, opts });
+          } catch (e) {
+            log(`  #${issue.number}: the account wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
+            retry(`#${issue.number}'s review label`);
+            continue;
+          }
+          if (how === "resumed") {
+            accountResumed.push(issue.number);
+            log(`  #${issue.number}: PR #${open.number}: one account label or none is left; the review goes on`);
+            continue;
+          }
+          if (how === "waiting") {
+            log(`  #${issue.number}: PR #${open.number}: its review waits until one account label is left`);
+            continue;
+          }
+          // Stale: removed, and the PR is handled as any In-review PR below.
+          log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
+        }
+        // A hand-off to review waiting for a sibling on the same files (overlap.mjs reviewHold): nothing else runs on the PR
+        // (no send-back, no merge) while a sibling is ahead of it. Then its review label goes on or, when it conflicts by
+        // then, the send-back below takes it first, so it rebases once, before its review. Waiting hand-offs go in a fixed
+        // order (the oldest first wait first), so one rebases per sibling merge.
+        if (!reviewing && reviewWait && !reviewWait.released && pr) {
+          let how;
+          try {
+            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { dryRun, log });
+          } catch (e) {
+            log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
+            retry(`#${issue.number}'s review wait`);
+            continue;
+          }
+          // Its record no longer waits ("unsettled" keeps it waiting for the next tick).
+          if (["released", "rebase", "stale", "draft"].includes(how)) holdReleased.add(issue.number);
+          if (how.waiting) {
+            reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
+            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            continue;
+          }
+          if (how === "deferred") {
+            holdDeferred.add(issue.number);
+            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            retry(`#${issue.number}'s trial merges`);
+            continue;
+          }
+          if (how === "unsettled") {
+            log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over, but GitHub has not worked out whether it conflicts; the next tick decides`);
+            retry(`PR #${open.number}'s mergeable state`);
+            continue;
+          }
+          if (how === "released") {
+            reviewResumed.push(issue.number);
+            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+            continue;
+          }
+          if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
+          // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
+        }
+        // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
+        if (sandbox && reviewing && !pr.draft) {
+          const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
+          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+          if (holds) leaseDue(issue.number, record);
+          if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
+          if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
+            const again = startRetryAt(record, labelledAt);
+            const flight = inFlightUntil(record, labelledAt);
+            if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
+            if (flight !== null) due(issue.number, "start-retry", flight);
+            else if (again !== null) {
+              if (Date.now() >= again) relaunch.push(issue.number);
+              else due(issue.number, "start-retry", again);
+            } else if (Date.now() - Date.parse(labelledAt) > RELAUNCH_GRACE_MS) relaunch.push(issue.number);
+            else graceDue(issue.number, "review-grace", Date.parse(labelledAt) + RELAUNCH_GRACE_MS + 1000);
+            relaunchStage[issue.number] = "review";
+          }
+        }
+        // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
+        if (sandbox && !relaunch.includes(issue.number)) {
+          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
+          if (holds) leaseDue(issue.number, record);
+          if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) {
+            relaunch.push(issue.number);
+            relaunchStage[issue.number] = record.stage;
+          }
+        }
+        // Only a conflicting PR under review needs the live jobs read (once per tick).
+        // A failed read counts as "a review may be running" for every PR this tick: a later tick sends it back.
+        if (reviewing && pr?.mergeable_state === "dirty" && !liveJobs) {
+          liveJobs = await activeFactoryJobs(repo, readToken, { strict: true }).catch((e) => ({ failed: e }));
+          if (liveJobs.failed) retry("live jobs");
+        }
+        const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
+        if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
+        const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning, limit: inputs.rebaseLimit });
+        // A send-back that waited and now has nothing to rebase (it conflicts no more, a draft, or it Blocks below): its
+        // record ends as `over` and its issue's note goes; a later conflict starts a bound of its own (overlap.mjs waitStart).
+        if (!dryRun && rebaseWait && !rebaseWait.released && (pr?.draft || decision === "stuck" || decision === "limit" || (pr?.mergeable_state && !["dirty", "unknown"].includes(pr.mergeable_state))))
+          await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: "over" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
+        // Two account labels on these routes (#267): no work stage could start on it, so nothing is sent back to one (a
+        // GitHub update of the branch runs no stage and goes ahead); it waits In review until one label or none is left.
+        if (decision === "rebase" && twoAccounts(issue)) {
+          log(`  #${issue.number}: PR #${open.number} needs a rebase, but ${routeTwoLine(accountPin(issue.labels).two)}`);
+          continue;
+        }
+        // The send-backs could not be counted (session.mjs rebaseMarkers `unread`): no update, send-back or Block this tick.
+        if (unread && decision !== "ignore") {
+          retry(`#${issue.number}'s send-backs`);
+          continue;
+        }
+        if (decision === "update") {
+          // Behind, not conflicting: one API call brings the branch up to date and its checks re-run. No worker, no
+          // model; GitHub's signed merge commit is the one new head the merge pass accepts without another review.
+          updated.push(issue.number);
+          if (!dryRun) {
+            try {
+              await updatePrBranch(repo, open.number, opts);
+              log(`  #${issue.number}: PR #${open.number} was behind ${pr.base?.ref}; branch updated by GitHub`);
+            } catch (e) {
+              updated.splice(updated.indexOf(issue.number), 1);
+              if (transientError(e)) {
+                // GitHub failing for now: the next tick updates it, with no worker run.
+                log(`  #${issue.number}: update-branch failed for now (${String(e.message).slice(0, 120)}); the next tick tries again`);
+                retry(`#${issue.number}'s update-branch`);
               } else {
-                statuses[issue.number] = "Blocked";
-                await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+                // GitHub refused: a worker rebases it instead, under the send-back's rules (staleDecision).
+                const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue, limit: inputs.rebaseLimit });
+                if (instead === "rebase") {
+                  log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
+                  sentBack.push(issue.number);
+                  if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${inputs.rebaseLimit ?? REBASE_LIMIT} in 24 h).`, opts);
+                } else {
+                  statuses[issue.number] = "Blocked";
+                  await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch", limit: inputs.rebaseLimit }), opts);
+                }
               }
             }
           }
-        }
-      } else if (decision === "rebase") {
-        // When Factory merges, the send-backs go in the release order once every PR is read (below); else each goes now.
-        if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already, reviewWait, rebaseWait });
-        else {
-          sentBack.push(issue.number);
-          if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
-        }
-      } else if (decision === "stuck" || decision === "limit") {
-        statuses[issue.number] = "Blocked";
-        if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
-      } else if (!dryRun && inputs.autoMerge && pr && !reviewing) {
-        // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
-        // green, with no unread maintainer decision. Nothing is armed between ticks.
-        const report = {};
-        if (queue) hungMs ??= await queueBoundMs(repo, opts);
-        const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, opts).catch((e) => {
-          log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
-          return null;
-        });
-        mergeHow[issue.number] = how;
-        if (how === "merged" || how === "queued") merged.push(issue.number);
-        // Merged now (not only queued): no longer a sibling anything waits for this tick.
-        if (how === "merged") landed.push(issue.number);
-        if (how === "held") personHeld.add(issue.number);
-        if (report.watch) queueWatch.push(open.number);
-        if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
-        const why = mergeBlockReason(how, report);
-        if (why) {
+        } else if (decision === "rebase") {
+          // When Factory merges, the send-backs go in the release order once every PR is read (below); else each goes now.
+          if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already, reviewWait, rebaseWait });
+          else {
+            sentBack.push(issue.number);
+            if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
+          }
+        } else if (decision === "stuck" || decision === "limit") {
           statuses[issue.number] = "Blocked";
-          await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "dispatch" }, opts);
+          if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch", limit: inputs.rebaseLimit }), opts);
+        } else if (!dryRun && inputs.autoMerge && pr && !reviewing) {
+          // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
+          // green, with no unread maintainer decision. Nothing is armed between ticks.
+          const report = {};
+          if (queue) hungMs ??= await queueBoundMs(repo, opts);
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, opts).catch((e) => {
+            log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
+            return null;
+          });
+          mergeHow[issue.number] = how;
+          if (how === "merged" || how === "queued") merged.push(issue.number);
+          // Merged now (not only queued): no longer a sibling anything waits for this tick.
+          if (how === "merged") landed.push(issue.number);
+          if (how === "held") personHeld.add(issue.number);
+          if (report.watch) queueWatch.push(open.number);
+          if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
+          const why = mergeBlockReason(how, report);
+          if (why) {
+            statuses[issue.number] = "Blocked";
+            await applyExit(repo, { issue: issue.number, pr, exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "dispatch" }, opts);
+          }
         }
+      } catch (e) {
+        log(`  #${issue.number}: ${String(e?.message || e).slice(0, 160)}; the next tick reads it again`);
+        retry(`#${issue.number}`);
       }
     }
     // The conflicting In-review PRs (#366): each goes back in the release order unless a sibling ahead of it, which
@@ -1105,7 +1111,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       sentBack.push(issue.number);
       if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= WAIT_MAX_MS ? "gaveUp" : "sent" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
-      if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
+      if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
     }
   } finally {
     trialsTick?.close();

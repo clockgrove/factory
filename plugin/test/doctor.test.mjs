@@ -228,6 +228,10 @@ test("doctor without --checkout takes the settings from the default branch's wor
     assert.match(defaultsCheck(r.inputs).detail, /^harness copilot, worker gpt-x,/);
     assert.deepEqual((await credentialChecks({ inputs: r.inputs, env: {}, local: false })).map((c) => c.name), ["copilot credential"]);
     assert.equal(r.env.FACTORY_RUNNER_NAME, undefined, "only the settings Factory takes");
+    // #402: what a local stage reads, as serve's baseEnv: the repository's settings, and this shell's own settings only.
+    const shell = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: { FACTORY_GUESS_HOURS: "3, 9", FACTORY_SUBAGENT_MODEL: "mine" } });
+    assert.deepEqual([shell.env.FACTORY_GUESS_HOURS, shell.stage.FACTORY_GUESS_HOURS], ["3, 9", undefined], "a shell-only repository setting reaches no stage");
+    assert.deepEqual([shell.stage.FACTORY_DAILY_USD, shell.stage.FACTORY_SUBAGENT_MODEL], ["40", "mine"]);
     // GitHub's copy wins over a clone's here; this shell wins over both.
     assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "copilot");
     assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: { FACTORY_HARNESS: "claude" } })).inputs.harness, "claude");

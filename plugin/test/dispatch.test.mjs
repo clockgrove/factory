@@ -956,7 +956,7 @@ test("serve waits out a live sandbox lease before it restarts an Objective relab
   const extra = (h) => ({
     open: [h.iss(63, ["factory:local", "factory:running", "factory:restart"])],
     comments: { 63: leased(h, 63) },
-    timeline: { 63: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }, { event: "labeled", label: { name: "factory:restart" }, actor: { login: "maintainer" }, created_at: h.iso(h.now - 60_000) }] },
+    timeline: { 63: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }, { event: "labeled", label: { name: "factory:restart" }, actor: { login: "maintainer", type: "User" }, created_at: h.iso(h.now - 60_000) }] },
   });
   const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 3, extra });
   assert.deepEqual(serve.r.restarted, [], "not restarted while the sandbox still runs it");

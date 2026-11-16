@@ -59,7 +59,7 @@ import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
-import { DRAFT_LABEL, isDraft, requeuedIn, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, isDraft, labelTrust, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -2953,7 +2953,7 @@ export class Local {
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
    * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
    * draft, its issue still a Question, marked ready after the Question was asked (readyAfter), and its Objective label
-   * not re-applied since (that reruns its work stage instead: the dispatcher's recovery). The review applies the answer;
+   * not re-applied since by a person who can push (that reruns its work stage instead: the dispatcher's recovery). The review applies the answer;
    * with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
    */
   async pendingReviews() {
@@ -2971,9 +2971,11 @@ export class Local {
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if (asked) {
         const events = await timelineOf(this.repo, issue, cached).catch(() => null);
-        // The Objective label re-applied since the Question (requeuedIn) is the go to run its work stage again: this
-        // tick's dispatch puts it back to Queued and picks it, so a ready mark beside it starts no review.
-        if (!events || requeuedIn(events, this.objectiveLabel())) continue;
+        // The Objective label re-applied since the Question by a person who can push (requeuedIn) is the go to run its
+        // work stage again: this tick's dispatch puts it back to Queued and picks it, so a ready mark beside it starts
+        // no review. A re-apply whose actor is unread waits with the dispatcher; anyone else's changes nothing.
+        const go = events ? await requeuedIn(events, this.objectiveLabel(), labelTrust(this.repo, this.opts)) : null;
+        if (!go || go.requeued || go.unread) continue;
         const askedAt = labeledAtIn(events, "factory:question");
         if (!readyAfter(askedAt ? await timelineOf(this.repo, pr.number, cached).catch(() => []) : [], askedAt)) continue;
       }

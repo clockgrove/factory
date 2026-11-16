@@ -638,30 +638,6 @@ export async function blockedByRelations(repo, number, opts) {
   }
 }
 
-/**
- * Whether `label` was (re)applied after the last `since` label was applied: the
- * plan's recovery path, where a human re-applies factory:objective to a Blocked,
- * Question or abandoned In-review issue. Reads the issue timeline's label events; removing
- * one of `removedStarts` (a draft label: starting the draft) counts as re-applying `label`.
- */
-export async function relabeledAfter(repo, number, label, since, opts, removedStarts = []) {
-  return relabeledIn((await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label, since, removedStarts);
-}
-
-/** relabeledAfter on timeline events already read. */
-export function relabeledIn(events, label, since, removedStarts = []) {
-  let last = null;
-  let lastSince = null;
-  for (const e of events) {
-    if (!e.label?.name) continue;
-    if (e.event === "unlabeled" && removedStarts.includes(e.label.name)) last = e.created_at;
-    if (e.event !== "labeled") continue;
-    if (e.label.name === label) last = e.created_at;
-    if (since.includes(e.label.name)) lastSince = e.created_at;
-  }
-  return !!(last && lastSince && last > lastSince);
-}
-
 export async function addLabels(repo, number, labels, opts) {
   return rest(`repos/${repo.full}/issues/${number}/labels`, { ...opts, method: "POST", body: { labels } });
 }

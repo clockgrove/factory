@@ -15,11 +15,11 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -30,7 +30,7 @@ import { accountPin, routeAccounts, routeAutoAccounts, routeTwoLine } from "./li
 import { choiceOf } from "./lib/choice.mjs";
 import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, labelTrust, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -244,6 +244,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
+  // Whose label counts as a person's go (stop.mjs labelTrust): a restart's, and the Objective label re-applied. One check
+  // per tick, so each login's permission is read at most once.
+  const mayGo = labelTrust(repo, opts);
   const listed = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
   // An open Objective blocks the ones that name it, a draft among them: it is not done.
   const openNumbers = new Set(listed.map((i) => i.number));
@@ -327,20 +330,6 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const hold = await backend().trigger.localHold(repo, n, opts, Date.now(), claimPause).catch(() => ({ state: "unread" }));
       return hold?.state === "alive" || hold?.state === "unread";
     };
-    // Who may restart: a writer the repository lists, a pinned maintainer, else one whose permission reads write or more.
-    // A permission read that fails for now is no answer ("unread": the restart waits for the next tick); only a person
-    // GitHub does not know (404) or one below write is refused.
-    const mayRestart = async (actor) => {
-      if (!actor?.login) return false;
-      if (knownWriter(actor.login) === true || pinnedMaintainer(actor)) return true;
-      let perm;
-      try {
-        perm = await collaboratorPermission(repo, actor.login, opts);
-      } catch {
-        return "unread";
-      }
-      return ["admin", "maintain", "write"].includes(perm);
-    };
     for (const issue of restarts) {
       const n = issue.number;
       const ev = await labeledBy(repo, n, RESTART_LABEL, opts).catch(() => undefined);
@@ -349,7 +338,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         retry(`#${n}'s restart time`);
         continue;
       }
-      const allowed = dryRun || (await mayRestart(ev?.actor));
+      // Who may restart (mayGo): a person who can push, or a pinned maintainer. A permission read that fails for now is no
+      // answer ("unread": the restart waits for the next tick); a Bot or App, a person GitHub does not know (404) or one
+      // below write is refused.
+      const allowed = dryRun || (await mayGo(ev?.actor));
       if (allowed === "unread") {
         restarting[n] = "restarting: who applied the restart could not be checked; next tick";
         retry(`#${n}'s restart permission`);
@@ -402,19 +394,52 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Recovery: a Blocked, Question or In-review issue (a PR closed unmerged by a human)
   // whose factory:objective label was re-applied after it stopped is Queued again (the
   // plan's "re-apply the label"). An explicit --issue from workflow_dispatch is the same
-  // human intent.
+  // human intent. Only a person who can push, or a pinned maintainer, gives that go (requeuedIn, mayGo): anyone else's
+  // re-apply changes nothing, and one comment on the issue says so. On the Action's route a Question's review job still
+  // running (its PR marked ready beside the label: review.mjs readyOwner stands it down) is waited for first, so the
+  // work stage never starts beside it.
   const reset = [];
+  // Objectives this pass decides nothing on this tick (who re-applied the label unread, a review job still running).
+  const recoveryWaits = new Set();
   // Each timeline read here, kept for the relaunch pass below (its outage notice and record are on it too).
   const timelines = {};
+  let reviewJobs = null;
   for (const issue of wanted) {
-    const state = stateOf(issue, statuses[issue.number] ?? null);
+    const n = issue.number;
+    const state = stateOf(issue, statuses[n] ?? null);
     if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
-    let again = inputs.issue === issue.number;
+    let again = inputs.issue === n;
     if (!again) {
-      timelines[issue.number] = await timelineOf(repo, issue.number, cached).catch(() => null);
-      again = !!timelines[issue.number] && requeuedIn(timelines[issue.number], inputs.objectiveLabel);
+      timelines[n] = await timelineOf(repo, n, cached).catch(() => null);
+      if (!timelines[n]) continue;
+      const go = await requeuedIn(timelines[n], inputs.objectiveLabel, mayGo);
+      if (go.unread) {
+        recoveryWaits.add(n);
+        log(`  #${n}: who re-applied ${inputs.objectiveLabel} could not be checked; next tick`);
+        retry(`#${n}'s re-apply permission`);
+        continue;
+      }
+      for (const r of dryRun ? [] : go.refused) {
+        const mark = marker(n, "relabel-refused", String(r.at || "").replace(/[^0-9TZ]/g, ""));
+        // Said once: the note already on the timeline read here costs no call.
+        if (commentsOf(timelines[n]).some((c) => isSelf(c) && (c.body || "").startsWith(mark))) continue;
+        const who = r.actor?.login || "someone";
+        const what = r.draft ? `\`${DRAFT_LABEL}\` taken off` : `\`${inputs.objectiveLabel}\` re-applied`;
+        log(`  #${n}: ${what} by ${who}, who cannot push and is no maintainer the workflow names: not taken`);
+        await upsertComment(repo, n, mark, `Factory: ${what} by ${who} was not taken, so the Objective stays ${state}: only someone who can push to this repository, or a maintainer the workflow names, can run it again by re-applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: re-apply refusal note: ${String(e?.message || e).slice(0, 120)}`));
+      }
+      again = go.requeued;
     }
     if (!again) continue;
+    if (state === "Question" && backend().name === "actions" && !sandbox) {
+      reviewJobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
+      if (reviewJobs.failed || reviewJobs.review.has(n)) {
+        recoveryWaits.add(n);
+        log(`  #${n}: ${inputs.objectiveLabel} re-applied while a review job of it ${reviewJobs.failed ? "may run (live jobs unread)" : "runs"}; requeued once it ends`);
+        retry(`#${n}'s review job`);
+        continue;
+      }
+    }
     reset.push(issue.number);
     issue.labels = (issue.labels || []).filter((l) => !/^factory:(blocked|question|in-review)$/.test(typeof l === "string" ? l : l.name));
     statuses[issue.number] = "Queued";
@@ -440,7 +465,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const answered = [];
   let answerCheck = null;
   for (const issue of wanted) {
-    if (reset.includes(issue.number)) continue;
+    if (reset.includes(issue.number) || recoveryWaits.has(issue.number)) continue;
     if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
     // A stage of it this local loop runs (a review of its PR marked ready): that stage's end decides.
     if (localHeld?.[issue.number]) continue;

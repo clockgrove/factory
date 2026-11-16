@@ -4,9 +4,9 @@
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
 // stopped (its PR a draft without the review label, its state label off, its card back in Queued).
-import { dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, relabeledIn, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
+import { collaboratorPermission, dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL, marker, restartedAt, trustedAuthor } from "./logic.mjs";
+import { REVIEW_LABEL, knownWriter, marker, pinnedMaintainer, restartedAt, trustedAuthor } from "./logic.mjs";
 
 /** How often a running stage reads its issue for a stop. */
 export const STOP_POLL_MS = 60_000;
@@ -36,11 +36,51 @@ export const DRAFT_LABEL = "factory:draft";
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
 
 /**
- * Whether a person re-applied the Objective `label` (or started it from a draft) after its last Block, Question or
- * In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage (the dispatcher's
- * recovery). serve reads the same rule, so a Question re-labelled since gets no review for a ready mark beside it.
+ * Who may give a label's go (the Objective label re-applied, a draft started, `factory:restart`), since GitHub lets anyone
+ * with triage access, and any App installed with issue write, apply labels: a person (a `User`, never a Bot or an App)
+ * on the repository's writer list (github.mjs primeWriters, read once per process), a maintainer the workflow pins by
+ * id, else one whose permission GitHub reads as write or more. Returns the check of an event's `actor`: true, false, or
+ * "unread" when that permission read failed for now (no answer: the caller decides at its next tick). Each login's
+ * permission is read at most once per check made here.
  */
-export const requeuedIn = (events, label) => relabeledIn(events, label, ["factory:blocked", "factory:question", "factory:in-review"], [DRAFT_LABEL]);
+export function labelTrust(repo, opts) {
+  const reads = new Map();
+  return async (actor) => {
+    if (!actor?.login || actor.type !== "User") return false;
+    if (knownWriter(actor.login) === true || pinnedMaintainer(actor)) return true;
+    const key = actor.login.toLowerCase();
+    if (!reads.has(key)) reads.set(key, collaboratorPermission(repo, actor.login, opts).then((p) => ["admin", "maintain", "write"].includes(p), () => "unread"));
+    return reads.get(key);
+  };
+}
+
+/** The states a person's go (the Objective label re-applied) puts back to Queued: their labels, by the issue's timeline. */
+const REQUEUED_FROM = ["factory:blocked", "factory:question", "factory:in-review"];
+
+/**
+ * Whether a person re-applied the Objective `label` (or started it from a draft: its DRAFT_LABEL taken off) after its last
+ * Block, Question or In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage
+ * (the dispatcher's recovery). serve's pendingReviews and the review job's start read the same rule, so a ready mark
+ * beside such a go starts no review. A go counts only when `trusted` (labelTrust) holds for its actor; anyone else's
+ * changes nothing. Newest go first, so the usual case is one check. Returns `{requeued, unread, refused}`: `unread`
+ * when the check of a go's actor could not be made for now (nothing is decided on it), and `refused`, when neither, the
+ * goes since that did not count (`{at, actor, draft}`, `draft` for a draft's start), newest first.
+ */
+export async function requeuedIn(events, label, trusted) {
+  let since = null;
+  for (const e of events || []) if (e?.event === "labeled" && REQUEUED_FROM.includes(e.label?.name)) since = e.created_at;
+  const out = { requeued: false, unread: false, refused: [] };
+  if (!since) return out;
+  const go = (e) => (e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
+  const goes = (events || []).filter((e) => go(e) && e.created_at > since).reverse();
+  for (const e of goes) {
+    const ok = await trusted(e.actor ?? null);
+    if (ok === true) return { ...out, requeued: true, refused: [] };
+    if (ok === "unread") return { ...out, unread: true, refused: [] };
+    out.refused.push({ at: e.created_at, actor: e.actor ?? null, draft: e.event === "unlabeled" });
+  }
+  return out;
+}
 
 /** Whether the issue is a draft (DRAFT_LABEL on it). */
 export const isDraft = (issue) => names(issue).includes(DRAFT_LABEL);

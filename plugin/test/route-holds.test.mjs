@@ -454,6 +454,19 @@ test("a stage that meets its usage limit with another account free holds its own
   });
 });
 
+test("#390: a stage waiting in place for a busy provider's time holds its account until then, so automatic choice passes it over meanwhile", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
+  const reset = Date.now() + 2 * H;
+  await withGitHub({ labels: ["factory:objective", "factory:running"] }, async () => {
+    const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" } });
+    await limits.hold({ harness: "claude", status: 429, type: "rate_limit", code: null, message: "m", resetAt: reset });
+    const holds = (await readHolds(REPO, { token: "t" })).store;
+    assert.equal(holds.until("claude", Date.now()), reset, "held until the provider's time, on GitHub");
+    assert.equal(holds.avoidUntil("claude-2", Date.now()), null, "the other account stays free");
+  });
+});
+
 test("with every other account held, a usage limit Blocks provider-quota naming the reset, as today, and the others' first; a hold that cannot be written Blocks as with the setting off (#268)", async () => {
   setSelf(BOT);
   const env = { FACTORY_ACCOUNTS: TWO, FACTORY_AUTO_ACCOUNT: "1" };
@@ -488,6 +501,28 @@ test("with every other account held, a usage limit Blocks provider-quota naming 
   assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude-9", env, opts: {} }), null);
 });
 
+test("#402: on Actions and in the cloud sandbox the no-reset guess follows the repository's guess_hours, by how many in a row; one that is no list of hours is the default", async () => {
+  setSelf(BOT);
+  const guessFor = async (hours, times) => {
+    const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1", ...(hours === null ? {} : { FACTORY_GUESS_HOURS: hours }) };
+    const ends = [];
+    await withGitHub({}, async () => {
+      for (let i = 0; i < times; i += 1) {
+        const t = Date.now();
+        const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" }, now: () => t });
+        await limits.spent({ harness: "claude" });
+        ends.push((await readHolds(REPO, { token: "t" }, { now: t })).store.avoidUntil("claude", t) - t);
+      }
+    });
+    return ends.map((ms) => Math.round(ms / (H / 60)) / 60);
+  };
+  assert.deepEqual(await guessFor("2, 5", 3), [2, 5, 5]);
+  assert.deepEqual(await guessFor(null, 2), [1, 4], "Factory's default");
+  assert.deepEqual(await guessFor("soon", 1), [1], "not a list of hours: the default");
+  assert.deepEqual(await guessFor("1e10", 1), [1], "a step past the longest hold kept (8 days): the default, never a time no date can hold");
+  setSelf(null);
+});
+
 test("a usage limit with no reset reported still Blocks, and its account is a guess the next account step passes over (#268)", async () => {
   setSelf(BOT);
   const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
@@ -509,6 +544,7 @@ test("a usage limit with no reset reported still Blocks, and its account is a gu
     assert.match(src, /goOn: limits\?\.limit/, script);
     assert.match(src, /limits = local \|\| !acct\.account \? null : routeLimits\(/, script);
     assert.match(src, /if \(limits\) LIMIT\.elsewhere = limits\.elsewhere;/, script);
+    assert.match(src, /if \(limits\) LIMIT\.hold = limits\.hold;/, `${script}: a busy provider's long wait holds the account (#390)`);
     assert.match(src, /account: acct\.account, pinned: acct\.pinned,/, `${script}: a pinned stage never moves`);
   }
 });

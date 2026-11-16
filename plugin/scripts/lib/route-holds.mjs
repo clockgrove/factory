@@ -40,7 +40,7 @@ import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs"
 import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
 import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey, liveWindows, readingOf } from "./holds.mjs";
-import { log } from "./inputs.mjs";
+import { guessHoursMs, input, log } from "./inputs.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
 /** Factory's holds issue: the label is a hint to find it, the exact title and Factory's own login are what count. */
@@ -314,15 +314,15 @@ export async function writeReading(repo, { harness, account, windows = {}, silen
 
 /**
  * Record that a stage on `account` met its usage limit: `kind` "limit", reset at `reset` (ms, the provider's), or "spent"
- * (no reset reported: a guess). The hold is holds.mjs's (limit, spent) over the records on the holds issues now; it is
- * written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
+ * (no reset reported: a guess, by `steps`, the guess_hours setting). The hold is holds.mjs's (limit, spent) over the
+ * records on the holds issues now; it is written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
  * label was taken off is found again); with none there either, the issue is opened, closed and locked, then looked for
  * again: of two jobs that opened one each at once, both write to the oldest. Only once this writer's record is written:
  * its label goes back on, the forgotten and edited records go, and each stray's live records are copied to the record
  * issue before it is retired, so a hold another job wrote there is kept. Returns {until, store}: the hold's end and the
  * holds with it. A failed read or write throws.
  */
-export async function writeHold(repo, { kind, harness, account, reset = null, window = null, now = Date.now() }, opts, { actions } = {}) {
+export async function writeHold(repo, { kind, harness, account, reset = null, window = null, now = Date.now(), steps = undefined }, opts, { actions } = {}) {
   const found = await recordIssue(repo, opts, { actions, now });
   const issue = found.record;
   const read = await recordsOn(repo, issue, opts, now);
@@ -330,7 +330,7 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   for (const n of found.strays) strays.push({ n, ...(await recordsOn(repo, n, opts, now)) });
   let made = null;
   const store = accountHolds({ seed: [...read.records, ...read.releases, ...strays.flatMap((x) => [...x.records, ...x.releases])], onPut: (r) => (made = r) });
-  const until = kind === "spent" ? store.spent({ harness, account, now, window }) : store.limit({ harness, account, reset, now, window });
+  const until = kind === "spent" ? store.spent({ harness, account, now, window, steps }) : store.limit({ harness, account, reset, now, window });
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =
     kind === "spent"
@@ -448,6 +448,8 @@ const heldText = (store, name, t) => {
  *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
  *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
+ * - `hold(r)`: the stage waits in place for a busy provider's time (harness.mjs runBusy, `r.resetAt`): its account is
+ *   held until then, so automatic choice passes it over for other Objectives while this one waits.
  * - `reading(quota, {warmUntil})`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), or
  *   `{harness, silent: true}` when its provider served it and reported none (session.mjs servedSilent), pinned or not:
  *   kept on the holds issue (writeReading) for automatic choice, with until when its prompt cache stays warm
@@ -456,6 +458,8 @@ const heldText = (store, name, t) => {
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
   if (!names || !names.includes(account)) return null;
+  // The guess's steps: the repository's guess_hours (inputs.mjs), Factory's default when it is not a list of hours.
+  const steps = guessHoursMs(input("guess_hours", { env })) ?? undefined;
   const others = names.filter((n) => n !== account);
   const free = (store, t) => others.filter((n) => store.avoidUntil(n, t) === null);
   const who = HARNESS_NAMES[harness] || harness;
@@ -473,7 +477,7 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
     async limit(e) {
       const t = now();
       const noReset = !Number.isFinite(e.resetAt);
-      const { until, store } = await writeHold(repo, { kind: noReset ? "spent" : "limit", harness, account, reset: e.resetAt, window: e.refusal?.limitType ?? null, now: t }, opts);
+      const { until, store } = await writeHold(repo, { kind: noReset ? "spent" : "limit", harness, account, reset: e.resetAt, window: e.refusal?.limitType ?? null, now: t, steps }, opts);
       const line = noReset ? `${who} reached its usage limit or quota on account \`${account}\` with no reset reported, so automatic account choice passes it over until about ${iso(until)}` : `${who} reached its usage limit on account \`${account}\`, which is held until ${iso(until)}`;
       if (pinned) return {};
       if (free(store, t).length) {
@@ -488,8 +492,12 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       const first = Math.min(...others.map((n) => store.avoidUntil(n, t)));
       return { note: `Every other ${who} account this repository declares is held too, the first until ${iso(first)}.` };
     },
+    async hold(r) {
+      const { until } = await writeHold(repo, { kind: "limit", harness, account, reset: r.resetAt, window: r.limitType ?? null, now: now() }, opts);
+      log(`${who} account ${account} is busy until ${iso(r.resetAt)}; held until ${iso(until)} while this stage waits for it`);
+    },
     async spent(limitRefused) {
-      const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now() }, opts);
+      const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now(), steps }, opts);
       log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}`);
     },
     async reading(quota, { warmUntil = null } = {}) {

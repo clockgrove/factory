@@ -893,6 +893,7 @@ test("#266: a usage limit with no reset reported Blocks as before, and automatic
   const holds = accountHolds({ dir: join(dir, "..", "holds") });
   assert.equal(holds.spent({ harness: "copilot", account: "seat", now: t }), t + 60 * MIN);
   assert.equal(holds.until("seat", t), null, "no hold");
+  assert.equal(accountHolds({ dir: join(dir, "..", "holds-cap") }).spent({ harness: "copilot", account: "seat", now: t, steps: [1e15] }), t + 8 * 24 * 60 * MIN, "#402: a step is never longer than the longest hold kept");
   assert.equal(holds.held("copilot", t), false);
   assert.equal(holds.held("copilot", t, true), true);
   assert.equal(accountHolds({ dir: join(dir, "..", "holds") }).avoidUntil("seat", t), t + 60 * MIN, "every serve reads it");
@@ -1193,6 +1194,44 @@ test("#332: a guess is remembered a day past its end, so a limit again within th
   // A hold with a reset is still forgotten an hour past its end: its back-off count starts again.
   holds.limit({ harness: "claude", account: "beta", reset: t + MIN, now: t });
   assert.equal(holds.limit({ harness: "claude", account: "beta", reset: t + 2 * HOLD_FORGET_MS, now: t + 2 * HOLD_FORGET_MS }), t + 2 * HOLD_FORGET_MS + 2 * MIN);
+});
+
+test("#402: a usage limit with no reset passes its account over for machine.json's guess_hours, by how many in a row, in a stage's end and a paused stage's alike", async () => {
+  const h = fakeHome();
+  mkdirSync(join(h, ".cache", "factory"), { recursive: true });
+  writeFileSync(join(h, ".cache", "factory", "machine.json"), JSON.stringify({ stages: 8, guess_hours: [2, 6] }));
+  const gh = fakeGitHub();
+  let now = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => now);
+      // The repository's guess_hours too: machine.json's wins on this machine.
+      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
+      loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 120 * MIN, "two hours, not the default's one nor the repository's three");
+      // A second in a row, from a stage that ended paused on it: the setting's second step.
+      now += 121 * MIN;
+      await loop.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, pinned: true, usageLimit: { harness: "claude", reset: null, since: new Date(now).toISOString(), noReset: true } });
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 360 * MIN);
+    });
+  } finally {
+    gh.restore();
+  }
+  // Without guess_hours in machine.json, the repository's setting is the one in force.
+  const plain = fakeHome();
+  const gh2 = fakeGitHub();
+  try {
+    await withHome(plain, async () => {
+      const loop = autoServe(plain, () => now);
+      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
+      loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 180 * MIN);
+    });
+  } finally {
+    gh2.restore();
+  }
 });
 
 test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {

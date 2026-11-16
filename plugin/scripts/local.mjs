@@ -25,10 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, causeCode, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
-
-/** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
-const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
+import { OUTAGE, causeCode, lostText, minutesText, probe as probeHost, serverDown, serverWait, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
@@ -56,7 +53,7 @@ import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout,
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
-import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
+import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
@@ -321,11 +318,12 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 /**
  * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
  * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
- * validation runs, how a session resumes and its cache, and whether hand-offs wait for siblings. One this shell sets (inputs.mjs machineSettings) keeps the
- * shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
+ * validation runs, how a session resumes and its cache, whether hand-offs wait for siblings, how many rebases a PR
+ * gets and how long a usage limit with no reset passes its account over. One this shell sets (inputs.mjs
+ * machineSettings) keeps the shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD"];
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD", "FACTORY_REBASE_LIMIT", "FACTORY_GUESS_HOURS"];
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
@@ -1498,7 +1496,7 @@ export class Local {
           // choice, in this serve and any other here that has it on, passes the account over for a while (holds.mjs spent);
           // nothing else holds on it, and a serve with it off writes no guess.
           if (this.auto && runs.account && result?.exit === "blocked" && result.limitRefused) {
-            const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null });
+            const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
             log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
           }
           done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
@@ -1828,7 +1826,7 @@ export class Local {
 
   /**
    * A stage whose account automatic choice picked that ended `paused` on a usage limit or quota with no reset reported
-   * (session.mjs usageLimitExit `noReset`, #332): the account is passed over for a guessed while (holds.mjs spent), in
+   * (session.mjs usageLimitExit `noReset`, #332): the account is passed over for a guessed while (holds.mjs spent, by machine.json's guess_hours), in
    * every serve here. With another account of the harness free (freeAccounts), the Objective stays paused as on a known
    * reset, until the guess's end, and pausedHere moves it to a free one at the next tick (movesEarly): never back to the
    * account it left, which the guess holds. Each stage makes one such move at most, and each move holds the account it
@@ -1842,7 +1840,7 @@ export class Local {
     const hold = result.hold ?? this.holdOf(implicitAccount(l.harness));
     // Only a serve with automatic choice on keeps a guess (a stage this serve did not pick for cannot end here: its env
     // never says so, accounts.mjs STAGE_AUTO_ENV); one with it off Blocks the stage as on any no-reset limit.
-    const end = this.auto ? this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null }) : null;
+    const end = this.auto ? this.holdStore(hold).spent({ harness: l.harness, account: hold.key, now, window: l.limitType ?? null, steps: this.guessSteps() }) : null;
     if (end !== null) log(`#${issue}: ${limitName(l.harness, account)} reached its usage limit or quota with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
     if (end !== null && !result.pinned && this.freeAccounts(l.harness, hold.key).length) return this.limitPaused(issue, { ...result, usageLimit: { ...l, noReset: false, reset: new Date(end).toISOString(), held: true, guessed: true } });
     const h = HARNESS_NAMES[l.harness] || l.harness;
@@ -2257,7 +2255,7 @@ export class Local {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
       const back = serverDown(off.code) || !off.origin || (await probeHost(off.origin)) === null;
       const reason = serverDown(off.code)
-        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${off.server?.pauses ?? 1} pauses over ${minutesText(now - off.since)}, past Factory's bound of ${OUTAGE.serverResumes} resumes or ${minutesText(OUTAGE.blockMs)} for GitHub failing. Re-apply the label to run it again once GitHub answers that request.`
+        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${off.server?.pauses ?? 1} pauses over ${minutesText(now - off.since)}, past Factory's bound for ${off.host} failing. Re-apply the label to run it again once ${off.host} answers that request.`
         : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? `${serverDown(off.code) ? off.host : "The network"} is back: re-apply the label to run it again.` : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
@@ -2731,12 +2729,12 @@ export class Local {
       const seen = await gh.rebaseMarkers(this.repo, { issue, pr, objectiveLabel: inputs.objectiveLabel }, this.opts);
       // The send-backs could not be counted: followMerge's next poll reads them again.
       if (seen.unread) return "retry";
-      const why = staleDecision({ pr, rebases: seen.recent, stuck: seen.stuck, queue: true });
+      const why = staleDecision({ pr, rebases: seen.recent, stuck: seen.stuck, queue: true, limit: inputs.rebaseLimit });
       if (why === "stuck" || why === "limit") {
-        await gh.applyExit(this.repo, rebaseBlock({ issue, pr, why, record: seen.stuck || seen.record, since: seen.since, notify: inputs.notify, stage: "merge" }), this.opts);
+        await gh.applyExit(this.repo, rebaseBlock({ issue, pr, why, record: seen.stuck || seen.record, since: seen.since, notify: inputs.notify, stage: "merge", limit: inputs.rebaseLimit }), this.opts);
         return false;
       }
-      if (!seen.already) await gh.prComment(this.repo, prNumber, rebaseNotice(issue, pr, seen.recent), this.opts);
+      if (!seen.already) await gh.prComment(this.repo, prNumber, rebaseNotice(issue, pr, seen.recent, inputs.rebaseLimit), this.opts);
     } catch (e) {
       return this.sendBackFailed(issue, pr, e, inputs, gh);
     }
@@ -3084,6 +3082,15 @@ export class Local {
     return false;
   }
 
+  /**
+   * How long a usage limit with no reset passes its account over, by how many in a row: machine.json's guess_hours, this
+   * machine's own, else the repository's (the guess_hours setting).
+   */
+  guessSteps() {
+    const machine = machineLimits({ home: this.machinePlaces().home });
+    return machine.from.guess === "setting" ? machine.guessMs : resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }).guessMs;
+  }
+
   /** Where this loop reads the machine's budget, slots and load: the user's home and /proc, or a test's own. */
   machinePlaces() {
     const home = this.machine?.home ?? homedir();
@@ -3092,13 +3099,17 @@ export class Local {
 
   /**
    * The machine's room for this loop's new starts now (lib/machine.mjs machineRoom), with its cap: FACTORY_LOCAL_MAX_CONCURRENT,
-   * else the machine's budget. A budget setting that cannot be used is said once.
+   * else the machine's budget, and its saturation limits (machineLimits). A budget or limit that cannot be used is said once.
    */
   machineBox(running) {
     const { home, dir, proc } = this.machinePlaces();
     const budget = machineBudget({ home });
     if (budget.problem && budget.problem !== this.saidBudget) log(`machine budget: ${budget.problem}; using ${budget.stages}, from this machine's size`);
     this.saidBudget = budget.problem;
+    const limits = machineLimits({ home });
+    const problems = limits.problems.filter((p) => p !== budget.problem).join("; ");
+    if (problems && problems !== this.saidLimits) log(`machine limits: ${problems}; Factory's defaults stand for those`);
+    this.saidLimits = problems;
     const cap = loopCap(process.env.FACTORY_LOCAL_MAX_CONCURRENT ?? this.wf.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
     let held = 0;
     try {
@@ -3106,7 +3117,7 @@ export class Local {
     } catch (e) {
       this.slotTrouble(e);
     }
-    return { ...machineRoom({ running, cap, budget: budget.stages, held, pressure: readPressure({ root: proc }) }), cap, from: budget.from, file: budget.file, dir };
+    return { ...machineRoom({ running, cap, budget: budget.stages, held, pressure: readPressure({ root: proc }), limits: limits.pressure }), cap, from: budget.from, file: budget.file, dir };
   }
 
   /** A slot directory this loop cannot use: said once per cause; its stages then start uncounted, as the room allows. */

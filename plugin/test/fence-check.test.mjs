@@ -274,4 +274,12 @@ test("#414: the question's input is fenced; a missing failure or comment says so
   assert.deepEqual(await openFenceCheck({ decider: v.decider }).judge({ path: ".nvmrc", diff: " \n" }), { allow: false, why: ".nvmrc: not judged (no textual change to read)", told: ".nvmrc: not judged (no textual change to read)" });
   assert.equal(v.asked.length, 0);
   assert.equal(openFenceCheck({ inputs: { decisionRoute: "off" } }).off, "route-off");
+  // The floor is triage_min_confidence while the gateway's triage_model answers (triage.mjs confidenceFloor), else 0.7.
+  const item = { path: ".nvmrc", diff: "@@ -1 +1 @@\n-22\n+18" };
+  const at = (name) => ({ name, decide: async () => ({ verdict: "fix", confidence: 0.9 }) });
+  assert.equal((await openFenceCheck({ decider: at("ai-gateway") }).judge(item)).allow, true);
+  const strict = await openFenceCheck({ inputs: { triageMinConfidence: 0.95 }, decider: at("ai-gateway") }).judge(item);
+  assert.equal(strict.allow, false);
+  assert.match(strict.why, /under 0\.95/);
+  assert.equal((await openFenceCheck({ inputs: { triageMinConfidence: 0.95 }, decider: at("harness") }).judge(item)).allow, true, "another model than the setting's: the default floor");
 });

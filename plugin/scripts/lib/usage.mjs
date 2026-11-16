@@ -8,7 +8,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BARE_BUSY_TYPES } from "./network.mjs";
 
 /**
  * Codex prices, USD per million tokens: the one table (codex-prices.json beside this file), which the bench reads too.
@@ -177,6 +176,13 @@ export const noResetLimit = (r) => !!r && refusalCause(r) === "provider-quota" &
 /** An epoch time in seconds or ms as ms; null when it is no positive number. */
 const epochMs = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : null);
 
+/**
+ * The AI Gateway's error types for a 5xx it sends as a bare body with no status (gateway-relay.mjs UNAVAILABLE_ERRORS
+ * and `internal_server_error`, docs/PLAN.md's decider): the provider busy, as a 5xx with its status is (providerBusy),
+ * and the outage code of a pause on one (busyCode, network.mjs serverDown).
+ */
+export const BARE_BUSY_TYPES = new Set(["service_unavailable_error", "overloaded_error", "internal_server_error"]);
+
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 /** 4xx statuses that mean the provider is busy, not refusing (HTTP's own meaning): a request timeout, too early, too many requests. */
@@ -314,7 +320,7 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
 /**
  * The provider saying it is busy, from its error (providerError) on a failed run: {harness, status, type, code, message,
  * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included);
- * with no status, the AI Gateway's bare 5xx types (network.mjs BARE_BUSY_TYPES: `service_unavailable_error`,
+ * with no status, the AI Gateway's bare 5xx types (BARE_BUSY_TYPES: `service_unavailable_error`,
  * `overloaded_error`, `internal_server_error`). A refusal type or code (REFUSED_KINDS: auth, permission, quota or
  * billing; a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or global rate limit) is a refusal
  * instead, whatever the status: providerRefusal reads a 5xx with one as a refusal too, so no such error falls between.

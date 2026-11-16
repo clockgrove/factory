@@ -116,12 +116,15 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
 
 /**
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
- * to resume (fifteen minutes: a DNS flap or a router restart passes, and a longer outage costs the stage no more of its
- * wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS). `blockMs`: how long an Objective may stay paused
- * on one outage before serve Blocks it with the External cause `outage` (twelve hours: a night's outage, from late evening
- * to the next morning, fits with room; under the dispatcher's day for a claim gone quiet, local.mjs CLAIM_PAUSE_MS, so an
- * outage of twelve to twenty-four hours Blocks naming the outage, while one that keeps the machine off GitHub for over a
- * day meets the dispatcher's Block first). `probeMs`: the pause before each probe, the last
+ * to resume (fifteen minutes by default: a DNS flap or a router restart passes, and a longer outage costs the stage no
+ * more of its wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS; the repository's or this machine's
+ * FACTORY_LOCAL_WAIT_MINUTES, at most an hour, which a stage sets here when it starts, harness.mjs stageLimits, and serve
+ * each tick for its own same-outage window, local.mjs applyLocalLimits). `blockMs`: how long an
+ * Objective may stay paused on one outage before serve Blocks it with the External cause `outage` (twelve hours by
+ * default: a night's outage, from late evening to the next morning, fits with room; FACTORY_LOCAL_OUTAGE_HOURS, which
+ * serve sets here each tick). It stays under the dispatcher's bound for a claim gone quiet (claim_pause_hours, a day by
+ * default), so an outage between the two Blocks naming the outage, while one that keeps the machine off GitHub for longer
+ * meets the dispatcher's Block first; doctor names a pair that is not so ordered. `probeMs`: the pause before each probe, the last
  * repeated. `passReruns`: how many times one pass cut off by its provider or the network (passCutOff) runs again
  * before its failure stands. `flapMs`: a host lost again this soon after answering is the same
  * outage (its first loss and its limit carried over). `quotaJitterMs`: the most a wait for a rate limit's reset runs past

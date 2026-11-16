@@ -41,9 +41,9 @@
       "words": 429
     },
     "factory-implement-split": {
-      "sha256": "1e4aa2110a565336f1a0a793d096fcfd1ff0bc8b64789dcca4098454c6decdf9",
-      "lines": 37,
-      "words": 699
+      "sha256": "42d68dbd6117818a4e82e6e44e859f512d66f8fdb02c650ca730428b8550503f",
+      "lines": 39,
+      "words": 700
     },
     "factory-objective-plan": {
       "sha256": "749cfccb55f04d540d10a45bd31cb25ef14817e03631c45d3de1a0d3e0a2a782",
@@ -105,9 +105,9 @@
       }
     },
     "factory-serve": {
-      "sha256": "1bf32c25a12770637fa022903b84dfd25ad435e35a71d4e36ee77f66db798b90",
+      "sha256": "74cc937471c415074d1f2c4889f32f2fb77f67eb20e11d2189668202e0dffbc8",
       "lines": 34,
-      "words": 697
+      "words": 699
     },
     "factory-setup": {
       "sha256": "06f8f9f9e02ac9d08a827d8fc1f0461b9a30c1b0fc569f09a06be333a4d805f4",

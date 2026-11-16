@@ -529,7 +529,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
  * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
  * `writers`: the collaborators read, or a status to fail it with.
  */
-async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2 }) {
+async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2, inputs = {} }) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -557,7 +557,7 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t" });
     return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
   } finally {
     globalThis.fetch = realFetch;
@@ -653,6 +653,25 @@ test("local claim age: GitHub's update time, not the machine's clock in the body
   assert.deepEqual(expired.r.vanished, [7]);
   assert.match(expired.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over a day; start `factory serve`[^]*"cause":"setup"/);
   assert.ok(expired.writes.includes("DELETE /issues/comments/70"));
+});
+
+test("#423: claim_pause_hours is the dispatcher's bound for a quiet local claim: a loop away five hours Blocks at four, a run with no claim too, and both wait at the default day", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const four = { claimPauseMs: resolveInputs({ env: { FACTORY_CLAIM_PAUSE_HOURS: "4" } }).claimPauseMs };
+  const claim = { id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 5 * HOUR))}`, updated_at: ago(5 * HOUR) };
+  const away = (inputs) => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(6 * HOUR)), comments: (n) => (n === 7 ? [claim] : []), inputs });
+  const day = await away({});
+  assert.deepEqual([day.r.paused, day.r.vanished], [[7], []]);
+  const blocked = await away(four);
+  assert.deepEqual(blocked.r.vanished, [7]);
+  assert.match(blocked.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over 4 h; start `factory serve`[^]*"cause":"setup"/);
+  // No claim at all, Running five hours: waits for the day by default, Blocks at four.
+  const bare = (inputs) => localTick({ open: [localIssue(8, "factory:running")], timeline: () => labelled("factory:running", ago(5 * HOUR)), inputs });
+  assert.deepEqual((await bare({})).r.vanished, []);
+  const none = await bare(four);
+  assert.deepEqual(none.r.vanished, [8]);
+  assert.match(none.blocked(8), /Running with no local loop holding it for over 4 h \(no claim\)/);
 });
 
 test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause factory); younger, or a marked comment updated within the day, waits (#167)", async () => {

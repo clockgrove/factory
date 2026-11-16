@@ -2075,16 +2075,17 @@ export const variablesRefusedLine = (status) => `the local token cannot read thi
 
 /**
  * The adopter workflow's top-level `env:` block, so a local run uses the repository's own configuration, read from the
- * parsed file (yaml.mjs parseYaml, as Actions reads it): each FACTORY_* key whose value is text (an empty value reads as
- * "", as Actions sets it; a number or `true` as written). A value that is an Actions expression (`${{ ... }}`) has no
- * meaning off a runner and is left out, and so is a mapping or a list. A file that does not parse throws, naming why.
+ * parsed file (yaml.mjs parseYaml): each FACTORY_* key whose value is text. An empty value reads as "", as Actions sets
+ * it; a plain number or boolean reads as written in the file (`25`, `true`), where Actions may write a number its own
+ * way (`1.0` as `1`), so quote one to be sure. A value that is an Actions expression (`${{ ... }}`) has no meaning off a
+ * runner and is left out, and so is a mapping or a list. A file that does not parse throws (code `WORKFLOW_PARSE`).
  */
 export function workflowEnv(text) {
   let doc;
   try {
     doc = parseYaml(text);
   } catch (e) {
-    throw new Error(`.github/workflows/factory.yml does not parse (${e.message})`);
+    throw Object.assign(new Error(`.github/workflows/factory.yml does not parse (${e.message})`), { code: "WORKFLOW_PARSE" });
   }
   const env = doc && typeof doc === "object" && !Array.isArray(doc) && doc.env && typeof doc.env === "object" && !Array.isArray(doc.env) ? doc.env : {};
   const out = {};
@@ -2096,13 +2097,15 @@ export function workflowEnv(text) {
   return out;
 }
 
-/** The working tree's workflow env block (workflowEnv); none when the file is absent or does not parse (doctor and serve name that from the default branch's copy). */
-export function readWorkflowEnv(dir) {
+const workflowWarned = new Set();
+/** The working tree's workflow env block (workflowEnv); none when the file is absent, or does not parse (said once per process, on stderr). */
+export function readWorkflowEnv(dir, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
   const file = join(dir, ".github", "workflows", "factory.yml");
   if (!existsSync(file)) return {};
   try {
     return workflowEnv(readFileSync(file, "utf8"));
-  } catch {
+  } catch (e) {
+    warn(`warning: ${dir}'s ${e.message}; its settings are not read`);
     return {};
   }
 }
@@ -2123,13 +2126,16 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
   return committedWorkflow(ok(git(["show", `refs/remotes/origin/${branch}:.github/workflows/factory.yml`])), branch);
 }
 
-/** committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file; one that does not parse is the `error`, and no settings). */
+/**
+ * committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file; one that does not
+ * parse is the `error`, with `parseError`, and no settings: `serve`, `run` and `review` do not start on it).
+ */
 function committedWorkflow(text, branch) {
   if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` };
   try {
     return { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text };
   } catch (e) {
-    return { wf: {}, pins: [], branch, error: `origin/${branch}'s ${e.message}` };
+    return { wf: {}, pins: [], branch, error: `origin/${branch}'s ${e.message}`, parseError: true };
   }
 }
 

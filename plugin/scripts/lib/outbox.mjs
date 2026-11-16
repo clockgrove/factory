@@ -13,7 +13,7 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, scriptsChanged, settingsFile, setupScriptsReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
@@ -248,7 +248,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, setupScripts = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -1131,16 +1131,52 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return r.code === 0 && !r.truncated ? r.stdout : undefined;
   };
 
-  // Each package.json entry among `names` that differs between `from` and `to` in the changed `files`, as
-  // `<path> scripts.<name>` (logic.mjs scriptsChanged); a version that cannot be read changes every name.
-  const scriptsMoved = async (files, from, to, names) => {
+  // Each package.json entry `scripts` names ({pkg, name}, `pkg` `*` for any) that differs between `from` and `to` in
+  // the changed `files`, as `<path> scripts.<name>` (logic.mjs scriptsChanged); a version that cannot be read changes
+  // every name. `also`: a second base the entry must differ from too.
+  const scriptsMoved = async (files, from, to, scripts, also = null) => {
     const hits = [];
-    if (!names.length) return hits;
     for (const p of files.filter((f) => f.split("/").at(-1) === "package.json")) {
-      const [was, now] = await Promise.all([from, to].map((rev) => (rev ? settingsAt(rev, p, PACKAGE_JSON_MAX) : undefined)));
-      for (const n of scriptsChanged(was, now, names)) hits.push(`${p} scripts.${n}`);
+      const names = [...new Set(scripts.filter((x) => x.pkg === p || x.pkg === "*").map((x) => x.name))];
+      if (!names.length) continue;
+      const [was, now, other] = await Promise.all([from, to, also].map((rev) => (rev ? settingsAt(rev, p, PACKAGE_JSON_MAX) : undefined)));
+      const moved = scriptsChanged(was, now, names);
+      const alsoMoved = also ? new Set(scriptsChanged(other, now, names)) : null;
+      for (const n of moved) if (!alsoMoved || alsoMoved.has(n)) hits.push(`${p} scripts.${n}`);
     }
     return hits;
+  };
+
+  // The setup guard's view of a commit (logic.mjs setupGuard `io`), from one listing of its tree.
+  const treeIo = async (rev) => {
+    const ls = await git(["ls-tree", "-r", "-z", "--full-tree", rev]);
+    const entries = new Map();
+    const dirs = new Set();
+    if (ls.code === 0) {
+      for (const line of ls.stdout.split("\0").filter(Boolean)) {
+        const m = /^(\d+) \w+ ([0-9a-f]+)\t(.*)$/s.exec(line);
+        if (!m) continue;
+        entries.set(m[3], { mode: m[1], sha: m[2] });
+        const parts = m[3].split("/");
+        for (let k = 1; k < parts.length; k += 1) dirs.add(parts.slice(0, k).join("/"));
+      }
+    }
+    const blob = async (sha) => {
+      const r = await git(["cat-file", "blob", sha], { maxBytes: PACKAGE_JSON_MAX + 1 });
+      return r.code === 0 && !r.truncated ? r.stdout : undefined;
+    };
+    return {
+      ...setupContext,
+      read: async (p) => {
+        if (ls.code !== 0) return undefined;
+        const e = entries.get(p);
+        if (!e) return null;
+        return e.mode === "100644" || e.mode === "100755" ? blob(e.sha) : undefined;
+      },
+      exists: (p) => ls.code !== 0 || entries.has(p) || dirs.has(p),
+      list: (name) => [...entries.keys()].filter((p) => p.split("/").at(-1) === name),
+      link: async (p) => (entries.get(p)?.mode === "120000" ? blob(entries.get(p).sha) : null),
+    };
   };
 
   /**
@@ -1156,7 +1192,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // Only the branch's own changes: a file the default branch changed and the branch took in a rebase is not the pass's.
     const own = new Set(await names([`${base}...${h}`]));
     const mine = since.filter((f) => own.has(f));
-    const moved = await scriptsMoved(mine, fence.since, h, toolchain.scripts);
+    const moved = await scriptsMoved(mine, fence.since, h, toolchain.scripts ?? []);
     return [...(await outsideFiles(mine, h)), ...moved];
   };
   /** box.outside's toolchain files among `mine`, the branch's own changes since the fence started, to the head `h`. */
@@ -1253,12 +1289,21 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
     if (hits.length) return refuse(protectedReason(hits), { kind: "protected" });
-    // The package.json scripts the setup command runs are as protected as the files it names (logic.mjs setupFiles):
-    // compared where the branch left the default branch, so a script the default branch changed since is not the branch's.
-    if (setupScripts.length && files.some((f) => f.split("/").at(-1) === "package.json")) {
+    // What the setup command runs (logic.mjs setupGuard), read where the branch left the default branch and on the
+    // default branch now, is as protected as the files it names: this stage's own change to any of it is refused, and a
+    // package.json script only when it differs both from the stage's start and from where the branch left (so a script
+    // the default branch or a person changed is not the stage's). A setup whose runs cannot all be named refuses the push.
+    if (setup && files.length) {
       const mb = await git(["merge-base", base, head]);
-      const moved = await scriptsMoved(files, mb.code === 0 ? mb.stdout.trim() : null, head, setupScripts);
-      if (moved.length) return refuse(setupScriptsReason(moved), { kind: "protected" });
+      const fork = mb.code === 0 ? mb.stdout.trim() : null;
+      const guards = [];
+      for (const rev of new Set([fork, base].filter(Boolean))) guards.push(await setupGuard(setup, await treeIo(rev)));
+      const unresolved = [...new Set(guards.flatMap((g) => g.unresolved))];
+      if (unresolved.length) return refuse(setupGuardReason([], unresolved), { kind: "protected" });
+      const covered = guards.flatMap((g) => g.files);
+      const touched = files.filter((f) => covered.some((p) => guardCovers(p, f)));
+      const moved = await scriptsMoved(files, start, head, guards.flatMap((g) => g.scripts), fork);
+      if (touched.length || moved.length) return refuse(setupGuardReason([...touched, ...moved]), { kind: "protected" });
     }
     // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
     const leak = await secretScan(git, `${base}..${head}`);

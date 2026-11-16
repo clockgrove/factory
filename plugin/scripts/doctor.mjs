@@ -7,7 +7,7 @@
 import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
@@ -19,7 +19,7 @@ import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offLi
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { FACTORY_VERSION, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
-import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
+import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
@@ -1038,7 +1038,7 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
   const list = protectedPaths(inputs.protectedAdditions);
   const absent = list.filter((p) => !existsSync(join(checkout, p.replace(/\/$/, ""))));
   out.push(absent.length ? WARN("protected paths", `absent: ${absent.join(", ")}`, "the list still applies; absent paths cannot be touched") : PASS("protected paths", list.join(", ")));
-  out.push(...setupFilesCheck({ inputs, checkout, list }));
+  out.push(...(await setupFilesCheck({ inputs, checkout, list, env })));
   const skillsDir = join(checkout, ".agents", "skills");
   if (existsSync(skillsDir)) {
     for (const name of readdirSync(skillsDir)) {
@@ -1064,39 +1064,92 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
 }
 
 /**
- * What the setup command runs from the repository (logic.mjs setupFiles): {files, scripts, unresolved}, `files` each a
- * file in `checkout` (`scripts/ci/setup.sh`, `bash -e ./x.sh && scripts/ci/toolchain.sh`). Setup runs as the runner
- * beside the App's key on every route (as root into the image every stage starts from, with a sandbox), so a worker's
- * commit must not change any of it.
+ * The setup guard's view of a checkout (logic.mjs setupGuard `io`): files read from it, its package.json files found
+ * by walking it (`.git` and `node_modules` left out), its symlinks read, absolute paths into it read as its own.
  */
-export function setupRuns(setup, checkout) {
-  return setupFiles(setup, (p) => {
+export function checkoutIo(checkout, env = process.env) {
+  const at = (p) => join(checkout, p);
+  return {
+    env,
+    roots: [checkout],
+    read: (p) => {
+      try {
+        return readFileSync(at(p), "utf8");
+      } catch (e) {
+        return e.code === "ENOENT" || e.code === "ENOTDIR" ? null : undefined;
+      }
+    },
+    exists: (p) => existsSync(at(p)),
+    link: (p) => {
+      try {
+        return lstatSync(at(p)).isSymbolicLink() ? readlinkSync(at(p)) : null;
+      } catch {
+        return null;
+      }
+    },
+    list: (name) => {
+      const found = [];
+      const walk = (dir) => {
+        let entries = [];
+        try {
+          entries = readdirSync(join(checkout, dir), { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          const p = dir ? `${dir}/${e.name}` : e.name;
+          if (e.isDirectory() && e.name !== ".git" && e.name !== "node_modules") walk(p);
+          else if (e.name === name && e.isFile()) found.push(p);
+        }
+      };
+      walk("");
+      return found;
+    },
+  };
+}
+
+/**
+ * What the setup command runs from the repository (logic.mjs setupGuard, read in `checkout`): {files, guard}, `files`
+ * the regular files the command itself names (`scripts/ci/setup.sh`, `bash -e ./x.sh && scripts/ci/toolchain.sh`),
+ * each to be a protected path. Setup runs as the runner beside the App's key on every route (as root into the image
+ * every stage starts from, with a sandbox), so a worker's commit must not change any of it.
+ */
+export async function setupRuns(setup, checkout, env = process.env) {
+  const guard = await setupGuard(setup, checkoutIo(checkout, env));
+  const files = guard.named.filter((p) => {
     try {
       return statSync(join(checkout, p)).isFile();
     } catch {
       return false;
     }
   });
+  return { files, guard };
 }
+
+const listed = (xs, n = 6) => `${xs.slice(0, n).join(", ")}${xs.length > n ? ` and ${xs.length - n} more` : ""}`;
 
 /**
  * Setup runs as the runner beside the App's key on every route (with sudo on Actions, as root into a sandbox's image), so
  * every repository file its command names must be a protected path: otherwise a worker's change to it, once merged, runs
- * there. What it may run that cannot be named (a variable, a substitution's output, a glob) cannot be protected at all.
- * FAIL on either, in a job too: the run Blocks before such a setup runs. The package.json scripts it runs need no entry:
- * Factory refuses a push that changes one (outbox.mjs). What the `install` command may run that cannot be named is a
- * WARN: every file then counts as toolchain to a fix pass (logic.mjs fixScopeRefused).
+ * there. What it may run that cannot be named (a variable, a substitution's output, a glob, a shell reading a pipe, remote
+ * code), in the command or a package.json script it runs, cannot be protected at all. FAIL on either, in a job too: the
+ * run Blocks before such a setup runs. The rest of what it runs (setupGuard `files` and `scripts`) needs no entry:
+ * Factory refuses a push that changes any of it (outbox.mjs). What the `install` command may run that cannot be named
+ * is a WARN: every file then counts as toolchain to a fix pass (logic.mjs fixScopeRefused).
  */
-export function setupFilesCheck({ inputs, checkout, list = protectedPaths(inputs.protectedAdditions) }) {
+export async function setupFilesCheck({ inputs, checkout, list = protectedPaths(inputs.protectedAdditions), env = process.env }) {
   const out = [];
-  const install = inputs.install && inputs.install !== "auto" && inputs.install !== "none" ? commandRefs(inputs.install).unresolved : [];
-  if (install.length) out.push(WARN("install files", `the install command runs ${install.join(", ")}, which Factory cannot resolve to repository files, so a fix pass may change no file its scope does not name`, "name each file literally in the install command, or move the command into a script file"));
-  const { files, scripts, unresolved } = setupRuns(inputs.setup, checkout);
-  if (unresolved.length) return [FAIL("setup files", `the setup command runs ${unresolved.join(", ")}, which Factory cannot resolve to repository files, so it cannot keep a worker from changing what runs as the runner beside the App's key`, "name each file the setup runs literally (bash scripts/ci/setup.sh), or move the command into a script file in the repository; setup --apply workflow then protects it"), ...out];
+  const install = inputs.install && inputs.install !== "auto" && inputs.install !== "none" ? commandRefs(inputs.install, { env, roots: [checkout] }).unresolved : [];
+  if (install.length) out.push(WARN("install files", `the install command runs ${listed(install)}, which Factory cannot resolve to repository files, so a fix pass may change no file its scope does not name`, "name each file literally in the install command, or move the command into a script file"));
+  if (!inputs.setup) return out;
+  const { files, guard } = await setupRuns(inputs.setup, checkout, env);
+  if (guard.unresolved.length) return [FAIL("setup files", `the setup command runs ${listed(guard.unresolved, 4)}, which Factory cannot resolve to repository files, so it cannot keep a worker from changing what runs as the runner beside the App's key`, "name each file the setup runs literally (bash scripts/ci/setup.sh), or move the command into a script file in the repository; setup --apply workflow then protects it"), ...out];
   const bare = unprotectedFiles(files, list);
   if (bare.length) return [FAIL("setup files", `the setup command runs ${bare.join(", ")} as the runner, beside the App's key, and no protected path covers it: a worker's merged change to it would run there`, `add ${bare.map((f) => `/${f}`).join(", ")} to protected_paths (FACTORY_PROTECTED_PATHS in .github/workflows/factory.yml; a leading / protects it at the root only); setup --apply workflow adds it`), ...out];
-  const runs = [...(files.length ? [`${files.join(", ")} protected`] : []), ...(scripts.length ? [`package.json scripts ${scripts.join(", ")} fenced (a push changing one is refused)`] : [])];
-  if (runs.length) out.unshift(PASS("setup files", `${runs.join("; ")} (what the command names; what those read in turn, such as a Makefile, is not)`));
+  const guarded = guard.files.filter((f) => !files.includes(f));
+  const scripts = guard.scripts.map((x) => `${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`);
+  const parts = [...(files.length ? [`${files.join(", ")} protected`] : []), ...(guarded.length ? [`a push changing ${listed(guarded)} is refused`] : []), ...(scripts.length ? [`and one changing ${listed(scripts)}`] : [])];
+  if (parts.length) out.unshift(PASS("setup files", `${parts.join("; ")}: what the command names or runs by name (a PATH entry, a package.json script and what it runs, a package manager's own files). Not followed: what a file it runs reads in turn (a script's own source, a Makefile, an install's lifecycle scripts)`));
   return out;
 }
 
@@ -1575,6 +1628,7 @@ export async function claudeLocalStart({ checkout, env = process.env, commands =
  */
 export function workflowSourceChecks(working, committed) {
   if (committed.noClone) return [WARN("workflow source", "not checked: doctor runs outside a clone of the repository, so it cannot read the default branch's .github/workflows/factory.yml (serve reads it from its own clone)", "run doctor --local from the repository's clone to check the settings local mode uses")];
+  if (committed.parseError) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so serve, run and review do not start`, `fix the YAML on ${committed.branch} (the error names the line), through a pull request`)];
   if (committed.error) return [WARN("workflow source", `local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`, "merge the workflow into the default branch (factory:setup writes it)")];
   const [line] = workflowDriftLines(working, committed);
   return line ? [WARN("workflow source", line, `commit the change to ${committed.branch}; local mode never reads a working tree's workflow`)] : [];
@@ -1758,6 +1812,10 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
   } catch (e) {
     const here = existsSync(join(checkout, path));
     const s = settle(readWorkflowEnv(checkout), null);
+    if (e.code === "WORKFLOW_PARSE") {
+      s.checks.unshift(WARN("workflow settings", `the default branch's ${e.message} on GitHub, so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "fix the YAML on the default branch (the error names the line), through a pull request"));
+      return s;
+    }
     const status = e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80);
     s.checks.unshift(WARN("workflow settings", `${path} could not be read from the default branch on GitHub (${status}), so the checks take ${here ? `${checkout}'s copy` : "no workflow's settings"} and assume harness ${s.inputs.harness}`, "merge the workflow into the default branch (factory:setup writes it) and give the token contents: read, or pass --checkout with a clone of the repository"));
     return s;

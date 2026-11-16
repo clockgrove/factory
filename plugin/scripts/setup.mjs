@@ -508,8 +508,9 @@ export function keptNotify(before, explicit) {
  * named, `unresolved` what the command may run that cannot be named (doctor FAILs on it), and the list to render as
  * FACTORY_PROTECTED_PATHS.
  */
-export function protectSetup(inputs, checkout) {
-  const { files: scripts, unresolved } = setupRuns(inputs.setup, checkout);
+export async function protectSetup(inputs, checkout) {
+  const { files: scripts, guard } = await setupRuns(inputs.setup, checkout);
+  const unresolved = guard.unresolved;
   const adding = unprotectedFiles(scripts, protectedPaths(inputs.protectedAdditions)).map((f) => `/${f}`);
   return { scripts, unresolved, adding, protectedList: [...inputs.protectedAdditions, ...adding] };
 }
@@ -533,7 +534,7 @@ async function applyWorkflow({ inputs, args, explicit, before, template, checkou
     const theirs = pr.found && pr.name !== ci.name ? ciRunner(pr, hints) : null;
     if (theirs && theirs.runner !== runner.runsOn) runner.note += `; doctor compares against ${pr.name} (the workflow on pull_request), which runs on ${theirs.runner}, so it will warn`;
   }
-  const { scripts, unresolved, adding, protectedList } = protectSetup(inputs, checkout);
+  const { scripts, unresolved, adding, protectedList } = await protectSetup(inputs, checkout);
   const defaultBranch = sandbox ? (await getRepo(repo, opts)).default_branch : "";
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));
   const text = workflowText({ template, inputs, args, explicit, before, latest, notify, runsOn: runner?.runsOn, ciWorkflow, defaultBranch, protectedPaths: protectedList });

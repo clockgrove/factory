@@ -163,7 +163,7 @@ test("the image job's own wake: the sweep's, minutes after a build that left an 
   assert.deepEqual(imageWaits({ built: false, now }), []);
 });
 
-test("triggers, privileged config changes and the setup script", () => {
+test("triggers, privileged config changes and the setup script", async () => {
   assert.equal(imageTrigger("push", { ref: "refs/heads/main" }, "main"), "merge");
   assert.equal(imageTrigger("push", { ref: "refs/heads/factory/4" }, "main"), null);
   assert.equal(imageTrigger("schedule", { schedule: NIGHTLY_CRON }, "main"), "nightly");
@@ -181,20 +181,20 @@ test("triggers, privileged config changes and the setup script", () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-image-test-"));
   mkdirSync(join(dir, "scripts", "ci"), { recursive: true });
   writeFileSync(join(dir, "scripts", "ci", "setup.sh"), "");
-  assert.deepEqual(setupRuns("scripts/ci/setup.sh postgresql", dir).files, ["scripts/ci/setup.sh"]);
-  assert.deepEqual(setupRuns("./scripts/ci/setup.sh", dir).files, ["scripts/ci/setup.sh"]);
-  assert.deepEqual(setupRuns("sudo apt-get install x", dir).files, []);
-  assert.deepEqual(setupRuns("bash -e scripts/ci/setup.sh", dir).files, ["scripts/ci/setup.sh"], "after a known interpreter and its options");
-  assert.deepEqual(setupRuns("PG=16 sudo bash ./scripts/ci/setup.sh", dir).files, ["scripts/ci/setup.sh"], "after env assignments");
-  assert.deepEqual(setupRuns("make setup", dir).files, [], "nothing the repository holds is named");
-  assert.deepEqual(setupRuns("../outside.sh", dir).files, []);
+  assert.deepEqual((await setupRuns("scripts/ci/setup.sh postgresql", dir)).files, ["scripts/ci/setup.sh"]);
+  assert.deepEqual((await setupRuns("./scripts/ci/setup.sh", dir)).files, ["scripts/ci/setup.sh"]);
+  assert.deepEqual((await setupRuns("sudo apt-get install x", dir)).files, []);
+  assert.deepEqual((await setupRuns("bash -e scripts/ci/setup.sh", dir)).files, ["scripts/ci/setup.sh"], "after a known interpreter and its options");
+  assert.deepEqual((await setupRuns("PG=16 sudo bash ./scripts/ci/setup.sh", dir)).files, ["scripts/ci/setup.sh"], "after env assignments");
+  assert.deepEqual((await setupRuns("make setup", dir)).files, [], "nothing the repository holds is named");
+  assert.deepEqual((await setupRuns("../outside.sh", dir)).files, []);
   writeFileSync(join(dir, "setup"), "");
-  assert.deepEqual(setupRuns("./setup --ci", dir).files, ["setup"], "a leading ./ names a repository file with no extension");
-  assert.deepEqual(setupRuns("setup", dir).files, [], "a bare word stays a command");
+  assert.deepEqual((await setupRuns("./setup --ci", dir)).files, ["setup"], "a leading ./ names a repository file with no extension");
+  assert.deepEqual((await setupRuns("setup", dir)).files, [], "a bare word stays a command");
   writeFileSync(join(dir, "configure"), "");
-  assert.deepEqual(setupRuns("sh configure", dir).files, ["configure"], "the script an interpreter runs, with no directory or extension");
-  assert.deepEqual(setupRuns("PG=16 sudo -E -H bash -e configure --prefix x", dir).files, ["configure"], "after assignments, sudo and the interpreter's options");
-  assert.deepEqual(setupRuns("bash -c configure", dir).files, [], "-c makes the next word inline code, not a file");
+  assert.deepEqual((await setupRuns("sh configure", dir)).files, ["configure"], "the script an interpreter runs, with no directory or extension");
+  assert.deepEqual((await setupRuns("PG=16 sudo -E -H bash -e configure --prefix x", dir)).files, ["configure"], "after assignments, sudo and the interpreter's options");
+  assert.deepEqual((await setupRuns("bash -c configure", dir)).files, [], "-c makes the next word inline code, not a file");
 });
 
 test("workflow template: the image job runs on the default branch's pushes, the nightly cron and by hand on it, with the App writing the record", () => {

@@ -131,9 +131,14 @@ export function protectedReason(hits) {
   return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun` : why;
 }
 
-/** The push refusal for package.json scripts the `setup` command runs (setupFiles `scripts`) that a branch changed (`hits`: `<path> scripts.<name>`). */
-export const setupScriptsReason = (hits) =>
-  `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Factory never pushes one; a person changes it on the default branch`;
+/**
+ * The push refusal for what the `setup` command runs (setupGuard) that a branch changed (`hits`: paths, or `<path>
+ * scripts.<name>`), or, with `unresolved`, for a setup command whose runs cannot all be named.
+ */
+export const setupGuardReason = (hits, unresolved = []) =>
+  unresolved.length
+    ? `the setup command runs ${unresolved.slice(0, 3).join("; ")}${unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : ""}, which Factory cannot resolve to repository files, so it cannot tell whether this push changes what runs as the runner beside the App's key; name each file literally in the command, or move the command into a script file`
+    : `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Factory never pushes one; a person changes it on the default branch`;
 
 /** Changed files that fall under a protected path (protectedCovers). */
 export function protectedTouched(files, protectedList) {
@@ -197,14 +202,13 @@ const dependencyFile = (path) => {
 };
 
 /**
- * What the shell command `command` (`setup`, an explicit `install`) refers to in the repository (shell.mjs
- * commandRefs): {paths, scripts, unresolved}, with the manifests, lockfiles and requirements files an install reads
- * (dependencyFile) left out of `paths`. A fix pass changing one of `paths`, or one of the package.json `scripts`, is
- * changing the toolchain (fixScopeRefused, outbox.mjs); `unresolved` names what may be any file.
+ * What the shell command `command` (`setup`, an explicit `install`, a package.json script) refers to in the repository
+ * (shell.mjs commandRefs, `ctx` its context): {paths, maybe, guarded, scripts, unresolved}, with the manifests,
+ * lockfiles and requirements files an install reads (dependencyFile) left out of `paths` and `maybe`.
  */
-export function commandRefs(command) {
-  const refs = shellRefs(command);
-  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)) };
+export function commandRefs(command, ctx = {}) {
+  const refs = shellRefs(command, ctx);
+  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)), maybe: refs.maybe.filter((p) => !dependencyFile(p)) };
 }
 /** The repository paths a shell command names (commandRefs `paths`). */
 export const commandPaths = (command) => commandRefs(command).paths;
@@ -247,25 +251,106 @@ export function simpleCommands(command) {
 
 /**
  * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
- * (outbox.mjs box.outside). {paths, scripts, unresolved}.
+ * (outbox.mjs box.outside). {paths (every path either may run, named, guarded or only maybe one), scripts, unresolved}.
  */
-export function setupPaths({ setup = "", install = "auto" } = {}) {
-  const all = [commandRefs(setup), install && install !== "auto" && install !== "none" ? commandRefs(install) : { paths: [], scripts: [], unresolved: [] }];
-  const join = (k) => [...new Set(all.flatMap((r) => r[k]))];
-  return { paths: join("paths"), scripts: join("scripts"), unresolved: join("unresolved") };
+export function setupPaths({ setup = "", install = "auto" } = {}, ctx = {}) {
+  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], maybe: [], guarded: [], scripts: [], unresolved: [] }];
+  const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, x]));
+  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.maybe, ...r.guarded]))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
 }
 
+/** Whether `file` is `path` or under it: what the setup guard protects is each path as a file and as a directory. */
+export const guardCovers = (path, file) => file === path || file.startsWith(`${path}/`);
+
 /**
- * What the `setup` command runs from the repository (commandRefs): {files, scripts, unresolved}. `files`: the paths it
- * names that are files in the checkout (`isFile`, given a path from its root), each to be a protected path; `scripts`:
- * the package.json `scripts` entries it runs, which a push may not change (outbox.mjs); `unresolved`: what it may run
- * that Factory cannot name, so nothing can keep a worker from changing it. Setup runs as the runner, beside the App's
- * key (with sudo on Actions, as root into a sandbox's image), on every route: no worker or fix pass may change what it runs.
+ * Everything the `setup` command runs from the repository, as read through `io` at one revision (the checkout for
+ * doctor, a commit for the push): {named, files, scripts, unresolved}. `io`: {read(path) (text, null: none, undefined:
+ * unreadable), exists(path) (a file or directory), list(name) (every path with that file name), link(path) (a symlink's
+ * target, else null)}, all may be async, plus commandRefs' `env` and `roots`.
+ * - `named`: the paths the command itself names (commandRefs `paths`); doctor wants each regular file among them on
+ *   the protected list.
+ * - `files`: what no push may change, each as a file and as a directory (guardCovers): `named`, each other argument the
+ *   revision holds (`maybe`), what the command runs without naming it (`guarded`), the same for every package.json script
+ *   it runs, read from its package's directory and followed through the scripts that one runs, `.yarnrc.yml`'s
+ *   `yarnPath`, and a symlink's target beside the link.
+ * - `scripts`: {pkg, name}, each package.json entry it runs (`pkg` `*`: in any package.json), which no push may change.
+ * - `unresolved`: what may run and cannot be named, in the command or a script it runs (`<pkg> scripts.<name>: …`).
  */
-export function setupFiles(setup, isFile) {
-  const refs = commandRefs(setup);
-  return { files: refs.paths.filter((p) => isFile(p)), scripts: refs.scripts, unresolved: refs.unresolved };
+export async function setupGuard(setup, io) {
+  const ctx = { env: io.env ?? null, roots: io.roots ?? [] };
+  const refs = commandRefs(setup, ctx);
+  const files = new Set([...refs.paths, ...refs.guarded]);
+  const unresolved = [...refs.unresolved];
+  const scripts = new Map();
+  const maybe = [...refs.maybe];
+  const queue = refs.scripts.map((x) => ({ ...x, from: "" }));
+  const seen = new Set();
+  while (queue.length) {
+    const { pkg, name } = queue.shift();
+    scripts.set(`${pkg}\0${name}`, { pkg, name });
+    for (const p of pkg === "*" ? await io.list("package.json") : [pkg]) {
+      if (seen.has(`${p}\0${name}`)) continue;
+      seen.add(`${p}\0${name}`);
+      const text = await io.read(p);
+      if (text === null) continue;
+      let doc;
+      try {
+        doc = typeof text === "string" ? JSON.parse(text) : undefined;
+      } catch {
+        doc = undefined;
+      }
+      if (!doc || typeof doc !== "object") {
+        unresolved.push(`${p} (cannot be read as JSON, so the scripts setup runs from it cannot be named)`);
+        continue;
+      }
+      const value = doc.scripts && typeof doc.scripts === "object" ? doc.scripts[name] : undefined;
+      if (typeof value !== "string") continue;
+      const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
+      for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
+      maybe.push(...sub.maybe);
+      unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
+      queue.push(...sub.scripts);
+    }
+  }
+  for (const m of maybe) if (await io.exists(m)) files.add(m);
+  for (const f of [...files]) {
+    if (fileName(f) === ".yarnrc.yml") {
+      const text = await io.read(f);
+      let yarnPath = null;
+      try {
+        yarnPath = typeof text === "string" ? parseYaml(text)?.yarnPath : null;
+      } catch {
+        unresolved.push(`${f} (does not parse, so the yarn release it names cannot be read)`);
+      }
+      if (typeof yarnPath === "string") {
+        const p = posixJoin(dirOf(f), yarnPath);
+        if (p) files.add(p);
+      }
+    }
+  }
+  for (const f of [...files]) {
+    const target = await io.link?.(f);
+    if (typeof target === "string") {
+      const p = posixJoin(dirOf(f), target);
+      if (p) files.add(p);
+      else if (!target.startsWith("/")) unresolved.push(`${f} (a link out of the repository)`);
+    }
+  }
+  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)] };
 }
+/** `dir` + `rel` as a path from the root, or null when it leaves the root or is absolute. */
+const posixJoin = (dir, rel) => {
+  if (rel.startsWith("/")) return null;
+  const parts = [];
+  for (const s of `${dir}${rel}`.split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else parts.push(s);
+  }
+  return parts.join("/") || null;
+};
 
 /**
  * The package.json `scripts` entries among `names` whose value differs between two texts of one package.json (`before`

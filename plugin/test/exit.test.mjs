@@ -1141,19 +1141,20 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.equal(namesPath("(web/yarn.lock)", "yarn.lock"), true);
   // The repository's own setup and install commands name its setup scripts: toolchain, unless the scope names them.
   // Every argument word is a path to match (one naming no file matches nothing); absolute paths, ~, URLs and .. are none.
-  assert.deepEqual(commandPaths(`bash scripts/setup.sh && FOO=1 sh "./tools/install-deps.sh" --dir=vendor/x; curl -fsSL https://x.test/a.sh | sh; source ~/.env; ../up.sh; make setup`), ["scripts/setup.sh", "tools/install-deps.sh", "vendor/x", "setup"]);
+  assert.deepEqual(commandPaths(`bash scripts/setup.sh && FOO=1 sh "./tools/install-deps.sh" --dir=vendor/x; curl -fsSL https://x.test/a.sh | sh; source ~/.env; ../up.sh; make setup`), ["scripts/setup.sh", "tools/install-deps.sh", "vendor/x"]);
   assert.deepEqual(setupPaths({ setup: "./scripts/setup.sh", install: "auto" }).paths, ["scripts/setup.sh"]);
-  assert.deepEqual(commandPaths("sh configure; bash -e bootstrap; bash -c run.sh; python -m tools.gen"), ["configure", "bootstrap", "tools/gen.py", "tools/gen/__main__.py", "tools/__init__.py", "tools/gen/__init__.py", "tools.gen"], "an interpreter's script operand is a path, a module the files it runs from the root; -c code is read as a command");
+  assert.deepEqual(commandPaths("sh configure; bash -e bootstrap; bash -c run.sh; python -m tools.gen"), ["configure", "bootstrap", "run.sh", "tools.gen"], "an interpreter's script operand is a path; every path-looking word of the text too");
+  assert.ok(setupPaths({ setup: "python -m tools.gen" }).paths.includes("tools/gen.py"), "the files a module runs are toolchain");
   assert.deepEqual(setupPaths({ setup: "", install: "bash tools/install-deps.sh" }).paths, ["tools/install-deps.sh"]);
   assert.deepEqual(setupPaths({ setup: "", install: "none" }), { paths: [], scripts: [], unresolved: [] });
   // A dependency list the install command reads is not toolchain: a fix pass that adds a dependency may change it.
   assert.deepEqual(setupPaths({ install: "pip install -r requirements.txt" }).paths, ["install"]);
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements-dev.txt -c constraints.txt && npm ci --prefix web/package.json" }).paths, ["install", "ci"]);
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements-dev.txt -c constraints.txt && npm ci --prefix web/package.json" }).paths.filter((p) => /requirements|constraints|package\.json$/.test(p)), []);
   assert.deepEqual(setupPaths({ setup: "bash scripts/setup.sh", install: "poetry install -C api/pyproject.toml && bundle install --gemfile=Gemfile && cargo fetch --locked Cargo.lock" }).paths, ["scripts/setup.sh", "install", "fetch"]);
   assert.deepEqual(fixScopeRefused(["requirements.txt"], { texts: [plan, red], extra: setupPaths({ install: "pip install -r requirements.txt" }).paths }), []);
   // The common layouts too: a requirements/ or constraints/ directory, a prefixed name. Other files there stay named.
   assert.deepEqual(setupPaths({ install: "pip install -r requirements/dev.txt -r dev-requirements.txt -c constraints/base.in -r test_requirements.txt" }).paths, ["install"]);
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements/build.sh -r tools/requirements-gen.py" }).paths, ["install", "requirements/build.sh", "tools/requirements-gen.py"]);
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements/build.sh -r tools/requirements-gen.py" }).paths, ["requirements/build.sh", "tools/requirements-gen.py", "install"]);
   const extra = setupPaths({ setup: "bash scripts/setup.sh" }).paths;
   assert.deepEqual(fixScopeRefused(["src/parse.ts", "scripts/setup.sh", "scripts/other.sh"], { prior: ["src/parse.ts"], texts: [plan, red], extra }), ["scripts/setup.sh"]);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { texts: ["setup fails: scripts/setup.sh line 3"], extra }), []);

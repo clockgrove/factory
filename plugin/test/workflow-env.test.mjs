@@ -200,5 +200,37 @@ test("a default-branch workflow that does not parse is committedWorkflowEnv's er
   assert.match(read.error, /^origin\/trunk's \.github\/workflows\/factory\.yml does not parse \(/);
   const [warn] = workflowSourceChecks({}, read);
   assert.equal(warn.status, "WARN");
-  assert.match(warn.detail, /does not parse .*so it uses none/);
+  assert.match(warn.detail, /does not parse .*so serve, run and review do not start/);
+  assert.match(warn.fix, /^fix the YAML on trunk/, "its own remedy, not merging a workflow that is there");
+});
+
+test("serve, run and review do not start on a default-branch workflow that does not parse; the working tree's copy is said, once (#387)", async () => {
+
+  const { readWorkflowEnv } = await import("../scripts/lib/local.mjs");
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(join(tmpdir(), "wf-broken-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" };
+  const git = (dir, ...a) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8", env });
+  const origin = join(root, "origin.git");
+  const dev = join(root, "dev");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "trunk", origin]);
+  execFileSync("git", ["clone", "-q", origin, dev], { env, stdio: "ignore" });
+  git(dev, "checkout", "-q", "-b", "trunk");
+  mkdirSync(join(dev, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(dev, ".github", "workflows", "factory.yml"), "env:\n  FACTORY_MODEL: [unclosed\n");
+  git(dev, "add", ".");
+  git(dev, "commit", "-q", "-m", "broken");
+  git(dev, "push", "-q", "origin", "trunk");
+  const before = process.env.FACTORY_LOCAL;
+  try {
+    assert.throws(() => new Local({ checkout: dev, repo: "o/r" }), /factory\.yml does not parse .*fix the file on trunk and start again/);
+  } finally {
+    if (before === undefined) delete process.env.FACTORY_LOCAL;
+    else process.env.FACTORY_LOCAL = before;
+  }
+  const said = [];
+  assert.deepEqual(readWorkflowEnv(dev, { warn: (l) => said.push(l) }), {});
+  assert.match(said[0], /factory\.yml does not parse/, "the working tree's parse failure is said, not silent");
 });

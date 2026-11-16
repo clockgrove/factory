@@ -176,7 +176,7 @@ export function pinModel(text, harness, model) {
   const fm = /^---\n([\s\S]*?)\n---/.exec(text);
   if (!fm) return text;
   let front = fm[1];
-  front = /^model:/m.test(front) ? front.replace(/^model:.*$/m, `model: ${model}`) : `${front}\nmodel: ${model}`;
+  front = /^model:/m.test(front) ? front.replace(/^model:.*$/m, `model: ${JSON.stringify(model)}`) : `${front}\nmodel: ${JSON.stringify(model)}`;
   if (harness === "copilot" && !/^model-policy:/m.test(front)) front += "\nmodel-policy: required";
   return text.replace(fm[0], `---\n${front}\n---`);
 }

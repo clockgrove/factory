@@ -31,7 +31,7 @@ Factory never pushes a change under `.github/workflows/`, and the commit hook re
 
 When the PR has review comments (`$FACTORY_IN/review-comments.json` holds them), read [reference.md](reference.md) beside this file first: its "Reviewer comments" section says how to answer each one once, then finish the pass.
 
-If Factory's validation is red after its push, it sends you the failure; fix it and commit. Factory sends each red back while your fixes make progress; a pass that commits nothing or leaves the same failures Blocks.
+If Factory's validation is red after its push, it sends you the failure; fix it and commit. Factory sends each red back while your fixes make progress; a pass that commits nothing, leaves the same failures or brings back an earlier red Blocks.
 
 ## Stop
 

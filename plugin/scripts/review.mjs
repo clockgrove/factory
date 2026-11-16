@@ -1262,12 +1262,14 @@ async function main() {
   }
 
   // A red merge-queue run the merge pass handed here (session.mjs mergeReadyOne "queue-red", readQueueRed), read as
-  // a red PR check is (queueRedOf): the PR's own change gets one fix pass per failure class, the answer pass (heldRed);
-  // the same class red again after its fix pass Blocks; a flake, GitHub's side or the default branch's is recorded and
+  // a red PR check is (queueRedOf): the PR's own change gets a fix pass, the answer pass (heldRed), while each one makes
+  // progress (fix-progress.mjs); a red after one that made none Blocks; a flake, GitHub's side or the default branch's is recorded and
   // the merge below enqueues it again as any drop (or Blocks at the queue's bound).
   const queued = heldRed
     ? null
-    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), progressCheck: openProgressCheck({ inputs, stage: decisionStage }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+        // The stage harness's usage limit in its progress check ends the stage on it; the drop stays handed.
+        if (e?.code === USAGE_LIMIT) throw e;
         // Unread, the drop stays handed: the merge pass hands it to the next review stage.
         log(`the merge queue's red run could not be read: ${String(e?.message || e).slice(0, 160)}`);
         return null;

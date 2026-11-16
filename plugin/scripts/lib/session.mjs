@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -82,7 +82,7 @@ import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { redNames, redProgress } from "./fix-progress.mjs";
+import { exactJudge, redNames } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
 import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
@@ -1082,11 +1082,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   const usage = [];
   let passes = 0;
   let last = null;
-  // The red the last fix pass was handed, as the progress check reads it (redShape), and why the loop stopped without
-  // progress. No progressCheck (no decider wired): only the exact checks decide, and what they cannot is no progress.
+  // The red the last fix pass was handed, as the progress check reads it (redShape), every red the loop has seen (one
+  // seen again after a committed pass is no progress), and why the loop stopped without progress. No progressCheck (no
+  // decider wired): only the exact checks decide, and what they cannot is no progress.
   let handed = null;
+  const seen = [];
   let stalled = "";
-  const judgeProgress = progressCheck?.judge ?? (async ({ before, after }) => redProgress(before, after) ?? { progress: false, why: "the failing jobs changed without getting fewer, and no decision model can judge it" });
+  const judgeProgress = progressCheck?.judge ?? exactJudge;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
   // The head the last fix pass was asked to fix: the same head after it is no new observation (validate).
@@ -1287,7 +1289,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const jobs = v.fromChecks
       ? (v.failedRuns?.length ? v.failedRuns : [{ name: `required checks ${checks.names.join(", ")}` }]).map((r) => ({ name: r.name, sig: sigs.get(r.id) ?? null }))
       : failures.map((f) => ({ name: f.command, sig: failureSignature(f.command, f.full || f.output || "") }));
-    return { head: v.sha || v.head || "", jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
+    const head = v.sha || v.head || "";
+    return { head, at: `pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
   };
   // What the fix pass between two reds changed, as git's --stat (null when it cannot be read).
   const diffStat = async (from, to) => {
@@ -1390,6 +1393,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
           red = { ...lastFix, ...now, command: v.rerunRed.failed.command, rec: lastFix.rec };
           // The fresh pass is judged against the red it is handed.
           handed = redShape(v.rerunRed, now);
+          seen.push(handed);
           lastLead = now.lead || lastLead;
           last = { ...last, failed: v.rerunRed.failed };
           block = unchangedBlock(v.unchanged, lastLead);
@@ -1469,7 +1473,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A red after a fix pass goes on only when that pass made progress on the red it was handed (fix-progress.mjs); a
     // red on a merge Factory made itself is not the change's, so it gets its fix pass unjudged.
     const caught = !!validated && !!outbox?.caughtUp?.(validated);
-    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, diff: await diffStat(handed.head, shape.head) }) : null;
+    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : null;
+    seen.push(shape);
+    // The stage harness's usage limit stopped the question: the stage ends on it as a pass meeting it does, never as no progress.
+    if (judged?.limited) throw new UsageLimitReached(judged.limited, { since: Date.now(), label: "fix-progress check" });
     if (judged) log(`${label} pass ${passes}: the fix pass before it ${judged.progress ? "made progress" : "made no progress"}: ${judged.why}`);
     if (judged && !judged.progress) {
       const first = String(shape.lead).split("\n")[0].replace(/^--- /, "");
@@ -2606,8 +2613,6 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
 
 /** The queue's removal code when the required checks failed on its merge_group commit (GitHub's FAILED_CHECKS). */
 export const QUEUE_RED_CODE = "failed_checks";
-/** The most queue fix passes (red queue runs in the PR's own change) per re-entry of the Objective. */
-export const QUEUE_FIX_PASSES = 2;
 /** How many review stages look for a red drop's merge-group run before it counts as unread (`none`). */
 export const QUEUE_RED_READS = 2;
 /** How far back from a drop the PR's merge-group runs are listed at most (one page of runs, newest first). */
@@ -2620,13 +2625,13 @@ export const queueRedMarker = (issue, at) => marker(issue, "queue-red", String(a
 const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocked: 1 };
 
 /**
- * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, head, kind, sigs}` as JSON, read back
+ * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, head, kind, sigs, jobs}` as JSON, read back
  * by queueRedRecords) and one line for a person. `head`: the PR head the drop was of; `after`: no merge-group run created
  * before it is the drop's (the removal before it, or the drop count's bound); `tries`: the review stages that started its
  * fix pass; `reads`: the stages that found no run of it yet. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
  * decided it, or its fix pass has committed), `fixed` (the PR's own change, and its fix pass
- * committed: `sigs` its failure classes), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
- * as any drop), `blocked` (the PR's own change past its bound) or `superseded` (the PR's head moved on before a stage read it).
+ * committed: `sigs` its failure classes, `jobs` its failing jobs as [name, signature id]), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
+ * as any drop), `blocked` (the PR's own change, its fix pass before it making no progress) or `superseded` (the PR's head moved on before a stage read it).
  */
 export function queueRedBody(issue, prNumber, rec) {
   const at = Number.isFinite(Date.parse(rec.at)) ? new Date(Date.parse(rec.at)).toISOString().replace(/\.\d{3}Z$/, "Z") : "an unknown time";
@@ -2637,7 +2642,7 @@ export function queueRedBody(issue, prNumber, rec) {
     blocked: "the PR's own change, past its fix passes: Blocked",
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
-  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
+  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
   return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
@@ -2655,7 +2660,7 @@ export function queueRedRecords(comments, issue) {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
       if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
       const count = (x) => (Number.isInteger(x) && x > 0 ? x : 0);
-      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], tries: count(v.tries), reads: count(v.reads) };
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id]) => [name, typeof id === "string" ? id : null]) : null, tries: count(v.tries), reads: count(v.reads) };
       const key = new Date(Date.parse(v.at)).toISOString();
       const had = byAt.get(key);
       const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 10_000 + r.tries * 100 + r.reads;
@@ -2687,7 +2692,8 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
  * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
  * (`none`), or triage is off and no failure names a file or test the PR changes (`unclassified`, triage.mjs
  * namesChange). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
- * detail, tail, lead, command, queue: true}) and `sigs` (its classes, queueRedClass).
+ * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass) and `jobs` (each failing job's name
+ * and signature id, [name, id|null]: what the progress check compares).
  */
 export async function queueRedOf({ repo, issue, prNumber, base, at, after = null, names = [], triage = null, token, actionsToken = token }) {
   const opts = { token };
@@ -2729,20 +2735,21 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   if (!verdict || verdict.off) {
     if (!verdict?.named) return { kind: "unclassified", sha, reason: `${first}; triage is off and no failure names a file or test the PR changes` };
   }
-  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))] };
+  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: detail.jobs.map((j) => [j.name, j.sig?.id ?? null]) };
 }
 
 /**
  * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`.
  * A record of another head than the PR's `head` now is `superseded` (the head moved on: a fix, a person's push). Else the
  * drop is read (queueRedOf) and: `requeued` (written now: not known to be the PR's change), `blocked` (the PR's own change,
- * and every class of it had its fix pass, or QUEUE_FIX_PASSES fix passes ran, since the Objective's last re-entry: its
- * Objective label, `factory:restart` or a Block; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
+ * and the last fix pass since the Objective's last re-entry, its Objective label, `factory:restart` or a Block, made no
+ * progress on the red it was handed: fix-progress.mjs, `progressCheck`'s judge, with every red fixed since the re-entry
+ * as the ones seen; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
  * answer pass gets `red`; the record stays `handed`, its `tries` counted, until recordQueueFix writes `fixed` once that
  * pass has committed, so a stage that ends before then leaves it for the next; two tries that committed nothing Block). Null when nothing is pending. `names()` gives the required checks,
  * read only then.
  */
-export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
+export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
   const records = queueRedRecords(await listComments(repo, issue, { token }), issue);
   const pending = records.at(-1);
   if (pending?.state !== "handed") return null;
@@ -2769,21 +2776,21 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   // The fix passes since the Objective's last re-entry (an unread timeline counts every one).
   const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:restart", "factory:blocked"], { token }).catch(() => null);
   const fixes = records.filter((r) => r.state === "fixed" && !(Date.parse(entered) > Date.parse(r.at)));
-  const done = new Set(fixes.flatMap((r) => r.sigs));
-  const over =
-    fixes.length >= QUEUE_FIX_PASSES
-      ? `${fixes.length} fix passes for the merge queue's runs since the Objective last started`
-      : q.sigs.every((x) => done.has(x))
-        ? "fix pass for the same failure"
-        : pending.tries >= 2
-          ? `${pending.tries} fix passes that committed nothing for it`
-          : "";
+  // The red the last fix pass was handed, and every one fixed since the re-entry, against this one (fix-progress.mjs).
+  // A fix pass is recorded only once it committed (recordQueueFix), so the heads are not compared.
+  const shape = (r, jobs) => ({ head: "", at: `the merge queue's run red at ${r.at}`, jobs: jobs.map(([name, id]) => ({ name, sig: id ? { id } : null })), lead: "" });
+  const last = fixes.at(-1);
+  const judge = progressCheck?.judge ?? exactJudge;
+  const p = last?.jobs?.length ? await judge({ before: shape(last, last.jobs), after: { ...shape(pending, q.jobs), lead: q.red.lead || "" }, seen: fixes.slice(0, -1).filter((r) => r.jobs?.length).map((r) => shape(r, r.jobs)) }) : null;
+  // The stage harness's usage limit stopped the question: the drop stays handed, and the stage ends on the limit.
+  if (p?.limited) throw new UsageLimitReached(p.limited, { since: Date.now(), label: "fix-progress check" });
+  const over = p && !p.progress ? `fix pass, which made no progress: ${p.why}` : pending.tries >= 2 ? `${pending.tries} fix passes that committed nothing for it` : "";
   if (over) {
-    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs }, { token });
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs }, { token });
     return { state: "blocked", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
-  const record = { ...pending, kind: "own", sigs: q.sigs, tries: pending.tries + 1 };
+  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, tries: pending.tries + 1 };
   await writeQueueRed(repo, issue, prNumber, record, { token });
   return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; the PR's own change, one fix pass (the answer pass)`, red: q.red, record };
 }

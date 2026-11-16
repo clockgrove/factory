@@ -49,10 +49,11 @@ test("the progress question: closer at the confidence floor or more is progress;
 
 /**
  * The real validationLoop on the commands route in a git checkout, with a fake Codex whose call n does `steps[n - 1]`:
- * writes its `write` files and, with `commit`, commits everything (git add -A). Each command fails with its own TAP line until its file
- * exists. Returns the result, the harness calls made and the phase lines.
+ * writes its `write` files, deletes its `remove` files and, with `commit`, commits everything (git add -A). `base`: files
+ * the first commit holds. Returns the result (or the error it rejected with, as `error`), the harness calls made and the
+ * phase lines.
  */
-async function commandsLoop({ commands, steps, progressCheck = null }) {
+async function commandsLoop({ commands, steps, progressCheck = null, base = {} }) {
   const root = mkdtempSync(join(tmpdir(), "fix-progress-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -60,7 +61,7 @@ async function commandsLoop({ commands, steps, progressCheck = null }) {
   g("init", "-q", "-b", "main");
   g("config", "user.name", "t");
   g("config", "user.email", "t@example.com");
-  writeFileSync(join(work, "README"), "x\n");
+  for (const [f, c] of Object.entries({ README: "x\n", ...base })) writeFileSync(join(work, f), c);
   g("add", "-A");
   g("commit", "-q", "-m", "base");
   mkdirSync(join(root, "bin"));
@@ -73,6 +74,7 @@ fs.appendFileSync(${JSON.stringify(calls)}, "x");
 const n = fs.readFileSync(${JSON.stringify(calls)}, "utf8").length;
 const step = ${JSON.stringify(steps)}[n - 1] || {};
 for (const [f, c] of Object.entries(step.write || {})) fs.writeFileSync(f, c);
+for (const f of step.remove || []) fs.rmSync(f);
 if (step.commit) {
   const { execFileSync } = require("node:child_process");
   execFileSync("git", ["add", "-A"]);
@@ -88,12 +90,13 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   process.env.PATH = env.PATH;
   const phases = [];
   try {
-    const result = await validationLoop({ checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, onPhase: async (l) => phases.push(l) });
+    let error = null;
+    const result = await validationLoop({ checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, onPhase: async (l) => phases.push(l) }).catch((e) => ((error = e), null));
     let made = 0;
     try {
       made = readFileSync(calls, "utf8").length;
     } catch {}
-    return { result, calls: made, phases };
+    return { result, error, calls: made, phases };
   } finally {
     process.env.PATH = path;
     rmSync(root, { recursive: true, force: true });
@@ -155,5 +158,50 @@ test("validation loop: with no decider, a red the exact checks cannot judge coun
     assert.equal(r.result.green, false);
     assert.equal(r.calls, 1);
     assert.match(r.result.stalled, /^the fix pass before it made no progress: the failing jobs changed without getting fewer, and no decision model can judge it( \(route-off\))?; failing: /);
+  }
+});
+
+test("redProgress: a red equal to one seen earlier in the stage is no progress, naming both; a seen red unsigned never matches (#399)", () => {
+  const a = { ...red("1", ["lint", sig("l1")]), at: "pass 1 on 1111111" };
+  const b = { ...red("2", ["test", sig("t1")]), at: "pass 2 on 2222222" };
+  const again = { ...red("3", ["lint", sig("l1")]), at: "pass 3 on 3333333" };
+  assert.deepEqual(redProgress(b, again, [a, b]), { progress: false, why: "it brought back the red of pass 1 on 1111111: lint, failing the same way, after the red it was handed (pass 2 on 2222222: test)" });
+  assert.deepEqual(redProgress(b, again, []), { progress: true, why: "a different set of jobs fails" }, "without the history, a disjoint set");
+  assert.deepEqual(redProgress(b, red("3", ["lint", sig("l2")]), [a, b]), { progress: true, why: "a different set of jobs fails" }, "the same job failing another way is not that red");
+  assert.deepEqual(redProgress(b, red("3", ["lint"]), [red("1", ["lint"]), b]).progress, true, "no signature, no match");
+});
+
+test("validation loop: a red that flips back to one seen before (A, then B, then A) Blocks, naming both (#399)", async () => {
+  // Two commands; the first pass fixes A and breaks B, the second fixes B and breaks A again.
+  const commands = [needs("fa"), needs("fb")];
+  const steps = [{ write: { fa: "ok\n" }, remove: ["fb"], commit: true }, { write: { fb: "ok\n" }, remove: ["fa"], commit: true }, { write: { fa: "ok\n" }, commit: true }];
+  const r = await commandsLoop({ commands, steps, base: { fb: "ok\n" } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.calls, 2, "no third fix pass");
+  const [ca, cb] = commands.map((c) => c.replace(/^parallel: /, ""));
+  assert.ok(r.phases.some((l) => l.startsWith("validation pass 2 red: ") && l.endsWith("(progress: a different set of jobs fails)")), r.phases.join("\n"));
+  const reason = `it brought back the red of pass 1 on ${"x".repeat(7)}: ${ca}, failing the same way, after the red it was handed (pass 2 on ${"y".repeat(7)}: ${cb})`;
+  const said = r.result.stalled.replace(/pass 1 on [0-9a-f]{7}/, `pass 1 on ${"x".repeat(7)}`).replace(/pass 2 on [0-9a-f]{7}/, `pass 2 on ${"y".repeat(7)}`);
+  assert.ok(said.startsWith(`the fix pass before it made no progress: ${reason}; failing: ${ca} (`), said);
+});
+
+test("validation loop: the stage harness's usage limit in the progress question ends the stage through UsageLimitReached, never as no progress (#399)", async () => {
+  // The decision call runs on the stage's own Claude Code, which answers with its usage limit.
+  const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
+  const bin = mkdtempSync(join(tmpdir(), "limit-claude-"));
+  const limitRun = readFileSync(new URL("./fixtures/claude-2.1.323-usage-limit.jsonl", import.meta.url), "utf8");
+  writeFileSync(join(bin, "claude"), `#!${process.execPath}\nrequire("node:fs").readFileSync(0);\nprocess.stdout.write(${JSON.stringify(limitRun)});\nprocess.exit(1);\n`, { mode: 0o755 });
+  const kept = [];
+  const stage = { harness: "claude", model: "m-1", env: { HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy" }, record: (x) => kept.push(x) };
+  try {
+    const steps = ["one", "done"].map((x) => ({ write: { state: `${x}\n` }, commit: true }));
+    const r = await commandsLoop({ commands: [needs("state", "done")], steps, progressCheck: openProgressCheck({ inputs: {}, env: {}, stage }) });
+    assert.equal(r.result, null, "the loop ended on the limit, with no Block of its own");
+    assert.equal(r.error?.code, USAGE_LIMIT, String(r.error?.stack || r.error));
+    assert.equal(r.error.refusal.code, "usage_limit_reached");
+    assert.match(r.error.message, /^fix-progress check: claude reached/);
+    assert.equal(r.calls, 1, "no further fix pass");
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
   }
 });

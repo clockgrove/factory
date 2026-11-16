@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { APP_PERMISSIONS_TEXT, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
+import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, pinnedVersion, prepareCopilotHome } from "./lib/copilot-runner.mjs";
@@ -430,11 +430,13 @@ export async function sandboxStorageChecks({ inputs, repo, token = null, repoId 
  */
 export function appPermissionChecks(app) {
   const out = [];
-  out.push(app.missing?.length ? FAIL("app permissions", `missing ${app.missing.join(", ")}`, `edit the App's repository permissions (${APP_PERMISSIONS_TEXT}) and accept the new permissions on the installation`) : PASS("app permissions", `${app.appSlug}: ${APP_PERMISSIONS_TEXT}`));
+  // A personal account's App needs no projects (#199), so its list names none.
+  const need = appPermissionsText({ userAccount: app.userAccount === true });
+  out.push(app.missing?.length ? FAIL("app permissions", `missing ${app.missing.join(", ")}`, `edit the App's repository permissions (${need}) and accept the new permissions on the installation`) : PASS("app permissions", `${app.appSlug}: ${need}`));
   // Workflows write would let a branch change the workflow its own review job runs, including whom Factory trusts.
   // A warning, not a Block: an installed App with it keeps working until a person turns it off.
   if (app.extra?.some((p) => /workflow/i.test(p))) out.push(WARN("app permissions", `the App can write workflows (extra: ${app.extra.join(", ")})`, "turn the App's workflows permission off: a worker branch could change the workflow its review runs, and with it whom Factory trusts"));
-  else if (app.extra?.length) out.push(WARN("app permissions", `extra permissions granted: ${app.extra.join(", ")}`, `remove them; Factory needs ${APP_PERMISSIONS_TEXT}`));
+  else if (app.extra?.length) out.push(WARN("app permissions", `extra permissions granted: ${app.extra.join(", ")}`, `remove them; Factory needs ${need}`));
   return out;
 }
 

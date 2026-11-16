@@ -607,11 +607,14 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const bin = join(dir, "bin");
   mkdirSync(bin);
   // Real tools the probe text runs around the sandbox's own; each sandbox tool a stub, slirp4netns failing as it would.
-  for (const t of ["sleep", "grep", "tail", "cat", "id"]) symlinkSync(spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout.trim(), join(bin, t));
+  for (const t of ["sh", "sleep", "grep", "tail", "cat", "id", "mkfifo"]) symlinkSync(spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout.trim(), join(bin, t));
   const tools = ["slirp4netns", "nsenter", "unshare", "ip", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore"];
   const stub = (t, body) => write(join(bin, t), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  for (const t of tools) stub(t, t === "slirp4netns" ? "echo 'open(\"/dev/net/tun\"): Permission denied' >&2\nexit 1" : t === "unshare" ? "exit 0" : "exit 1");
-  const run = () => spawnSync("/bin/sh", ["-c", COPILOT_OUTER_PROBE], { env: { HOME: process.env.HOME, PATH: bin, TMPDIR: dir }, encoding: "utf8", timeout: 30_000 });
+  // unshare as util-linux's: its options, then its command run.
+  const unshare = 'while [ $# -gt 0 ]; do case "$1" in --*) shift;; *) break;; esac; done; [ "$1" = true ] && exit 0; exec "$@"';
+  for (const t of tools) stub(t, t === "slirp4netns" ? "echo 'open(\"/dev/net/tun\"): Permission denied' >&2\nexit 1" : t === "unshare" ? unshare : "exit 1");
+  // Each run in a temp directory of its own, as runOuterProbe gives it.
+  const run = () => spawnSync("/bin/sh", ["-c", COPILOT_OUTER_PROBE], { env: { HOME: process.env.HOME, PATH: bin, TMPDIR: mkdtempSync(join(dir, "t-")) }, encoding: "utf8", timeout: 30_000 });
   const r = run();
   assert.equal(r.status, 4);
   assert.equal(r.stderr.trim(), 'slirp4netns did not configure its interface: open("/dev/net/tun"): Permission denied', "one line, with the cause, for outerProbe's reason");
@@ -627,6 +630,21 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const u = run();
   assert.equal(u.status, 5);
   assert.match(u.stderr.trim(), /^unshare cannot make a user and network namespace mapping the user/);
+  // #421: slirp4netns slow to configure (a loaded box: 4 s, past any fixed poll) is waited for on its --ready-fd, and
+  // the address is then checked once.
+  stub("unshare", unshare);
+  stub("slirp4netns", 'fd=""; for a do case "$a" in --ready-fd=*) fd=${a#--ready-fd=};; esac; done\nsleep 4\n: > "$TMPDIR/configured"\n[ -n "$fd" ] && eval "printf 1 >&$fd; exec $fd>&-"\nexec sleep 60');
+  stub("nsenter", '[ -f "$TMPDIR/configured" ] && echo "2: tap0    inet 10.0.2.100/24 scope global tap0"');
+  const slow = run();
+  assert.equal(slow.status, 0, slow.stderr);
+  assert.equal(slow.stdout, "ok\n");
+  // One that exits without configuring closes the descriptor unwritten: a no at once, with its own error.
+  stub("slirp4netns", "echo 'cannot open tap0' >&2\nexit 1");
+  const t = Date.now();
+  const failed = run();
+  assert.equal(failed.status, 4);
+  assert.equal(failed.stderr.trim(), "slirp4netns did not configure its interface: cannot open tap0");
+  assert.ok(Date.now() - t < 3_000, "no wait on a clock");
 });
 
 test("local mode pins the clone's .git when it clones and refuses one put in its place; its git state too", async () => {
@@ -786,7 +804,7 @@ test("outerProbe keeps only a yes: a no is probed again, and an old no in the ca
     assert.equal(r.on, false);
     assert.equal(r.cached, undefined);
     assert.equal(r.cacheFile, cacheFile, "named, so a refusal can say where");
-    assert.equal(probes, 2 * i, "probed each time, and a Copilot no once more");
+    assert.equal(probes, i, "probed each time");
   }
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(cacheFile, "utf8"))), ["other"], "no `on: false` entry is kept");
   const on = { ...opts, probe: () => (probes++, { on: true, why: "" }) };
@@ -798,23 +816,19 @@ test("outerProbe keeps only a yes: a no is probed again, and an old no in the ca
   rmSync(t, { recursive: true, force: true });
 });
 
-test("a Copilot outer probe that answers off once then on is on: one slow probe neither refuses serve nor Blocks a stage", { skip: process.platform !== "linux" }, async () => {
-  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+test("#421: an outer probe's no is its answer, probed once: the probe waits on slirp4netns itself, so a slow box is no no", { skip: process.platform !== "linux" }, async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { outerProbe } = await import("../scripts/lib/local.mjs");
   const t = mkdtempSync(join(tmpdir(), "op2-"));
   const cacheFile = join(t, "outer-probe.json");
-  const answers = [{ on: false, why: "slirp4netns did not configure its interface: slow" }, { on: true, why: "" }];
-  let probes = 0;
-  const r = outerProbe("copilot", { cacheFile, home: t, keyOf: () => "k", probe: () => answers[probes++] });
-  assert.equal(r.on, true, "the stage runs (stageEnv refuses Copilot only on an off answer)");
-  assert.equal(probes, 2);
-  assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["k|copilot"].on, true, "the yes is kept");
-  // Codex runs without it on a no (no Block): probed once, as before.
-  let codex = 0;
-  assert.equal(outerProbe("codex", { cacheFile, home: t, keyOf: () => "c", probe: () => (codex++, { on: false, why: "x" }) }).on, false);
-  assert.equal(codex, 1);
+  for (const harness of ["copilot", "codex"]) {
+    let probes = 0;
+    const r = outerProbe(harness, { cacheFile, home: t, keyOf: () => "k", probe: () => (probes++, { on: false, why: "x" }) });
+    assert.equal(r.on, false);
+    assert.equal(probes, 1, harness);
+  }
   rmSync(t, { recursive: true, force: true });
 });
 

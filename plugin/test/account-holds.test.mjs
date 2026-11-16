@@ -260,6 +260,28 @@ test("#264: with no accounts declared, a hold is the login's: two serves on two 
   }
 });
 
+test("#421: pauses on GitHub's spent rate limit count from the first only while nothing is done between them: a stage whose provider served a pass counts afresh", async () => {
+  const h = fakeHome();
+  let t = Date.parse("2026-11-14T08:00:00Z");
+  await withHome(h, async () => {
+    const loop = serveOn(h, () => t);
+    // As session.mjs outageExit writes a stage paused on the spent quota; `output`: what its provider served.
+    const quota = (output) => ({ exit: "paused", usd: 0.1, tokens: { output }, outage: { host: "api.github.com", origin: "https://api.github.com", code: "RATE_LIMIT_SPENT", since: new Date(t).toISOString(), reset: new Date(t + 60 * MIN).toISOString() } });
+    const first = t;
+    loop.result = quota(0);
+    await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
+    t += 80 * MIN;
+    loop.result = quota(0);
+    await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
+    assert.equal(loop.offline.get(8).since, first, "nothing served between: the same outage");
+    t += 80 * MIN;
+    loop.result = quota(1200);
+    await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
+    assert.equal(loop.offline.get(8).since, t, "a pass served since the last pause: counted from its own");
+    assert.equal(loop.ran(), 3);
+  });
+});
+
 test("#264: a Copilot token from serve's environment names no login: its hold stays in that serve's memory", async () => {
   const h = fakeHome({ declared: false });
   const t = Date.now();

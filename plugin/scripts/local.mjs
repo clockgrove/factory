@@ -20,7 +20,7 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
-import { constants as osConstants, homedir, hostname, platform, tmpdir, uptime } from "node:os";
+import { constants as osConstants, homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -38,8 +38,8 @@ import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
-import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
+import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -60,6 +60,7 @@ import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveI
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
+import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
@@ -120,6 +121,8 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
  * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
  */
 export const PAUSED_BEAT_MS = 60 * 60_000;
+/** The lapse in a row that Blocks even when the lapse check judges it `transient` (Local.lapse). */
+export const LAPSE_TRANSIENT_MAX = 3;
 
 /** The line for an Objective with more than one account label (#265): it moves nowhere and waits. */
 const twoPinsLine = (labels) => `${labels.map(pinLabelText).join(", ")}: more than one account label moves nothing, so the Objective waits, on no account, until one is left`;
@@ -278,12 +281,12 @@ const readId = (file) => {
 /**
  * Who this machine is and which boot it is on, for claim holders: a host name alone is not unique (a devcontainer on
  * host networking, two laptops called the same), and a pid is only meaningful within one boot. Linux gives both ids;
- * elsewhere the machine is its host name and the boot its start minute.
+ * elsewhere the machine is its host name and the boot is proc.mjs bootId's (macOS: the boot time's exact second, as
+ * liveStage and the slots read it), or none where that is unreadable: a holder's pid is then probed alone.
  */
-export function machineIdentity() {
+export function machineIdentity({ boot = bootId } = {}) {
   const machine = readId("/etc/machine-id") || readId("/var/lib/dbus/machine-id");
-  const boot = readId("/proc/sys/kernel/random/boot_id") || String(Math.round((Date.now() / 1000 - uptime()) / 60));
-  return { host: hostname(), machine, boot };
+  return { host: hostname(), machine, boot: String(boot() ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) };
 }
 
 /** A loop's claim holder: `host:pid:nonce:machine:boot`. */
@@ -447,21 +450,37 @@ export const REFUSED_PROBE = { ms: 60_000 };
 const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
 
 /**
+ * The most other repositories checkToken probes: a token that lists more is refused, never passed on a partial check.
+ * Each probe is one write request against the token's API quota.
+ */
+export const TOKEN_PROBE_MAX = 100;
+
+/**
  * The token can write to this repository and nothing else. A fine-grained token lists every public repository it
  * may read, and the listed permissions are the person's, not the token's, so write reach is probed instead: an
  * issue with no title is refused before anything is created, with 422 where the token may write and 403 or 404
- * where it may not.
+ * where it may not. Every listed repository is probed; a listing that fails, more than `max` others, or a probe that
+ * gets any other answer refuses the token, since its reach is then unknown.
  */
-async function checkToken(repoFull, token) {
+export async function checkToken(repoFull, token, { max = TOKEN_PROBE_MAX } = {}) {
   if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
-  const reach = (await rest("user/repos?per_page=100", { token, paginate: true }).catch(() => [])) || [];
-  const others = reach.map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase()).slice(0, 20);
+  let reach;
+  try {
+    reach = await rest("user/repos?per_page=100", { token, paginate: true });
+  } catch (e) {
+    throw new Error(`the repositories the local token can reach could not be listed (${e.status || String(e.message).slice(0, 80)}), so its reach is not verified`);
+  }
+  const others = (Array.isArray(reach) ? reach : []).map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase());
+  if (others.length > max) throw new Error(`the local token lists ${others.length} other repositories, more than the ${max} Factory probes for write access; make a token whose repository access is limited to ${repoFull}`);
   const writable = [];
+  const unknown = [];
   for (const name of others) {
     const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {} }).then(() => 201, (e) => e.status || 0);
     if (status === 422 || status === 201) writable.push(name);
+    else if (status !== 403 && status !== 404) unknown.push(`${name}: ${status || "no answer"}`);
   }
   if (writable.length) throw new Error(`the local token can write to ${writable.length} other repositor${writable.length === 1 ? "y" : "ies"} (${writable.slice(0, 3).join(", ")}${writable.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
+  if (unknown.length) throw new Error(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);
 }
 
 /** The issue a PR is a review trigger for: on factory/<issue>, labelled factory:review, not a draft; else 0. */
@@ -1442,7 +1461,8 @@ export class Local {
     }
     // Its env is made: the settings may change from here on.
     setUp();
-    if (this.stopping) {
+    // Stopping, or another loop took the claim meanwhile (withClaim's heartbeat): no process starts.
+    if (this.stopping || this.lost?.has(issue)) {
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
     }
@@ -1474,6 +1494,8 @@ export class Local {
         child.stdio[3].on("error", () => {});
         child.stdio[3].end(this.token);
         if (this.notice) serveNotices(child, this.notice);
+        // By its Objective, for withClaim's heartbeat to end it when another loop holds the claim.
+        child.issue = issue;
         this.children.add(child);
         // One relay per stream, whole lines only, so no value split across two chunks escapes the redaction.
         const relays = [child.stdout, child.stderr].map((stream) => {
@@ -1511,7 +1533,8 @@ export class Local {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
             log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
           }
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          // `served`: a pass the provider served in this stage (servedPass), the progress outagePaused reads between pauses.
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, served: !!result && servedPass(result), ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1614,6 +1637,11 @@ export class Local {
    * after the claim is written. A start that waited long enough for another loop to put the Objective back to Queued, or
    * to pick it again (serve's sweep of a Running one with no claim, the dispatcher's), sees the stint change and steps
    * aside: it writes no claim, or takes back the one it wrote.
+   *
+   * Two loops that write at once can each read their own name back. The heartbeat settles it: each beat reads the claim
+   * before it writes, and one that names another live loop (fresh, and not a dead loop of this machine) ends this loop's
+   * stage of the Objective instead of overwriting it (`lost`): no lapse, the claim stays that loop's, and this loop never
+   * resumes the Objective from it.
    */
   async withClaim(issue, fn, { onStop = null, stint = false } = {}) {
     const stintNow = async () => {
@@ -1658,9 +1686,8 @@ export class Local {
     } catch (e) {
       throw Object.assign(e, { startFailed: "claim", othersClaim: others });
     }
-    // Two loops writing at once: the comment's last writer holds it, and the other steps aside. A short random wait
-    // lets both writes land before either reads back, so both cannot read their own.
-    await new Promise((r) => setTimeout(r, this.claimSettleMs ?? 1500 + Math.floor(Math.random() * 1500)));
+    // Two loops writing at once: the comment's last writer holds it, and the other steps aside, here or at its next
+    // heartbeat (below), whichever first reads the other's name.
     let mine;
     try {
       mine = await this.readClaim(issue);
@@ -1684,29 +1711,52 @@ export class Local {
     }
     this.ceded?.delete(issue);
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
-    // beats due meanwhile are skipped rather than queued behind it.
+    // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
+    // cannot read is written as before (no answer is no other holder).
     let beating = null;
+    let lost = null;
+    const heartbeat = async () => {
+      const now = await localClaim(this.repo, issue, this.opts).catch(() => undefined);
+      if (now && now.holder !== this.holder && now.fresh && !deadHereHolder(now.holder, { own: this.holder })) {
+        lost = now.holder;
+        clearInterval(beat);
+        log(`#${issue}: another local loop holds it now (${now.holder}); ending this loop's stage of it`);
+        (this.lost ??= new Set()).add(issue);
+        for (const child of this.children || []) if (child.issue === issue) child.kill("SIGTERM");
+        return;
+      }
+      // This loop's own claim read: rewritten in place, with no second read.
+      if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, this.opts);
+      else await writeClaim(this.repo, issue, this.holder, this.opts);
+    };
     const beat = setInterval(() => {
-      if (beating) return;
-      beating = writeClaim(this.repo, issue, this.holder, this.opts)
+      if (beating || lost) return;
+      beating = heartbeat()
         .catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`))
         .finally(() => {
           beating = null;
         });
-    }, HEARTBEAT_MS);
+    }, this.heartbeatMs ?? HEARTBEAT_MS);
     let result = null;
     let failure = null;
     try {
       result = await fn();
-      return result;
+      return lost ? { exit: "skipped" } : result;
     } catch (e) {
       failure = e;
       throw e;
     } finally {
       clearInterval(beat);
+      this.lost?.delete(issue);
+      // The claim went to another live loop (the heartbeat): its stage is that loop's, and so is the claim.
+      if (lost) {
+        (this.ceded ??= new Set()).add(issue);
+        this.lapsed?.delete(issue);
+        this.offline?.delete(issue);
+      }
       // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it. A failed
       // start is unstart's to settle.
-      if (!this.stopping && !failure?.startFailed) {
+      else if (!this.stopping && !failure?.startFailed) {
         // A stage this machine's network ended (`paused`): no lapse, the claim stays, and pausedHere resumes it once
         // the host answers again (outagePaused).
         if (result?.exit === "paused") await this.outagePaused(issue, result);
@@ -1743,11 +1793,14 @@ export class Local {
 
   /**
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
-   * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
-   * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. A throw names
-   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work; and
-   * the error as postedError has it. The count is this loop's memory: another serve on the machine resumes the
-   * Objective afresh.
+   * stays and pausedHere resumes it, or it Blocks here (cause `factory`), naming the stage, its exit code or signal and
+   * its log on this machine, so the cause reaches GitHub and nothing retries forever. Whether to start it again is the
+   * lapse check's (lib/lapse-check.mjs, a decision call on the AI Gateway): given this end and the one before it, would
+   * the same stage started again end the same way? `same_again` Blocks at once; `transient` resumes it, and the
+   * LAPSE_TRANSIENT_MAX-th lapse in a row Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
+   * once and a second lapse in a row Blocks. A throw names what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else
+   * the local loop itself; never the work; and the error as postedError has it. The count is this loop's memory:
+   * another serve on the machine resumes the Objective afresh.
    */
   async lapse(issue, result, failure) {
     const stage = result?.stage || failure?.stageSetup || "local";
@@ -1756,15 +1809,30 @@ export class Local {
     const what = said(String(failure?.message || failure).slice(0, 200));
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
-    if (!lapsed.has(issue)) {
-      lapsed.set(issue, 1);
-      log(`#${issue}: ${what}; the claim stays and this loop resumes it once${where}`);
+    const before = lapsed.get(issue) ?? null;
+    let pressure = null;
+    try {
+      pressure = readPressure({ root: this.machinePlaces().proc });
+    } catch {
+      // unknown: the check is told so
+    }
+    const facts = lapseFacts({ result, failure, pressure });
+    // Opened for each lapse, so a key file or decision route set since serve started is read (`lapseCheck`: a test's own).
+    const check = this.lapseCheck ?? openLapseCheck({ inputs: resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }), env: this.baseEnv() });
+    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
+    const count = (before?.count ?? 0) + 1;
+    const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
+    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < LAPSE_TRANSIENT_MAX : count < 2;
+    if (resume) {
+      lapsed.set(issue, { count, facts });
+      log(`#${issue}: ${what}${judged}; the claim stays and this loop resumes it (lapse ${count} in a row)${where}`);
       return;
     }
     lapsed.delete(issue);
-    log(`#${issue}: ${what} again; Blocking it${where}`);
+    const times = count === 1 ? "" : count === 2 ? " twice in a row" : ` ${count} times in a row`;
+    log(`#${issue}: ${what}${times ? " again" : ""}${judged}; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${said(postedError(failure))} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -1777,7 +1845,9 @@ export class Local {
    * comes within OUTAGE.stageWaitMs of this loop resuming the Objective from an earlier one is the same outage (a network
    * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
    * the network. A pause on GitHub's spent rate limit after an earlier one, with no other end between, is the same however
-   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. A pause on GitHub answering
+   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. Either holds only while
+   * nothing was done between them: a stage that paused after its provider served a pass (`result.served`, servedPass)
+   * made progress since the earlier pause, so its pause counts afresh from its own `since`. A pause on GitHub answering
    * 5xx past the client's retries (network.mjs serverDown) is counted in `server` ({since, pauses, at, request,
    * requestSince, tried}: the request that failed, its first failure and whether its one more try was made) across
    * every pause of the Objective however far apart, until a stage ends any other way (withClaim): a probe of the host
@@ -1795,7 +1865,7 @@ export class Local {
     const earlier = this.offline?.get(issue);
     const reset = Date.parse(o.reset);
     const quotaAgain = Number.isFinite(reset) && Number.isFinite(earlier?.reset) && !earlier?.harness;
-    const same = earlier && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
+    const same = earlier && !result?.served && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
     const since = same ? Math.min(own, earlier.since) : own;
     const now = (this.clock ?? Date.now)();
     const before = earlier?.harness ? null : (earlier?.server ?? null);

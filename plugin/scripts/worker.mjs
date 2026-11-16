@@ -46,6 +46,7 @@ import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
+import { judgedAnswers, openPlanAnswerCheck } from "./lib/plan-answer.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 
@@ -710,10 +711,10 @@ async function main() {
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   io.set({ decisions, prNumber: openPr?.number ?? null });
   // The plan-time Question (lib/one-repo.mjs): a repository other than this one that the plan needs, unless a maintainer
-  // has answered about it since a run asked (Factory's own record of the ask, in its progress comments). A rebase
-  // send-back changes no plan.
+  // has answered about it since a run asked (Factory's own record of the ask, in its progress comments), as the
+  // plan-answer check judges the comments since (lib/plan-answer.mjs). A rebase send-back changes no plan.
   const askedAt = rebaseMode ? {} : planAskedOf(await listComments(repo, issue, token).catch(() => []), { issue, self: await progress.self() });
-  const answered = answeredRepos(askedAt, decisions);
+  const answered = await judgedAnswers(askedAt, decisions, { source: repo, label: inputs.objectiveLabel, check: openPlanAnswerCheck({ inputs, stage: decisionStage }) });
   if (answered.size) log(`plan-time Question answered since it was asked: ${[...answered].join(", ")}`);
   // The mid-run stop counts any maintainer decision since the ask, naming the repository or not: until the harness has
   // re-planned with the answer, its plan.md (a copy of the plan comment, a first draft) may still carry the line, and

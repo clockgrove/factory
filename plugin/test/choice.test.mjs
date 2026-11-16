@@ -161,8 +161,8 @@ test("editedSincePlan: the merge's check reads the labels with the text", async 
   setSelf("factory-app[bot]");
   const plan = async () => ({ at: "2026-11-14T10:00:00Z", own: true, text: "## Plan", record: { sha256: objectiveSha("Objective", "Build the thing."), label: null } });
   const issue = (labels) => ({ gh: { graphql: async (q) => (assert.match(q, /labels\(first: 100\)/), { repository: { issue: { title: "Objective", body: "Build the thing.", labels: { nodes: labels.map((name) => ({ name })) } } } }) }, read: plan });
-  assert.equal(await editedSincePlan(repo, 7, {}, issue(["factory:objective"])), false);
-  assert.equal(await editedSincePlan(repo, 7, {}, issue(["factory:objective", "factory:reviewer-model:claude-opus-5-5"])), true);
+  assert.equal(await editedSincePlan(repo, 7, {}, issue(["factory:objective"])), "same");
+  assert.equal(await editedSincePlan(repo, 7, {}, issue(["factory:objective", "factory:reviewer-model:claude-opus-5-5"])), "changed");
 });
 
 /** GitHub's REST timeline, from a fetch fake. */
@@ -285,12 +285,13 @@ test("what ran is recorded: the progress comment's harness line and doctor's def
   for (const p of Object.values(CHOICE_PREFIXES)) assert.ok(d.detail.includes(p), p);
 });
 
-test("the work and review stages: the choice after the trust and plan checks, then doctor for that harness, all before any harness", () => {
+test("the work and review stages: the choice after the trust check, then the plan check on the chosen harness, doctor for that harness, all before any harness", () => {
   for (const file of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(ROOT, "plugin", "scripts", file), "utf8");
     const run = src.indexOf("async function run()");
     const at = (s) => src.indexOf(s, run);
-    assert.ok(at("await authorGate(") < at("await planGate(") && at("await planGate(") < at("await choiceGate("), file);
+    // The plan check after the choice: an edit is judged on the harness the labels chose (objective-trust.mjs planGate).
+    assert.ok(at("await authorGate(") < at("await choiceGate(") && at("await choiceGate(") < at("await planGate("), file);
     assert.match(src.slice(at("await choiceGate("), at("await choiceGate(") + 700), /if \(!chosen\.ok\) \{\n\s+log\(chosen\.reason\);\n\s+await finish\("blocked", chosen\.reason\);\n\s+return;\n\s+\}\n\s+Object\.assign\(inputs, chosen\.inputs\);/, `${file} stops on a refusal, else runs on the choice`);
     for (const later of ["jobChecks(", "installPlugin(", "credentialEnv(", "openHandoff(", "runHarness(", "validationLoop("]) {
       const i = at(later);

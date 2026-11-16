@@ -54,7 +54,8 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningFactory, runningName, startProblem } from "./lib/release.mjs";
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
-import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
+import { openEditCheck } from "./lib/edit-check.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -2773,7 +2774,7 @@ export class Local {
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
-        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
+        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
         const why = mergeBlockReason(how, report);
         if (why) {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
@@ -2787,7 +2788,7 @@ export class Local {
           log(`#${issue}: a person took PR #${prNumber} out of the merge queue; Factory leaves it to them`);
           return false;
         }
-        if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red") return this.review(issue, prNumber, { wait: true }).then((r) => (r.next ? "next" : r.exit === "delivered"));
+        if (how === "re-review" || how === "unread" || how === "code-scanning" || how === "queue-red" || how === "text-edit") return this.review(issue, prNumber, { wait: true }).then((r) => (r.next ? "next" : r.exit === "delivered"));
         if (how === "conflict") {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
@@ -3435,7 +3436,7 @@ const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (
  */
 async function issueForSession(issue, flags) {
   const clone = sessionClone(flags);
-  await sessionInputs(clone);
+  const { inputs } = await sessionInputs(clone);
   const data = await getIssue(clone.repo, issue, clone.opts);
   if (isDraft(data)) throw draftRefusal(issue, `#${issue} is not given to this session`);
   const t = await trustedIssue(clone.repo, issue, data, clone.opts);
@@ -3446,7 +3447,8 @@ async function issueForSession(issue, flags) {
   // the new text. No plan.md from an earlier run stays, even when the plan cannot be read: it goes before anything else.
   const planFile = flags.out ? null : join(dirname(file), "plan.md");
   if (planFile) rmSync(planFile, { force: true });
-  const { posted, state } = planFile ? await planStateNow(clone.repo, issue, t, clone.opts) : {};
+  // An edit since the plan is judged by the edit check on the AI Gateway alone (a session has no stage harness here).
+  const { posted, state } = planFile ? await planStateNow(clone.repo, issue, t, clone.opts, {}, () => openEditCheck({ inputs })) : {};
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
@@ -3499,7 +3501,7 @@ async function deliver(issue, flags) {
     }
   })();
   if (given !== null && settled(given) !== settled(inFiles({ issue, issueTitle: issueData.title, issueBody: issueData.body })["issue.md"])) throw new Error(`nothing was delivered: the Objective's title or body changed after this session read it; run \`factory issue ${issue}\` again and make the plan again from the new text`);
-  const planRecord = given === null ? null : { sha256: trusted.sha, label: labeledAt };
+  const planRecord = given === null ? null : { sha256: trusted.sha, label: labeledAt, text: recordText({ ...issueData, labels: trusted.labels }) };
   const out = resolve(flags.out || process.env.FACTORY_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "factory-out"));
   const { files, refused } = await readOut({ out }, process.env);
   if (refused.length) log(`hand-off files refused: ${refused.join(", ")}`);
@@ -3782,11 +3784,12 @@ async function postFindings(prNumber, file, flags) {
   const issue = Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]);
   if (!issue) throw new Error(`PR #${prNumber} is not on a factory/<issue> branch`);
   // The review job's check: a review judged against text no writer vouches for is not posted.
-  await sessionInputs(clone);
+  const { inputs } = await sessionInputs(clone);
   const trusted = await trustedIssue(repo, issue, await getIssue(repo, issue, opts), opts);
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
-  // The review job's second check: a review of code made from earlier text than the Objective's now is not posted.
-  if ((await planStateNow(repo, issue, trusted, opts)).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
+  // The review job's second check: a review of code made from earlier text than the Objective's now is not posted. An
+  // edit since the plan is judged by the edit check on the AI Gateway alone (a session has no stage harness here).
+  if ((await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }))).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
   // The review job's third: a foundation label it would Block on is refused here; a trusted one asks for both passes.
   const found = await foundationTrusted(repo, issue, trusted.labels, opts);
   if (!found.ok) throw new Error(`nothing posted: ${found.reason}. ${found.fix}`);

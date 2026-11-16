@@ -373,7 +373,7 @@ test("#331: code scanning's open comments reach the answer pass marked as untrus
   // A first review that found nothing leaves code scanning's and the named reviewers' comments to answer.
   assert.deepEqual(answerList([{ id: 11 }, { id: codeql.comment.id, from: CODE_SCANNING }], { placeholder: true, first: true }).map((c) => c.id), [codeql.comment.id]);
   assert.match(src, /resolveFactoryThreads\(repo, pr\.number, issue, token, \{ thirdParty \}\)/);
-  assert.match(src, /mergeReadyOne\(repo, \{[^\n]*thirdParty \}, token\)/);
+  assert.match(src, /mergeReadyOne\(repo, \{[^\n]*thirdParty, editCheck \}, token\)/);
 });
 
 test("#331 #368: code scanning's thread is never resolved on a reply alone: Factory's answer is the finding check's to resolve", async () => {

@@ -43,7 +43,7 @@ Run the proof: `npm ci --ignore-scripts --prefix plugin && node bench/sandbox-co
 
 ## Decision model
 
-Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decider there: red-check triage (`lib/triage.mjs`) and the drift advisory (`lib/drift.mjs`), each with its own gateway model setting, and the finding check (`lib/finding-check.mjs`), the answer gate (`review.mjs` answerGate) and the rebase check (`lib/kept.mjs`), on triage's. Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK) and `harness` (`decider-harness.mjs`, the stage's own harness on its login).
+Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decider there: red-check triage (`lib/triage.mjs`) and the drift advisory (`lib/drift.mjs`), each with its own gateway model setting, and the finding check (`lib/finding-check.mjs`), the answer gate (`review.mjs` answerGate), the rebase check (`lib/kept.mjs`) and the edit check (`lib/edit-check.mjs`), on triage's. Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK) and `harness` (`decider-harness.mjs`, the stage's own harness on its login).
 
 | Operation | Does |
 | --- | --- |
@@ -51,7 +51,7 @@ Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decid
 | `decide(input, question, {signal})` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. Each caller keeps its own confidence floor. `signal` ends the call early, with no answer: the drift advisory ends its check in flight when a pass ends, rather than hold the stage for it. |
 | `asked()`, `limited()` | Who answers now (`{name, model}`: the gateway, or the stage's harness once the gateway refused); the stage harness's refusal that stopped its decision calls, or null. A Block names the first; the finding check ends its stage on the second. |
 
-To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it, the same object for every decider of the stage), call `decide`, and act only on a verdict at the caller's floor. For triage, drift and the answer gate, no answer is the same as no decider. The rebase check reads no answer as a change not shown kept, so the send-back Blocks naming the file. The stage harness's usage limit is the exception: the stage ends as a pass meeting the limit does, with nothing pushed. The finding check does not take it that way. An answer it got no verdict on is judged again by the next stage, with no worker pass. After two stages without a verdict the Objective Blocks, naming the decider asked. A stage harness's usage limit stops it as a pass's does (below).
+To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it, the same object for every decider of the stage), call `decide`, and act only on a verdict at the caller's floor. For triage, drift, the answer gate and the edit check, no answer is the same as no decider. The rebase check reads no answer as a change not shown kept, so the send-back Blocks naming the file. The stage harness's usage limit is the exception: the stage ends as a pass meeting the limit does, with nothing pushed. The finding check does not take it that way. An answer it got no verdict on is judged again by the next stage, with no worker pass. After two stages without a verdict the Objective Blocks, naming the decider asked. A stage harness's usage limit stops it as a pass's does (below).
 
 One stage, one harness adapter: every decider opened with the same `stage` asks through one shared `harness` adapter. Its cap on calls at once, its stop after a usage limit and its usage record are the stage's, whichever caller asks. On `auto`, a gateway that refuses Factory's key or its credits (`auth`, `billing`) hands that question and the rest of the stage to the stage's harness, said once in the log.
 
@@ -85,9 +85,10 @@ The `harness` vendor:
   - The answer gate asks once per review stage whose answer and fix passes committed.
   - The finding check asks once per reviewer finding the answer pass replied to.
   - The rebase check asks once per file a send-back's conflict pass left other than the branch's version.
+  - The edit check asks once per distinct text of an Objective edited after its plan was made, its verdict kept on the plan comment.
   - On Copilot each call is a premium request.
   - All of it counts toward max_usd, the validation loop's budget included.
-  - `decision_route` `gateway` uses the gateway only. `off` runs no decision call: every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass (the answer gate), a reply resolves its reviewer finding unjudged (the finding check), and a send-back's conflict pass is checked by matching commits rather than by content (the rebase check).
+  - `decision_route` `gateway` uses the gateway only. `off` runs no decision call: every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass (the answer gate), a reply resolves its reviewer finding unjudged (the finding check), a send-back's conflict pass is checked by matching commits rather than by content (the rebase check), and any edit to an Objective's text after its plan makes the plan and code stale (the edit check).
 
 Rules:
 

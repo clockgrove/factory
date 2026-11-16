@@ -101,6 +101,7 @@ import {
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
+import { openEditCheck } from "./lib/edit-check.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -932,14 +933,6 @@ async function main() {
     return;
   }
   const { issueData } = trusted;
-  // The text its plan was made from (objective-trust.mjs planGate): changed since, the review, the answer pass and the
-  // merge do not go on with code made for the earlier text. The stage Blocks before anything is set up for it.
-  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
-  if (!planned.ok) {
-    log(planned.reason);
-    await finish("blocked", planned.reason);
-    return;
-  }
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): the reviewer, and the fix and answer
   // passes, on what its labels choose over the repository's defaults, or a Block before anything is set up for it.
   const chosen = await choiceGate({ repo, issue, labels: trusted.labels, args, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review" });
@@ -984,6 +977,30 @@ async function main() {
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", ...block, notify: inputs.notify }, token);
     await finish("blocked", block.reason);
+    return;
+  }
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, on
+  // the reviewer's model (the independent one), each call's spend in the stage's usage. Their env is the harness env (no
+  // worker secret) once the hand-off is open; before it, for the edit check alone, the env every child starts from with
+  // this harness's credential, read only when a question is due.
+  let decisionEnv = null;
+  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  const editCheck = async () => {
+    try {
+      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env };
+    } catch (e) {
+      log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
+      return openEditCheck({ inputs });
+    }
+    return openEditCheck({ inputs, stage: decisionStage });
+  };
+  // The text its plan was made from (objective-trust.mjs planGate), before anything is set up for it: changed since, the
+  // review, the answer pass and the merge do not go on with code made for the earlier text, and the stage Blocks. An
+  // edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel, stage: "review", check: editCheck });
+  if (!planned.ok) {
+    log(planned.reason);
+    await finish("blocked", planned.reason);
     return;
   }
   // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. Whether
@@ -1098,9 +1115,8 @@ async function main() {
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   io.set({ decisions, prNumber: pr.number });
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, on
-  // the reviewer's model (the independent one) and env (no worker secret), each call's spend in the stage's usage.
-  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The decision calls from here run on the harness env (decisionStage).
+  decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
   // The answer gate's decision model (answerDecider): triage's model, through the stage's decider; with none, every
@@ -1838,8 +1854,8 @@ async function main() {
         await recordMergeable(repo, pr.number, issue, outbox.expected() || pr.head.sha, token);
         recorded = true;
         const report = {};
-        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, thirdParty }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
+        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, thirdParty, editCheck }, token);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
         // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.

@@ -3032,6 +3032,18 @@ async function conversationsGate(repo, ctx, report, opts) {
 }
 
 /**
+ * An edit since the plan that the merge pass could not judge (objective-trust.mjs editedSincePlan "unjudged"): the
+ * review label goes back on, so a review stage, whose start judges the edit with its own decider (planGate), decides
+ * whether the PR still merges. Returns "text-edit".
+ */
+async function textEdit(repo, issue, prNumber, opts) {
+  log(`#${issue}: the Objective's text changed since its plan and no decider here can judge the edit; the review stage judges it`);
+  await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
+  await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
+  return "text-edit";
+}
+
+/**
  * Merge the PR when, and only when, its head is the one recorded as mergeable (or GitHub's signed update-branch merge
  * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
@@ -3041,7 +3053,8 @@ async function conversationsGate(repo, ctx, report, opts) {
  * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
  * "red" (a required check failed on the recorded head; the caller Blocks), "edited" (the Objective's title, body or harness and model labels
  * changed since its plan was made, read before any merge and while the PR waits in the queue, which it is taken out
- * of; the caller Blocks), "conflict" (the PR conflicts with the
+ * of; the caller Blocks), "text-edit" (such an edit that `editCheck`, the edit check this process can ask (edit-check.mjs
+ * openEditCheck), could not judge: the review label goes back on and the review stage's start judges it), "conflict" (the PR conflicts with the
  * default branch, read before the merge or after GitHub refused it: never a Block here; the caller sends it back for a
  * rebase under logic.mjs staleDecision's rules), "dropped" (the merge queue
  * dropped it QUEUE_TRIES times since the latest of its review, its head's commit and the issue's last re-entry (the
@@ -3059,7 +3072,7 @@ async function conversationsGate(repo, ctx, report, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [] }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3088,10 +3101,11 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // seen by a run nothing holds for approval, not only by the `dequeued` event's (#2683).
     if (!st?.stalled) {
       // The Objective edited since its plan while its PR waits in the queue: taken out, so it does not merge (the
-      // caller Blocks). A dequeue GitHub refuses is logged.
-      if (await editedSincePlan(repo, issue, opts)) {
+      // caller Blocks, or the review stage judges the edit). A dequeue GitHub refuses is logged.
+      const text = await editedSincePlan(repo, issue, opts, { check: editCheck });
+      if (text !== "same") {
         await dequeuePr(repo, pr.node_id, opts).catch((e) => log(`#${issue}: PR #${prNumber} could not be taken out of the merge queue (${errCode(e)})`));
-        return "edited";
+        return text === "unjudged" ? textEdit(repo, issue, prNumber, opts) : "edited";
       }
       report.watch = true;
       return "in-queue";
@@ -3145,8 +3159,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     return "unread";
   }
   // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
-  // earlier text does not merge; the caller Blocks.
-  if (await editedSincePlan(repo, issue, opts)) return "edited";
+  // earlier text does not merge; the caller Blocks. An edit no decider here could judge goes to the review stage.
+  const text = await editedSincePlan(repo, issue, opts, { check: editCheck });
+  if (text === "changed") return "edited";
+  if (text === "unjudged") return textEdit(repo, issue, prNumber, opts);
   // A PR the queue dropped (its checks never ran on the queue's commit, or failed there) goes back in once; dropped
   // again, it Blocks with the queue's reasons rather than waiting with no notice. GitHub's timeline is the record.
   let retry = null;

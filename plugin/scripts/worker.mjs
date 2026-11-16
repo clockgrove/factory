@@ -45,6 +45,7 @@ import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
+import { openEditCheck } from "./lib/edit-check.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -343,16 +344,7 @@ async function main() {
     return;
   }
   issueData = trusted.issueData;
-  // The text its plan was made from (objective-trust.mjs planGate): changed since, with no label applied after the last
-  // work stage started from it, the stage Blocks; with one, the plan is made again from this text.
   const prNow = await findPr(repo, `factory/${issue}`, token).catch(() => null);
-  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
-  if (!planned.ok) {
-    log(planned.reason);
-    await finish("blocked", planned.reason);
-    return;
-  }
-  if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
 
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): its harness and model labels, read
   // with the text, over the repository's defaults; a label no writer applied, two of one kind, a model the harness cannot
@@ -403,6 +395,31 @@ async function main() {
     await finish("blocked", block.reason);
     return;
   }
+
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
+  // call's spend in the stage's usage. Their env is the harness env once the hand-off is open; before it, for the edit
+  // check alone, the env every child starts from with this harness's credential, read only when a question is due.
+  let decisionEnv = null;
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  const editCheck = async () => {
+    try {
+      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env };
+    } catch (e) {
+      log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
+      return openEditCheck({ inputs });
+    }
+    return openEditCheck({ inputs, stage: decisionStage });
+  };
+  // The text its plan was made from (objective-trust.mjs planGate), before anything acts on the text: changed since, with
+  // no label applied after the last work stage started from it, the stage Blocks; with one, the plan is made again from
+  // this text. An edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck });
+  if (!planned.ok) {
+    log(planned.reason);
+    await finish("blocked", planned.reason);
+    return;
+  }
+  if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
 
   // One repository per Objective (lib/one-repo.mjs): a body that names another repository (declaredQuestion) is a
   // Question before any branch work or harness spend. An open PR the Objective already has goes back to a draft with
@@ -615,9 +632,8 @@ async function main() {
     return;
   }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
-  // call's spend in the stage's usage.
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The decision calls from here run on the harness env (decisionStage).
+  decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.

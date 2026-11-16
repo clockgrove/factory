@@ -16,9 +16,10 @@ RETRY.sleep = async () => {};
 
 /**
  * GitHub listing `count` repositories for the token (acme/app, this one, among them), each with its person's permissions
- * `perms(name)` (push by default), and answering each write probe by `probe(name)`: a status, or `{status, headers}`.
+ * `perms(name)` (push by default), or the listing `repos` as given, and answering each write probe by `probe(name)`:
+ * a status, or `{status, headers}`.
  */
-async function withGitHub({ count, probe, list = true, perms = () => ({ admin: false, maintain: false, push: true, triage: true, pull: true }) }, fn) {
+async function withGitHub({ count, probe, list = true, repos, perms = () => ({ admin: false, maintain: false, push: true, triage: true, pull: true }) }, fn) {
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -26,7 +27,7 @@ async function withGitHub({ count, probe, list = true, perms = () => ({ admin: f
   const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
-    if (u.pathname === "/user/repos") return list ? json([{ full_name: "acme/app", permissions: perms("acme/app") }, ...Array.from({ length: count - 1 }, (_, i) => ({ full_name: `dev/r${i + 1}`, permissions: perms(`dev/r${i + 1}`) }))]) : json({ message: "Forbidden" }, 403);
+    if (u.pathname === "/user/repos") return list ? json(repos ?? [{ full_name: "acme/app", permissions: perms("acme/app") }, ...Array.from({ length: count - 1 }, (_, i) => ({ full_name: `dev/r${i + 1}`, permissions: perms(`dev/r${i + 1}`) }))]) : json({ message: "Forbidden" }, 403);
     const m = /^\/repos\/([^/]+\/[^/]+)\/issues$/.exec(u.pathname);
     if (m && init.method === "POST") {
       probed.push(m[1]);
@@ -61,7 +62,7 @@ test("#421: checkToken never passes on a partial check: a listing that fails, mo
     assert.equal(probed.length, 0);
   });
   await withGitHub({ count: TOKEN_PROBE_MAX + 2, probe: () => 404 }, async (probed) => {
-    await assert.rejects(checkToken("acme/app", "github_pat_x"), new RegExp(`lists ${TOKEN_PROBE_MAX + 1} other repositories you can push to, more than the ${TOKEN_PROBE_MAX} Factory probes for write access \\(FACTORY_LOCAL_TOKEN_PROBE_MAX\\)`));
+    await assert.rejects(checkToken("acme/app", "github_pat_x"), new RegExp(`lists ${TOKEN_PROBE_MAX + 1} other repositories it could write to, more than the ${TOKEN_PROBE_MAX} Factory probes for write access \\(FACTORY_LOCAL_TOKEN_PROBE_MAX\\)`));
     assert.equal(probed.length, 0, "refused before any probe");
   });
   await withGitHub({ count: 3, probe: (n) => (n === "dev/r2" ? 400 : 404) }, async () => {
@@ -69,7 +70,7 @@ test("#421: checkToken never passes on a partial check: a listing that fails, mo
   });
 });
 
-test("#421: checkToken probes only the listed repositories its person can push to: hundreds of public ones it can only read pass with no probe", async () => {
+test("#421: checkToken probes only the listed repositories its person can push to or this one's owner owns: hundreds of public ones it can only read pass with no probe", async () => {
   // A token limited to acme/app, whose person reads 300 public repositories of their account and orgs and pushes to one.
   const perms = (n) => ({ admin: n === "acme/app", maintain: false, push: n === "acme/app" || n === "dev/r7", triage: false, pull: true });
   await withGitHub({ count: 301, perms, probe: () => 404 }, async (probed) => {
@@ -84,8 +85,56 @@ test("#421: checkToken probes only the listed repositories its person can push t
   });
   // The cap counts the repositories to probe, as the setting sets it.
   await withGitHub({ count: 4, probe: () => 404 }, async (probed) => {
-    await assert.rejects(checkToken("acme/app", "github_pat_x", { max: 2 }), /lists 3 other repositories you can push to, more than the 2 Factory probes/);
+    await assert.rejects(checkToken("acme/app", "github_pat_x", { max: 2 }), /lists 3 other repositories it could write to, more than the 2 Factory probes/);
     assert.equal(probed.length, 0);
+  });
+});
+
+test("#421: checkToken refuses a token that lists any other private repository, with no probe: a fine-grained token lists one only when granted it", async () => {
+  const read = { admin: false, maintain: false, push: false, triage: false, pull: true };
+  const repos = [
+    { full_name: "acme/app", private: true, permissions: { ...read, push: true } },
+    { full_name: "acme/secret", private: true, permissions: read },
+    { full_name: "acme/other", private: false, permissions: read },
+  ];
+  await withGitHub({ repos, probe: () => 404 }, async (probed) => {
+    const e = await checkToken("acme/app", "github_pat_x").then(() => null, (err) => err);
+    assert.ok(e, "a token granted another private repository is refused");
+    assert.match(e.message, /can reach 1 other private repository \(acme\/secret\); limit it to acme\/app/);
+    assert.equal(e.again, undefined, "refused for good, not checked again");
+    assert.deepEqual(probed, [], "no probe");
+  });
+  // This repository private and listed alone (or with public ones that pass) is the token it should be.
+  await withGitHub({ repos: [repos[0], { full_name: "dev/lib", private: false, permissions: read }], probe: () => 404 }, async (probed) => {
+    await checkToken("ACME/App", "github_pat_x");
+    assert.deepEqual(probed, []);
+  });
+});
+
+test("#421: checkToken probes the public repositories this one's owner owns, though its person only reads them: a token granted one is refused", async () => {
+  const read = { admin: false, maintain: false, push: false, triage: false, pull: true };
+  const repos = [
+    { full_name: "acme/app", private: false, permissions: { ...read, push: true } },
+    { full_name: "acme/other", private: false, permissions: read },
+    { full_name: "Acme/docs", private: false, permissions: read },
+    { full_name: "dev/lib", private: false, permissions: read },
+  ];
+  await withGitHub({ repos, probe: (n) => (n === "acme/other" ? 422 : 404) }, async (probed) => {
+    await assert.rejects(checkToken("acme/app", "github_pat_x"), /can write to 1 other repository \(acme\/other\); limit it to acme\/app/);
+    assert.deepEqual(probed, ["acme/other", "Acme/docs"], "the owner's public repositories, not another owner's it only reads");
+  });
+  await withGitHub({ repos, probe: () => 404 }, async (probed) => {
+    await checkToken("acme/app", "github_pat_x");
+    assert.equal(probed.length, 2);
+  });
+});
+
+test("#421: checkToken stops at the first probe GitHub's rate limit turns away: no further write request, its reach unknown", async () => {
+  await withGitHub({ count: 6, probe: (n) => (n === "dev/r2" ? { status: 403, headers: { "retry-after": "60" } } : 404) }, async (probed) => {
+    const e = await checkToken("acme/app", "github_pat_x").then(() => null, (err) => err);
+    assert.match(e.message, /could not be probed \(dev\/r2: rate limited\); try again/);
+    assert.equal(e.again, true);
+    assert.deepEqual(probed, ["dev/r1", "dev/r2"], "no probe after the rate-limited one");
   });
 });
 

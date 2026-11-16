@@ -455,14 +455,17 @@ const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LO
 const personPushes = (p) => !!(p.push || p.maintain || p.admin);
 
 /**
- * The token can write to this repository and nothing else. A fine-grained token lists every public repository it may
- * read, with its person's permissions on each, not the token's. The token can push only where its person can, so a
- * listed repository whose permissions show its person cannot push (no push, maintain or admin) is out of its write
- * reach; every other listed one, and one listed with no permissions, is probed: an issue with no title is refused
- * before anything is created, with 422 where the token may write and 403 or 404 where it may not. A listing that
- * fails, more than `max` repositories to probe (FACTORY_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer
- * (GitHub's rate limit included: one probe at a time, each thrown at once rather than waited out) refuses the token,
- * since its reach is then unknown; that error carries `again`, as a check worth making again later.
+ * The token can write to this repository and nothing else. A fine-grained token lists another private repository only
+ * when it was granted it, so any listed private one but this refuses it outright, with no probe. It also lists every
+ * public repository it may read, with its person's permissions on each, not the token's. The token can push only where
+ * its person can, and can open issues on a public repository only when it was granted it, which needs that repository
+ * to share its resource owner with this one. So a listed public repository is probed when its person can push to it
+ * (push, maintain or admin), when this repository's owner owns it, or when it is listed with no permissions; others are
+ * out of its write reach. A probe is an issue with no title, refused before anything is created, with 422 where the token
+ * may write and 403 or 404 where it may not. A listing that fails, more than `max` repositories to probe
+ * (FACTORY_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer refuses the token, since its reach is then
+ * unknown; that error carries `again`, as a check worth making again later. GitHub's rate limit on a probe ends the
+ * check there: one probe at a time, each thrown at once rather than waited out, and no probe after it.
  */
 export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback } = {}) {
   if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
@@ -474,8 +477,12 @@ export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_L
     throw unknownReach(`the repositories the local token can reach could not be listed (${e.rateLimited ? "GitHub's rate limit" : e.status || String(e.message).slice(0, 80)}), so its reach is not verified`);
   }
   const others = (Array.isArray(reach) ? reach : []).filter((r) => String(r?.full_name || "").toLowerCase() !== repoFull.toLowerCase());
-  const toProbe = others.filter((r) => !r.permissions || typeof r.permissions !== "object" || personPushes(r.permissions)).map((r) => r.full_name);
-  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories you can push to, more than the ${max} Factory probes for write access (FACTORY_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
+  const secret = others.filter((r) => r.private === true).map((r) => r.full_name);
+  if (secret.length) throw new Error(`the local token can reach ${secret.length} other private repositor${secret.length === 1 ? "y" : "ies"} (${secret.slice(0, 3).join(", ")}${secret.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
+  const owner = repoFull.split("/")[0].toLowerCase();
+  const sameOwner = (r) => String(r.full_name).split("/")[0].toLowerCase() === owner;
+  const toProbe = others.filter((r) => !r.permissions || typeof r.permissions !== "object" || personPushes(r.permissions) || sameOwner(r)).map((r) => r.full_name);
+  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories it could write to, more than the ${max} Factory probes for write access (FACTORY_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
   const writable = [];
   const unknown = [];
   for (const name of toProbe) {
@@ -485,6 +492,7 @@ export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_L
     );
     if (status === 422 || status === 201) writable.push(name);
     else if (status !== 403 && status !== 404) unknown.push(`${name}: ${status || "no answer"}`);
+    if (status === "rate limited") break;
   }
   if (writable.length) throw new Error(`the local token can write to ${writable.length} other repositor${writable.length === 1 ? "y" : "ies"} (${writable.slice(0, 3).join(", ")}${writable.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
   if (unknown.length) throw unknownReach(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);

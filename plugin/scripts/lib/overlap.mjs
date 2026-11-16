@@ -17,7 +17,7 @@ import { planOf } from "./handoff.mjs";
 import { REVIEW_LABEL, isSelf, marker, priorityOf, selfLogin, stateOf, trustedAuthor } from "./logic.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
 import { TrialUnread, trialMerges } from "./outbox.mjs";
-import { waitOf } from "./third-party-review.mjs";
+import { waitOf, waitUntil } from "./third-party-review.mjs";
 
 /** The plan line that names a checklist item's files (factory-objective-plan): `Files: a/b.mjs, c.md`. */
 export const PLAN_FILES_KEY = "Files";
@@ -356,8 +356,28 @@ const hasMark = (comments, mark) => (comments || []).some((c) => trustedAuthor(c
 /** Whether issue `n`'s PR was handed to review before (its worker's validated or handed-off marker, on any head). */
 const handedOff = (comments, n) => hasMark(comments, marker(n, "validated")) || hasMark(comments, marker(n, "handed-off"));
 
-/** A sibling's PR, its records and what its own review waits for (a third-party reviewer, an account label), read once per `memo`. */
-function siblingState(repo, n, opts, prOf, memo) {
+/**
+ * What sibling `n`'s own review waits for, from its PR's `comments`, or null: a record counts only while it is current.
+ * A third-party wait (waitOf) is current on the PR's head (`pr`) and before its bound (waitUntil); an account wait
+ * (accountWaitOf) while no review label went on since it was written; and either only while the review label's latest
+ * time (read only when a record is there) is not after it, as the dispatcher's own resumes read them (waitState,
+ * accountWaitResume): a record left behind once its wait was over says nothing about when the sibling merges. A label
+ * history that cannot be read counts no record: the sibling is judged as if its review did not wait.
+ */
+async function waitingCause(repo, n, pr, comments, opts, now) {
+  const third = waitOf(comments, n);
+  const account = accountWaitOf(comments, n);
+  const liveThird = third && third.sha === pr.head?.sha && now < waitUntil(third) ? third : null;
+  if (!liveThird && !account) return null;
+  const labelled = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts).then((at) => (at ? Date.parse(at) : -Infinity), () => null);
+  if (labelled === null) return null;
+  if (liveThird && !(labelled >= liveThird.updatedAt)) return "its review waits for a third-party reviewer";
+  if (account && !(account.at && labelled > Date.parse(account.at))) return "its review waits for one account label";
+  return null;
+}
+
+/** A sibling's PR, its records and what its own review waits for now (waitingCause), read once per `memo`. */
+function siblingState(repo, n, opts, prOf, memo, now = Date.now()) {
   if (!memo.has(n))
     memo.set(
       n,
@@ -365,7 +385,7 @@ function siblingState(repo, n, opts, prOf, memo) {
         const pr = await prOf(n);
         if (!pr) return { pr: null, record: null, rebaseWait: null, cause: null };
         const comments = await listComments(repo, pr.number, opts);
-        const cause = waitOf(comments, n) ? "its review waits for a third-party reviewer" : accountWaitOf(comments, n) ? "its review waits for one account label" : null;
+        const cause = await waitingCause(repo, n, pr, comments, opts, now);
         return { pr, record: reviewWaitOf(comments, n), rebaseWait: rebaseWaitOf(comments, n), cause, sentBack: handedOff(comments, n) && hasMark(comments, marker(n, "rebase")) };
       })(),
     );
@@ -397,8 +417,8 @@ async function trial(trials, head, theirs, skip = []) {
  * merge against the default branch (siblingTrials), and that is ahead of it: `{on, files, cause, unread}` (`files` the
  * paths the merge conflicts in), or null. `others` are the other Objectives In review or Running, `stateOf(s)` the state
  * of one, `key` this Objective's place in the release order (keyOf), `stuck(s)` whether one can run no stage now (two
- * account labels, as Blocked), and a sibling whose own review waits (a third-party reviewer, an account label) will
- * not merge soon: neither is ahead. `trials` a siblingTrials, `skip` a sibling head this Objective's record says could not be
+ * account labels, as Blocked), and a sibling whose own review waits now (waitingCause: a third-party reviewer, an
+ * account label) will not merge soon: neither is ahead. `trials` a siblingTrials, `skip` a sibling head this Objective's record says could not be
  * fetched before. Ahead is: In review with no record (in review or in the merge queue); Running the send-back rebase of
  * an open ready PR it handed to review before; a record whose wait is over, on an open ready PR (In review, or Running
  * its rebase after the wait); a record still waiting, In review, earlier in the release order. A Running sibling that
@@ -418,7 +438,7 @@ async function aheadOf(repo, { issue, head, key, others, state, stuck = () => fa
     const r = await trial(trials, head, theirs.head.sha, skip);
     if (!r || (!r.unread && !r.conflict)) continue;
     const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
-    // Its own review waits for a third-party reviewer or one account label: it will not merge soon, as sendBackOrder holds.
+    // Its own review waits now for a third-party reviewer or one account label: it will not merge soon, as sendBackOrder holds.
     if (cause) continue;
     const st = state(s);
     const ahead = record?.released || (record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review" || (st === "Running" && sentBack));
@@ -454,7 +474,7 @@ export function waitStart({ reviewWait = null, rebaseWait = null, released = fal
  * `landed` the tick's; `held` and `released` the Objectives whose hand-off this tick found still waiting, or released
  * (reviewWaitResume), the others' waits read from their records (reviewHold); `stuck(s)` whether a sibling will merge
  * nothing soon (two account labels, a usage-limit hold, red checks, a person took it out of the merge queue); a sibling
- * whose own review waits (a third-party reviewer, an account label) will not either. Each dirty PR, in the release order
+ * whose own review waits now (waitingCause: a third-party reviewer, an account label) will not either. Each dirty PR, in the release order
  * (priority, then number), is sent back unless a sibling ahead of it would make it conflict again once that sibling
  * merges: one earlier in the release order that is In review (not waiting) or Running the rebase of a PR that went to
  * review (sent back, or through its wait), whose head conflicts with this PR's head by a trial merge against the
@@ -485,10 +505,10 @@ export async function sendBackOrder(repo, { dirty, issues, statuses = {}, landed
           if (!theirs?.head?.sha || theirs.draft) continue;
           const r = await trial(scope, head, theirs.head.sha, skip);
           if (!r || (!r.unread && !r.conflict)) continue;
-          const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
+          const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo, now);
           // Its hand-off waits (it waits for others; it would not merge first), unless this tick released it.
           if (record && !record.released && !released.has(s.number)) continue;
-          // Its own review waits for a third-party reviewer or one account label: it will not merge soon.
+          // Its own review waits now for a third-party reviewer or one account label: it will not merge soon.
           if (cause) continue;
           // Running: ahead only while it rebases a PR that went to review (its send-back, or the rebase after its wait).
           if (stateOf(s, statuses[s.number] ?? null) === "Running" && !sentBack && !record?.released) continue;

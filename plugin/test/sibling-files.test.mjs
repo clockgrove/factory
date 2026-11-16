@@ -677,6 +677,11 @@ test("#366: a send-back that waits says so on its PR and issue and arms a wake; 
   const tp = setup({ 31: [validated(21, h21), thirdParty] });
   const p = await tick(tp, { maxConcurrent: 6 });
   assert.deepEqual([p.sentBack, p.rebaseHeld], [[22], []]);
+  // One left behind on an older head is no wait: #21 still merges first, and #22's rebase waits for it (#423).
+  forgetFiles();
+  const stale = setup({ 31: [validated(21, h21), { ...thirdParty, body: thirdParty.body.replace(h21, "a".repeat(40)) }] });
+  const st = await tick(stale, { maxConcurrent: 6 });
+  assert.deepEqual([st.sentBack, st.rebaseHeld], [[], [22]]);
 });
 
 test("#366: trial merges that cannot be computed fall back to the release order (the first conflicting PR goes back, the later ones wait) and keep a waiting hand-off waiting without an error", async () => {
@@ -1030,14 +1035,34 @@ test("#340: a sibling on the other route counts by its own record: the Action's 
   const t = await tick(v);
   assert.deepEqual(t.reviewHeld, [8], "#7 waited first: it goes first, on its own route");
 
-  // #7 In review, its review waiting for a third-party reviewer (its record on its PR): it will not merge soon, so it is
-  // not ahead, as a send-back already reads it, and #8's review goes on.
-  forgetFiles();
-  const thirdParty = { id: 940, user: { login: SELF, type: "Bot" }, body: `${marker(7, "third-party").replace(/ -->$/, "")} {"sha":"${"a".repeat(40)}","logins":["greptile-apps[bot]"],"at":"${new Date().toISOString()}"} -->\nFactory: waiting.`, created_at: new Date().toISOString() };
-  const p = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [thirdParty], 13: [holdRecord(8, 7, since)] }, prs: prs() });
+  // #7 In review, its review waiting for a third-party reviewer on its head (its record on its PR): it will not merge
+  // soon, so it is not ahead, as a send-back already reads it, and #8's review goes on.
+  const thirdPartyOn = (sha, createdAt = new Date().toISOString(), minutes = 20) => ({ id: 940, user: { login: SELF, type: "Bot" }, body: `${marker(7, "third-party").replace(/ -->$/, "")} {"sha":"${sha}","logins":["greptile-apps[bot]"],"minutes":${minutes}} -->\nFactory: waiting.`, created_at: createdAt });
+  const waitingOn7 = (record, timeline = []) => {
+    forgetFiles();
+    const x = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [record], 13: [holdRecord(8, 7, since)] }, prs: prs() });
+    x.state.timelines[12] = timeline;
+    return x;
+  };
+  const p = waitingOn7(thirdPartyOn(H7));
   const q = await tick(p);
   assert.deepEqual([q.reviewHeld, q.reviewResumed], [[], [8]]);
   assert.deepEqual(prLabels(p, 8), ["factory:review"]);
+
+  // A record that is no longer current says nothing about when #7 merges: it is still ahead, and #8 waits. A third-party
+  // record on an older head, one past its bound, and an account-wait record older than #7's latest review label.
+  const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+  const account = (at) => ({ id: 941, user: { login: SELF, type: "Bot" }, body: `${marker(7, "account-wait")}\nFactory: the review waits.`, created_at: at, updated_at: at });
+  const labelled = [{ event: "labeled", label: { name: "factory:review" }, created_at: new Date(Date.now() - 3600_000).toISOString() }];
+  for (const [why, x] of [
+    ["an older head", waitingOn7(thirdPartyOn("a".repeat(40)))],
+    ["past its bound", waitingOn7(thirdPartyOn(H7, old))],
+    ["the review label went on since", waitingOn7(thirdPartyOn(H7, old, 240), labelled)],
+    ["an account wait the label came back over", waitingOn7(account(old), labelled)],
+  ]) {
+    const held = await tick(x);
+    assert.deepEqual([held.reviewHeld, held.reviewResumed], [[8], []], why);
+  }
 });
 
 test("#340: `factory run` on an Objective whose hand-off waits reviews it now: the label goes on, the record is released", async () => {

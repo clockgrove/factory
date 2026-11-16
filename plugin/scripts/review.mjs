@@ -323,6 +323,18 @@ export async function validatedOn({ repo, issue, prNumber, sha, token }) {
   return { pr, moved: `PR #${prNumber}'s head moved to ${pr.head.sha.slice(0, 7)} while ${sha.slice(0, 7)} was validated; the review runs again on the new head` };
 }
 
+/**
+ * The stage's end on a third-party review still to come (thirdPartyStep's `wait`): the review label off and the
+ * Objective In review (third-party-review.mjs waitEnd), or, where that fails, the wait record removed so the stage goes
+ * on without it (clearWait). `opts` are the stage's request options ({token, notice}): each call gets its token getter,
+ * so every request carries the current token (#405). Returns waitEnd's {ok, why}.
+ */
+export async function endForWait({ repo, issue, prNumber, labels, opts }) {
+  const ended = await waitEnd({ repo, issue, prNumber, labels, token: opts.token });
+  if (!ended.ok) await clearWait({ repo, issue, prNumber, token: opts.token });
+  return ended;
+}
+
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
 export function workerRun(inputs) {
   return { harness: inputs.harness, model: inputs.model, effort: inputs.effort };
@@ -1004,7 +1016,7 @@ async function main() {
   const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
-  const identity = await gitIdentity(app, keeper.token);
+  const identity = await gitIdentity(app, keeper.getter);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);
   outbox.author = botWho;
@@ -1516,7 +1528,7 @@ async function main() {
   if (third.wait) {
     // A stop's end stands; otherwise the stage ends only where the dispatcher will resume it (third-party-review.mjs waitEnd).
     await holdIfStopped();
-    const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels: issueData.labels, token });
+    const ended = await endForWait({ repo, issue, prNumber: pr.number, labels: issueData.labels, opts: token });
     if (ended.ok) {
       // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
       await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
@@ -1525,7 +1537,6 @@ async function main() {
       await finish("waiting", reason);
       return;
     }
-    await clearWait({ repo, issue, prNumber: pr.number, ...token });
     await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
   }
   // The reviewers outside Factory the answer pass handles: the named ones, and code scanning on every repository (#331).

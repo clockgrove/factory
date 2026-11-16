@@ -1,8 +1,9 @@
 // Keep the App's installation token fresh for the length of a job, in memory only. An installation token lives one
 // hour; a worker job may run six. The keeper re-mints before expiry; github.mjs reads it through `getter` and Factory's
-// own git through outbox.mjs, each per call. No file and no environment variable holds it. Beside it the keeper mints a
-// read-only token (a permissions subset of the same installation) for the agent uid on Actions; `onRefresh` hands each
-// fresh one over (agent.mjs writes it into the agent's home).
+// own git through outbox.mjs, each per call, and a call GitHub refuses with 401 has it re-minted once (#405). No file
+// and no environment variable holds it. Beside it the keeper mints a read-only token (a permissions subset of the same
+// installation) for the agent uid on Actions; `onRefresh` hands each fresh one over (agent.mjs writes it into the
+// agent's home, each file replaced whole).
 import { mintInstallationToken } from "./app-token.mjs";
 import { mask } from "./inputs.mjs";
 import { setSelf } from "./logic.mjs";
@@ -25,6 +26,9 @@ export class TokenKeeper {
     this.refreshMs = refreshMinutes * 60_000;
     this.timer = null;
     this.app = { appSlug: null, missing: [], extra: [] };
+    // When the write token expires (GitHub's expires_at, ms), once minted here; the mint in flight, shared (refresh).
+    this.expiresAt = null;
+    this.minting = null;
   }
 
   /** Mint (unless fixed) and start the refresh timer. */
@@ -58,9 +62,19 @@ export class TokenKeeper {
     return this;
   }
 
-  async refresh() {
+  /** Mint both tokens now: one mint at a time, shared by every caller asking meanwhile (the timer, a call's 401). */
+  refresh() {
+    this.minting ??= this.mint().finally(() => {
+      this.minting = null;
+    });
+    return this.minting;
+  }
+
+  async mint() {
     const minted = await mintInstallationToken({ appId: this.appId, privateKey: this.privateKey, owner: this.owner, repo: this.repo });
     this.token = minted.token;
+    const expires = Date.parse(minted.expiresAt);
+    this.expiresAt = Number.isFinite(expires) ? expires : null;
     this.issued.push(minted.token);
     this.app = minted;
     // Factory writes as the App's bot: only its own markers, and people who can push, are trusted (logic.mjs isSelf).
@@ -80,9 +94,18 @@ export class TokenKeeper {
     if (this.onRefresh) await this.onRefresh(this);
   }
 
-  /** For github.mjs calls: always the current token. */
+  /**
+   * For github.mjs calls: always the current token. A minted one (not a fixed one, which only its giver renews) can be
+   * refreshed by the call (`refresh`, after GitHub's 401), and says when it is at or within a minute of its expiry
+   * (`expired`), so no call goes with it then.
+   */
   get getter() {
-    return () => this.token;
+    const get = () => this.token;
+    if (!this.fixed) {
+      get.refresh = () => this.refresh();
+      get.expired = () => this.expiresAt !== null && this.expiresAt - Date.now() < 60_000;
+    }
+    return get;
   }
 
   stop() {

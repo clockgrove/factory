@@ -434,7 +434,7 @@ async function main() {
     return;
   }
   const { base, resumed } = outbox;
-  const identity = await gitIdentity(app, keeper.token);
+  const identity = await gitIdentity(app, keeper.getter);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);
   outbox.author = botWho;

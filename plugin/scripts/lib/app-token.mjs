@@ -164,7 +164,8 @@ export const NOTICE_PERMISSIONS = { issues: "write" };
  * own @mention, so Blocked and Question notices post with the Factory App instead. Only local.mjs, the parent of every
  * stage, holds the App's key and calls this: an installation token for the one repository (`repositories` on the
  * access_tokens call) narrowed to NOTICE_PERMISSIONS, minted on first use and again near expiry, in memory only. A
- * token that came back for any other repository, or with more than issues write, is refused.
+ * token that came back for any other repository, or with more than issues write, is refused. `stale`: the token GitHub
+ * refused (401) to a caller; while it is still the current one, a new one is minted (#405).
  */
 export function noticeMinter({ appId, privateKey, owner, repo }) {
   let cur = null;
@@ -177,8 +178,8 @@ export function noticeMinter({ appId, privateKey, owner, repo }) {
     if (wider.length) throw new Error(`the notice token came back with ${wider.map(([k, v]) => `${k}:${v}`).join(", ")}; refusing it`);
     return minted;
   };
-  return async () => {
-    if (cur && Date.parse(cur.expiresAt) - Date.now() > 5 * 60_000) return cur;
+  return async ({ stale = null } = {}) => {
+    if (cur && cur.token !== stale && Date.parse(cur.expiresAt) - Date.now() > 5 * 60_000) return cur;
     // One mint in flight, shared by every stage asking at once.
     pending ??= mint()
       .then((m) => (cur = m))
@@ -224,9 +225,12 @@ function serve(child, type, answer) {
   });
 }
 
-/** Parent side: answer a stage's notice-token requests with `mint` (noticeMinter). Only the token goes back. */
+/**
+ * Parent side: answer a stage's notice-token requests with `mint` (noticeMinter), passing on the token GitHub refused
+ * the stage (`stale`), which it had from here. Only the token goes back.
+ */
 export function serveNotices(child, mint) {
-  serve(child, NOTICE_MESSAGE, () => mint().then((t) => ({ token: t.token })));
+  serve(child, NOTICE_MESSAGE, (m) => mint(typeof m.stale === "string" && m.stale ? { stale: m.stale } : {}).then((t) => ({ token: t.token })));
 }
 
 /** Stage side: `(payload) => reply` from the parent for `type`, or null without an IPC channel. Every token received is pushed onto `issued`. */
@@ -263,10 +267,10 @@ function askParent(type, { proc = process, issued = [], timeoutMs = 60_000, what
 
 /**
  * Stage side: an async function giving {token} from the parent, or null when this process has no IPC channel (Actions,
- * or a stage started without one). The channel does not keep the stage alive between requests. Every token received is
- * pushed onto `issued` (masking).
+ * or a stage started without one); `{stale}` asks for a new one in place of the token GitHub refused. The channel does
+ * not keep the stage alive between requests. Every token received is pushed onto `issued` (masking).
  */
 export function noticeFromParent({ proc = process, issued = [], timeoutMs = 60_000 } = {}) {
   const ask = askParent(NOTICE_MESSAGE, { proc, issued, timeoutMs, what: "notice token" });
-  return ask && (() => ask().then((m) => ({ token: m.token })));
+  return ask && (({ stale = null } = {}) => ask(typeof stale === "string" && stale ? { stale } : {}).then((m) => ({ token: m.token })));
 }

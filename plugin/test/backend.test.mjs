@@ -304,8 +304,10 @@ test("local notices: a failed App post is posted again with the local token; the
   const { noticeAppCheck } = await import("../scripts/doctor.mjs");
   const tries = [];
   const post = async (o) => {
-    tries.push(o.token);
-    if (o.token === "app") throw new Error("HTTP 403");
+    // The App's token goes as a getter (refreshed on a 401, #405); the local one as it is.
+    const token = typeof o.token === "function" ? o.token() : o.token;
+    tries.push(token);
+    if (token === "app") throw new Error("HTTP 403");
     return "posted";
   };
   assert.equal(await noticePost({ notice: async () => ({ token: "app" }), token: "local", what: "t", post }), "posted");

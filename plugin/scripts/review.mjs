@@ -324,15 +324,22 @@ export async function validatedOn({ repo, issue, prNumber, sha, token }) {
 }
 
 /**
- * The stage's end on a third-party review still to come (thirdPartyStep's `wait`): the review label off and the
- * Objective In review (third-party-review.mjs waitEnd), or, where that fails, the wait record removed so the stage goes
- * on without it (clearWait). `opts` are the stage's request options ({token, notice}): each call gets its token getter,
- * so every request carries the current token (#405). Returns waitEnd's {ok, why}.
+ * The review stage's step for the repository's third-party reviewers, before its answer pass (thirdPartyStep). A review
+ * still to come ends the stage: `beforeEnd` first (the stage's stop check, whose end stands), then the review label off
+ * and the Objective In review (waitEnd), and the step returns the `wait`, for the stage to end `waiting`. Where that
+ * fails, the wait record goes (clearWait), the progress says so, and the stage goes on without the wait. `opts` are the
+ * stage's request options ({token, notice}): each call gets its token getter, so every request carries the current
+ * token (#405). Returns {logins, wait}.
  */
-export async function endForWait({ repo, issue, prNumber, labels, opts }) {
-  const ended = await waitEnd({ repo, issue, prNumber, labels, token: opts.token });
-  if (!ended.ok) await clearWait({ repo, issue, prNumber, token: opts.token });
-  return ended;
+export async function thirdPartyGate({ repo, issue, pr, labels, names, own, skip, progress, opts, beforeEnd = async () => {} }) {
+  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names, own, skip, progress, token: opts.token });
+  if (!third.wait) return third;
+  await beforeEnd();
+  const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels, token: opts.token });
+  if (ended.ok) return third;
+  await clearWait({ repo, issue, prNumber: pr.number, token: opts.token });
+  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+  return { logins: third.logins, wait: null };
 }
 
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
@@ -1522,20 +1529,15 @@ async function main() {
   // records the wait on the PR and ends `waiting`, its label off, holding no slot or runner; the dispatcher puts the
   // label back once that review exists or the bound has passed, and that review stage, with Factory's own review
   // already posted (reviewsCover), runs no reviewer pass and goes on from here.
-  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, ...token });
+  // A stop's end stands (holdIfStopped); otherwise the stage ends only where the dispatcher will resume it (thirdPartyGate).
+  const third = await thirdPartyGate({ repo, issue, pr, labels: issueData.labels, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, opts: token, beforeEnd: holdIfStopped });
   if (third.wait) {
-    // A stop's end stands; otherwise the stage ends only where the dispatcher will resume it (third-party-review.mjs waitEnd).
-    await holdIfStopped();
-    const ended = await endForWait({ repo, issue, prNumber: pr.number, labels: issueData.labels, opts: token });
-    if (ended.ok) {
-      // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
-      await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
-      const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
-      log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
-      await finish("waiting", reason);
-      return;
-    }
-    await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+    // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
+    await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
+    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+    log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
+    await finish("waiting", reason);
+    return;
   }
   // The reviewers outside Factory the answer pass handles: the named ones, and code scanning on every repository (#331).
   const thirdParty = answeredReviewers(third.logins);

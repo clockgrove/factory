@@ -182,7 +182,7 @@ export function noticeMinter({ appId, privateKey, owner, repo }) {
     if (cur && cur.token !== stale && Date.parse(cur.expiresAt) - Date.now() > 5 * 60_000) return cur;
     // One mint in flight, shared by every stage asking at once.
     pending ??= mint()
-      .then((m) => (cur = m))
+      .then((m) => (cur = { ...m, mintedAt: Date.now() }))
       .finally(() => {
         pending = null;
       });
@@ -227,10 +227,10 @@ function serve(child, type, answer) {
 
 /**
  * Parent side: answer a stage's notice-token requests with `mint` (noticeMinter), passing on the token GitHub refused
- * the stage (`stale`), which it had from here. Only the token goes back.
+ * the stage (`stale`), which it had from here. The token goes back, and when it was minted (this machine's clock).
  */
 export function serveNotices(child, mint) {
-  serve(child, NOTICE_MESSAGE, (m) => mint(typeof m.stale === "string" && m.stale ? { stale: m.stale } : {}).then((t) => ({ token: t.token })));
+  serve(child, NOTICE_MESSAGE, (m) => mint(typeof m.stale === "string" && m.stale ? { stale: m.stale } : {}).then((t) => ({ token: t.token, mintedAt: t.mintedAt ?? null })));
 }
 
 /** Stage side: `(payload) => reply` from the parent for `type`, or null without an IPC channel. Every token received is pushed onto `issued`. */
@@ -267,10 +267,11 @@ function askParent(type, { proc = process, issued = [], timeoutMs = 60_000, what
 
 /**
  * Stage side: an async function giving {token} from the parent, or null when this process has no IPC channel (Actions,
- * or a stage started without one); `{stale}` asks for a new one in place of the token GitHub refused. The channel does
- * not keep the stage alive between requests. Every token received is pushed onto `issued` (masking).
+ * or a stage started without one), with when it was minted (`mintedAt`); `{stale}` asks for a new one in place of the
+ * token GitHub refused. The channel does not keep the stage alive between requests. Every token received is pushed onto
+ * `issued` (masking).
  */
 export function noticeFromParent({ proc = process, issued = [], timeoutMs = 60_000 } = {}) {
   const ask = askParent(NOTICE_MESSAGE, { proc, issued, timeoutMs, what: "notice token" });
-  return ask && (({ stale = null } = {}) => ask(typeof stale === "string" && stale ? { stale } : {}).then((m) => ({ token: m.token })));
+  return ask && (({ stale = null } = {}) => ask(typeof stale === "string" && stale ? { stale } : {}).then((m) => ({ token: m.token, mintedAt: Number.isFinite(m.mintedAt) ? m.mintedAt : null })));
 }

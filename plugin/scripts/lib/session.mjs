@@ -1821,16 +1821,18 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
 export async function noticePost({ notice, token, what, post }) {
   if (!notice) return post({ token });
   let appToken;
+  let mintedAt = null;
   try {
-    appToken = (await notice()).token;
+    ({ token: appToken, mintedAt = null } = await notice());
   } catch (e) {
     log(`${what}: no notice token (${e.message.slice(0, 160)}); posting with the local token`);
     return post({ token });
   }
   const current = () => appToken;
   current.refresh = async () => {
-    appToken = (await notice({ stale: appToken })).token;
+    ({ token: appToken, mintedAt = null } = await notice({ stale: appToken }));
   };
+  current.mintedAt = (t) => (t && t === appToken ? mintedAt : null);
   try {
     return await post({ token: current });
   } catch (e) {

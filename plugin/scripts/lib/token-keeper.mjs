@@ -5,6 +5,7 @@
 // installation) for the agent uid on Actions; `onRefresh` hands each fresh one over (agent.mjs writes it into the
 // agent's home, each file replaced whole).
 import { mintInstallationToken } from "./app-token.mjs";
+import { githubNow } from "./github.mjs";
 import { mask } from "./inputs.mjs";
 import { setSelf } from "./logic.mjs";
 
@@ -26,8 +27,10 @@ export class TokenKeeper {
     this.refreshMs = refreshMinutes * 60_000;
     this.timer = null;
     this.app = { appSlug: null, missing: [], extra: [] };
-    // When the write token expires (GitHub's expires_at, ms), once minted here; the mint in flight, shared (refresh).
+    // When the write token expires (GitHub's expires_at, ms on GitHub's clock) and when GitHub answered its mint (ms, this
+    // machine's clock), once minted here; the mint in flight, shared (refresh).
     this.expiresAt = null;
+    this.mintedAt = null;
     this.minting = null;
   }
 
@@ -62,7 +65,11 @@ export class TokenKeeper {
     return this;
   }
 
-  /** Mint both tokens now: one mint at a time, shared by every caller asking meanwhile (the timer, a call's 401). */
+  /**
+   * Mint both tokens now: one mint at a time, shared by every caller asking meanwhile (the timer, a call's 401). The write
+   * token is replaced as soon as it is minted: a failure after (the read-only token, `onRefresh`) rejects, with the new
+   * write token already in use.
+   */
   refresh() {
     this.minting ??= this.mint().finally(() => {
       this.minting = null;
@@ -73,6 +80,7 @@ export class TokenKeeper {
   async mint() {
     const minted = await mintInstallationToken({ appId: this.appId, privateKey: this.privateKey, owner: this.owner, repo: this.repo });
     this.token = minted.token;
+    this.mintedAt = Date.now();
     const expires = Date.parse(minted.expiresAt);
     this.expiresAt = Number.isFinite(expires) ? expires : null;
     this.issued.push(minted.token);
@@ -96,14 +104,15 @@ export class TokenKeeper {
 
   /**
    * For github.mjs calls: always the current token. A minted one (not a fixed one, which only its giver renews) can be
-   * refreshed by the call (`refresh`, after GitHub's 401), and says when it is at or within a minute of its expiry
-   * (`expired`), so no call goes with it then.
+   * refreshed by the call (`refresh`, after GitHub's 401), says when it was minted (`mintedAt`, for GitHub's delay with a
+   * new token) and when it is at or within a minute of its expiry on GitHub's clock (`expired`), so no call goes with it then.
    */
   get getter() {
     const get = () => this.token;
     if (!this.fixed) {
       get.refresh = () => this.refresh();
-      get.expired = () => this.expiresAt !== null && this.expiresAt - Date.now() < 60_000;
+      get.mintedAt = (token) => (token && token === this.token ? this.mintedAt : null);
+      get.expired = () => this.expiresAt !== null && this.expiresAt - githubNow() < 60_000;
     }
     return get;
   }

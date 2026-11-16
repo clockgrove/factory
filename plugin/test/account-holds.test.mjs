@@ -103,13 +103,16 @@ test("#264: a usage limit holds only the account that met it, for every serve on
     t += 180 * MIN;
     const c = serveOn(h, () => t);
     assert.equal(c.limitHold(["factory:objective"]), null);
-    c.result = { exit: "delivered", tokens: { output: 10 } };
+    c.result = { exit: "delivered", tokens: { output: 10 }, servedPasses: 1 };
     assert.equal((await c.stage(8, "work", "worker.mjs", [])).exit, "delivered");
     assert.equal(c.ran(), 1);
   });
   // The record: no secret, no path; and under Factory's cache folder, never ~/.config/factory.
-  const files = readdirSync(holdsDir(h));
-  assert.ok(files.length > 0 && files.every((f) => /^alpha\.[0-9a-f]{16}\.json$/.test(f)), files.join(", "));
+  // A served stage that reported no quota reading leaves that fact too (#391): its account's quota file, no secret or path.
+  const all = readdirSync(holdsDir(h));
+  const files = all.filter((f) => f !== "alpha.quota.json");
+  assert.ok(files.length > 0 && files.every((f) => /^alpha\.[0-9a-f]{16}\.json$/.test(f)), all.join(", "));
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(holdsDir(h), "alpha.quota.json"), "utf8"))).sort(), ["account", "at", "harness", "silentAt", "windows"]);
   for (const f of files) assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(holdsDir(h), f), "utf8"))).sort(), ["account", "at", "harness", "streak", "until"]);
   assert.equal(lstatSync(holdsDir(h)).mode & 0o077, 0);
   assert.ok(!within(holdsDir(h), join(h, ".config", "factory")));
@@ -252,7 +255,7 @@ test("#264: with no accounts declared, a hold is the login's: two serves on two 
   });
   // The key is the login's path, hashed: no path in the record.
   for (const f of readdirSync(holdsDir(h))) {
-    assert.match(f, /^claude@[0-9a-f]{12}\.[0-9a-f]{16}\.json$/);
+    assert.match(f, /^claude@[0-9a-f]{12}\.([0-9a-f]{16}|quota)\.json$/);
     assert.ok(!readFileSync(join(holdsDir(h), f), "utf8").includes(h));
   }
 });

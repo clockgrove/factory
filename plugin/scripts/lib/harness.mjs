@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, githubOrigin, givenUp, minutesText, networkBack, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -259,6 +259,18 @@ export function promptCacheTtl(harness, env = {}) {
   if (setting === "1h" || setting === "5m") return setting;
   if (setting !== "auto") return null;
   return env.ANTHROPIC_API_KEY ? "1h" : null;
+}
+
+/**
+ * How long a pass's prompt cache stays warm after it ends, by the TTL Factory sets (promptCacheTtl), in ms: `1h` or `5m`
+ * as set; with none set, Claude Code's own default, which the comment above states: an hour on a plan token or a CLI
+ * login, five minutes on an API key (ANTHROPIC_API_KEY). Null for Codex and Copilot, whose caches Factory sets no
+ * lifetime for. Automatic account choice prefers the account of the Objective's previous stage while it lasts (#391).
+ */
+export function cacheLifetimeMs(harness, env = {}) {
+  if (harness !== "claude") return null;
+  const ttl = promptCacheTtl(harness, env) ?? (env.ANTHROPIC_API_KEY ? "5m" : "1h");
+  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
 }
 
 /**
@@ -1281,9 +1293,10 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
   const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
-  // A failed Codex run's usage limit is in its rollout only (usage.mjs providerRefusal): read when the stream names no
-  // refusal of its own, from the copy just captured on a runner.
-  const rollout = harness === "codex" && ranSession && !ran.ok && !ran.refusal ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
+  // A Codex run's rate-limit snapshots are in its rollout only, from the copy just captured on a runner: every pass's
+  // quota reading (usage.mjs quotaReading), and a failed run's usage limit when the stream names no refusal of its own
+  // (usage.mjs providerRefusal).
+  const rollout = harness === "codex" && ranSession ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
   const found = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : { threads: [], missed: [] };
@@ -1294,7 +1307,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout, since: started });
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, since: started });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
   const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
@@ -1344,9 +1357,14 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
       log(`${label}: the harness ran commands, but none came up with the gateway relay's forwarder (its sandbox did not start them through Factory's bwrap shim); the relay was out of their reach`);
     }
   }
+  // How much of its account's usage limits the provider reported used (automatic account choice prefers the most left).
+  const quota = quotaReading(harness, r.stdout, { rollout, since: started });
+  if (quota) rec.quota = quota;
   rec.label = label;
   rec.resumed = !!resume;
   rec.cacheTtl = cacheTtl;
+  // How long its prompt cache stays warm past `ended` (cacheLifetimeMs): the stage's `cacheWarmUntil`.
+  rec.cacheWarmMs = cacheLifetimeMs(harness, env);
   rec.finalText = finalText(harness, r.stdout);
   rec.started = started;
   rec.ended = ended;
@@ -1407,7 +1425,7 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
   }
 }
 /**
- * A Codex run's own rollout, its `token_count` lines only, for its usage limit (usage.mjs providerRefusal): on a runner
+ * A Codex run's own rollout, its `token_count` lines only, for its rate limits (usage.mjs quotaReading, providerRefusal): on a runner
  * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from the
  * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
  * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
@@ -1435,7 +1453,7 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
     if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
     return counts(readFileSync(join(root, newest.f), "utf8"));
   } catch (e) {
-    log(`${label}: Codex's rollout could not be read for a usage limit (${String(e?.message || e).slice(0, 160)})`);
+    log(`${label}: Codex's rollout could not be read for its rate limits (${String(e?.message || e).slice(0, 160)})`);
     return null;
   }
 }

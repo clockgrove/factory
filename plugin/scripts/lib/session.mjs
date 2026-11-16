@@ -1710,6 +1710,42 @@ function lineageTotal(id, records) {
   return { ...(total ?? { usd: null, tokens: null }), children: { ...children } };
 }
 
+/**
+ * Until when (ms) the stage's prompt cache stays warm: its last harness pass that ran's end plus its cache's lifetime
+ * (harness.mjs cacheLifetimeMs); null when no pass ran or its harness has none Factory sets. A decision record
+ * (harness.mjs runDecision: no session, so no cache the next stage reads) is no pass.
+ */
+export function cacheWarmUntil(records = []) {
+  const last = [...(records || [])].reverse().find((r) => Number.isFinite(Date.parse(r?.ended)) && !r.noRun && !r.decision);
+  return last && Number.isFinite(last.cacheWarmMs) ? Date.parse(last.ended) + last.cacheWarmMs : null;
+}
+
+/**
+ * Whether a stage's record (writeUsage's) shows its provider served a harness pass (`servedPasses`: a decision call's
+ * output is no pass, and Factory reads no quota from one), no usage limit or refusal ending it, and no quota reading
+ * reported: the account's harness or credential reports none (holds.mjs silent).
+ */
+export const servedSilent = (r) => !!r && !r.quota && !r.usageLimit && !r.limitRefused && Number(r.servedPasses) > 0;
+
+/** Whether a harness pass's record shows its provider served it: output, AI credits or premium requests. */
+const served = (r) => [r?.tokens?.output, r?.aiu, r?.premiumRequests].some((v) => Number(v) > 0);
+
+/**
+ * The stage's quota reading (its decision records left out): each window as the last pass that reported it read it (usage.mjs quotaReading, harness.mjs
+ * runHarness `quota`), {harness, windows}; null when no pass reported one.
+ */
+export function stageQuota(records = []) {
+  const windows = {};
+  let harness = null;
+  for (const r of records || []) {
+    // A decision record (harness.mjs runDecision) carries no reading Factory reads: only the stage's harness passes.
+    if (!r?.quota?.windows || r.decision) continue;
+    harness = r.quota.harness;
+    Object.assign(windows, r.quota.windows);
+  }
+  return harness ? { harness, windows } : null;
+}
+
 /** Write usage/result.json and return the merged record. */
 /**
  * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
@@ -1742,6 +1778,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
   // choice passes that account over for a while.
   const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
   const runs = (records || []).filter((r) => r && !r.decision);
+  const quota = stageQuota(records);
+  const warm = cacheWarmUntil(records);
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1762,6 +1800,8 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ended: runs.at(-1)?.ended ?? merged.ended ?? null,
     // Harness passes only: the stage's decision record (harness.mjs keepDecision) is in usd and tokens, never a run.
     runs: runs.length,
+    // The harness passes its provider served (output, AI credits or premium requests): servedSilent reads it.
+    servedPasses: runs.filter(served).length,
     passes,
     exit,
     reason,
@@ -1774,6 +1814,12 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(usageLimit ? { usageLimit } : {}),
     // A Block on a usage limit or quota with no reset reported (`spent` above): the harness and the window when named.
     ...(spent ? { limitRefused: { harness: spent.harness, ...(typeof spent.limitType === "string" ? { limitType: spent.limitType } : {}) } } : {}),
+    // How much of its account's usage limits the provider reported used (stageQuota): a local serve keeps it with the
+    // machine's holds, and automatic account choice prefers the account with the most left.
+    ...(quota ? { quota } : {}),
+    // Until when (ms) the stage's prompt cache stays warm (cacheWarmUntil): automatic account choice prefers this account
+    // for the Objective's next stage until then.
+    ...(warm !== null ? { cacheWarmUntil: warm } : {}),
     // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once.
     ...(progressRun ? { progressRun } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.

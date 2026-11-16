@@ -1139,9 +1139,11 @@ export class TrialUnread extends Error {
  * as the merges need them. `conflicts(a, b)` resolves to `{conflict, files, main}`: whether the two would conflict once
  * one of them has merged into the default branch `main`, and the paths (sorted; none when git names none). When both
  * heads merge cleanly into `main`, that is exact: the two merged trees are merged with `main` as their base. When one
- * does not (it conflicts with `main` and will be rebased whatever its siblings do), the heads are merged with each other
- * and a path counts only when both heads' own changes (since their merge base with `main`) touch it, so a head on an old
- * base does not conflict with a sibling over a change of `main`'s that the sibling never touched. Rejects with
+ * does not (it conflicts with `main` and will be rebased whatever its siblings do), the two heads' own changes (each
+ * since its merge base with `main`) are merged on one base: one head's base, the other's changes made again there when
+ * they apply cleanly, so a head on an old base does not conflict with a sibling over a change of `main`'s, and git's
+ * merge follows renames and line regions on both sides. When neither's changes apply on the other's base (both overlap
+ * `main`'s changes between the two), whether they clash cannot be told: it is a conflict. Rejects with
  * TrialUnread when a commit cannot be had or git cannot merge them. `close()` removes the mirror.
  */
 export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
@@ -1179,9 +1181,10 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
       // Which of them the server does not have: each alone.
       const lost = [];
       for (const s of missing) if ((await fetch([s])).code !== 0) lost.push(s);
-      if (!lost.length) throw new TrialUnread(`${missing.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`);
       for (const s of missing.filter((x) => !lost.includes(x))) fetched.add(s);
-      throw new TrialUnread(`${lost.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`, lost);
+      // Each fetched alone: the batch's failure was the batch's, and the merge goes on.
+      if (lost.length) throw new TrialUnread(`${lost.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`, lost);
+      return;
     }
     for (const s of missing) fetched.add(s);
   };
@@ -1198,11 +1201,14 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
       const m = await mergeTree([main, h], `${h.slice(0, 7)} into the default branch`);
       return m.code === 0 ? must(["commit-tree", m.tree, "-p", main, "-p", h, "-m", "trial"], "a trial merge could not be written") : null;
     });
-  // The paths a head's own changes touch: since its merge base with main.
-  const own = (h) =>
-    once(`own:${h}`, async () => {
-      const b = await must(["merge-base", main, h], `${h.slice(0, 7)} has no history in common with the default branch`);
-      return new Set((await must(["diff", "--name-only", "-z", "--no-renames", b, h], "a head's changes could not be read")).split("\0").filter(Boolean));
+  // A head's merge base with main: where its own changes start.
+  const baseOf = (h) => once(`base:${h}`, () => must(["merge-base", main, h], `${h.slice(0, 7)} has no history in common with the default branch`));
+  // Head `h`'s own changes (since `from`) made again on `onto`: the commit, or null when they do not apply there cleanly.
+  const replay = (h, from, onto) =>
+    once(`replay:${h}:${onto}`, async () => {
+      if (from === onto) return h;
+      const m = await mergeTree([`--merge-base=${from}`, onto, h], `${h.slice(0, 7)}'s changes onto ${onto.slice(0, 7)}`);
+      return m.code === 0 ? must(["commit-tree", m.tree, "-p", onto, "-m", "trial"], "a trial merge could not be written") : null;
     });
   return {
     /** The default branch's head this mirror judges against (fetched at the first call). */
@@ -1218,13 +1224,19 @@ export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
         const m = await mergeTree([`--merge-base=${main}`, ma, mb], `${a.slice(0, 7)} and ${b.slice(0, 7)} on the default branch`);
         return { conflict: m.code === 1, files: m.files, main };
       }
+      // One conflicts with main: its own changes and the other's, on one base. Each base in turn: the other head's own
+      // changes made again there; a head on that base already stays as it is. git's merge finds renames on either side.
+      const [ba, bb] = [await baseOf(a), await baseOf(b)];
+      for (const [x, bx, y, by] of [[a, ba, b, bb], [b, bb, a, ba]]) {
+        const y2 = await replay(y, by, bx);
+        if (!y2) continue;
+        const m = await mergeTree([`--merge-base=${bx}`, x, y2], `${a.slice(0, 7)} and ${b.slice(0, 7)}'s own changes`);
+        return { conflict: m.code === 1, files: m.files, main };
+      }
+      // Neither's changes apply on the other's base: they overlap main's changes between the two, so whether they clash
+      // with each other cannot be told; taken as a conflict (a bounded wait), with the files a merge of the two names.
       const m = await mergeTree([a, b], `${a.slice(0, 7)} and ${b.slice(0, 7)}`);
-      if (m.code === 0) return { conflict: false, files: [], main };
-      // git named no path: a conflict all the same.
-      if (!m.files.length) return { conflict: true, files: [], main };
-      const [oa, ob] = [await own(a), await own(b)];
-      const files = m.files.filter((f) => oa.has(f) && ob.has(f));
-      return { conflict: files.length > 0, files, main };
+      return { conflict: true, files: m.files, main };
     },
     close() {
       if (dir) rmSync(dir, { recursive: true, force: true });

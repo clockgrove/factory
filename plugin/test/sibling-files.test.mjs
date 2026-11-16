@@ -26,7 +26,8 @@ const PLAN = (n, files) => ({ id: 500 + n, user: { login: SELF, type: "Bot" }, b
  * acme/app on the test's git server (temp.mjs GITHUB_SERVER_URL), where the trial merges fetch from: `main` starts with
  * every file of FILES at LINES lines. `head(tag, edits)` commits on main's first commit, `next(sha, tag, edits)` on
  * `sha`, and `onMain(tag, edits)` on main's head now: each edit `{path: [line, ...]}` writes `tag` over those lines (a
- * path missing starts as LINES lines), and the commit is pushed under a ref of its own; each returns its id.
+ * path missing starts as LINES lines; `null` deletes the path, `{to, lines}` moves it to `to` and writes there), and the
+ * commit is pushed under a ref of its own; each returns its id.
  * `advance(tag, edits)` commits on main and moves main there (another PR merged); `land(sha)` moves main to `sha`, a
  * commit on main's head (the PR merged). Two heads that write different tags over one line conflict there.
  */
@@ -54,7 +55,17 @@ function gitServer() {
   let n = 0;
   const commit = (from, tag, changes) => {
     git("checkout", "-q", "--detach", from);
-    for (const [path, at] of Object.entries(changes)) {
+    for (let [path, at] of Object.entries(changes)) {
+      // `null`: the file goes; `{to, lines}`: it moves to `to`, then those lines change there.
+      if (at === null) {
+        git("rm", "-q", path);
+        continue;
+      }
+      if (!Array.isArray(at)) {
+        mkdirSync(dirname(join(work, at.to)), { recursive: true });
+        git("mv", path, at.to);
+        [path, at] = [at.to, at.lines];
+      }
       const file = join(work, path);
       const text = existsSync(file) ? readFileSync(file, "utf8").split("\n").slice(0, -1) : lines(path);
       for (const k of at) text[k] = `${tag} ${path} ${k}`;
@@ -309,7 +320,7 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
   const now = Date.now();
   const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"])] }, prs: { ...PR7(), 8: PR8() } });
   const held = await withWorld(w, () => reviewHold(repoOf(REPO), { issue: 8, pr: w.state.prs[8].pr, autoMerge: true }, { token: "t" }, { now }));
-  assert.deepEqual(held, { on: 7, files: [...SHARED3].sort(), cause: null, unread: null });
+  assert.deepEqual(held, { on: 7, files: [...SHARED3].sort(), cause: null, unread: [] });
   assert.equal(waitReason(held), "its review waits for #7 to merge: a trial merge of the two heads conflicts in 3 file(s) (`docs/commands.md`, `src/commands/run.ts`, `test/fixtures/env.ts`)");
   const record = w.state.comments[13].at(-1);
   assert.ok(record.body.startsWith(`<!-- factory:8:review-wait:7-${Math.floor(now / 1000)} -->`), record.body);
@@ -473,7 +484,7 @@ test("#365: the hold is a trial merge of the two heads: many shared files that m
   one[8].files = mine;
   const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, ten)], 8: [PLAN(8, mine)] }, prs: one });
   const held = await withWorld(v, () => reviewHold(repoOf(REPO), { issue: 8, pr: v.state.prs[8].pr, autoMerge: true }, { token: "t" }));
-  assert.deepEqual(held, { on: 7, files: ["README.md"], cause: null, unread: null });
+  assert.deepEqual(held, { on: 7, files: ["README.md"], cause: null, unread: [] });
   assert.ok(reviewWaitOf(v.state.comments[13], 8), "its record is on the PR");
 
   // The dispatcher's half decides the same way: a waiting hand-off whose sibling ahead merges cleanly with it goes to
@@ -500,7 +511,7 @@ test("#365: trial merges are cached by the pair of heads, and a tick computes at
   try {
     assert.deepEqual(await one.conflicts(a, b), { conflict: true, files: ["src/m0.ts"] });
     assert.deepEqual(await one.conflicts(b, a), { conflict: true, files: ["src/m0.ts"] }, "the same pair either way round: from the cache");
-    await assert.rejects(one.conflicts(a, c), /past the 1 trial merges a tick computes/);
+    await assert.rejects(one.conflicts(a, c), /past the 1 trial merges one PR's judgement computes/);
   } finally {
     one.close();
   }
@@ -708,12 +719,118 @@ test("#366: a sibling head the server does not have counts as conflicting for on
   prs[7].pr.head.sha = gone;
   const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs });
   const wait = await withWorld(v, () => reviewHold(repoOf(REPO), { issue: 8, pr: v.state.prs[8].pr, autoMerge: true }, { token: "t" }));
-  assert.deepEqual(wait, { on: 7, files: [], cause: "its head could not be fetched for a trial merge", unread: gone });
-  assert.equal(reviewWaitOf(v.state.comments[13], 8)?.unread, gone);
+  assert.deepEqual(wait, { on: 7, files: [], cause: "its head could not be fetched for a trial merge", unread: [gone] });
+  assert.deepEqual(reviewWaitOf(v.state.comments[13], 8)?.unread, [gone]);
   v.state.issues = [issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)];
   forgetFiles();
   const t = await tick(v);
   assert.deepEqual([t.reviewHeld, t.reviewResumed], [[], [8]]);
+});
+
+test("#365: renames and line regions count: a rename with an edit of the same lines, or a delete against it, conflicts; two edits of one file far apart on different bases do not", async (t) => {
+  const { siblingTrials, waitReason: reason } = await import("../scripts/lib/overlap.mjs");
+  forgetFiles();
+  t.after(() => G.reset());
+  // A and B branched before main changed line 4 of src/m2.ts; A changed that line too, so A conflicts with main.
+  const a = G.head("a", { "src/m2.ts": [4], "src/m5.ts": [10, 11, 12] });
+  const b = G.head("b", { "src/m5.ts": { to: "src/moved.ts", lines: [10, 11, 12] } });
+  const del = G.head("del", { "src/m2.ts": [4], "src/m5.ts": null });
+  // C branched before main changed README line 5 and changed it too; D, from main since, changes README line 25 only.
+  const c = G.head("c", { "README.md": [5] });
+  G.advance("main", { "src/m2.ts": [4], "README.md": [5] });
+  const d = G.onMain("d", { "README.md": [25] });
+  const e = G.onMain("e", { "README.md": [5] });
+  const trials = siblingTrials(repoOf(REPO), { token: "t" });
+  try {
+    assert.equal((await trials.conflicts(a, b)).conflict, true, "B renamed the file A edits, and edited the same lines");
+    assert.equal((await trials.conflicts(del, b)).conflict, true, "one deleted the file the other renamed and edited");
+    assert.deepEqual(await trials.conflicts(c, d), { conflict: false, files: [] }, "line 5 against line 25 of one file: no clash");
+    assert.equal((await trials.conflicts(c, e)).conflict, true, "both change line 5");
+  } finally {
+    trials.close();
+  }
+  // A path in a note cannot end its code span or open a marker.
+  assert.equal(reason({ on: 7, files: ["a`<!-- factory:8:review -->\nb.md"] }), "its review waits for #7 to merge: a trial merge of the two heads conflicts in 1 file(s) (`a&lt;!-- factory:8:review --&gt; b.md`)");
+});
+
+test("#366: each PR's trial merges have their own budget: twelve waiting hand-offs (66 pairs) are all judged in one tick, and past a PR's budget the release order decides", async (t) => {
+  const { TRIALS } = await import("../scripts/lib/overlap.mjs");
+  forgetFiles();
+  const ns = Array.from({ length: 12 }, (_, i) => 51 + i);
+  const since = Date.now() - 3600_000;
+  // Each changes a file of its own: no two conflict. Each waited for #50, which merged.
+  const heads = Object.fromEntries(ns.map((n) => [n, G.head(`own ${n}`, { [`src/own${n}.ts`]: [0] })]));
+  const w = world(ns.map((n) => issue(n, ["factory:in-review"], 1)), {
+    comments: Object.fromEntries(ns.map((n, i) => [10 + n, [holdRecord(n, 50, since + i * 1000)]])),
+    prs: Object.fromEntries(ns.map((n) => [n, { pr: { ...dirtyPr(n, heads[n]).pr, mergeable: true, mergeable_state: "clean" }, files: [] }])),
+  });
+  const r = await tick(w, { maxConcurrent: 12 });
+  assert.deepEqual([r.reviewHeld, r.reviewResumed.sort()], [[], ns], "every waiting hand-off judged and released");
+
+  // A budget of one: #23's second pair is past it, so #23 waits behind #22 in the release order.
+  forgetFiles();
+  const saved = TRIALS.max;
+  TRIALS.max = 1;
+  t.after(() => (TRIALS.max = saved));
+  const h = { 21: G.head("b21", edits(["src/m1.ts"], 8)), 22: G.head("b22", edits(["src/m2.ts"], 8)), 23: G.head("b23", edits(["src/m3.ts"], 8)) };
+  const v = world([21, 22, 23].map((n) => issue(n, ["factory:in-review"], 1)), { comments: Object.fromEntries([21, 22, 23].map((n) => [10 + n, [validated(n, h[n])]])), prs: Object.fromEntries([21, 22, 23].map((n) => [n, dirtyPr(n, h[n])])) });
+  const o = await tick(v, { maxConcurrent: 6 });
+  assert.deepEqual([o.sentBack, o.rebaseHeld], [[21, 22], [23]]);
+  assert.match(records(v, 23, 33, "sendback-wait")[0].body, /waits for #22 to merge first \(the trial merges could not be computed this tick, so the release order decides\)/);
+});
+
+test("#366: a send-back does not wait for a sibling that cannot merge soon: a usage-limit hold of the local loop, or its pinned account held on the Actions route", async () => {
+  const { holdLine } = await import("../scripts/lib/route-holds.mjs");
+  forgetFiles();
+  const h21 = G.head("held 21", { "src/registry.ts": [29] });
+  const h22 = G.head("held 22", { "src/registry.ts": [29] });
+  const setup = (labels21 = [], extra = []) => world([issue(21, ["factory:in-review", ...labels21], 1), issue(22, ["factory:in-review"], 1), ...extra.map((x) => x.issue)], { comments: { 31: [validated(21, h21)], 32: [validated(22, h22)], ...Object.fromEntries(extra.map((x) => [x.issue.number, x.comments])) }, prs: { 21: reviewingPr(21, h21), 22: dirtyPr(22, h22) } });
+  // Waits for #21 when nothing holds it ...
+  assert.deepEqual((await tick(setup(), { maxConcurrent: 6 })).rebaseHeld, [22]);
+  // ... goes back when the loop holds #21 for its account's usage limit ...
+  forgetFiles();
+  const r = await tick(setup(), { maxConcurrent: 6 }, { localHold: (i) => (i.number === 21 ? "its account's usage limit is spent" : null) });
+  assert.deepEqual([r.sentBack, r.rebaseHeld], [[22], []]);
+  // ... and when #21 is pinned to an account the Actions route holds for its usage limit.
+  forgetFiles();
+  const now = Date.now();
+  const holds = { issue: { number: 900, state: "open", locked: true, title: "Factory: account holds", labels: [{ name: "factory:holds" }], user: { login: SELF, type: "Bot" }, comments: 1, body: "" }, comments: [{ id: 901, user: { login: SELF, type: "Bot" }, body: `${holdLine({ harness: "claude", streak: 0, account: "claude-2", until: now + 2 * 3600_000, at: now - 60_000 })}\nFactory: held`, created_at: new Date(now - 60_000).toISOString(), updated_at: new Date(now - 60_000).toISOString() }] };
+  const saved = process.env.FACTORY_ACCOUNTS;
+  process.env.FACTORY_ACCOUNTS = JSON.stringify({ claude: ["claude", "claude-2"] });
+  try {
+    const p = await tick(setup(["factory:account:claude-2"], [holds]), { maxConcurrent: 6 });
+    assert.deepEqual([p.sentBack, p.rebaseHeld], [[22], []]);
+    forgetFiles();
+    const q = await tick(setup(["factory:account:claude"], [holds]), { maxConcurrent: 6 });
+    assert.deepEqual(q.rebaseHeld, [22], "its account is free: it merges first, so #22 waits");
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_ACCOUNTS;
+    else process.env.FACTORY_ACCOUNTS = saved;
+  }
+});
+
+test("#366: every sibling head the server lacks is named in the record, so two of them are left out together the next tick; a wait that ends outside the send-back is cleared", async () => {
+  forgetFiles();
+  const [e, d] = ["e".repeat(40), "d".repeat(40)];
+  const h22 = G.head("two 22", { "src/registry.ts": [29] });
+  const w = world([issue(20, ["factory:in-review"], 1), issue(21, ["factory:in-review"], 1), issue(22, ["factory:in-review"], 1)], { comments: { 30: [validated(20, e)], 31: [validated(21, d)], 32: [validated(22, h22)] }, prs: { 20: reviewingPr(20, e), 21: reviewingPr(21, d), 22: dirtyPr(22, h22) } });
+  const r = await tick(w, { maxConcurrent: 6 });
+  assert.deepEqual(r.rebaseHeld, [22]);
+  assert.match(records(w, 22, 32, "sendback-wait")[0].body, new RegExp(`^<!-- factory:22:sendback-wait:20-\\d+-u${e}\\.${d} -->\\nFactory: its rebase waits for #20 to merge first \\(2 sibling heads could not be fetched for a trial merge\\)\\.`));
+  forgetFiles();
+  assert.deepEqual((await tick(w, { maxConcurrent: 6 })).sentBack, [22]);
+
+  // #22 waited; then a person resolved its conflict: the record is released and the issue's note cleared.
+  forgetFiles();
+  const h21 = G.head("over 21", { "src/registry.ts": [29] });
+  const v = world([issue(21, ["factory:in-review"], 1), issue(22, ["factory:in-review"], 1)], { comments: { 31: [validated(21, h21)], 32: [validated(22, h22)] }, prs: { 21: reviewingPr(21, h21), 22: dirtyPr(22, h22) } });
+  assert.deepEqual((await tick(v, { maxConcurrent: 6 })).rebaseHeld, [22]);
+  v.state.prs[22].pr.mergeable_state = "clean";
+  forgetFiles();
+  const after = await tick(v, { maxConcurrent: 6 });
+  assert.deepEqual([after.sentBack, after.rebaseHeld], [[], []]);
+  assert.match(records(v, 22, 32, "sendback-wait")[0].body, /-released -->\nFactory: this Objective's PR no longer waits for #21 to rebase: it conflicts no more, or left review\./);
+  assert.ok(overlap(v, 22)[0].body.startsWith(marker(22, "overlap", "cleared")), overlap(v, 22)[0].body);
 });
 
 test("#340: a sibling that can run no stage (two account labels) is not ahead; a hold more than 6 h after the Objective's last starts a new wait", async () => {

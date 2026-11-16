@@ -24,10 +24,12 @@ export const PLAN_FILES_KEY = "Files";
 /** At most this many paths are kept per Objective: a plan line or a PR past it is read as its first ones. */
 export const FILES_MAX = 200;
 /**
- * The trial merges one dispatcher tick, or one hand-off, computes at most; a pair of heads already merged in this
- * process is read from its cache and counts nothing. A bound on the git work, not a judgement: past it, a pair is unread.
+ * The new trial merges one PR's judgement computes at most (a hand-off, a waiting hand-off's tick, a send-back's tick);
+ * a pair of heads already merged in this process is read from its cache and counts nothing. Each PR has its own, so the
+ * early ones never use up a later one's. A bound on the git work, not a judgement: past it, a pair is unread. `max` is
+ * settable (tests).
  */
-export const TRIALS_MAX = 50;
+export const TRIALS = { max: 50 };
 /** The longest a hand-off to review waits for siblings (from its record's start): then the review goes on beside them. */
 export const WAIT_MAX_MS = 6 * 3600_000;
 
@@ -100,11 +102,13 @@ export function siblingOrder({ candidates, siblings, slots }) {
   return { ready, notes };
 }
 
-const list = (paths, max = 5) => `${paths.slice(0, max).map((p) => `\`${p.replace(/`/g, "")}\``).join(", ")}${paths.length > max ? ` and ${paths.length - max} more` : ""}`;
+/** A path for a comment: no backtick, angle bracket or line break of its own, so it ends no code span and starts no marker. */
+const safePath = (p) => String(p).replace(/`/g, "").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/[\r\n]+/g, " ");
+const list = (paths, max = 5) => `${paths.slice(0, max).map((p) => `\`${safePath(p)}\``).join(", ")}${paths.length > max ? ` and ${paths.length - max} more` : ""}`;
 const hours = Math.round(WAIT_MAX_MS / 3600_000);
 
 /** What a trial merge found (`w.files`, the paths it conflicts in), after a wait's sibling and cause. */
-const found = (w, max) => (w.files?.length ? `: a trial merge of the two heads conflicts in ${w.files.length} file(s) (${list(w.files, max)})` : w.unread || w.order ? "" : ": a trial merge of the two heads conflicts");
+const found = (w, max) => (w.files?.length ? `: a trial merge of the two heads conflicts in ${w.files.length} file(s) (${list(w.files, max)})` : w.unread?.length || w.order ? "" : ": a trial merge of the two heads conflicts");
 const causeOf = (w) => (w.cause ? ` (${w.cause})` : "");
 
 /** Why a hand-off waits (the dispatcher's log line and the stage's exit reason): `w` is `{on, files, cause?, unread?}`. */
@@ -158,31 +162,34 @@ const trialCache = new Map();
 /** The git URL of `repo` on the GitHub server the run belongs to (GITHUB_SERVER_URL, else github.com). */
 export const gitRemote = (repo) => `${(process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "")}/${repo.full}.git`;
 
-/** Past TRIALS_MAX new trial merges in one tick or hand-off. */
+/** Past TRIALS.max new trial merges in one PR's judgement. */
 export class TrialCap extends Error {}
 
 /**
- * Trial merges of PR heads for one dispatcher tick or one hand-off (outbox.mjs trialMerges, one scratch mirror):
- * `conflicts(a, b)` resolves to `{conflict, files}` for the two heads against the default branch's head now, from this
- * process's cache when that pair was merged on that head before; it rejects with TrialUnread when the pair cannot be
- * merged (`missing` the heads the server did not have) and with TrialCap past TRIALS_MAX new merges. The caller closes it.
+ * Trial merges of PR heads for one dispatcher tick or one hand-off (outbox.mjs trialMerges, one scratch mirror).
+ * `scope()` is one PR's judgement: its `conflicts(a, b)` resolves to `{conflict, files}` for the two heads against the
+ * default branch's head now, from this process's cache when that pair was merged on that head before; it rejects with
+ * TrialUnread when the pair cannot be merged (`missing` the heads the server did not have) and with TrialCap past
+ * `max` new merges in that scope. `conflicts` itself is one scope's. The caller closes it.
  */
-export function siblingTrials(repo, opts, { max = TRIALS_MAX } = {}) {
+export function siblingTrials(repo, opts, { max = TRIALS.max } = {}) {
   const token = typeof opts?.token === "function" ? opts.token : () => opts?.token ?? null;
   const box = trialMerges({ remote: gitRemote(repo), token });
-  let left = max;
-  return {
-    async conflicts(a, b) {
-      const [x, y] = [a, b].sort();
-      const key = `${repo.full}|${await box.main()}|${x}|${y}`;
-      if (trialCache.has(key)) return trialCache.get(key);
-      if (left <= 0) throw new TrialCap(`past the ${max} trial merges a tick computes`);
-      left -= 1;
-      const { conflict, files } = await box.conflicts(x, y);
-      return remember(trialCache, key, { conflict, files });
-    },
-    close: () => box.close(),
+  const scope = () => {
+    let left = max;
+    return {
+      async conflicts(a, b) {
+        const [x, y] = [a, b].sort();
+        const key = `${repo.full}|${await box.main()}|${x}|${y}`;
+        if (trialCache.has(key)) return trialCache.get(key);
+        if (left <= 0) throw new TrialCap(`past the ${max} trial merges one PR's judgement computes`);
+        left -= 1;
+        const { conflict, files } = await box.conflicts(x, y);
+        return remember(trialCache, key, { conflict, files });
+      },
+    };
   };
+  return { ...scope(), scope, close: () => box.close() };
 }
 
 /** The issue's comments, from the cache while its `updated_at` and comment count are what they were. */
@@ -303,8 +310,8 @@ const readFiles = (repo, issue, opts, prOf, log) =>
 /**
  * The PR records of a wait: a hand-off's (reviewHold, `review-wait`) and a send-back's (sendBackOrder, `sendback-wait`).
  * Each is a comment whose first line is `<prefix><on>-<since, epoch s>[-u<sha>] -->` while it waits, with `-released`
- * before ` -->` once its wait is over; `u<sha>` names a sibling head that could not be fetched for a trial merge, so the
- * next tick that cannot fetch it either goes on without it. Released records stay: they keep the Objective's first wait
+ * before ` -->` once its wait is over; `u<sha>[.<sha>...]` names the sibling heads that could not be fetched for a trial
+ * merge, so the next tick that cannot fetch them either goes on without them. Released records stay: they keep the Objective's first wait
  * start (the bound is per Objective), and a released hand-off record marks a PR that went through its wait as ahead of
  * those still waiting.
  */
@@ -314,8 +321,8 @@ const recordPrefix = (n, kind) => marker(n, kind).replace(/ -->$/, ":");
 function waitRecordOf(comments, n, kind) {
   const prefix = recordPrefix(n, kind);
   const c = [...(comments || [])].reverse().find((x) => trustedAuthor(x) && String(x.body || "").startsWith(prefix));
-  const m = c && /^(\d+)-(\d+)(?:-u([0-9a-f]{40}))?(-released)? -->/.exec(c.body.slice(prefix.length));
-  return m ? { id: c.id, on: Number(m[1]), since: Number(m[2]) * 1000, unread: m[3] ?? null, released: !!m[4], at: Date.parse(c.updated_at || c.created_at) || null } : null;
+  const m = c && /^(\d+)-(\d+)(?:-u([0-9a-f]{40}(?:\.[0-9a-f]{40})*))?(-released)? -->/.exec(c.body.slice(prefix.length));
+  return m ? { id: c.id, on: Number(m[1]), since: Number(m[2]) * 1000, unread: m[3] ? m[3].split(".") : [], released: !!m[4], at: Date.parse(c.updated_at || c.created_at) || null } : null;
 }
 
 /**
@@ -328,8 +335,8 @@ export const reviewWaitOf = (comments, n) => waitRecordOf(comments, n, "review-w
 export const rebaseWaitOf = (comments, n) => waitRecordOf(comments, n, "sendback-wait");
 
 /** Write issue `n`'s PR record of `kind` (waitRecordOf's form), over Factory's earlier one. */
-function writeRecord(repo, n, prNumber, kind, { on, since, unread = null, released = false }, text, opts) {
-  return upsertComment(repo, prNumber, recordPrefix(n, kind), text, opts, { head: `${on}-${Math.floor(since / 1000)}${unread ? `-u${unread}` : ""}${released ? "-released" : ""} -->` });
+function writeRecord(repo, n, prNumber, kind, { on, since, unread = [], released = false }, text, opts) {
+  return upsertComment(repo, prNumber, recordPrefix(n, kind), text, opts, { head: `${on}-${Math.floor(since / 1000)}${unread?.length ? `-u${unread.join(".")}` : ""}${released ? "-released" : ""} -->` });
 }
 const writeWait = (repo, n, prNumber, wait, text, opts) => writeRecord(repo, n, prNumber, "review-wait", wait, text, opts);
 
@@ -358,20 +365,23 @@ function siblingState(repo, n, opts, prOf, memo) {
   return memo.get(n);
 }
 
+/** A wait's cause when sibling heads could not be fetched. */
+const unreadCause = (unread) => `${unread.length > 1 ? `${unread.length} sibling heads` : "its head"} could not be fetched for a trial merge`;
+
 /** The release order of siblings (aheadOf, sendBackOrder): priority, then number. */
 const byRelease = (a, b) => priorityOf(a) - priorityOf(b) || a.number - b.number;
 
 /**
  * The trial merge of `head` with a sibling's `theirs`: `{conflict, files}`, or `{unread: theirs}` when the server did not
  * have the sibling's head (a push in flight, a branch moved), or null when that same head could not be fetched last time
- * either (`skip`, from the waiting PR's record): it is left out. Anything else unread throws.
+ * either (`skip`, the heads the waiting PR's record names): it is left out. Anything else unread throws.
  */
-async function trial(trials, head, theirs, skip) {
+async function trial(trials, head, theirs, skip = []) {
   try {
     return await trials.conflicts(head, theirs);
   } catch (e) {
     if (!(e instanceof TrialUnread) || !e.missing.includes(theirs) || e.missing.includes(head)) throw e;
-    return theirs === skip ? null : { unread: theirs };
+    return skip.includes(theirs) ? null : { unread: theirs };
   }
 }
 
@@ -388,8 +398,11 @@ async function trial(trials, head, theirs, skip) {
  * merge: it is not ahead. One ahead whose head cannot be fetched is taken as conflicting once (`unread` its head, for
  * the record): the next time, still unfetched, it is left out. Anything else unread throws (TrialUnread, TrialCap).
  */
-async function aheadOf(repo, { issue, head, key, others, state, stuck = () => false, skip = null }, opts, prOf, memo, trials) {
+async function aheadOf(repo, { issue, head, key, others, state, stuck = () => false, skip = [] }, opts, prOf, memo, trials) {
   if (!head) return null;
+  // Siblings ahead whose heads could not be fetched: every one of them is named, so none alternates with another.
+  const unread = [];
+  let first = null;
   for (const s of [...others].filter((x) => x.number !== issue.number).sort(byRelease)) {
     if (stuck(s)) continue;
     const theirs = await prOf(s.number);
@@ -399,9 +412,15 @@ async function aheadOf(repo, { issue, head, key, others, state, stuck = () => fa
     const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
     const st = state(s);
     const ahead = record?.released || (record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review" || (st === "Running" && sentBack));
-    if (ahead) return { on: s.number, files: r.files ?? [], cause: r.unread ? "its head could not be fetched for a trial merge" : record && !record.released ? `it waits for #${record.on} itself` : cause, unread: r.unread ?? null };
+    if (!ahead) continue;
+    if (r.unread) {
+      unread.push(r.unread);
+      first ??= s.number;
+      continue;
+    }
+    return { on: s.number, files: r.files, cause: record && !record.released ? `it waits for #${record.on} itself` : cause, unread };
   }
-  return null;
+  return unread.length ? { on: first, files: [], cause: unreadCause(unread), unread } : null;
 }
 
 /**
@@ -429,7 +448,7 @@ export function waitStart({ reviewWait = null, rebaseWait = null, released = fal
  * review (sent back, or through its wait), whose head conflicts with this PR's head by a trial merge against the
  * default branch. Such a PR waits, at most WAIT_MAX_MS from waitStart: rebased now, it would be rebased again after that
  * merge. The order is fixed, so no two wait on each other. A sibling head that cannot be fetched holds it once (its
- * record names the head), then is left out. When the trial merges cannot be computed (past TRIALS_MAX, a fetch that
+ * record names the head), then is left out. When the trial merges cannot be computed (past TRIALS.max, a fetch that
  * fails), the release order alone decides: the first dirty PR goes back and the later ones wait. Returns the dirty PRs
  * in the release order, each with `wait` (`{on, files, since, unread, cause}`, or null: sent back) and `since`.
  */
@@ -441,12 +460,18 @@ export async function sendBackOrder(repo, { dirty, issues, statuses = {}, landed
     const since = waitStart({ reviewWait: d.reviewWait, rebaseWait: d.rebaseWait, released: released.has(d.issue.number) }, now);
     let wait = null;
     if (now - since < WAIT_MAX_MS) {
-      const earlier = issues.filter((s) => s.number !== d.issue.number && byRelease(s, d.issue) < 0 && !landed.includes(s.number) && !stuck(s) && !held.has(s.number) && ["In review", "Running"].includes(stateOf(s, statuses[s.number] ?? null))).sort(byRelease);
+      // This PR's own trial merges (its scope of the tick's), and the sibling heads its record says could not be fetched.
+      const scope = trials.scope();
+      const skip = d.rebaseWait && !d.rebaseWait.released ? d.rebaseWait.unread : [];
+      const unread = [];
+      let first = null;
       try {
+        const earlier = issues.filter((s) => s.number !== d.issue.number && byRelease(s, d.issue) < 0 && !landed.includes(s.number) && !held.has(s.number) && ["In review", "Running"].includes(stateOf(s, statuses[s.number] ?? null))).sort(byRelease);
         for (const s of head ? earlier : []) {
+          if (await stuck(s)) continue;
           const theirs = await prOf(s.number);
           if (!theirs?.head?.sha || theirs.draft) continue;
-          const r = await trial(trials, head, theirs.head.sha, d.rebaseWait?.released ? null : d.rebaseWait?.unread);
+          const r = await trial(scope, head, theirs.head.sha, skip);
           if (!r || (!r.unread && !r.conflict)) continue;
           const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
           // Its hand-off waits (it waits for others; it would not merge first), unless this tick released it.
@@ -455,13 +480,19 @@ export async function sendBackOrder(repo, { dirty, issues, statuses = {}, landed
           if (cause) continue;
           // Running: ahead only while it rebases a PR that went to review (its send-back, or the rebase after its wait).
           if (stateOf(s, statuses[s.number] ?? null) === "Running" && !sentBack && !record?.released) continue;
-          wait = { on: s.number, files: r.files ?? [], since, unread: r.unread ?? null, cause: r.unread ? "its head could not be fetched for a trial merge" : null };
+          if (r.unread) {
+            unread.push(r.unread);
+            first ??= s.number;
+            continue;
+          }
+          wait = { on: s.number, files: r.files, since, unread, cause: null };
           break;
         }
+        if (!wait && unread.length) wait = { on: first, files: [], since, unread, cause: unreadCause(unread) };
       } catch (e) {
         // Unread: the release order alone. The first dirty PR goes back; a later one waits for the one before it.
         log(`  #${d.issue.number}: its trial merges with the siblings ahead are unread (${String(e?.message || e).slice(0, 120)}); the release order decides`);
-        wait = i === 0 ? null : { on: sorted[i - 1].issue.number, files: [], since, unread: null, order: true, cause: "the trial merges could not be computed this tick, so the release order decides" };
+        wait = i === 0 ? null : { on: sorted[i - 1].issue.number, files: [], since, unread: [], order: true, cause: "the trial merges could not be computed this tick, so the release order decides" };
       }
     }
     out.push({ ...d, wait, since });
@@ -480,17 +511,21 @@ export async function sayWaiting(repo, issue, prNumber, wait, since, opts, { log
  * and the note on its issue, both written only when their text changed. A failed write throws.
  */
 export async function sayRebaseWait(repo, { issue, prNumber, wait, record }, opts, { log = () => {} } = {}) {
-  const head = { on: wait.on, since: wait.since, unread: wait.unread };
-  if (!record || record.released || record.on !== head.on || record.since !== Math.floor(head.since / 1000) * 1000 || record.unread !== (head.unread ?? null)) await writeRecord(repo, issue.number, prNumber, "sendback-wait", head, `Factory: ${rebaseWaitReason(wait)}.`, opts);
+  const head = { on: wait.on, since: wait.since, unread: wait.unread ?? [] };
+  if (!record || record.released || record.on !== head.on || record.since !== Math.floor(head.since / 1000) * 1000 || record.unread.join(".") !== head.unread.join(".")) await writeRecord(repo, issue.number, prNumber, "sendback-wait", head, `Factory: ${rebaseWaitReason(wait)}.`, opts);
   const comments = await commentsOf(repo, issue, opts).catch(() => null);
   await say(repo, issue.number, overlapOf(comments, issue.number), `rebasewait-${wait.on}-${Math.floor(wait.since / 1000)}`, rebaseWaitNote(wait, prNumber), opts, log);
 }
 
-/** A send-back whose wait is over (sent back now): its sendback-wait record released and the issue's note cleared. */
-export async function clearRebaseWait(repo, { issue, prNumber, record, gaveUp }, opts, { log = () => {} } = {}) {
-  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true }, "Factory: this PR's wait for its rebase is over; it rebases now.", opts);
+/**
+ * A send-back wait that is over: its sendback-wait record released and the issue's note cleared. `how`: "sent" (sent
+ * back now), "gaveUp" (sent back at WAIT_MAX_MS) or "over" (the PR conflicts no more, or left review: nothing to rebase).
+ */
+export async function clearRebaseWait(repo, { issue, prNumber, record, how = "sent" }, opts, { log = () => {} } = {}) {
+  const text = { sent: `this Objective's rebase no longer waits for #${record.on}; it rebases now`, gaveUp: `this Objective's rebase stopped waiting for #${record.on} after ${hours} h, the longest Factory holds one for a sibling; it rebases now`, over: `this Objective's PR no longer waits for #${record.on} to rebase: it conflicts no more, or left review` }[how];
+  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true }, `Factory: ${text}.`, opts);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
-  if (old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", gaveUp ? `Factory: this Objective's rebase stopped waiting for #${record.on} after ${hours} h, the longest Factory holds one for a sibling; it rebases now.` : `Factory: this Objective's rebase no longer waits for #${record.on}; it rebases now.`, opts, log);
+  if (old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", `Factory: ${text}.`, opts, log);
 }
 
 /**
@@ -544,7 +579,7 @@ export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMe
  *   PR handled as any In-review PR;
  * - `{waiting}`: a sibling is ahead of it (aheadOf) and it has waited less than WAIT_MAX_MS since its first wait; a
  *   sibling head that could not be fetched is named in its record, so the next tick goes on without it;
- * - "deferred": the trial merges could not be computed this tick (past TRIALS_MAX, or a fetch failed); it still waits
+ * - "deferred": the trial merges could not be computed this tick (past TRIALS.max, or a fetch failed); it still waits
  *   and the next tick decides;
  * - "unsettled": GitHub has not worked out whether it conflicts; the next tick decides;
  * - "rebase": it conflicts, so its record is released and the send-back takes it, before any review;
@@ -565,7 +600,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
     const others = issues.filter((i) => i.number !== issue.number && !landed.includes(i.number) && ["In review", "Running"].includes(stateOf(i, statuses[i.number] ?? null)));
     let on;
     try {
-      on = await aheadOf(repo, { issue, head: pr.head?.sha, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null), stuck, skip: wait.unread }, opts, prOf, memo, trials);
+      on = await aheadOf(repo, { issue, head: pr.head?.sha, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null), stuck, skip: wait.unread }, opts, prOf, memo, trials.scope());
     } catch (e) {
       if (e instanceof TrialUnread || e instanceof TrialCap) {
         log(`  #${issue.number}: its trial merges are unread this tick (${String(e.message).slice(0, 120)}); it still waits`);
@@ -575,7 +610,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
     }
     if (on) {
       // A sibling head that could not be fetched: named in the record, so the next tick goes on without it.
-      if (!dryRun && on.unread && on.unread !== wait.unread) await writeWait(repo, issue.number, pr.number, { on: on.on, since: wait.since, unread: on.unread }, `Factory: ${waitReason(on)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
+      if (!dryRun && on.unread.length && on.unread.join(".") !== wait.unread.join(".")) await writeWait(repo, issue.number, pr.number, { on: on.on, since: wait.since, unread: on.unread }, `Factory: ${waitReason(on)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
       return { waiting: on };
     }
   }
@@ -589,7 +624,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   }
   await release(how, how === "rebase" ? `Factory: this PR's wait for #${wait.on} is over; it rebases, then goes to review.` : `Factory: this PR's wait for #${wait.on} is over; it goes to review.`);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
-  if (old?.kind === "waits") await say(repo, issue.number, old, "cleared", clearedNote(wait.on, gaveUp && autoMerge && hold), opts, log);
+  if (old?.kind === "waits" || old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", clearedNote(wait.on, gaveUp && autoMerge && hold), opts, log);
   return how;
 }
 
@@ -620,6 +655,6 @@ export async function announceStarts(repo, { started, issues, order = null }, op
     const old = overlapOf(comments, n);
     const note = order?.notes?.find((x) => x.number === n);
     if (note) await say(repo, n, old, "beside", besideNote(note, note.hold), opts, log);
-    else if (old?.kind === "waits") await say(repo, n, old, "cleared", clearedNote(old.on), opts, log);
+    else if (old?.kind === "waits" || old?.kind === "rebasewait") await say(repo, n, old, "cleared", clearedNote(old.on), opts, log);
   }
 }

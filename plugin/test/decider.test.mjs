@@ -481,7 +481,9 @@ test("#379: decision spend is counted for the validation loop's budget, and the 
 
 test("#379: the review stage's decision calls run on the reviewer's model, the independent one", () => {
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
-  assert.match(src, /const decisionStage = \{ harness: inputs\.harness, model: inputs\.reviewerModel \|\| inputs\.model, env: harnessEnv,/);
+  assert.match(src, /const decisionStage = \{ harness: inputs\.harness, model: inputs\.reviewerModel \|\| inputs\.model, env: \(\) => decisionEnv,/);
+  // On the harness env (no worker secret) once it exists; before it, the edit check's own (#400).
+  assert.match(src, /\n  decisionEnv = harnessEnv;\n/);
 });
 
 test("#379: a gateway that answers 402 (its credits) hands the stage to its harness, as a refused key does", async () => {

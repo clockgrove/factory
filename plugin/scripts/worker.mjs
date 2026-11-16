@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
-import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
+import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
@@ -48,6 +48,7 @@ import { openKeptCheck } from "./lib/kept.mjs";
 import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
+import { openEditCheck } from "./lib/edit-check.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -163,6 +164,8 @@ async function main() {
   let pr = null;
   let credentialBasis = "none";
   let cred = { env: {} };
+  // The early decision calls' own credential read (readyDecisionEnv), masked like `cred` in everything the stage saves.
+  let decisionCred = {};
   // The worker secrets' values (lib/worker-secrets.mjs), masked in the uploaded stream like every other secret.
   let shellSecretValues = [];
   // The gateway relay for an opted-in AI Gateway key (lib/worker-relay.mjs), closed and booked when the stage ends.
@@ -219,14 +222,14 @@ async function main() {
     await closeWorkerRelay(relay);
     const workerKey = relay ? relay.totals() : null;
     // The raw harness stream is uploaded for 90 days: every secret this job held is masked in it first.
-    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     // The gateway relay's call log (uploaded with the usage directory) carries text the caller chose: masked the same way.
-    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -342,7 +345,7 @@ async function main() {
   // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
   // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
   const endNow = (recs, why) => {
-    const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    const secrets = [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
     if (rebaseStage) stoppedRebase(progress, rebaseStage.conflict, recs);
@@ -378,16 +381,7 @@ async function main() {
     return;
   }
   issueData = trusted.issueData;
-  // The text its plan was made from (objective-trust.mjs planGate): changed since, with no label applied after the last
-  // work stage started from it, the stage Blocks; with one, the plan is made again from this text.
   const prNow = await findPr(repo, `factory/${issue}`, token).catch(() => null);
-  const planned = await planGate({ repo, issue, sha: trusted.sha, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work" });
-  if (!planned.ok) {
-    log(planned.reason);
-    await finish("blocked", planned.reason);
-    return;
-  }
-  if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
 
   // The harness and models this Objective runs on (objective-trust.mjs choiceGate): its harness and model labels, read
   // with the text, over the repository's defaults; a label no writer applied, two of one kind, a model the harness cannot
@@ -440,6 +434,45 @@ async function main() {
     return;
   }
 
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
+  // call's spend in the stage's usage: one decision stage for all of them. Their env is the harness's own once the stage
+  // builds it (step 5); before that, for the edit check and the answer check at the stage's start, the env every child
+  // starts from with a credential read of their own (readyDecisionEnv), only when one asks the harness.
+  let decisionEnv = null;
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
+  // That early read, once: never the passes' own, since federate() returns a key with no expiry and the passes read theirs
+  // as they start (step 5), never one minted before setup and install. Masked like `cred` in everything the stage saves.
+  const readyDecisionEnv = async () => {
+    if (decisionEnv) return;
+    decisionCred = (await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env;
+    for (const v of Object.values(decisionCred)) mask(v);
+    decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...decisionCred };
+  };
+  // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
+  const editCheck = async () => {
+    if (inputs.decisionRoute === "off") return openEditCheck({ inputs });
+    try {
+      await readyDecisionEnv();
+    } catch (e) {
+      log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
+      return openEditCheck({ inputs });
+    }
+    return openEditCheck({ inputs, stage: decisionStage });
+  };
+  // The text its plan was made from (objective-trust.mjs planGate), before anything acts on the text: changed since, with
+  // no label applied after the last work stage started from it, the stage Blocks; with one, the plan is made again from
+  // this text. An edit by people who vouch for it is judged first (the edit check): wording only keeps the plan.
+  const planned = await planGate({ repo, issue, sha: trusted.sha, text: { title: issueData.title, body: issueData.body, labels: trusted.labels }, editedAt: trusted.editedAt, labeledAt, work: true, pr: prNow, objectiveLabel: inputs.objectiveLabel, notify: inputs.notify, opts: token, apply: applyExit, stage: "work", check: editCheck, progress });
+  if (!planned.ok) {
+    log(planned.reason);
+    await finish("blocked", planned.reason);
+    return;
+  }
+  if (planned.state === "replan") log("the Objective's text changed since its plan and the label was applied again after it: the plan is made again from the new text");
+  // The text a paused pass is held to (continue.mjs): the plan's own when this text is that plan's (the same, or an edit the
+  // edit check kept), so a kept edit does not discard the pause; else the text read now.
+  const planText = planned.state === "same" && planned.record?.sha256 ? planned.record.sha256 : trusted.sha;
+
   // One repository per Objective (lib/one-repo.mjs): a body that names another repository (declaredQuestion) is a
   // Question before any branch work or harness spend. An open PR the Objective already has goes back to a draft with
   // it, as on every Question: the dispatcher sends no draft back for a rebase (logic.mjs staleDecision), so a
@@ -452,11 +485,6 @@ async function main() {
     await finish("question", named);
     return;
   }
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
-  // call's spend in the stage's usage. Their env is the harness's own once the stage builds it (step 5); before that,
-  // the answer check readies one from the stage's credential, only when it asks the harness.
-  let decisionEnv = null;
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
   // The answer check (lib/answer-check.mjs), first thing once the stage's decider exists: a stint that resumes a Question
   // goes on only when the writer comments since it give a decision, so one that does not costs no branch, no Running
   // mark, no setup, no install, no hand-off and no relay. A send-back resumes no Question; a relaunch or a continued
@@ -465,8 +493,7 @@ async function main() {
   const readyDecisions = async () => {
     if (decisionEnv || answerCheck.asked().name !== "harness") return true;
     try {
-      const c = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
-      decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...c.env };
+      await readyDecisionEnv();
       return true;
     } catch (e) {
       log(`answer check: the stage's credential is not ready (${String(e?.message || e).slice(0, 160)}); the comment resumes the Question unjudged`);
@@ -532,7 +559,7 @@ async function main() {
       ? await enterStage({
           ws: join(usageDir, ".."),
           own: usageDir,
-          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: trusted.sha, harness: inputs.harness, login: loginOf(inputs.harness) }),
+          now: async () => ({ branch: outbox.expected() || "", restart: restartedAt(await listComments(repo, issue, token)), running: labels.includes("factory:running") ? await runningSince(repo, issue, token) : null, text: planText, harness: inputs.harness, login: loginOf(inputs.harness) }),
           holds: (pause) => checkoutHolds((args) => outbox.agentGit(args), branch, pause),
           putOn,
           clean,
@@ -765,7 +792,7 @@ async function main() {
   };
   // The work pass's pause, while it runs (not a send-back's conflict pass): the four guards as they stand when it ends on
   // its usage limit, which the next work stage here weighs (lib/continue.mjs).
-  if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: trusted.sha, harness: inputs.harness });
+  if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: planText, harness: inputs.harness });
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
     log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);

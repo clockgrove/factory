@@ -10,7 +10,8 @@ import { REBASE_LIMIT, marker, ontoRecord, setSelf, staleDecision } from "../scr
 import { Local } from "../scripts/local.mjs";
 import { RETRY, transientError } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
-import { EDITED_REASON, objectiveSha } from "../scripts/lib/objective-trust.mjs";
+import { EDITED_REASON, objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
+import { openEditCheck } from "../scripts/lib/edit-check.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
 RETRY.sleep = async () => {};
@@ -563,6 +564,39 @@ test("#205: an Objective edited while its PR waits in the merge queue is taken o
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report: {} }, { token: "t" }), "edited");
     assert.equal(dequeued.length, 1, "taken out of the queue");
     assert.equal(mergeBlockReason("edited"), EDITED_REASON);
+  });
+});
+
+test("#400: an edit since the plan by a writer merges once judged wording only; one no decider here can judge goes to the review stage", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    // The plan comment records the text it was made from; the body since edited by kirk, who can push.
+    const kirk = { __typename: "User", login: "kirk", databaseId: 4 };
+    const issue = { title: "Objective", body: "Save two, fixed a typo.", lastEditedAt: new Date().toISOString(), author: kirk, editor: kirk, labels: { nodes: [] } };
+    (gh.comments[2] ||= []).push({ id: 900, user: { login: SELF }, body: `${marker(2, "plan")}${planTextMarker({ sha256: objectiveSha("Objective", "Save two."), label: null, text: recordText({ title: "Objective", body: "Save two." }) })}\n## Plan`, created_at: new Date().toISOString() });
+    const real = gh.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+      if (/\/graphql$/.test(String(url)) && /issue\(number/.test(JSON.parse(init.body).query)) return new Response(JSON.stringify({ data: { repository: { issue } } }), { status: 200 });
+      if (/\/collaborators\/kirk\/permission$/.test(String(url))) return new Response(JSON.stringify({ permission: "write" }), { status: 200 });
+      return real(url, init);
+    };
+    // The dispatcher on Actions holds no AI Gateway key: the review label goes back on, and nothing merges.
+    const noKey = () => openEditCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } });
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: noKey }, { token: "t" }), "text-edit");
+    assert.deepEqual([gh.state.labelled, gh.enqueued], [["12:factory:review"], []]);
+    assert.equal(mergeBlockReason("text-edit"), null, "no Block");
+    // With decision_route off, as before: Blocked.
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: () => openEditCheck({ inputs: { decisionRoute: "off" } }) }, { token: "t" }), "edited");
+    // The gateway (or the review stage's own decider) reads it as wording only: it merges, the verdict on the plan comment.
+    const asked = [];
+    const wording = () => openEditCheck({ decider: { decide: async (input) => (asked.push(input), { verdict: "wording", confidence: 0.9 }) } });
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: wording }, { token: "t" }), "queued");
+    assert.equal(asked.length, 1);
+    assert.match(gh.comments[2].find((c) => c.id === 900).body, /"verdicts":\{"[0-9a-f]{64}":"wording"\}/);
+    // Said on the issue: a merge progress comment naming the verdict, the decider and its confidence.
+    assert.ok(gh.comments[2].some((c) => c.body.startsWith("<!-- factory:2:progress:merge:") && /edit judged wording-only by given \(perplexity\/pplx-decider-v1\.2\) \(0\.90\); plan kept/.test(c.body)), gh.comments[2].map((c) => c.body).join("\n---\n"));
   });
 });
 

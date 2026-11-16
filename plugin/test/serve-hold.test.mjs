@@ -390,6 +390,8 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     let verdict = "same_again";
     loop.lapseCheck = openLapseCheck({ decider: { name: "fake", decide: async (input, question) => (asked.push({ input, question }), { verdict, confidence: 0.9 }) } });
     const died = async () => ({ code: 127, signal: null, exit: null, usd: null, stage: "work", log });
+    // The newest Blocked notice as it now reads: on Actions (GITHUB_RUN_ID) each Block updates the one notice in place.
+    const lastNotice = () => gh.comments.filter((c) => c.body.includes(":blocked:")).sort((a, b) => a.updated_at.localeCompare(b.updated_at) || a.id - b.id).at(-1).body;
     // A cause that stays: Blocked on the first lapse, no resume spent on it.
     await loop.withClaim(7, died);
     assert.ok(gh.labels.has("factory:blocked"), "Blocked on the first lapse");
@@ -412,7 +414,7 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     assert.match(asked.at(-1).input, /The time before \(resumed after it\):/, "the lapse before it is given too");
     await loop.withClaim(7, died);
     assert.ok(gh.labels.has("factory:blocked"));
-    assert.match(gh.writes.filter((w) => w.includes("factory:block")).at(-1), /3 times in a row on this machine; the lapse check \(.*\) judged it transient/);
+    assert.match(lastNotice(), /3 times in a row on this machine; the lapse check \(.*\) judged it transient/);
     // A verdict under the floor is none: resumed once, the second Blocks (as with no key).
     gh.labels.delete("factory:blocked");
     loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict: "same_again", confidence: 0.5 }) } });
@@ -429,7 +431,7 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     assert.equal(loop.lapsed.get(7).count, 3);
     assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, blocks);
     await loop.withClaim(7, died);
-    assert.match(gh.writes.filter((w) => w.includes("factory:block")).at(-1), /4 times in a row on this machine/);
+    assert.match(lastNotice(), /4 times in a row on this machine/);
   } finally {
     gh.restore();
   }

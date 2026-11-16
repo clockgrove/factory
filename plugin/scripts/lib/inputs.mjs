@@ -65,6 +65,7 @@ export const DEFAULTS = {
   issue: "",
   pr: "",
   account: "", // the account the job's account step picked (action.yml FACTORY_STAGE_ACCOUNT, lib/accounts.mjs, #267); a run's own
+  rendered_accounts: "", // the accounts setup rendered the workflow's credential inputs for (action.yml FACTORY_RENDERED_ACCOUNTS, account mode)
   vars: "", // the workflow's `${{ toJSON(vars) }}`: the repository's variables (applyVariables)
   repo: "",
   app_id: "",
@@ -103,9 +104,9 @@ export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_
 const NOT_INPUTS = ["action", "objective_label", "repo"];
 /**
  * Inputs each run gives (a dispatch's or a stage's own), never a setting: `vars` is the workflow's `vars` context, the
- * repository's variables (applyVariables).
+ * repository's variables (applyVariables); `rendered_accounts` is what setup rendered the jobs for.
  */
-export const PER_RUN_INPUTS = ["mode", "issue", "pr", "vars", "account"];
+export const PER_RUN_INPUTS = ["mode", "issue", "pr", "vars", "account", "rendered_accounts"];
 /**
  * The FACTORY_* names a workflow's env block may set (#119): the Action's inputs (DEFAULTS, which test/inputs checks
  * against action.yml) under their env names, but secrets and a run's own, and local mode's settings. Local mode takes
@@ -379,7 +380,7 @@ export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOK
  * given to (from process.env), never by a child, so scrubbedEnv (harness.mjs) removes them from every child, and a local
  * stage's base env never takes one from FACTORY_LOCAL_ENV (lib/local.mjs localBaseEnv).
  */
-export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_AUTO_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_LOCAL_AUTO_ACCOUNT", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
+export const FACTORY_CONTROL_KEYS = ["FACTORY_STAGE", "FACTORY_STAGE_ISSUE", "FACTORY_STAGE_CLAIM", "FACTORY_STAGE_PR", "FACTORY_STAGE_RECORD", "FACTORY_STAGE_COMMAND_MS", "FACTORY_STAGE_SESSION_END", "FACTORY_STAGE_SESSION_CAP", "FACTORY_STAGE_HARNESS", "FACTORY_STAGE_HOSTS", "FACTORY_STAGE_ACCOUNT", "FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_ACCOUNTS", "FACTORY_RENDERED_ACCOUNTS", "FACTORY_AUTO_ACCOUNT", "FACTORY_APP_SLUG", "FACTORY_PROGRESS_RUN", "FACTORY_READ_TOKEN", "FACTORY_IMAGE_CHECKOUT", "FACTORY_IMAGE_ENV_FILE", "FACTORY_ADAPTER_INSTALL", "FACTORY_SANDBOX_VCPUS", "FACTORY_LOCAL_FIRST_SETUP_MS", "FACTORY_LOCAL_APP_ID", "FACTORY_LOCAL_APP_KEY", "FACTORY_LOCAL_AUTO_ACCOUNT", "FACTORY_GATEWAY_URL", "FACTORY_STATE_DIR", "FACTORY_RELAY_SOCKET_DIR", "FACTORY_SERVE_SWITCHED_AT", "FACTORY_SERVE_SWITCHED_FROM"];
 
 export const isFactorySecret = (k) => FACTORY_SECRET_KEYS.some((n) => k === n || k === `FACTORY_${n}` || k === `FACTORY_INPUT_${n}`);
 

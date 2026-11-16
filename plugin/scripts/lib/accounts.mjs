@@ -335,10 +335,10 @@ export const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", copilot: "
 // ---- Accounts on GitHub Actions and the cloud sandbox (#267) ----
 
 /**
- * The secret-name suffix no secret can have: GitHub allows only letters, digits and underscores in a secret's name, so a
- * lookup with it (`secrets[format('ANTHROPIC_API_KEY{0}', '-')]`) resolves to nothing.
+ * The account step's output when it picks none for a stage: no account's name (each starts with a letter or digit), so
+ * no credential input of the rendered workflow (routeCredentialRef) matches it, and the stage Blocks with the reason.
  */
-export const NO_SECRET = "-";
+export const NO_ACCOUNT = "-";
 
 /**
  * The accounts a repository declares for GitHub Actions and the cloud sandbox: FACTORY_ACCOUNTS in its workflow file's
@@ -418,14 +418,47 @@ export const routeSecretSuffix = (name, harness) => (name === harness ? "" : `_$
 export const ROUTE_SECRETS = { claude: { api: ["ANTHROPIC_API_KEY"], plan: ["CLAUDE_CODE_OAUTH_TOKEN"] }, codex: { api: [["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]] }, copilot: { api: ["COPILOT_GITHUB_TOKEN"] } };
 
 /**
- * The secret suffix each harness's credential lookups use in the workflow (workflow-template.yml) for a stage on
- * `account` ({name, harness}): the account's own for its harness, NO_SECRET for every other harness, so the step that
- * starts the stage resolves no other account's secret. With no account (one that cannot be picked), NO_SECRET for all.
+ * The declaration `text` (FACTORY_ACCOUNTS) as setup renders it into the workflow's account steps (their
+ * `rendered_accounts` input): each harness that declares accounts, its names in order, as one line of JSON; "" when it
+ * declares none or cannot be used. Two declarations name the same accounts exactly when these are equal.
  */
-export function routeSuffixes(account) {
-  const out = {};
-  for (const h of ACCOUNT_HARNESSES) out[h] = account?.harness === h ? routeSecretSuffix(account.name, h) : NO_SECRET;
-  return out;
+export function routeAccountsText(text) {
+  const d = routeAccounts(text);
+  if (!d.ok || !d.declared) return "";
+  return JSON.stringify(Object.fromEntries(Object.entries(d.accounts).filter(([, l]) => l.length)));
+}
+
+/**
+ * The Action's harness credential inputs as the workflow template passes them, each with its harness and the secret it
+ * names for the account named after that harness (an account's own adds routeSecretSuffix).
+ */
+export const ROUTE_CREDENTIAL_INPUTS = {
+  anthropic_api_key: { harness: "claude", secret: "ANTHROPIC_API_KEY" },
+  claude_code_oauth_token: { harness: "claude", secret: "CLAUDE_CODE_OAUTH_TOKEN" },
+  codex_api_key: { harness: "codex", secret: "CODEX_API_KEY" },
+  codex_gateway_key: { harness: "codex", secret: "FACTORY_CODEX_GATEWAY_KEY" },
+  copilot_github_token: { harness: "copilot", secret: "COPILOT_GITHUB_TOKEN" },
+};
+
+/**
+ * The names an `input`'s (ROUTE_CREDENTIAL_INPUTS) secret has for each account of its harness that `declared`
+ * (routeAccounts) gives, in order: {account, secret}. A harness with none declared has one account, named after it.
+ */
+export const routeCredentialSecrets = (input, declared) => {
+  const { harness, secret } = ROUTE_CREDENTIAL_INPUTS[input];
+  const names = declared?.accounts?.[harness]?.length ? declared.accounts[harness] : [harness];
+  return names.map((account) => ({ account, secret: `${secret}${routeSecretSuffix(account, harness)}` }));
+};
+
+/**
+ * The value setup renders for a stage step's credential `input` with accounts declared (`declared`, routeAccounts):
+ * one GitHub expression naming each account's secret by its fixed name, the one whose account the job's account step
+ * picked, else empty. GitHub sends a job only the secrets its file names, so no other secret reaches the runner, and the
+ * stage's step gets its own account's value alone: every other account's, and every harness but the stage's, is empty.
+ */
+export function routeCredentialRef(input, declared) {
+  const terms = routeCredentialSecrets(input, declared).map(({ account, secret }) => `(steps.account.outputs.account == '${account}' && secrets.${secret})`);
+  return `\${{ ${[...terms, "''"].join(" || ")} }}`;
 }
 
 /**

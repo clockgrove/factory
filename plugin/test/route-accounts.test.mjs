@@ -10,14 +10,16 @@ import { test } from "node:test";
 // App-token client reads it; every secret value here is a fake.
 process.env.GITHUB_API_URL = "https://github.test";
 const { RETRY } = await import("../scripts/lib/github.mjs");
-const { NO_SECRET, accountLabelNote, chatgptLogin, routeAccounts, routeSecretSuffix, routeSuffixes } = await import("../scripts/lib/accounts.mjs");
+const { NO_ACCOUNT, accountLabelNote, validAccountName, chatgptLogin, routeAccounts, routeAccountsText, routeCredentialRef, routeSecretSuffix } = await import("../scripts/lib/accounts.mjs");
 const { accountStep, stageAccount } = await import("../scripts/objective-account.mjs");
 const { accountGate, routeAccountCheck } = await import("../scripts/lib/objective-trust.mjs");
-const { renderWorkflow } = await import("../scripts/setup.mjs");
+const { keptArgs, pickRunner, workflowSettings, workflowText } = await import("../scripts/setup.mjs");
+const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+const { Evaluator, Lexer, Parser, data: exprData } = await import("../vendor/@actions/expressions/dist/index.js");
 const { parseYaml } = await import("../scripts/lib/yaml.mjs");
 const { missingCredential, stageEnvironment } = await import("../scripts/launch.mjs");
 const { credentialEnv } = await import("../scripts/lib/harness.mjs");
-const { credentialChecks, neededSecrets, routeAccountChecks, secretChecks } = await import("../scripts/doctor.mjs");
+const { credentialChecks, neededSecrets, routeAccountChecks, secretChecks, secretReferences, workflowSecretChecks } = await import("../scripts/doctor.mjs");
 
 RETRY.sleep = async () => {};
 const ROOT = join(import.meta.dirname, "..", "..");
@@ -75,10 +77,10 @@ async function withGitHub({ labels = ["factory:objective"], by = {}, events = []
 }
 
 /** The account step as the Action runs it (accountStep: the App's token minted, then stageAccount), its outputs read back. */
-async function runStep({ labels, by, events, accounts = ACCOUNTS, harness = "claude", issue = "8", branch = "none" }) {
+async function runStep({ labels, by, events, accounts = ACCOUNTS, rendered = routeAccountsText(accounts), harness = "claude", issue = "8", branch = "none" }) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
-  const env = { GITHUB_REPOSITORY: "acme/app", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_HARNESS: harness, FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY };
+  const env = { GITHUB_REPOSITORY: "acme/app", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_RENDERED_ACCOUNTS: rendered, FACTORY_HARNESS: harness, FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY };
   let reads;
   let minted;
   await withGitHub({ labels, by, events }, (r, st) => ((reads = r), (minted = st.minted), accountStep({ args: { repo: "acme/app", issue, branch }, env })));
@@ -107,32 +109,37 @@ test("the accounts declaration is a JSON object of each harness's account names;
   }
 });
 
-test("each account's secrets carry its own suffix; the account named after its harness is today's secrets, and a stage's other harnesses resolve none (#267)", () => {
+test("each account's secrets carry its own suffix, the account named after its harness today's secrets, each named by its fixed name in the workflow (#267, #351)", () => {
   assert.equal(routeSecretSuffix("claude", "claude"), "");
   assert.equal(routeSecretSuffix("claude-2", "claude"), "_CLAUDE_2");
   assert.equal(routeSecretSuffix("work-a-1", "codex"), "_WORK_A_1");
-  assert.deepEqual(routeSuffixes({ name: "claude-2", harness: "claude" }), { claude: "_CLAUDE_2", codex: NO_SECRET, copilot: NO_SECRET });
-  assert.deepEqual(routeSuffixes({ name: "codex", harness: "codex" }), { claude: NO_SECRET, codex: "", copilot: NO_SECRET });
-  assert.deepEqual(routeSuffixes(null), { claude: NO_SECRET, codex: NO_SECRET, copilot: NO_SECRET });
-  assert.ok(!/^[A-Za-z0-9_]*$/.test(`ANTHROPIC_API_KEY${NO_SECRET}`), "no secret can have the name a NO_SECRET lookup makes");
+  const declared = routeAccounts(ACCOUNTS);
+  assert.equal(routeCredentialRef("anthropic_api_key", declared), "${{ (steps.account.outputs.account == 'claude' && secrets.ANTHROPIC_API_KEY) || (steps.account.outputs.account == 'claude-2' && secrets.ANTHROPIC_API_KEY_CLAUDE_2) || '' }}");
+  assert.equal(routeCredentialRef("codex_gateway_key", declared), "${{ (steps.account.outputs.account == 'codex-2' && secrets.FACTORY_CODEX_GATEWAY_KEY_CODEX_2) || '' }}");
+  assert.equal(routeCredentialRef("copilot_github_token", declared), "${{ (steps.account.outputs.account == 'copilot' && secrets.COPILOT_GITHUB_TOKEN) || '' }}", "a harness with none declared: its one account");
+  assert.ok(!validAccountName(NO_ACCOUNT), "the step's no-account output is no account's name");
+  assert.equal(routeAccountsText(ACCOUNTS), '{"claude":["claude","claude-2"],"codex":["codex-2"]}');
+  assert.equal(routeAccountsText(' {"codex": ["codex-2"],  "claude": ["claude", "claude-2"]} '), routeAccountsText(ACCOUNTS), "the same accounts, written otherwise");
+  assert.equal(routeAccountsText(""), "");
+  assert.equal(routeAccountsText("{"), "");
 });
 
 test("the account step picks the trusted label's account, else the harness's default, and names no account for a label it cannot act on (#267)", async () => {
-  // A trusted pin: that account, its own suffix for its harness, none for the others. Read-only token, narrowed.
+  // A trusted pin: that account. Read-only token, narrowed.
   const pinned = await runStep({ labels: ["factory:objective", "factory:account:claude-2"] });
-  assert.deepEqual(pinned.outputs, { account: "claude-2", suffix_claude: "_CLAUDE_2", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
+  assert.deepEqual(pinned.outputs, { account: "claude-2" });
   assert.ok(pinned.reads.includes("GET /repos/acme/app/issues/8/timeline"), "the labeler is read");
   assert.deepEqual(pinned.minted, [{ issues: "read", metadata: "read" }], "the step's token is read-only: issues and metadata, nothing more");
   // No label: the harness's first declared account, on today's secrets (it is named after the harness).
   const plain = await runStep({ labels: ["factory:objective"] });
-  assert.deepEqual(plain.outputs, { account: "claude", suffix_claude: "", suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET });
+  assert.deepEqual(plain.outputs, { account: "claude" });
   // A pin removed by someone who cannot push still stands; removed by someone who can, the default again.
   const removal = (login) => [{ event: "labeled", label: { name: "factory:account:claude-2" }, created_at: "2026-11-15T01:00:00Z", actor: { login: "kirk", type: "User", id: 7 } }, { event: "unlabeled", label: { name: "factory:account:claude-2" }, created_at: "2026-11-15T02:00:00Z", actor: { login, type: "User", id: 9 } }];
   assert.equal((await runStep({ labels: ["factory:objective"], events: removal("stranger") })).outputs.account, "claude-2");
   assert.equal((await runStep({ labels: ["factory:objective"], events: removal("kirk") })).outputs.account, "claude");
   // A harness label: that harness's default account.
   const codex = await runStep({ labels: ["factory:objective", "factory:harness:codex"] });
-  assert.deepEqual(codex.outputs, { account: "codex-2", suffix_claude: NO_SECRET, suffix_codex: "_CODEX_2", suffix_copilot: NO_SECRET });
+  assert.deepEqual(codex.outputs, { account: "codex-2" });
   // A review job names its PR's branch, not the issue.
   const review = await runStep({ labels: ["factory:objective", "factory:account:claude-2"], issue: "0", branch: "factory/8" });
   assert.equal(review.outputs.account, "claude-2");
@@ -144,54 +151,125 @@ test("the account step picks the trusted label's account, else the harness's def
     [["factory:objective", "factory:account:claude", "factory:account:claude-2"], {}],
   ]) {
     const r = await runStep({ labels, by });
-    assert.deepEqual(r.outputs, { account: NO_SECRET, suffix_claude: NO_SECRET, suffix_codex: NO_SECRET, suffix_copilot: NO_SECRET }, labels.join(" "));
+    assert.deepEqual(r.outputs, { account: NO_ACCOUNT }, labels.join(" "));
   }
 });
 
-/** The rendered workflow's jobs whose stage step takes a harness credential, with the step that starts the stage. */
-function stageJobs(sandbox) {
+/** The workflow setup renders on the runner or the cloud sandbox route, re-rendered with `accounts` (FACTORY_ACCOUNTS) in its env block when given. */
+function rendered({ accounts = "", sandbox = false } = {}) {
   const template = readFileSync(join(ROOT, "plugin", "workflow-template.yml"), "utf8");
-  const text = renderWorkflow(template, { sandbox: sandbox ? "vercel" : "", action: "clockgrove/factory@v0.9.99", default_branch: { raw: '"main"' }, maintainer_ids: { raw: "" }, ci_workflow: "ci" });
-  const wf = parseYaml(text);
-  const jobs = Object.entries(wf.jobs).filter(([, j]) => (j.steps || []).some((s) => s?.with?.anthropic_api_key !== undefined));
-  return { text, jobs };
+  const render = (text) => {
+    const before = text ? workflowSettings(text) : null;
+    const args = { ...keptArgs(before, {}, template), ...(sandbox ? { sandbox: "vercel" } : {}) };
+    return workflowText({ template, inputs: resolveInputs({ args, env: {} }), args, explicit: {}, before, latest: "v0.9.99", notify: "", runsOn: pickRunner(undefined, {}, {}).runsOn, ciWorkflow: "CI", defaultBranch: "main" });
+  };
+  const first = render(null);
+  return accounts ? render(first.replace(/^env:\n/m, `env:\n  FACTORY_ACCOUNTS: '${accounts}'\n`)) : first;
 }
 
-/** GitHub's evaluation of the template's one lookup form, `secrets[format('NAME{0}', steps.account.outputs.KEY)]`. */
-function resolve(expr, secrets, outputs) {
-  const m = /^\$\{\{ secrets\[format\('([A-Z_]+)\{0\}', steps\.account\.outputs\.(suffix_[a-z]+)\)\] \}\}$/.exec(String(expr).trim());
-  assert.ok(m, `a credential input is a per-account lookup: ${expr}`);
-  return secrets[`${m[1]}${outputs[m[2]] ?? ""}`] ?? "";
+/** The rendered workflow's jobs whose stage step takes a harness credential: [name, job, the stage step]. */
+const stageJobs = (text) =>
+  Object.entries(parseYaml(text).jobs)
+    .map(([n, j]) => [n, j, (j.steps || []).find((st) => st?.with?.anthropic_api_key !== undefined)])
+    .filter(([, , st]) => st);
+
+/** A `with:` value as GitHub evaluates it, with its own expression library, over the `secrets` and `steps` contexts. */
+function evaluate(value, context) {
+  const m = /^\$\{\{([\s\S]*)\}\}$/.exec(String(value).trim());
+  if (!m) return String(value);
+  const expr = new Parser(new Lexer(m[1]).lex().tokens, ["secrets", "steps"], []).parse();
+  return new Evaluator(expr, JSON.parse(JSON.stringify(context), exprData.reviver)).evaluate().coerceString();
+}
+
+/** action.yml's run step: each FACTORY_INPUT_<NAME> it sets from an input, by the input's name. */
+function actionInputEnv() {
+  const action = parseYaml(readFileSync(join(ROOT, "action.yml"), "utf8"));
+  const run = action.runs.steps.find((st) => st.id === "run");
+  const out = {};
+  for (const [k, v] of Object.entries(run.env)) {
+    const m = /^\$\{\{ inputs\.([a-z_]+) \}\}$/.exec(String(v));
+    if (m) out[m[1]] = k;
+  }
+  return out;
 }
 
 const CREDENTIALS = ["anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token"];
+const ALL_ACCOUNTS = JSON.stringify({ claude: ["claude", "claude-2"], codex: ["codex", "codex-2"], copilot: ["copilot-2"] });
+// v0.9.32's rendered workflow (the last before #267): the secrets each job names, on each route.
+const V0932_RUNNER = { dispatch: ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY"], "queue-watch": ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY"], work: ["AI_GATEWAY_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "COPILOT_GITHUB_TOKEN", "FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", "FACTORY_CODEX_GATEWAY_KEY", "FACTORY_WORKER_SECRET_VALUES"] };
+V0932_RUNNER.review = V0932_RUNNER.work;
+const VERCEL = ["VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "VERCEL_TOKEN"];
+const V0932_SANDBOX = { dispatch: V0932_RUNNER.dispatch, "queue-watch": V0932_RUNNER.dispatch, launch: [...V0932_RUNNER.work, ...VERCEL].sort(), "launch-gate": V0932_RUNNER.dispatch, "launch-event": [...V0932_RUNNER.work, ...VERCEL].sort(), image: [...V0932_RUNNER.dispatch, ...VERCEL].sort(), sweep: [...V0932_RUNNER.dispatch, ...VERCEL].sort() };
 
-test("every stage job picks its account first and passes only that account's secrets; with none declared, exactly today's (#267)", async () => {
+test("no workflow Factory renders reads a secret by a computed name, so GitHub sends a job only the secrets it names (#351)", () => {
+  const template = readFileSync(join(ROOT, "plugin", "workflow-template.yml"), "utf8");
+  assert.doesNotMatch(template, /secrets\s*\[/, "the template indexes no secret");
+  for (const accounts of ["", ACCOUNTS, ALL_ACCOUNTS]) {
+    for (const sandbox of [false, true]) {
+      const text = rendered({ accounts, sandbox });
+      const at = `${accounts || "no accounts"}, ${sandbox ? "sandbox" : "runner"}`;
+      assert.doesNotMatch(text, /secrets\s*\[/, at);
+      assert.doesNotMatch(text, /toJSON\(\s*secrets\s*\)/i, at);
+      assert.deepEqual(secretReferences(text).dynamic, [], at);
+      assert.deepEqual(workflowSecretChecks(text).filter((c) => c.status !== "PASS"), [], at);
+    }
+  }
+});
+
+test("with no accounts declared, the rendered workflow names exactly v0.9.32's secrets, each stage's credentials by their usual names (#351)", () => {
+  for (const sandbox of [false, true]) {
+    const text = rendered({ sandbox });
+    const wf = parseYaml(text);
+    const named = Object.fromEntries(
+      Object.entries(wf.jobs)
+        .map(([n, j]) => [n, [...new Set([...JSON.stringify(j).matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]))].sort()])
+        .filter(([, l]) => l.length),
+    );
+    assert.deepEqual(named, sandbox ? V0932_SANDBOX : V0932_RUNNER);
+    const usual = { anthropic_api_key: "ANTHROPIC_API_KEY", claude_code_oauth_token: "CLAUDE_CODE_OAUTH_TOKEN", codex_api_key: "CODEX_API_KEY", codex_gateway_key: "FACTORY_CODEX_GATEWAY_KEY", copilot_github_token: "COPILOT_GITHUB_TOKEN" };
+    for (const [name, , step] of stageJobs(text)) for (const k of CREDENTIALS) assert.equal(step.with[k], `\${{ secrets.${usual[k]} }}`, `${name} ${k}`);
+  }
+});
+
+test("with accounts declared, each stage job picks its account first and its step's environment holds that account's credential alone (#267, #351)", async () => {
   // Every secret of every account, fake values.
   const secrets = { ANTHROPIC_API_KEY: "fake-claude-default", CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-plan", ANTHROPIC_API_KEY_CLAUDE_2: "fake-claude-2", CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2: "fake-claude-2-plan", CODEX_API_KEY: "fake-codex-default", CODEX_API_KEY_CODEX_2: "fake-codex-2", FACTORY_CODEX_GATEWAY_KEY_CODEX_2: "fake-codex-2-gw", COPILOT_GITHUB_TOKEN: "fake-copilot" };
   const pinned = (await runStep({ labels: ["factory:objective", "factory:account:claude-2"] })).outputs;
   const none = (await runStep({ labels: ["factory:objective", "factory:account:claude-9"] })).outputs;
+  const codex = (await runStep({ labels: ["factory:objective", "factory:harness:codex"] })).outputs;
+  const toEnv = actionInputEnv();
+  assert.equal(toEnv.anthropic_api_key, "FACTORY_INPUT_ANTHROPIC_API_KEY");
   for (const sandbox of [false, true]) {
-    const { text, jobs } = stageJobs(sandbox);
+    const text = rendered({ accounts: ACCOUNTS, sandbox });
+    const jobs = stageJobs(text);
     assert.deepEqual(jobs.map(([n]) => n).sort(), sandbox ? ["launch", "launch-event"] : ["review", "work"]);
-    // No credential secret is named outright anywhere: each is a lookup by the account's suffix.
-    assert.doesNotMatch(text, /secrets\.(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|FACTORY_CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN)\b/);
-    for (const [name, job] of jobs) {
-      const at = job.steps.findIndex((s) => s?.with?.anthropic_api_key !== undefined);
-      const step = job.steps[at];
-      const pick = job.steps.findIndex((s) => s?.id === "account");
-      assert.ok(pick >= 0 && pick < at, `${name}: the account step comes first`);
+    for (const [name, job, step] of jobs) {
+      const pick = job.steps.findIndex((st) => st?.id === "account");
+      assert.ok(pick >= 0 && pick < job.steps.indexOf(step), `${name}: the account step comes first`);
       assert.equal(job.steps[pick].if, "env.FACTORY_ACCOUNTS != ''", `${name}: it runs only with accounts declared`);
       assert.equal(job.steps[pick].with.mode, "account");
-      assert.equal(job.steps[pick].with.anthropic_api_key, undefined, `${name}: the account step gets no credential`);
+      assert.equal(job.steps[pick].with.rendered_accounts, routeAccountsText(ACCOUNTS), `${name}: it knows the accounts the step below was rendered for`);
+      assert.deepEqual(Object.keys(job.steps[pick].with).filter((k) => CREDENTIALS.includes(k)), [], `${name}: the account step gets no credential`);
       assert.equal(step.with.account, "${{ steps.account.outputs.account }}", `${name}: the stage is told its account`);
-      const given = (outputs) => Object.fromEntries(CREDENTIALS.map((k) => [k, resolve(step.with[k], secrets, outputs)]));
-      // Accounts declared, pinned to claude-2: claude-2's secrets alone.
-      assert.deepEqual(given(pinned), { anthropic_api_key: "fake-claude-2", claude_code_oauth_token: "fake-claude-2-plan", codex_api_key: "", codex_gateway_key: "", copilot_github_token: "" }, name);
-      // No account could be picked: no secret at all.
-      assert.deepEqual(Object.values(given(none)).filter(Boolean), [], name);
-      // None declared (the account step skipped, its outputs empty): today's secrets, as before.
-      assert.deepEqual(given({}), { anthropic_api_key: "fake-claude-default", claude_code_oauth_token: "fake-claude-plan", codex_api_key: "fake-codex-default", codex_gateway_key: "", copilot_github_token: "fake-copilot" }, name);
+      // The step's environment as action.yml builds it from the evaluated inputs, then the inputs the stage resolves.
+      const stepEnv = (outputs) => {
+        const ctx = { secrets, steps: { account: { outputs } } };
+        const env = { GITHUB_ACTIONS: "true", FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: evaluate(step.with.account, ctx) };
+        for (const k of CREDENTIALS) env[toEnv[k]] = evaluate(step.with[k], ctx);
+        return env;
+      };
+      const held = (env) => Object.values(env).filter((v) => Object.values(secrets).includes(v));
+      // Pinned to claude-2: claude-2's secrets alone, in the step and in the harness's environment.
+      const env = stepEnv(pinned);
+      assert.deepEqual(held(env).sort(), ["fake-claude-2", "fake-claude-2-plan"], name);
+      const inputs = resolveInputs({ args: {}, env });
+      assert.deepEqual((await credentialEnv({ harness: "claude", credential: "api", inputs, env })).env, { ANTHROPIC_API_KEY: "fake-claude-2" }, name);
+      assert.deepEqual((await credentialEnv({ harness: "claude", credential: "plan", inputs, env })).env, { CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-2-plan" }, name);
+      // A Codex stage on codex-2: its two secrets alone; no account could be picked: none at all.
+      assert.deepEqual(held(stepEnv(codex)).sort(), ["fake-codex-2", "fake-codex-2-gw"], name);
+      assert.deepEqual(held(stepEnv(none)), [], name);
+      // The default account, named after its harness: today's secret alone.
+      assert.deepEqual(held(stepEnv({ account: "claude" })).sort(), ["fake-claude-default", "fake-claude-plan"], name);
     }
   }
   // The Action's account mode runs before any install and records the picked account for the stage.
@@ -199,6 +277,40 @@ test("every stage job picks its account first and passes only that account's sec
   assert.match(action, /inputs\.mode != 'watch' && inputs\.mode != 'account'/, "no harness install in account mode");
   assert.match(action, /FACTORY_STAGE_ACCOUNT: \$\{\{ inputs\.account \}\}/);
   assert.match(action, /account\)\s+node "\$FACTORY_PLUGIN_ROOT\/scripts\/objective-account\.mjs"/);
+});
+
+test("a workflow rendered for other accounts than FACTORY_ACCOUNTS declares passes no credential: the account step picks none and the stage asks for a re-render (#351)", async () => {
+  // A third account added to the env block without a re-render: its secret is named nowhere in the jobs.
+  const more = JSON.stringify({ claude: ["claude", "claude-2", "claude-3"], codex: ["codex-2"] });
+  const stale = await runStep({ labels: ["factory:objective", "factory:account:claude-3"], accounts: more, rendered: routeAccountsText(ACCOUNTS) });
+  assert.deepEqual(stale.outputs, { account: "" });
+  assert.ok(!stale.reads.includes("GET /repos/acme/app/issues/8"), "decided before any read of the Objective");
+  // Declared by hand in a workflow rendered with none.
+  assert.deepEqual((await runStep({ labels: ["factory:objective"], rendered: "" })).outputs, { account: "" });
+  // The same accounts written otherwise still match.
+  assert.deepEqual((await runStep({ labels: ["factory:objective"], rendered: '{"codex":["codex-2"],"claude":["claude","claude-2"]}' })).outputs, { account: "claude" });
+  const applied = [];
+  await withGitHub({ labels: ["factory:objective"] }, () => accountGate({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: more, FACTORY_STAGE_ACCOUNT: "" }, opts: { token: "t" }, apply: async (_r, e) => applied.push(e), stage: "work" }));
+  assert.match(applied[0].reason, /declares accounts \(FACTORY_ACCOUNTS\), but its workflow was not rendered for them/);
+  assert.match(applied[0].fix, /Re-render the workflow .* after every change to FACTORY_ACCOUNTS/);
+  // Doctor: the re-render it needs, and the exposure of a workflow that reads secrets by a computed name (v0.9.33's).
+  const text = rendered({ accounts: ACCOUNTS }).replace(`FACTORY_ACCOUNTS: '${ACCOUNTS}'`, `FACTORY_ACCOUNTS: '${more}'`);
+  const [, accounts] = workflowSecretChecks(text);
+  assert.equal(accounts.status, "FAIL");
+  assert.match(accounts.detail, /do not name ANTHROPIC_API_KEY_CLAUDE_3, CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_3/);
+  assert.match(accounts.fix, /re-render the workflow/);
+  const removed = rendered({ accounts: ACCOUNTS }).replace(`  FACTORY_ACCOUNTS: '${ACCOUNTS}'\n`, "");
+  assert.match(workflowSecretChecks(removed).find((c) => c.name === "workflow accounts").detail, /FACTORY_ACCOUNTS declares none, but the workflow's jobs were rendered for/);
+  const handAdded = rendered({}).replace(/^env:\n/m, `env:\n  FACTORY_ACCOUNTS: '${ACCOUNTS}'\n`);
+  assert.equal(workflowSecretChecks(handAdded).find((c) => c.name === "workflow accounts").status, "FAIL");
+  assert.equal(workflowSecretChecks(rendered({ accounts: ACCOUNTS })).find((c) => c.name === "workflow accounts").status, "PASS");
+  assert.equal(workflowSecretChecks(rendered({})).find((c) => c.name === "workflow accounts"), undefined, "none declared or rendered: no row");
+  const exposed = rendered({}).replace("${{ secrets.ANTHROPIC_API_KEY }}", "${{ secrets[format('ANTHROPIC_API_KEY{0}', steps.account.outputs.suffix_claude)] }}");
+  const [fail] = workflowSecretChecks(exposed);
+  assert.equal(fail.status, "FAIL");
+  assert.match(fail.detail, /^1 expression\(s\) read secrets by a computed name or whole .*every repository and organization secret/);
+  assert.equal(workflowSecretChecks(rendered({}).replace("${{ secrets.ANTHROPIC_API_KEY }}", "${{ toJSON(secrets) }}"))[0].status, "FAIL", "the whole context");
+  assert.equal(workflowSecretChecks(rendered({}).replace("${{ secrets.ANTHROPIC_API_KEY }}", "${{ secrets['ANTHROPIC_API_KEY'] }}"))[0].status, "FAIL", "any index, even a fixed one");
 });
 
 test("the stage runs only on the account it was prepared with: a changed or unusable pin Blocks before any harness; none declared is today's route (#267)", async () => {
@@ -216,14 +328,14 @@ test("the stage runs only on the account it was prepared with: a changed or unus
   assert.match(moved.applied[0].reason, /prepared with account `claude`'s credential, but the Objective's labels now pick `claude-2`/);
   assert.deepEqual([moved.applied[0].exit, moved.applied[0].cause], ["blocked", "setup"]);
   const old = await gate(["factory:objective"], { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "" });
-  assert.match(old.applied[0].reason, /its workflow picked none for this stage/);
+  assert.match(old.applied[0].reason, /its workflow was not rendered for them/);
   assert.match(old.applied[0].fix, /Re-render the workflow/);
   const stranger = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: "" }, { "factory:account:claude-2": "stranger" });
   assert.match(stranger.applied[0].reason, /`factory:account:claude-2` was applied by `stranger`, who cannot push/);
   // The step ran and picked none: named so, not as a workflow with no account step.
-  const none = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET });
+  const none = await gate(pin, { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_ACCOUNT });
   assert.match(none.applied[0].reason, /the job's account step picked no account/);
-  assert.doesNotMatch(none.applied[0].reason, /no account step/);
+  assert.doesNotMatch(none.applied[0].reason, /not rendered/);
   const bad = await gate(["factory:objective"], { FACTORY_ACCOUNTS: "{", FACTORY_STAGE_ACCOUNT: "" });
   assert.match(bad.applied[0].reason, /FACTORY_ACCOUNTS is not valid JSON/);
   // None declared: today's single credential, the label only noted.
@@ -514,7 +626,7 @@ test("with no account label on, the pin is the pusher's newest still standing, a
   assert.equal(await pinOf([ev("labeled", A, "kirk", 1), ev("labeled", B, "stranger", 2), ev("unlabeled", B, "stranger", 3), ev("unlabeled", A, "stranger", 4)]), A);
   assert.equal(await pinOf([ev("labeled", A, "stranger", 1), ev("unlabeled", A, "stranger", 2)]), null);
   assert.equal(await pinOf([ev("labeled", A, "kirk", 1), ev("unlabeled", A, "kirk", 2)]), null);
-  const c = await withGitHub({ labels: ["factory:objective"], events: probed }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_SECRET }, opts: { token: "t" } }));
+  const c = await withGitHub({ labels: ["factory:objective"], events: probed }, () => routeAccountCheck({ repo: REPO, issue: 8, harness: "claude", labels: ["factory:objective"], env: { FACTORY_ACCOUNTS: ACCOUNTS, FACTORY_STAGE_ACCOUNT: NO_ACCOUNT }, opts: { token: "t" } }));
   assert.equal(c.wait, undefined, "the history never makes it wait");
   // The step prepared the harness's default: the stage and the launcher take its answer, with no timeline read.
   const reads = await withGitHub({ labels: ["factory:objective"] }, async (r) => {

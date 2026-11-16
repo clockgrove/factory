@@ -18,7 +18,7 @@ Ask the user only for what the issue cannot be written without. Where they left 
 
 ## Harness and models
 
-The workflow sets the default harness and models (doctor names them). When the user wants others for this Objective, offer one label per kind: `factory:harness:claude`, `codex` or `copilot`; `factory:model:<id>` (worker); `factory:subagent-model:<id>`; `factory:reviewer-model:<id>`. A cheaper worker suits a small, bounded change, the strongest one trust, money or concurrency. Claude Code runs `claude-` models, Codex those in `plugin/scripts/lib/codex-prices.json`; no provider prefix. Label names have length limits (reference.md).
+The workflow sets the default harness and models (doctor names them). When the user wants others for this Objective, offer one label per kind: `factory:harness:claude`, `codex` or `copilot`; `factory:model:<id>` (worker); `factory:subagent-model:<id>`; `factory:reviewer-model:<id>`. A cheaper worker suits a small, bounded change, the strongest one trust, money or concurrency. Claude Code runs `claude-` models, Codex those in `<plugin root>/scripts/lib/codex-prices.json`; no provider prefix. Label names have length limits (reference.md).
 
 ## Check before creating
 

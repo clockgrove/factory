@@ -28,7 +28,7 @@ When a check fails, or a login cannot be read, do not start it. Say who and why:
 
 ## Ask
 
-Show the number, title and labels, the people the trust check read, and what starting does: the run starts within seconds on Actions (on the ten-minute cron at the latest; in local mode on `factory serve`'s next tick), and one comment on the issue shows its progress. An edit after its plan is made Blocks it at its next stage (docs/USAGE.md, Edit an Objective). Ask for a yes.
+Show the number, title and labels, the people the trust check read, and what starting does: the run starts within seconds on Actions (on the ten-minute cron at the latest; in local mode on `factory serve`'s next tick), and one comment on the issue shows its progress. An edit after its plan is made Blocks it at its next stage ([Edit an Objective](https://github.com/clockgrove/factory/blob/v0.9.37/docs/USAGE.md#edit-an-objective)). Ask for a yes.
 
 ## Start it
 

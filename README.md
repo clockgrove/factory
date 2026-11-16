@@ -30,7 +30,7 @@ A run that goes well needs nothing from you. When one needs you, Factory does al
 - **You need CI that runs on pull requests.** Factory waits for your required checks and merges on them. A repository with no CI yet needs that first.
 - **Private repositories need GitHub Pro, Team or Enterprise Cloud.** Factory requires at least one required check on your default branch, and GitHub Free offers branch rules on public repositories only. A merge queue is used where GitHub offers one (repositories owned by an organization: public ones, and private ones on Enterprise Cloud); elsewhere Factory uses strict required checks.
 - **You need a model credential that GitHub Actions can use:**
-  - Claude Code: an Anthropic API key, billed per use. On a repository of your own you can use your Claude subscription instead (the `plan` credential, [docs/INSTALL.md](docs/INSTALL.md)).
+  - Claude Code: an Anthropic API key, billed per use. On a repository of your own you can use your Claude subscription instead (the `plan` credential, [docs/INSTALL.md](docs/INSTALL.md#claude-on-your-subscription)).
   - Codex: an OpenAI API key or a Vercel AI Gateway key, billed per use. On Actions there is no subscription option for Codex; your ChatGPT plan works in local mode only.
   - GitHub Copilot: a token from an account with a Copilot seat. Runs are billed to that seat as AI credits, like your own Copilot use.
 

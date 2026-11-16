@@ -5,7 +5,7 @@ Lookup detail for the factory-scoring skill. SKILL.md says when to load each sec
 ## Dollars by harness
 
 - **Claude.** The JSON result's `total_cost_usd`, and `modelUsage` keyed by model, which includes sub-agents; the top-level `usage` excludes them, so never use it for the whole run. Unit: USD. Basis: harness-reported.
-- **Codex.** Each run's JSONL ends in one `turn.completed` whose `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` are the thread's running total; `output_tokens` already includes `reasoning_output_tokens`. Sub-agent threads (`spawn_agent`) are not in it: the worker reads each from its own rollout and lists it in the usage record's `subAgents` (its tokens are in `tokens`, priced at its own model). A resumed thread reports its running total, so each pass counts only its own share. Sum per model and price from the bench's price table, naming the table's date. Unit: USD. Basis: tokens priced by table.
+- **Codex.** Each run's JSONL ends in one `turn.completed` whose `usage.input_tokens`, `usage.cached_input_tokens` and `usage.output_tokens` are the thread's running total; `output_tokens` already includes `reasoning_output_tokens`. Sub-agent threads (`spawn_agent`) are not in it: the worker reads each from its own rollout and lists it in the usage record's `subAgents` (its tokens are in `tokens`, priced at its own model). A resumed thread reports its running total, so each pass counts only its own share. Sum per model and price from the price table (`<plugin root>/scripts/lib/codex-prices.json`), naming the table's date. Unit: USD. Basis: tokens priced by table.
 - **Copilot.** Token counts, premium requests and AI credits (`totalNanoAiu`, billionths of a credit) from `copilot --usage-output-file`, which the worker writes beside `events.jsonl`. Dollars are the credits at `copilot_credit_usd`, GitHub's published $0.01 per credit by default. A resumed session reports its running total, so each pass counts only its own share. An artifact with no credits is `unmetered`. Unit: USD. Basis: harness-reported AI credits.
 - **Sandbox cost (any harness).** A cloud sandbox stage's own cost is booked once, at its end: `vendor` in its usage artifact beside the harness's dollars, and its vendor comment's spend line (`vendorUsd`) beside its progress comment's model dollars. Report it apart from the model's dollars, with its basis (list rates, or the session's ceiling as an upper bound).
 
@@ -32,7 +32,7 @@ An Objective is External when it is not a walk-away, it has at least one Blocked
 
 ## Stalls
 
-The walk-away rule's stall, as `bench/score.mjs` applies it:
+The walk-away rule's stall, as the scorecard script applies it:
 
 - The threshold is 60 minutes by default (`--stall-minutes`), GitHub's default merge-queue timeout, so one healthy CI wait, on the PR or in the queue, fits under it.
 - A merge that sat idle longer than the threshold between Factory's acts is a stall, not a walk-away: `walkAway.stall` gives the minutes and the span, and every merged row carries its longest idle span as `walkAway.longestIdleMinutes`.
@@ -42,7 +42,7 @@ The walk-away rule's stall, as `bench/score.mjs` applies it:
 
 ## Workflow hand-over
 
-Each merged PR whose body carries Factory's workflow hand-over line (`<!-- factory:N:handover-line -->`; every part of a split Objective) leaves a person's step: applying the change Factory handed over. Factory never pushes a workflow file and its App has no workflows permission, so this step is part of the design, like a publish, and it is scored as normal work by default, for every repository (`bench/score.mjs --handover owner-step`):
+Each merged PR whose body carries Factory's workflow hand-over line (`<!-- factory:N:handover-line -->`; every part of a split Objective) leaves a person's step: applying the change Factory handed over. Factory never pushes a workflow file and its App has no workflows permission, so this step is part of the design, like a publish, and it is scored as normal work by default, for every repository (the scorecard script's `--handover owner-step`):
 
 - When Factory's own hand-over comment with the patch (`<!-- factory:N:handover -->`) is on the issue, the hand-over is an **owner step**, not input: the Objective can still walk away, and the row shows the step apart (`ownerStep`) with its own minutes, from a stopwatch (`--owner-minutes`), never estimated. The person's removal of `factory:handover` after the merge marks it applied and is part of the step. Operator minutes stay zero on such a merge. Report it as "walk-away, owner step: workflow hand-over, N minutes" (or "not applied yet").
 - A hand-over with no such comment (or only a person's) is no owner step: each such merge is one human action, asked for, a miss.

@@ -12,7 +12,7 @@ Read the whole issue (`$FACTORY_IN/issue.md`) and the owner's recorded decisions
 Write the plan to `$FACTORY_OUT/plan.md` before code; edit it as the work moves. Factory posts it as the plan comment. On a rerun, start from `$FACTORY_IN/plan.md`, the plan as it stands. It holds, in this order:
 
 1. **Goal in your own words.** Two or three sentences; where they disagree, the issue wins.
-2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns on a line `Files: src/a.ts, docs/b.md` (Factory orders Objectives sharing files by them); an item that changes no file has no Files: line. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to an item and name which. Mark each item done as it lands.
+2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns on a line `Files: src/a.ts, test/a.test.ts` (Factory orders Objectives sharing files by them); an item that changes no file has no Files: line. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to an item and name which. Mark each item done as it lands.
 3. **Assumptions.** Every one, numbered: a default you chose, a behaviour left unsaid, a library, an invented name.
 4. **Design note.** When the repository has a design checklist, answer it here.
 

@@ -1154,6 +1154,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     };
     const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? 60 * 60_000, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
+    // How long a triage rerun may wait for its workflow run to complete (GitHub reruns only a completed run's failed
+    // jobs): what is left of the checks' own wait, counted from its start, within the stage's wall clock less
+    // CHECKS_WAIT_GUARD_MS.
+    const runUntil = () => Math.min(waitedFrom + (checks.timeoutMs ?? 60 * 60_000), Date.now() + remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
     // A wait that ended with no completed failing run is no red: nothing failed for a fix pass to fix. It is read on
     // structure (triage.mjs checkSources, checksNotStarted): a required check GitHub has not started is waited for here,
     // on every route, up to CHECKS_WAIT_MS or the stage's wall clock less CHECKS_WAIT_GUARD_MS, the reads backing off;
@@ -1211,7 +1215,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (onPhase) await onPhase(`${label}: ${said}`);
       const before = r.failedRuns;
       const a = triage?.again
-        ? await triage.again({ sha, failedRuns: r.failedRuns }).catch((e) => {
+        ? await triage.again({ sha, failedRuns: r.failedRuns, until: runUntil() }).catch((e) => {
             log(`rerun on the unchanged head failed: ${String(e?.message || e).slice(0, 160)}`);
             return { rerun: false, skipped: "the rerun could not be asked" };
           })
@@ -1249,7 +1253,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // the wait starts again; no fix pass is spent and no pass is counted. Any other red goes on to the fix pass.
     let triaged = null;
     if (triage && !r.green && !r.timedOut && r.failedRuns?.length) {
-      const t = await triage.red({ sha, failedRuns: r.failedRuns, required: checks.names }).catch((e) => {
+      const t = await triage.red({ sha, failedRuns: r.failedRuns, required: checks.names, until: runUntil() }).catch((e) => {
         log(`triage failed: ${String(e?.message || e).slice(0, 160)}; fix pass`);
         return { rerun: false };
       });
@@ -1868,21 +1872,29 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
 }
 
 /**
- * Post a notice as the App when there is one (`notice`, local mode). Any failure on that path (no token from the
- * parent, or GitHub refusing the App's post: uninstalled, rate limited) posts it again with the local `token`, logged:
- * a comment no one is told of beats none. `post` takes the request options.
+ * Post a notice as the App when there is one (`notice`, local mode). The App's token goes as a getter whose refresh
+ * asks `notice` for a new one in place of the one GitHub refused, so a 401 on it is refreshed once (github.mjs
+ * refreshedOn401). Any failure on that path (no token from the parent, or GitHub refusing the App's post: uninstalled,
+ * rate limited) posts it again with the local `token`, logged: a comment no one is told of beats none. `post` takes the
+ * request options.
  */
 export async function noticePost({ notice, token, what, post }) {
   if (!notice) return post({ token });
   let appToken;
+  let mintedAt = null;
   try {
-    appToken = (await notice()).token;
+    ({ token: appToken, mintedAt = null } = await notice());
   } catch (e) {
     log(`${what}: no notice token (${e.message.slice(0, 160)}); posting with the local token`);
     return post({ token });
   }
+  const current = () => appToken;
+  current.refresh = async () => {
+    ({ token: appToken, mintedAt = null } = await notice({ stale: appToken }));
+  };
+  current.mintedAt = (t) => (t && t === appToken ? mintedAt : null);
   try {
-    return await post({ token: appToken });
+    return await post({ token: current });
   } catch (e) {
     log(`${what}: the App's post failed (${e.message.slice(0, 160)}); posting with the local token`);
     return post({ token });
@@ -2494,13 +2506,14 @@ export async function queueEntryState(repo, prNumber, opts, now = Date.now(), ga
 
 /**
  * applyExit's input for a send-back that Blocks (logic.mjs staleDecision): `why` "stuck" (the conflict came back on the
- * base the last rebase resolved, `record` its rebase record, files named) or "limit" (REBASE_LIMIT rebases in a day).
+ * base the last rebase resolved, `record` its rebase record, files named) or "limit" (`limit`, the rebase_limit in
+ * force, rebases in a day).
  * Its key names the condition, the PR's head and the objective label's time (`since`, rebaseMarkers), so the dispatcher
  * and a `run --wait` loop Blocking the same condition write one comment, not two @mentions; a new head or a human
  * recovery is a new condition, so it notifies again.
  */
-export function rebaseBlock({ issue, pr, why, record = null, since = null, notify, stage }) {
-  const reason = rebaseBlockReason(why, { record, defaultBranch: pr?.base?.ref || "main", behind: pr?.mergeable_state === "behind" });
+export function rebaseBlock({ issue, pr, why, record = null, since = null, notify, stage, limit = REBASE_LIMIT }) {
+  const reason = rebaseBlockReason(why, { record, defaultBranch: pr?.base?.ref || "main", behind: pr?.mergeable_state === "behind", limit });
   return { issue, pr, exit: "blocked", reason, cause: "work", notify, stage, key: `rebase-${why}:${pr?.head?.sha || "none"}:${since || ""}` };
 }
 
@@ -2550,10 +2563,10 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
 
 /**
  * The send-back's notice on the PR: its marker (naming the head it saw), why the worker rebases it, and which of the
- * REBASE_LIMIT send-backs in 24 h this is (`recent`, rebaseMarkers: the ones before it that pushed).
+ * `limit` send-backs in 24 h (rebase_limit) this is (`recent`, rebaseMarkers: the ones before it that pushed).
  */
-export function rebaseNotice(issue, pr, recent = 0) {
-  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h; the issue's progress comments show each rebase's cost).`;
+export function rebaseNotice(issue, pr, recent = 0, limit = REBASE_LIMIT) {
+  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${limit} in 24 h; the issue's progress comments show each rebase's cost).`;
 }
 
 /**

@@ -291,6 +291,13 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   assert.match(none.body, /The reviewer judged no acceptance entry\.\n\nNot judged: A, B, C, D\.$/);
   assert.match(none.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
   assert.deepEqual(none.unjudged, ["A", "B", "C", "D"]);
+  // With no entries listed (no exact Acceptance section), an answer judging none says so too (#417).
+  const unnamed = reviewPost({ issue: 7, review: parseReview('{"acceptance": [], "comments": []}'), diff, entries: [] });
+  assert.equal(unnamed.body, ["<!-- factory:7:review -->", "Factory reviewer: one comment-only pass, 1 comment(s).", "", "The reviewer judged no acceptance entry."].join("\n"));
+  assert.match(unnamed.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
+  const namedClean = reviewPost({ issue: 7, review: parseReview('{"acceptance": [{"entry": "W1", "met": true}], "comments": []}'), diff, entries: [] });
+  assert.match(namedClean.comments[0].body, /no findings; the pass ran/);
+  assert.match(namedClean.body, /Acceptance as the reviewer judged it:\n- W1: met$/);
   // A comment that names its entry only in its body prefix still covers that entry's not-met judgment.
   const prefixed = reviewPost({ issue: 7, review: { comments: [{ path: "src/a.ts", line: 3, body: "acceptance A: the limit is gone" }], acceptance: [{ entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "gone" }] }, diff, entries: [{ id: "A", text: "a" }] });
   assert.deepEqual(prefixed.comments.map((c) => c.body), ["acceptance A: the limit is gone"]);
@@ -338,7 +345,13 @@ test("review: a pass that failed, held no JSON or judged no entry is missed; one
   assert.equal(reviewMissed({ review: parseReview("it looks fine"), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"B","met":false}],"comments":[]}'), entries }), false);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries: [] }), false, "no entries in the issue: nothing to judge");
+  // No exact Acceptance section: the prompt asked the reviewer to name the entries, so an answer that judges none missed (#417).
+  const named = "### Outcome\n- a ranked list\n\n### Completion experience\n- it feels instant\n\n### What must be true\n- **W1:** results are ranked\n- **W2:** a test covers it";
+  assert.deepEqual(acceptanceEntries(named), []);
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[],"comments":[]}'), entries: acceptanceEntries(named) }), true);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": [{"path": "a", "line": 1, "body": "x"}]}'), entries: acceptanceEntries(named) }), true, "comments only: still no judgment");
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"W1","met":true}],"comments":[]}'), entries: acceptanceEntries(named) }), false);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), judges: false }), false, "a comments-only pass (the foundation pass) judges nothing");
   // Design notes under a criteria heading are no entries: a pass that judged the outcomes it named itself is no miss (#417).
   const body = "## Selection criteria\n- recall over precision\n- cheap to rerun\n\n## Outcomes\n- **O1:** ranked results\n- **O2:** a test covers it";
   assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"O1","met":true},{"entry":"O2","met":true}],"comments":[]}'), entries: acceptanceEntries(body) }), false);
@@ -354,6 +367,7 @@ test("review: post-review posts nothing from a file with no reviewer JSON or no 
   // Unquoted key: not JSON, so nothing is posted (it would carry the review marker and stop the Action's pass).
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [ {"entry": "A", met: true} ], "comments": []}', file: "f.json", diff, entries }), /f\.json holds no reviewer JSON; nothing posted/);
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"comments": []}', file: "f.json", diff, entries }), /judges none of the issue's acceptance entries \(A\); nothing posted/);
+  assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [], "comments": []}', file: "f.json", diff, entries: [] }), /f\.json judges no acceptance entry \(its "acceptance" list is empty\); nothing posted/);
   const post = reviewPostFor({ issue: 7, text: '{"acceptance": [{"entry": "A", "met": true}], "comments": []}', file: "f.json", diff, entries });
   assert.equal(post.placeholder, true);
 });

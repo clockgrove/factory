@@ -1014,8 +1014,14 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * `failedRuns` are those failed check-runs ({id, name, conclusion, suite, started_at, completed_at}); `ignoreIds` are check-runs a rerun replaces, read
  * as not there yet, so the wait lasts until the rerun's own runs finish. `maxPollMs` above `pollMs` backs the reads off.
  * `ended(runs)` (async, optional) is asked on a read with check runs that leaves a required check with none; yes ends
- * the wait unfinished. `onRead(state, runs)` (optional) gets each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an
- * AbortSignal, optional) ends the wait, unfinished, at its next pause.
+ * the wait unfinished. A required name no check run has is read from the head's commit statuses too (a pending status is
+ * a check in progress, a failing one a failed run). `progress(checks)` (async, optional) is asked on a read that leaves a
+ * required check unfinished, given the checks as queueCommitChecks shapes them, and answers `{running, hung}`: hung
+ * checks (session.mjs hangsOn) end the wait unfinished, returned as `hung`, and so does `idleMs` with no required check
+ * running. `timeoutMs` is the caller's bound (the stage's wall clock); the reads back off only past `backoffAfterMs`.
+ * `onRead(state, runs)` (optional) gets
+ * each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an AbortSignal,
+ * optional) ends the wait, unfinished, at its next pause.
  */
 /** `ms` of sleep, cut short when `signal` aborts. */
 const pause = (ms, signal = null) =>
@@ -1033,22 +1039,31 @@ const pause = (ms, signal = null) =>
 /** A check run as awaitChecks returns it (and checksNotStarted reads it). */
 const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
 
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60_000, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, onPoll = null, onRead = null, conflicted = null, ended = null, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
   const started = Date.now();
+  // When a required check was last seen running (progress), from the wait's start.
+  let ranAt = started;
+  // The head's commit statuses as check runs, read while a required name has no check run.
+  let statuses = [];
+  // Conditional reads (rest's ETag cache): a page unchanged since the last poll answers 304, outside the rate limit.
+  const etags = new Map();
   // The pause between reads: `pollMs`, doubling after each read up to `maxPollMs` (a backoff), never past the timeout.
   let pause = pollMs;
   let runs = [];
   let state = null;
   let conflict = false;
+  let hangs = [];
   // Whether a read of the check runs has succeeded since the wait began.
   let readOnce = false;
   for (;;) {
     // A failed read is no reading: once one has succeeded, the last good one stands and the wait goes on to its own
     // deadline; with none yet, the wait ends at `appearMs` as for nothing ran.
-    const read = await checkRuns(repo, sha, { token }).catch(() => null);
+    const read = await checkRuns(repo, sha, { token, cache: etags }).catch(() => null);
     if (read) {
       runs = read.filter((r) => !ignoreIds?.has(r.id));
       readOnce = true;
+      if (names.some((n) => !runs.some((r) => r.name === n))) statuses = await rest(`repos/${repo.full}/commits/${sha}/status`, { token, cache: etags }).then((st) => (st?.statuses || []).map(statusRun), () => statuses);
+      runs = [...runs, ...statuses.filter((x) => !runs.some((r) => r.name === x.name))];
     }
     state = evaluateChecks(names, runs);
     // Each reading as it is made (session.mjs validationLoop's `onRead`: whether the head is known red yet).
@@ -1065,19 +1080,27 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = 60 * 60
     // optional, given the runs as returned below) says it will get none: its own workflow runs ended before their jobs
     // ran. The wait ends at once, unfinished.
     if (read && state.missing.length && runs.length > 0 && ended && (await ended(runs.map(runShape)).catch(() => false))) break;
+    // A required check that made no progress (its step past its usual duration) ends it too, and so does `idleMs` with
+    // none running (queued, waiting or not reported: GitHub's not-started bound). An unanswered reading is running.
+    if (read && progress) {
+      const p = await progress(runs.map(commitCheck)).catch(() => null);
+      if (!p || p.running) ranAt = Date.now();
+      if ((hangs = p?.hung || []).length) break;
+    }
+    if (progress && Date.now() - ranAt > idleMs) break;
     if (elapsed > timeoutMs) break;
     if (onPoll) await onPoll(state, Math.round(elapsed / 60000));
     await sleep(Math.max(1, Math.min(pause, timeoutMs - elapsed + 1)));
-    pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
+    if (elapsed >= backoffAfterMs) pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
   }
   const timedOut = !state.done && !conflict;
   const failedRuns = runs.filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
   const parts = [];
-  for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${await jobLogTail(repo, r.id, { token })}`);
+  for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${r.commitStatus ? `commit status${r.details_url ? ` ${r.details_url}` : ""}` : await jobLogTail(repo, r.id, { token })}`);
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
   // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, hung: hangs, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */
@@ -1179,6 +1202,12 @@ export async function checksStarted(repo, sha, gate, opts) {
   return gateStarted(gate, { suites });
 }
 
+/** A check run as logic.mjs queueHangs reads it (queueCommitChecks, awaitChecks' `progress`). */
+const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null });
+
+/** A commit status as a check run: `in_progress` while pending, else completed, `success` or failed; from its creation. */
+const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, details_url: x.target_url ?? null, commitStatus: true });
+
 /**
  * The checks on a queue commit as logic.mjs queueHangs reads them: each check run `{id, name, status, started_at, app}`
  * (GitHub's status: `queued`, `in_progress`, `completed`, ...; `app` its integration's id; an Actions run's id is its
@@ -1186,10 +1215,9 @@ export async function checksStarted(repo, sha, gate, opts) {
  * as "nothing running".
  */
 export async function queueCommitChecks(repo, sha, opts) {
-  const runs = (await checkRuns(repo, sha, opts, { all: true })).map((r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null }));
+  const runs = (await checkRuns(repo, sha, opts, { all: true })).map(commitCheck);
   const st = await rest(`repos/${repo.full}/commits/${sha}/status`, opts);
-  const statuses = (st?.statuses || []).map((x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", started_at: x.created_at ?? null }));
-  return [...runs, ...statuses];
+  return [...runs, ...(st?.statuses || []).map(statusRun).map(commitCheck)];
 }
 
 /**

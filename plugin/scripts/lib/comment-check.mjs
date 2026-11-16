@@ -1,7 +1,7 @@
 // The comment check (#416): whether the writer comments no pass has read yet (session.mjs unreadNow) ask for anything
 // before a reviewed, green PR merges. A comment that only approves, thanks or acknowledges has nothing to apply, so it
 // need not cost a review stage. It is a decision call through the one decision interface (decider.mjs,
-// docs/ADAPTERS.md), on red-check triage's model setting and confidence floor (triage.mjs). Given: the issue's title and
+// docs/ADAPTERS.md), on red-check triage's model setting and confidence floor (triage.mjs confidenceFloor). Given: the issue's title and
 // body (its acceptance entries with it), the PR's title and state, whether a Question is open, and every unread comment
 // whole, each saying what it is (a comment, a review and its state, an inline comment). A writer's review that requests
 // changes holds the merge without a question: the structure says it. Only a confident `nothing_asked` lets the merge go
@@ -16,7 +16,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question asked about the unread writer comments. */
 export const COMMENT_QUESTION = {
@@ -38,8 +38,8 @@ export const COMMENT_QUESTION = {
 /** The most characters of each comment, of all of them together, and of the issue's body a question shows. */
 export const INPUT_CAPS = Object.freeze({ comment: 4000, comments: 12_000, body: 8000 });
 
-/** Whether a verdict lets the merge go on: `nothing_asked` at MIN_CONFIDENCE or more. Anything else holds it. */
-export const clears = (v) => v?.verdict === "nothing_asked" && typeof v.confidence === "number" && v.confidence >= MIN_CONFIDENCE;
+/** Whether a verdict lets the merge go on: `nothing_asked` at the floor (`min`, triage.mjs confidenceFloor) or more. Anything else holds it. */
+export const clears = (v, min = MIN_CONFIDENCE) => v?.verdict === "nothing_asked" && typeof v.confidence === "number" && v.confidence >= min;
 
 /** Whether every comment fits one question whole (INPUT_CAPS): a comment never shown whole is never judged. */
 export function commentsFit(comments) {
@@ -88,21 +88,22 @@ export function commentInput({ repo, issue, title, body, pr, questionOpen, comme
 }
 
 /**
- * The comment check's decider (decider.mjs openDecider, triage's `triage_model`): `{model, off, judge(input), asked(),
- * limited()}`. Without a `stage` only the AI Gateway answers; with one, the stage's own harness answers when there is no
+ * The comment check's decider (decider.mjs openDecider, triage's `triage_model`): `{model, off, floor(), judge(input),
+ * asked(), limited()}`, `floor` the confidence floor its verdicts are read at (triage.mjs confidenceFloor). Without a `stage` only the AI Gateway answers; with one, the stage's own harness answers when there is no
  * key (`auto`). With neither, `off` is why (the key's code, or `route-off`) and there is no `judge`. `judge` never throws:
  * a failed call is no verdict with its code. `decider` stands in for the vendor (tests).
  */
 export function openCommentCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const limited = () => ask.limited?.() ?? null;
-  if (ask.off) return { model: ask.model, off: ask.off, judge: null, asked: () => ask.asked(), limited };
+  const floor = () => confidenceFloor(inputs, ask);
+  if (ask.off) return { model: ask.model, off: ask.off, floor, judge: null, asked: () => ask.asked(), limited };
   const judge = async (input) => {
     const a = await Promise.resolve(ask.decide(input, COMMENT_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     const verdict = COMMENT_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
     return { verdict, confidence: verdict && typeof a?.confidence === "number" ? a.confidence : null, error: verdict ? null : a?.error || "no_answer" };
   };
-  return { model: ask.model, off: null, judge, asked: () => ask.asked(), limited };
+  return { model: ask.model, off: null, floor, judge, asked: () => ask.asked(), limited };
 }
 
 /** Who answered, as a line names it: the AI Gateway's model, or the stage's harness and model. */
@@ -129,8 +130,9 @@ export async function judgeUnread({ check, repo, issue, issueData, pr, unread })
   const input = commentInput({ repo: repo.full, issue, title: issueData?.title, body: issueData?.body, pr: { number: pr.number, title: pr.title, state: "open, reviewed, its required checks green, about to merge" }, questionOpen: labels.includes("factory:question"), comments: unread });
   const v = await c.judge(input);
   const newest = unread.at(-1);
-  log(`comment check (${c.model}): #${issue}, ${unread.length} unread writer comment(s), the newest by ${newest.author}: ${said(v)}`);
-  if (clears(v)) return { clear: true, why: "nothing asked", line: `comment check: ${unread.length} unread writer comment(s), the newest by ${newest.author}, read as asking nothing by ${deciderName(c.asked?.())} (${v.confidence.toFixed(2)}); recorded as read, the merge goes on` };
+  const floor = c.floor?.() ?? confidenceFloor();
+  log(`comment check (${c.model}, ${floor.text}): #${issue}, ${unread.length} unread writer comment(s), the newest by ${newest.author}: ${said(v)}`);
+  if (clears(v, floor.min)) return { clear: true, why: "nothing asked", line: `comment check: ${unread.length} unread writer comment(s), the newest by ${newest.author}, read as asking nothing by ${deciderName(c.asked?.())} (${v.confidence.toFixed(2)}); recorded as read, the merge goes on` };
   const limited = v.verdict ? null : (c.limited?.() ?? null);
-  return { clear: false, why: v.verdict === "asks" ? "the decision model reads them as asking for something" : `the decision model gave ${said(v)}, short of nothing asked at ${MIN_CONFIDENCE}`, ...(limited ? { limited } : {}) };
+  return { clear: false, why: v.verdict === "asks" ? "the decision model reads them as asking for something" : `the decision model gave ${said(v)}, short of nothing asked at the ${floor.text}`, ...(limited ? { limited } : {}) };
 }

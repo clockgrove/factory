@@ -26,7 +26,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 - The workflow checks read the default branch's `.github/workflows/factory.yml` on GitHub, as runs do; a differing local copy is a warning. Fix: pull the default branch.
 - The job token is read-only on code (`permissions: contents: read`, plus `actions: read` for the usage artifacts). Fix: edit the workflow's `permissions:`.
 - No `secrets[...]` lookup, which sends the runner every secret. Fix: re-render.
-- The default branch has the merge queue on, the CI workflow's checks required, and its parsed `on:` lists `pull_request` and `merge_group` (unreadable: a warning). Fix: setup's protection step; add `merge_group:` to the CI workflow's `on:`.
+- The default branch has the merge queue on; workflows on `pull_request` and on `merge_group` (parsed `on:`) make each required check (unread, or unmade: a warning). Fix: setup's protection step; add the missing event to that workflow's `on:`.
 - The `factory:objective` label exists; the Project board has Queued, Running, In review, Blocked and Done; `notify` is a collaborator. Fix: setup creates the label and board.
 
 ## Repository

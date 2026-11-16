@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
-import { exitRecord } from "../scripts/lib/session.mjs";
+import { exitRecord, scopeRefusal } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 
@@ -206,12 +206,12 @@ test("review: findings parse from a fenced block and snap to diff lines", () => 
   assert.deepEqual(snapComments(findings, "").map((c) => [c.path, c.line]), [["src/a.ts", 3], ["src/a.ts", 99], ["elsewhere.ts", 1]]);
 });
 
-test("review: the issue's acceptance entries are found under an acceptance heading, by label or position", () => {
+test("review: the issue's acceptance entries are the list under its exact Acceptance heading, by label or position", () => {
   const body = [
     "### Outcome",
     "- not an entry: the outcome section",
     "",
-    "### What must be true",
+    "### Acceptance",
     "- **A:** the widget stays keyboard-reachable,",
     "  from every view.",
     "- **B:** the limit stays in place. The fallback stays available, so callers are unaffected.",
@@ -221,19 +221,23 @@ test("review: the issue's acceptance entries are found under an acceptance headi
     "- inside a fence: not an entry",
     "```",
     "",
-    "**Acceptance criteria**",
-    "1. [ ] numbered and checked",
+    "#### API",
+    "1. [ ] numbered and checked, under a sub-heading",
     "",
-    "## Context",
+    "### Context",
     "- not an entry",
   ].join("\n");
   assert.deepEqual(acceptanceEntries(body), [
     { id: "A", text: "**A:** the widget stays keyboard-reachable, from every view." },
     { id: "B", text: "**B:** the limit stays in place. The fallback stays available, so callers are unaffected." },
     { id: "3", text: "The heading shows the display name. - a nested note joins its entry" },
-    { id: "4", text: "numbered and checked" },
+    { id: "4", text: "numbered and checked, under a sub-heading" },
   ]);
   assert.deepEqual(acceptanceEntries("## Want\n- something"), [], "no acceptance heading: the reviewer names the entries itself");
+  // A heading that only mentions acceptance words is not the section: the reviewer names the entries from the issue (#417).
+  const designNotes = "## Selection criteria for the ranking model\n- recall over precision\n- **R:** cheap to rerun\n\n## Done when\n- one\n\n## Acceptance criteria\n- two\n\n**Acceptance**\n- three";
+  assert.deepEqual(acceptanceEntries(designNotes), []);
+  assert.deepEqual(acceptanceEntries("## acceptance ##\n- one").map((e) => e.text), ["one"], "the heading's case and closing hashes are formatting");
   assert.deepEqual(acceptanceEntries("## Acceptance\n- **A:** one\n- **A:** two").map((e) => e.id), ["A", "2"], "a repeated label falls back to the position");
   assert.equal(entryKey("acceptance b."), "B");
   assert.equal(entryKey("**B:**"), "B");
@@ -287,6 +291,13 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   assert.match(none.body, /The reviewer judged no acceptance entry\.\n\nNot judged: A, B, C, D\.$/);
   assert.match(none.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
   assert.deepEqual(none.unjudged, ["A", "B", "C", "D"]);
+  // With no entries listed (no exact Acceptance section), an answer judging none says so too (#417).
+  const unnamed = reviewPost({ issue: 7, review: parseReview('{"acceptance": [], "comments": []}'), diff, entries: [] });
+  assert.equal(unnamed.body, ["<!-- factory:7:review -->", "Factory reviewer: one comment-only pass, 1 comment(s).", "", "The reviewer judged no acceptance entry."].join("\n"));
+  assert.match(unnamed.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
+  const namedClean = reviewPost({ issue: 7, review: parseReview('{"acceptance": [{"entry": "W1", "met": true}], "comments": []}'), diff, entries: [] });
+  assert.match(namedClean.comments[0].body, /no findings; the pass ran/);
+  assert.match(namedClean.body, /Acceptance as the reviewer judged it:\n- W1: met$/);
   // A comment that names its entry only in its body prefix still covers that entry's not-met judgment.
   const prefixed = reviewPost({ issue: 7, review: { comments: [{ path: "src/a.ts", line: 3, body: "acceptance A: the limit is gone" }], acceptance: [{ entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "gone" }] }, diff, entries: [{ id: "A", text: "a" }] });
   assert.deepEqual(prefixed.comments.map((c) => c.body), ["acceptance A: the limit is gone"]);
@@ -334,7 +345,19 @@ test("review: a pass that failed, held no JSON or judged no entry is missed; one
   assert.equal(reviewMissed({ review: parseReview("it looks fine"), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"B","met":false}],"comments":[]}'), entries }), false);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries: [] }), false, "no entries in the issue: nothing to judge");
+  // No exact Acceptance section: the prompt asked the reviewer to name the entries, so an answer that judges none missed (#417).
+  const named = "### Outcome\n- a ranked list\n\n### Completion experience\n- it feels instant\n\n### What must be true\n- **W1:** results are ranked\n- **W2:** a test covers it";
+  assert.deepEqual(acceptanceEntries(named), []);
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[],"comments":[]}'), entries: acceptanceEntries(named) }), true);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": [{"path": "a", "line": 1, "body": "x"}]}'), entries: acceptanceEntries(named) }), true, "comments only: still no judgment");
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"W1","met":true}],"comments":[]}'), entries: acceptanceEntries(named) }), false);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), judges: false }), false, "a comments-only pass (the foundation pass) judges nothing");
+  // Design notes under a criteria heading are no entries: a pass that judged the outcomes it named itself is no miss (#417).
+  const body = "## Selection criteria\n- recall over precision\n- cheap to rerun\n\n## Outcomes\n- **O1:** ranked results\n- **O2:** a test covers it";
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"O1","met":true},{"entry":"O2","met":true}],"comments":[]}'), entries: acceptanceEntries(body) }), false);
+  // Entries under a sub-heading of Acceptance are entries: a pass that judged only those is no miss either.
+  const nested = "## Acceptance\n- one\n- two\n\n### API\n- **C:** three";
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"C","met":false}],"comments":[]}'), entries: acceptanceEntries(nested) }), false);
 });
 
 test("review: post-review posts nothing from a file with no reviewer JSON or no judgment", async () => {
@@ -344,6 +367,7 @@ test("review: post-review posts nothing from a file with no reviewer JSON or no 
   // Unquoted key: not JSON, so nothing is posted (it would carry the review marker and stop the Action's pass).
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [ {"entry": "A", met: true} ], "comments": []}', file: "f.json", diff, entries }), /f\.json holds no reviewer JSON; nothing posted/);
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"comments": []}', file: "f.json", diff, entries }), /judges none of the issue's acceptance entries \(A\); nothing posted/);
+  assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [], "comments": []}', file: "f.json", diff, entries: [] }), /f\.json judges no acceptance entry \(its "acceptance" list is empty\); nothing posted/);
   const post = reviewPostFor({ issue: 7, text: '{"acceptance": [{"entry": "A", "met": true}], "comments": []}', file: "f.json", diff, entries });
   assert.equal(post.placeholder, true);
 });
@@ -354,6 +378,11 @@ test("review: the prompt lists the issue's entries by id and asks for a judgment
   assert.match(p, /"acceptance": \[\{"entry": "2", "met": true/);
   assert.match(p, /The issue's acceptance entries, by the ids to use[^\n]*\n- A: \*\*A:\*\* one\n- 2: two\n/);
   assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Want\n- x", prBody: "", diff: "", harness: "codex" }), /Name each acceptance entry the issue states by its own label/);
+  // Design notes under a criteria heading are not handed over as the entries: the reviewer names them (#417).
+  const notes = reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Selection criteria\n- recall over precision\n\n## Outcomes\n- ranked results", prBody: "", diff: "", harness: "claude" });
+  assert.doesNotMatch(notes, /by the ids to use/);
+  assert.match(notes, /Name each acceptance entry the issue states by its own label/);
+  assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- one\n\n### API\n- two", prBody: "", diff: "", harness: "claude" }), /by the ids to use[^\n]*\n- 1: one\n- 2: two\n/, "entries under a sub-heading are listed too");
 });
 
 test("review: the prompt tells the reviewer of a split part, and only of one that is not the last (#157)", async () => {
@@ -1083,16 +1112,18 @@ test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is
 });
 
 test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the red are refused; everything else passes", () => {
-  for (const p of ["package-lock.json", "web/pnpm-lock.yaml", ".nvmrc", "rust-toolchain.toml", "scripts/install-toolchain.sh", ".gitlab-ci.yml", ".circleci/config.yml", "Dockerfile", "docker/api.Dockerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".husky/pre-commit", "toolchain/fetch.sh", "tools/toolchains/zig.sh", "src/toolchain/x.ts"]) assert.equal(toolchainFile(p), true, p);
+  for (const p of ["package-lock.json", "web/pnpm-lock.yaml", ".nvmrc", "rust-toolchain.toml", ".gitlab-ci.yml", ".circleci/config.yml", "Dockerfile", "docker/api.Dockerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".husky/pre-commit"]) assert.equal(toolchainFile(p), true, p);
   for (const p of ["src/app.ts", "package.json", "README.md", "docs/toolchain.md", "Dockerfiles/readme.md", "scripts/setup.sh", "src/mytoolchainutil/x.ts"]) assert.equal(toolchainFile(p), false, p);
-  // The incident shape: a fix for an unrelated red edits the toolchain download step and the pins.
+  // The incident shape: a fix for an unrelated red edits the toolchain download step and the pins. The download step is
+  // toolchain by the repository's `toolchain_paths` setting, not by its name.
+  const paths = ["scripts/fetch-toolchain.sh"];
   const changed = ["src/parse.ts", "scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"];
   const plan = "1. Parser fix: owns `src/parse.ts`, `test/parse.test.ts` (acceptance 1).";
   const red = "FAIL test/parse.test.ts\n  expected 3, received 2\n    at src/parse.ts:41:7";
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts"], texts: [plan, red] }), ["scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts"], texts: [plan, red], paths }), ["scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"]);
   // In scope: changed before the fix passes; named by the plan, the issue or the red (path or file name); a lockfile beside its own manifest in scope.
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts", ".nvmrc"], texts: [plan, red] }), ["scripts/fetch-toolchain.sh", "package-lock.json"]);
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["package.json"], texts: ["npm ci: `package-lock.json` is not in sync with package.json", "bump `scripts/fetch-toolchain.sh` to zig 0.14"] }), [".nvmrc"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts", ".nvmrc"], texts: [plan, red], paths }), ["scripts/fetch-toolchain.sh", "package-lock.json"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["package.json"], texts: ["npm ci: `package-lock.json` is not in sync with package.json", "bump `scripts/fetch-toolchain.sh` to zig 0.14"], paths }), [".nvmrc"]);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { prior: ["web/package.json"] }), []);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { prior: ["api/package.json"] }), ["web/package-lock.json"]);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { texts: ["Item 2 adds zod to web/package.json"] }), []);
@@ -1137,10 +1168,49 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.deepEqual(fixScopeRefused(["src/parse.ts", "scripts/setup.sh", "scripts/other.sh"], { prior: ["src/parse.ts"], texts: [plan, red], extra }), ["scripts/setup.sh"]);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { texts: ["setup fails: scripts/setup.sh line 3"], extra }), []);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { prior: ["scripts/setup.sh"], extra }), []);
-  assert.deepEqual(fixScopeRefused(["toolchain/fetch.sh"], { texts: [plan, red] }), ["toolchain/fetch.sh"]);
+  assert.deepEqual(fixScopeRefused(["toolchain/fetch.sh"], { texts: [plan, red], paths: ["toolchain/"] }), ["toolchain/fetch.sh"]);
   const reason = fixScopeReason(["a/.nvmrc", "b", "c", "d", "e", "f", "g"]);
   assert.match(reason, /^a fix pass changed a\/\.nvmrc, b, c, d, e and 2 more \(toolchain, lockfile or CI configuration\)/);
   assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, validation: { passes: 1, green: false, scope: reason } }), { exit: "blocked", reason, cause: "work" });
+});
+
+test("#414: toolchain by exact lists and the toolchain_paths setting, never by a name guess; the fence check is asked only about what it may let go", () => {
+  // No name guess: a `*toolchain*` file or a `toolchain(s)/` directory is toolchain only on the setting.
+  for (const p of ["scripts/install-toolchain.sh", "toolchain/fetch.sh", "tools/toolchains/zig.sh", "src/toolchain/x.ts"]) {
+    assert.equal(toolchainFile(p), false, `${p}: no guess`);
+    assert.deepEqual(fixScopeRefused([p], {}), [], `${p}: a fix pass may change it`);
+  }
+  const paths = ["toolchain/", "zig.sh", "/scripts/install-toolchain.sh"];
+  for (const p of ["toolchain/fetch.sh", "tools/toolchains/zig.sh", "scripts/install-toolchain.sh"]) assert.equal(toolchainFile(p, paths), true, `${p}: on the setting`);
+  assert.equal(toolchainFile("src/toolchain/x.ts", paths), false, "a directory matches from the root, as protected_paths do");
+  assert.equal(toolchainFile("a/scripts/install-toolchain.sh", paths), false, "a leading / matches at the root only");
+  assert.deepEqual(resolveInputs({ env: {} }).toolchainPaths, [], "empty by default: the exact lists only");
+  assert.deepEqual(resolveInputs({ env: { FACTORY_TOOLCHAIN_PATHS: "toolchain/, scripts/zig.sh" } }).toolchainPaths, ["toolchain/", "scripts/zig.sh"]);
+  // What the fence check may let go: a lockfile, nothing else.
+  for (const p of ["package-lock.json", "web/yarn.lock", "Cargo.lock", "uv.lock"]) assert.equal(fenceDecidable(p), true, p);
+  // Never: version pins, CI and hooks, containers, wrappers, mise.toml, package-manager configuration, the setting's files.
+  for (const p of [".nvmrc", ".node-version", ".tool-versions", ".python-version", "rust-toolchain", "rust-toolchain.toml", "global.json", ".ruby-version", ".gitlab-ci.yml", ".circleci/config.yml", "ci/.buildkite/pipeline.yml", ".husky/pre-commit", ".pre-commit-config.yaml", "lefthook.yml", "Jenkinsfile", "Dockerfile", "docker/api.Containerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".mvn/wrapper/maven-wrapper.properties", "mise.toml", ".mise.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", "bunfig.toml", "pnpm-workspace.yaml"]) assert.equal(fenceDecidable(p), false, p);
+  assert.equal(fenceDecidable("toolchain/fetch.sh", { paths }), false, "a toolchain_paths file: refused unless in scope");
+  assert.equal(fenceDecidable("src/app.ts"), false, "not toolchain: nothing to judge");
+  // Never: a protected path, what setup or install names or runs (with what is under it), the guard's files, a script entry.
+  assert.equal(fenceDecidable("yarn.lock", { protectedList: protectedPaths(["/yarn.lock"]) }), false, "a protected path");
+  assert.equal(fenceDecidable("tools/yarn.lock", { extra: ["tools/yarn.lock"] }), false, "what setup or install names");
+  assert.equal(fenceDecidable("web/package-lock.json", { extra: ["web"] }), false, "under a directory an explicit install names (guardCovers)");
+  assert.equal(fenceDecidable("tools/yarn.lock", { guarded: ["tools"] }), false, "what the setup guard covers, under a guarded directory");
+  assert.equal(fenceDecidable("package-lock.json", { unknown: ["$SCRIPT"] }), false, "a command that may run a file Factory cannot name");
+  assert.equal(fenceDecidable("package.json scripts.x/yarn.lock"), false, "a script entry, even one named like a lockfile");
+  // Every still-refused file undecided: Factory's or the outage's Block; any other among them: the work's.
+  const undecided = { cause: "outage", undecided: ["a.lock"], judged: ["a.lock: the decision model (m) gave no answer (unavailable)"] };
+  assert.equal(scopeRefusal(["a.lock"], undecided).cause, "outage");
+  assert.equal(scopeRefusal(["a.lock", ".npmrc"], undecided).cause, undefined, "a file never asked about makes it the work's");
+  // The Block names what the fence check said; its cause is the work's unless it gave no answer.
+  const reason = fixScopeReason(["package-lock.json"], [], ["package-lock.json: judged to weaken or sidestep the check at 0.91"]);
+  assert.match(reason, /\(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: package-lock\.json: judged to weaken/);
+  const exit = (more) => decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, ...more });
+  assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "outage" } }).cause, "outage");
+  assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "nonsense" } }).cause, "work");
+  assert.equal(exit({ pushRejected: reason, pushCause: "factory" }).cause, "factory");
+  assert.equal(exit({ pushRejected: reason }).cause, "work");
 });
 
 test("fix-pass scope: a workspace member's manifest brings its workspace's root lockfile, as the declaration lists members", () => {

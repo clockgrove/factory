@@ -181,6 +181,23 @@ test("#416: `asks`, a confidence under the floor, no answer, no decider or a com
   assert.equal(long.asked.length, 0);
 });
 
+test("#416 with #413: the comment check reads its verdict at triage_min_confidence while the gateway's triage_model answers, else at 0.7", async () => {
+  const at = (name, confidence, inputs = {}) => openCommentCheck({ inputs, decider: { name, decide: async () => ({ verdict: "nothing_asked", confidence }) } });
+  // A raised floor holds a verdict the default floor would clear, and says which floor.
+  const strict = world([writer("LGTM")]);
+  assert.equal(await merge(strict, () => at("ai-gateway", 0.9, { triageMinConfidence: 0.95 })), "unread");
+  assert.equal(strict.state.merged, false);
+  const why = await judgeUnread({ check: at("ai-gateway", 0.9, { triageMinConfidence: 0.95 }), repo, issue: 7, issueData: { title: "t", body: "b", labels: [] }, pr: { number: 70, title: "p" }, unread: [{ author: "kirk", at: "2026-11-15T10:00:00Z", body: "LGTM" }] });
+  assert.match(why.why, /short of nothing asked at the floor 0\.95/);
+  // The setting is the gateway model's: the stage's harness answering reads at the default floor.
+  const harness = world([writer("LGTM")]);
+  assert.equal(await merge(harness, () => at("harness", 0.9, { triageMinConfidence: 0.95 })), "merged");
+  // A lowered floor lets a verdict under 0.7 clear, as for every decision call on the triage model.
+  const lowered = world([writer("LGTM")]);
+  assert.equal(await merge(lowered, () => at("ai-gateway", 0.65, { triageMinConfidence: 0.6 })), "merged");
+  assert.equal(await merge(world([writer("LGTM")]), () => at("ai-gateway", 0.65)), "unread", "no setting: 0.7");
+});
+
 const review = (id, state, body, at = "2026-11-15T10:00:00Z") => ({ id, user: { login: "kirk", id: 4, type: "User" }, body, state, submitted_at: at });
 
 test("#416: a writer's review requesting changes holds the merge whatever its text, and no model is asked", async () => {

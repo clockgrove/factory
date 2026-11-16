@@ -18,7 +18,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -36,12 +36,13 @@ import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-t
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, openTriage, triageKey } from "./lib/triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor, openTriage, triageKey } from "./lib/triage.mjs";
 import { openDecider } from "./lib/decider.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
+import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { checkAnswers, openFindingCheck } from "./lib/finding-check.mjs";
 import {
@@ -199,7 +200,7 @@ export function foundationCall({ harness, model, effort, label, timeoutMs, promp
 
 /**
  * The foundation pass (foundationPrompt): one reviewer call, rerun once like the first pass when it misses (no answer,
- * or no JSON: handoff.mjs reviewMissed, with no entries to judge; on the fallback reviewer where the harness has one),
+ * or no JSON: handoff.mjs reviewMissed with `judges` false, as it judges no entry; on the fallback reviewer where the harness has one),
  * never after a provider's refusal. Each call starts only with budget and time left: `over()` true (max_usd spent) ends
  * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"` before the first call (before the
  * rerun, `missed`: the first call's end is the reason). `run` makes one call ({model, effort,
@@ -217,7 +218,7 @@ export async function foundationReview({ run, model, effort, fallback = null, ov
     const rec = await run({ ...call, timeoutMs });
     recs.push(rec);
     const review = parseReview(rec.finalText || "");
-    if (!reviewMissed({ ok: rec.ok, review })) return { review, recs, stop: null };
+    if (!reviewMissed({ ok: rec.ok, review, judges: false })) return { review, recs, stop: null };
     if (rec.refusal) break;
   }
   return { review: null, recs, stop: "missed" };
@@ -358,11 +359,11 @@ export function workerRun(inputs) {
  * but of code scanning's alert only its file, and never a protected or toolchain one: an alert there is fixed by no
  * answer pass, and the scope's refusal Blocks it.
  */
-export function answerScope(comments, protectedList) {
+export function answerScope(comments, protectedList, toolchainPaths = []) {
   return comments.flatMap((c) => {
     if (c.from !== CODE_SCANNING) return [`${c.path || ""}\n${c.body || ""}`];
     const path = String(c.path || "");
-    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path) ? [path] : [];
+    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path, toolchainPaths) ? [path] : [];
   });
 }
 
@@ -488,13 +489,13 @@ const BINARY_DIFF = /^(?:Binary files .* differ|GIT binary patch)$/m;
  */
 export function answerDecider({ inputs, env = process.env, home = homedir(), stage = null, decider = null }) {
   const d = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
-  return { model: d.model, off: d.off, decider: d.off ? null : d };
+  return { model: d.model, off: d.off, floor: () => confidenceFloor(inputs, d), decider: d.off ? null : d };
 }
 
 /**
  * Whether what a review stage's answer and fix passes wrote after the review (#350, #367) stays the review's answer: the
  * decision model (`ask`, answerDecider) reads the `diff` they wrote, the findings they answered (`comments`) and the
- * failures they were given (`checks`), and answers `only_asked` at triage's MIN_CONFIDENCE or more. Any other answer, a
+ * failures they were given (`checks`), and answers `only_asked` at triage's confidence floor (`ask.floor`) or more. Any other answer, a
  * lower or missing confidence, a failed, timed-out or unreadable call, no decision model, a diff git prints as binary
  * (its content unseen), an input over ANSWER_INPUT_BYTES or a diff that cannot be told (`diff` null, `why` says why)
  * gives `review` true: those commits get a review pass. `{review, why, verdict, confidence, error, off?}`.
@@ -514,8 +515,9 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
   }
   const verdict = ANSWER_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
   const confidence = typeof a?.confidence === "number" ? a.confidence : null;
-  if (verdict === "only_asked" && confidence !== null && confidence >= MIN_CONFIDENCE) return { review: false, why: "", verdict, confidence, error: null };
-  if (verdict === "only_asked") return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as only what was asked, at ${confidence === null ? "no stated confidence" : `confidence ${confidence.toFixed(2)}`}, under ${MIN_CONFIDENCE}`, { verdict, confidence });
+  const floor = ask.floor?.() ?? confidenceFloor();
+  if (verdict === "only_asked" && confidence !== null && confidence >= floor.min) return { review: false, why: "", verdict, confidence, error: null };
+  if (verdict === "only_asked") return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as only what was asked, at ${confidence === null ? "no stated confidence" : `confidence ${confidence.toFixed(2)}`}, under the ${floor.text}`, { verdict, confidence });
   if (verdict) return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as more than the findings and failing checks asked`, { verdict, confidence });
   return reviewed(`the decision model (${ask.model}) gave no answer on what the answer and fix passes wrote (${a?.error || "no_answer"})`, { error: a?.error || "no_answer" });
 }
@@ -1050,7 +1052,7 @@ async function main() {
   // starts at GitHub's head now. No GitHub token reaches a child: on Actions the agent reads with its own read-only
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
-  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
+  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), toolchainPaths: inputs.toolchainPaths, setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
   const identity = await gitIdentity(app, keeper.getter);
@@ -1082,10 +1084,12 @@ async function main() {
   if (inputs.setup) {
     await progress("setup");
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
-    const s = access.agent ? await sh(await outbox.defaultTree(), inputs.setup, { env: { ...childBase, TMPDIR: tmp.factory }, timeoutMs: remainingMs(deadlineAt), asRunner: true }) : await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
+    const tree = access.agent ? await outbox.defaultTree() : checkout;
+    const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.factory } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed before review:" });
     if (!s.ok) {
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}`, cause: "setup", notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: s.reason, cause: "setup", notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", "setup failed");
       return;
     }
@@ -1156,6 +1160,8 @@ async function main() {
   decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
+  // The fence check (lib/fence-check.mjs): an answer or fix pass's toolchain change outside its scope goes only on its yes.
+  outbox.fenceCheck = openFenceCheck({ inputs, stage: decisionStage });
   // The answer gate's decision model (answerDecider): triage's model, through the stage's decider; with none, every
   // answer that committed gets a review pass.
   const answerAsk = answerDecider({ inputs, stage: decisionStage });
@@ -1674,7 +1680,7 @@ async function main() {
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
-    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList, inputs.toolchainPaths), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])], lead: heldRed?.lead || "", comments: toAnswer.map((c) => ({ path: c.path || "", line: c.line ?? c.original_line ?? null, body: c.body || "" })) }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     // The checkout's HEAD before the pass: a queue fix counts once the pass itself committed and that went up
     // (recordQueueFix), never for a merge commit Factory makes at the push.
     const checkoutHead = async () => {
@@ -1810,6 +1816,7 @@ async function main() {
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
+    pushCause: outbox.failed ? outbox.errorCause : null,
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     handoverRefused: handover.refused(),

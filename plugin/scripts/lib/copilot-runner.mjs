@@ -28,7 +28,7 @@
 //   that kind in the agent's temp directory, an added directory whose .github agents and skills Copilot loads.
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { exec, SAFE_PATH } from "./proc.mjs";
@@ -36,6 +36,8 @@ import { GitRefusal, HARNESS_CONFIG, LOCAL_DOMAINS, TOOLCHAIN_RULE, codexReadOnl
 import { RUNNER_CACHES, SESSIONS_HELD, prepareFactoryHome } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER, decoyLaunch } from "./codex-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
+import { commandText, simpleCommands } from "./logic.mjs";
+import { parseToml } from "./toml.mjs";
 
 import { RELAY_PING } from "./gateway-relay.mjs";
 
@@ -346,29 +348,246 @@ export function localToolchain({ path = "", off = [], home = homedir(), execPath
 }
 
 /**
- * Local mode's toolchain for Claude Code's and Copilot's commands on Linux (#111, #137): their sandboxes show nothing of
- * the home but what their settings name. The stage's node (localToolchain) and the repository's package manager
- * (localPackageManager), the latter linked from `<usageDir>/toolbin`, which no sandbox may write. Returns {lead,
- * readable, denied, probe}: the directories to put first on each command's PATH (after Factory's git), those readable
- * read-only, those denied, and what the probe proves (probeDriver, Claude Code's local probe). Codex's sandbox reads the
- * whole system but the credential stores, so its commands find both as the developer does: nothing.
+ * Local mode's toolchain for Claude Code's and Copilot's commands on Linux (#111, #137, #371): their sandboxes show
+ * nothing of the home but what their settings name. The stage's node (localToolchain), the repository's package manager
+ * (localPackageManager) and every other tool the repository's own commands run (repositoryTools), the latter two linked
+ * from `<usageDir>/toolbin`, which no sandbox may write. Returns {lead, readable, denied, probe, unresolved}: the
+ * directories to put first on each command's PATH (after Factory's git), those readable read-only, those denied, what the
+ * probe proves (probeDriver, Claude Code's local probe) and the command words not made visible (repositoryTools). Codex's
+ * sandbox reads the whole system but the credential stores, so its commands find them all as the developer does: nothing.
  */
-export function localTools({ harness, clone, path = "", off = [], usageDir, os = process.platform, home = homedir() }) {
-  if (!["claude", "copilot"].includes(harness) || os !== "linux") return { lead: [], readable: [], denied: [], probe: null };
+export function localTools({ harness, clone, commands = {}, path = "", off = [], usageDir, os = process.platform, home = homedir() }) {
+  if (!["claude", "copilot"].includes(harness) || os !== "linux") return { lead: [], readable: [], denied: [], probe: null, unresolved: [] };
   const toolchain = localToolchain({ path, off, home });
   const pm = localPackageManager({ clone, path, off, home });
+  const repo = repositoryTools({ clone, commands, path, off, home, skip: pm ? [pm.name] : [] });
   const toolBin = join(usageDir, "toolbin");
-  if (pm?.real) {
-    mkdirSync(toolBin, { recursive: true });
-    rmSync(join(toolBin, pm.name), { force: true });
-    symlinkSync(pm.real, join(toolBin, pm.name));
+  const links = [...(pm?.real ? [[pm.name, pm.real]] : []), ...repo.tools.filter((t) => t.link).map((t) => [t.word, t.real])];
+  if (links.length) mkdirSync(toolBin, { recursive: true });
+  for (const [name, real] of links) {
+    rmSync(join(toolBin, name), { force: true });
+    symlinkSync(real, join(toolBin, name));
   }
+  const tools = repo.tools.filter((t) => t.link).map((t) => join(toolBin, t.word));
   return {
-    lead: [...(toolchain?.dirs.length ? [toolchain.bin] : []), ...(pm?.real ? [toolBin] : [])],
-    readable: [...(toolchain?.dirs || []), ...(pm?.dirs || [])],
+    lead: [...(toolchain?.dirs.length ? [toolchain.bin] : []), ...(links.length ? [toolBin] : [])],
+    readable: [...new Set([...(toolchain?.dirs || []), ...(pm?.dirs || []), ...repo.tools.flatMap((t) => t.dirs)])],
     denied: toolchain?.denied || [],
-    probe: toolchain || pm ? { ...(toolchain?.toolchain || {}), ...(pm ? { pm: pm.name } : {}) } : null,
+    probe: toolchain || pm || tools.length ? { ...(toolchain?.toolchain || {}), ...(pm ? { pm: pm.name } : {}), ...(tools.length ? { tools } : {}) } : null,
+    unresolved: repo.unresolved,
   };
+}
+
+/**
+ * The commands a local stage runs for the repository, from its settings (`env`, as the stage gets them): the validation
+ * commands (FACTORY_LOCAL_VALIDATION where set, else FACTORY_VALIDATION), local mode's setup (FACTORY_LOCAL_SETUP; the
+ * workflow's assumes a runner) and the install setting (FACTORY_INSTALL; the caller resolves `auto` by the lockfile with
+ * checkout.mjs installCommand before handing it to localTools).
+ */
+export const stageCommands = (env = {}) => ({
+  validation: String(env.FACTORY_LOCAL_VALIDATION || env.FACTORY_VALIDATION || "")
+    .split(/\r?\n|,/)
+    .map((c) => commandText(c).trim())
+    .filter(Boolean),
+  setup: env.FACTORY_LOCAL_SETUP || "",
+  install: env.FACTORY_INSTALL || "auto",
+});
+
+/** The tools the stage's node gives (localToolchain) and Factory's own git: never resolved as a repository's tool. */
+const STAGE_OWN = new Set(["node", "npm", "npx", "corepack", "git"]);
+/** At most this many package.json scripts are followed, and this many command words resolved. */
+const MAX_SCRIPTS = 32;
+const MAX_WORDS = 64;
+
+/**
+ * The package.json script a package manager's command runs (`npm test`, `npm run lint`, `pnpm build`, `yarn run x`,
+ * `bun run x`), or null.
+ */
+function scriptRun(word, args) {
+  const a = args.filter((x) => !x.startsWith("-"));
+  if (word === "npm") return /^(run|run-script)$/.test(a[0]) ? a[1] || null : /^(test|t|tst)$/.test(a[0]) ? "test" : /^(start|stop|restart)$/.test(a[0]) ? a[0] : null;
+  if (word === "pnpm" || word === "yarn") return a[0] === "run" ? a[1] || null : a[0] || null;
+  if (word === "bun") return a[0] === "run" ? a[1] || null : null;
+  return null;
+}
+
+/**
+ * The command words the repository's own commands run, each with where it came from (`from`): the words of the
+ * validation, setup and install commands (stageCommands; `install` as checkout.mjs installCommand resolves it), and of the package.json
+ * scripts those run through a package manager (`npm test`, `pnpm lint`; one level, its pre and post scripts too, at most
+ * MAX_SCRIPTS). An absolute word only from the configured commands, never from package.json, which the agent writes.
+ */
+export function repositoryWords({ clone, commands = {} }) {
+  let scripts = {};
+  try {
+    scripts = JSON.parse(readFileSync(join(clone, "package.json"), "utf8")).scripts || {};
+  } catch {
+    // no package.json: no scripts
+  }
+  const configured = [...(commands.validation || []).map((c) => [c, "validation"]), [commands.setup || "", "setup"], [commands.install || "", "install"]];
+  const out = new Map();
+  const add = (word, from) => out.has(word) || out.size >= MAX_WORDS || out.set(word, from);
+  const followed = new Set();
+  for (const [command, from] of configured) {
+    for (const { word, args } of simpleCommands(command)) {
+      add(word, from);
+      const name = scriptRun(word, args);
+      if (!name || followed.size >= MAX_SCRIPTS) continue;
+      for (const s of [`pre${name}`, name, `post${name}`]) {
+        if (followed.has(s) || typeof scripts[s] !== "string") continue;
+        followed.add(s);
+        for (const c of simpleCommands(scripts[s])) if (!c.word.startsWith("/")) add(c.word, `package.json scripts.${s}`);
+      }
+    }
+  }
+  return [...out].map(([word, from]) => ({ word, from }));
+}
+
+/** The versions the repository pins per tool, by name (`.tool-versions`, `mise.toml`, `.mise.toml`'s [tools]), read, never run. */
+function toolPins(clone) {
+  const pins = new Map();
+  const read = (f) => {
+    try {
+      return readFileSync(join(clone, f), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  for (const line of read(".tool-versions").split("\n")) {
+    const [tool, version] = line.replace(/#.*/, "").trim().split(/\s+/);
+    if (tool && version && !pins.has(tool)) pins.set(tool, version);
+  }
+  for (const f of ["mise.toml", ".mise.toml"]) {
+    let tools = {};
+    try {
+      tools = parseToml(read(f)).tools || {};
+    } catch {
+      continue;
+    }
+    for (const [tool, v] of Object.entries(tools)) {
+      const version = typeof v === "string" ? v : Array.isArray(v) ? v[0] : v?.version;
+      const name = tool.replace(/[:/]/g, "-");
+      if (typeof version === "string" && !pins.has(name)) pins.set(name, version);
+    }
+  }
+  return pins;
+}
+
+const isExe = (f) => {
+  try {
+    accessSync(f, constants.X_OK);
+    return statSync(f).isFile();
+  } catch {
+    return false;
+  }
+};
+const realOf = (f) => {
+  try {
+    return realpathSync(f);
+  } catch {
+    return null;
+  }
+};
+const entries = (d) => {
+  try {
+    return readdirSync(d).filter((e) => !e.startsWith("."));
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * A command word behind a version manager's shim (mise's and asdf's `shims`, Volta's), resolved by the manager's install
+ * layout under its data directory `data` (`installs/<tool>/<version>`, Volta's `tools/image/<tool>/<version>`), never by
+ * running it: the manager reads the clone's own configuration, which can run commands. A tool's version is the one the
+ * repository pins (toolPins), else its only install. The word's executable is `bin/<word>` or `<word>` in that version's
+ * directory, or one directory below. Returns {real, dir} (that version's directory) or {why}.
+ */
+function managedTool(word, data, clone) {
+  const pins = toolPins(clone);
+  const several = [];
+  for (const root of ["installs", join("tools", "image")].map((r) => join(data, r))) {
+    const tools = entries(root).sort((a, b) => (b === word) - (a === word) || a.localeCompare(b));
+    for (const tool of tools.slice(0, 200)) {
+      const pin = pins.get(tool);
+      let dir = pin && !pin.includes("/") && realOf(join(root, tool, pin));
+      if (!pin) {
+        const versions = [...new Set(entries(join(root, tool)).map((v) => realOf(join(root, tool, v))).filter((v) => v && statSync(v).isDirectory()))];
+        if (versions.length === 1) dir = versions[0];
+        else if (versions.length > 1) several.push(tool);
+      }
+      if (!dir) continue;
+      const found = [join(dir, "bin", word), join(dir, word), ...entries(dir).flatMap((e) => [join(dir, e, word), join(dir, e, "bin", word)])].find(isExe);
+      if (found) return { real: realOf(found), dir };
+    }
+  }
+  return { why: several.length ? `behind a version manager's shim, and ${several.join(", ")} has several versions installed and none pinned (.tool-versions, mise.toml)` : "behind a version manager's shim, with no install of it in the manager's install directory" };
+}
+
+/** Whether an executable is in a directory every sandbox binds itself (SYSTEM_BOUND). */
+const system = (p) => SYSTEM_BOUND.some((d) => within(dirname(p), d));
+
+/**
+ * The tools the repository's own commands run (repositoryWords), each resolved on the stage's PATH to its real path on
+ * this machine, for Claude Code's and Copilot's commands on Linux (#371). Returns {tools, unresolved}:
+ * - `tools`: {word, from, real, dirs, link}: `link` where a command must find it through the stage's `toolbin` (its PATH
+ *   entry is not the system's own); `dirs`, read-only in commands' reach: the install prefix (`bin`'s parent), a version
+ *   manager's install of that version, else the executable alone; none where it is the system's (bound already), and never
+ *   `/`, the home or above it, in or above a credential store or `off` (what a sandbox may write);
+ * - `unresolved`: {word, from, why}: a word not on PATH, a shim no install answers, or one that can only be reached
+ *   through a directory the rules above keep out. Named, never guessed.
+ * A word that is the stage's own (node, npm, git: STAGE_OWN), in `skip` (the package manager), the repository's own
+ * file (in the clone) or, in a script, a dependency's (node_modules/.bin) is left out. Nothing is run.
+ */
+export function repositoryTools({ clone, commands = {}, path = "", off = [], home = homedir(), skip = [] }) {
+  const fenced = [...off, ...credentialPaths(home)].filter((x) => x && x.startsWith("/"));
+  const safe = (d) => d !== "/" && !within(home, d) && !fenced.some((x) => within(d, x) || within(x, d));
+  const dirs = absolutePath(path).split(":").filter(Boolean);
+  const tools = [];
+  const unresolved = [];
+  for (const { word, from } of clone ? repositoryWords({ clone, commands }) : []) {
+    if (STAGE_OWN.has(word) || skip.includes(word)) continue;
+    const absolute = word.startsWith("/");
+    if (!absolute && !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(word)) continue;
+    // A script's word its package manager finds in node_modules/.bin is a dependency's, in the clone. Before the install
+    // made that directory, one not on PATH may still be one: named once it exists.
+    const script = from.startsWith("package.json");
+    if (script && existsSync(join(clone, "node_modules", ".bin", word))) continue;
+    const first = absolute ? (isExe(word) ? word : null) : dirs.map((d) => join(d, word)).find(isExe);
+    if (!first) {
+      const pending = script && !existsSync(join(clone, "node_modules", ".bin"));
+      if (!pending && !existsSync(join(clone, word))) unresolved.push({ word, from, why: absolute ? "not an executable file" : "not on PATH" });
+      continue;
+    }
+    if (within(first, clone)) continue;
+    if (system(first)) {
+      tools.push({ word, from, real: first, dirs: [], link: false });
+      continue;
+    }
+    let real = realOf(first);
+    let prefix = null;
+    if (basename(dirname(first)) === "shims" || /^(mise|rtx|asdf|volta-shim)$/.test(basename(real || ""))) {
+      const m = managedTool(word, dirname(dirname(first)), clone);
+      if (!m.real) {
+        unresolved.push({ word, from, why: m.why });
+        continue;
+      }
+      ({ real, dir: prefix } = m);
+    }
+    if (!real) {
+      unresolved.push({ word, from, why: `${first} does not resolve` });
+      continue;
+    }
+    const bin = dirname(real);
+    prefix ??= /^s?bin$/.test(basename(bin)) ? dirname(bin) : null;
+    const own = system(real) ? [] : prefix && safe(prefix) ? [prefix] : safe(real) ? [real] : null;
+    if (!own) {
+      unresolved.push({ word, from, why: `${real} sits in or above a directory a sandbox may write, the home or a credential store` });
+      continue;
+    }
+    tools.push({ word, from, real, dirs: own, link: !absolute });
+  }
+  return { tools, unresolved };
 }
 
 /** Claude Code's env file (CLAUDE_ENV_FILE), sourced inside its sandbox before each command: `lead` first on PATH. */
@@ -537,11 +756,14 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
 /**
  * The toolchain rule's shell lines, for a probe driver with an `out <code> <line>` function (probeDriver, Claude Code's
  * local probe): the stage's node, first on its PATH, must be the node a command finds, and it and the npm beside it run
- * (#105); the repository's package manager runs (#137, pnpm or yarn by name only). None for a null `toolchain`.
+ * (#105); the repository's package manager runs (#137, pnpm or yarn by name only); each of the repository's tools linked
+ * from the stage's toolbin (`tools`, localTools: #371) is found on the PATH and its link reaches an executable, run by
+ * no rule (what `--version` means differs per tool). None for a null `toolchain`.
  */
 export const toolchainRules = (toolchain) => [
   ...(toolchain?.node ? [`if [ "$(command -v node)" != ${sq(toolchain.node)} ] || ! node --version >/dev/null 2>&1${toolchain.npm ? " || ! npm --version >/dev/null 2>&1" : ""}; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
   ...(toolchain?.pm && /^(pnpm|yarn)$/.test(toolchain.pm) ? [`if ! ${toolchain.pm} --version >/dev/null 2>&1; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`] : []),
+  ...(Array.isArray(toolchain?.tools) ? toolchain.tools.filter((t) => typeof t === "string" && t.startsWith("/")).map((t) => `if ! command -v ${sq(basename(t))} >/dev/null || ! [ -x ${sq(t)} ]; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`) : []),
 ];
 
 export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null, relay = null }) => {

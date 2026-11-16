@@ -29,7 +29,7 @@ import { OUTAGE, lostText, minutesText, probe as probeHost, serverDown, waitOuta
 
 /** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
 const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
-import { PLUGIN_ROOT } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
@@ -48,7 +48,7 @@ import { git as gitIn } from "./lib/proc.mjs";
 import { BACKENDS } from "./lib/backend.mjs";
 import { scrubbedEnv } from "./lib/harness.mjs";
 import { choiceOf } from "./lib/choice.mjs";
-import { bwrapShim, claudeEnvText, localTools } from "./lib/copilot-runner.mjs";
+import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
@@ -135,6 +135,8 @@ export const SETTINGS_EVERY_MS = 3 * 60_000;
 
 /** The harnesses this process has said run without the outer sandbox. */
 const OUTER_SAID = new Set();
+/** The repository's command words already named as not visible to the harness's commands (stageEnv, #371): once per loop. */
+const TOOLS_SAID = new Set();
 /** After a failed start, this loop holds the Objective this long, doubling per failure up to the cap (Local.unstart). */
 export const START_BACKOFF_MS = 5 * 60_000;
 export const START_BACKOFF_MAX_MS = 60 * 60_000;
@@ -1081,11 +1083,18 @@ export class Local {
       }
     }
     const addDirs = [...caches, stageTmp];
-    // Linux: the stage's node (#111) and the repository's package manager (#137) for Claude Code's and Copilot's commands,
-    // read-only: their sandboxes show nothing of the home but what their settings name. Never in or above what a sandbox
-    // may write (this repository's Objectives, the stages' temp directories), the home or a credential store. Codex's
-    // sandbox reads the whole system but the credential stores, so its commands find both as the developer does.
-    const tools = localTools({ harness, clone, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    // Linux: the stage's node (#111), the repository's package manager (#137) and the tools its own commands run (#371) for
+    // Claude Code's and Copilot's commands, read-only: their sandboxes show nothing of the home but what their settings
+    // name. Never in or above what a sandbox may write (this repository's Objectives, the stages' temp directories), the
+    // home or a credential store. Codex's sandbox reads the whole system but the credential stores, so its commands find
+    // them as the developer does. A command word not made visible is named once per loop.
+    const commands = stageCommands(base);
+    const tools = localTools({ harness, clone, commands: { ...commands, install: installCommand(clone, commands.install) }, path: base.PATH, off: [this.dev, join(this.dev, ".factory"), dirname(stageTmp)], usageDir });
+    for (const u of tools.unresolved) {
+      if (TOOLS_SAID.has(u.word)) continue;
+      TOOLS_SAID.add(u.word);
+      log(`local: \`${u.word}\` (${u.from}) is not visible to ${harness === "claude" ? "Claude Code's" : "Copilot's"} commands: ${u.why}`);
+    }
     const lead = tools.lead;
     const extra = this.harnessEnv(issue, addDirs, clone, usageDir, tools, harness, domains, account);
     // Linux: the harness process itself runs in srt too (lib/local.mjs harnessOuterSettings), writing only the clone, the
@@ -1178,7 +1187,7 @@ export class Local {
       // no sandbox may write (checkout.mjs claudePlugin).
       // cacheDirs: writable to commands, but no harness's added directory (Claude Code would read a CLAUDE.md there,
       // Copilot .github/agents and skills).
-      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv, readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
+      FACTORY_LOCAL_SANDBOX: JSON.stringify({ gitId: readGitPin(gitPinFile(ws)), gitPin: gitPinFile(ws), gitBin, ...(bwrapBin ? { bwrapBin, copilotTmp: copilotPrivateTmp(usageDir) } : {}), ...(tools.probe ? { toolchain: tools.probe } : {}), ...(claudeEnv ? { claudeEnv } : {}), ...(tools.readable.length ? { readable: tools.readable } : {}), ...(ripgrep ? { ripgrep } : {}), addDirs, cacheDirs: caches, readDirs: [usageDir], domains, clone, readOnly: [usageDir], claudeDir: join(usageDir, "claude"), credentials }),
       // Every git-lfs transfer of Factory's own host-side git (lfs pull, checkout, rebase, push) goes to the repository's
       // own endpoint, whatever .lfsconfig the model wrote (env config outranks that file), over the real history (no
       // refs/replace). scrubbedEnv drops both (with FACTORY_LFS_PIN) from every child: the harness and the repository's
@@ -1206,7 +1215,7 @@ export class Local {
     mkdirSync(home, { recursive: true });
     // Its policy, config and MCP servers, as Factory's own: whatever an earlier run left there (a link included) is replaced.
     // Linux: Copilot's own TMPDIR (its commands' network rules), denied to its commands.
-    // The stage's node and package manager (stageEnv) read-only, its global npmrc denied.
+    // The stage's node, package manager and repository tools (stageEnv) read-only, its global npmrc denied.
     const alsoDenied = platform() === "linux" ? [copilotPrivateTmp(usageDir), ...(tools?.denied || [])] : [];
     const files = { "settings.json": JSON.stringify(copilotLocalSettings({ domains, clone, addDirs, readOnly: [usageDir], readable: tools?.readable || [], alsoDenied }), null, 2), ...copilotHomeFiles() };
     for (const [f, text] of Object.entries(files)) {

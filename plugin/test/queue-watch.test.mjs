@@ -42,6 +42,7 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
     annotations: {}, // check-run annotations by check-run id
     labels: [], // the PR's label writes, in order: "+name" or "-name"
     logs: {}, // Actions job logs by job id
+    mainCommits: [], // the default branch's newest commits, newest first
     prFiles: [{ filename: "src/add.js", patch: "+export const add = (a, b) => a - b;" }], // the PR's files
   };
   let id = 200;
@@ -97,6 +98,8 @@ function fakeGitHub({ clock = () => Date.now() } = {}) {
       return json(200, { total_count: 0, workflow_runs: s.queueRuns.filter((r) => q.get("event") === "merge_group" && r.event === "merge_group" && (!Number.isFinite(from) || Date.parse(r.created_at) >= from) && (!q.get("status") || r.conclusion === q.get("status"))) });
     }
     if (method === "GET" && (m = /\/check-runs\/(\d+)\/annotations/.exec(u))) return json(200, s.annotations[m[1]] || []);
+    // The default branch's newest commits, newest first (reds.mjs redDetail).
+    if (method === "GET" && /\/repos\/o\/r\/commits\?/.test(u)) return json(200, s.mainCommits.map((sha) => ({ sha })));
     if (method === "GET" && (m = /\/commits\/([0-9a-z]+)$/.exec(u))) return json(200, { sha: m[1], commit: { committer: { date: s.headAt } }, parents: [] });
     if (method === "GET" && /\/actions\/workflows\/77\/runs/.test(u)) return json(200, { workflow_runs: s.history.map((_, k) => ({ id: 1000 + k, event: k % 2 ? "merge_group" : "push", head_branch: k % 2 ? "gh-readonly-queue/main/pr-1" : "main" })) });
     if (method === "GET" && /\/repos\/o\/r\/rulesets\?/.test(u)) return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
@@ -929,7 +932,7 @@ test("queue red: unreadable job logs on the queue's commit are no failure of the
 });
 
 test("queue drops: the Block's cause and advice follow what the review stage read the red drops as", async () => {
-  const cases = { infra: ["outage", /GitHub's side \(infra\); rerun the queue's jobs/], "not-started": ["outage", /GitHub's side \(not-started\)/], base: ["work", /The default branch fails the same way: fix it there/], flaky: ["work", /read the failure as a flake each time/], unclassified: ["work", /Fix that on the branch/] };
+  const cases = { unjudged: ["factory", /Whether the default branch fails the same way could not be judged \(the decision model gave no answer\)/], "unjudged-outage": ["outage", /could not be judged \(the decision model gave no answer: its vendor's outage\)/], infra: ["outage", /GitHub's side \(infra\); rerun the queue's jobs/], "not-started": ["outage", /GitHub's side \(not-started\)/], base: ["work", /The default branch fails the same way: fix it there/], flaky: ["work", /read the failure as a flake each time/], unclassified: ["work", /Fix that on the branch/] };
   for (const [kind, [cause, said]] of Object.entries(cases)) {
     const fake = fakeGitHub();
     await withGitHub(fake, async () => {
@@ -985,4 +988,50 @@ test("queue red: a drop is read from its own merge-group run, never an earlier d
     assert.equal(step.state, "fixing");
     assert.equal(step.red.sha, sha);
   });
+});
+
+test("#413: queue red: a failure the default branch may share in the same step, whose same-failure judgement got no answer, is enqueued again as unjudged, with the outage's cause; judged the same, it is the base's; read as the change's, the signature alone decides", async () => {
+  const otherWay = ["##[group]Run npm test", "not ok 1 - adds", "  TypeError: add is not a function", "##[error]Process completed with exit code 1."].join("\n");
+  const onMain = (fake) => {
+    fake.s.mainCommits = ["e".repeat(40), "f".repeat(40)];
+    fake.s.mainCommits.forEach((sha, i) => {
+      const id = 690 + i;
+      fake.s.runs[sha] = [{ id, name: "Quality", status: "completed", conclusion: "failure", app: ACTIONS, check_suite: { id: 801 + i }, completed_at: ago((30 + i) * MIN) }];
+      fake.s.jobs[id] = { id, run_id: 990 + i, name: "Quality", status: "completed", conclusion: "failure", steps: [{ name: "Run npm test", conclusion: "failure", number: 3 }], runner_id: 5, runner_name: "r" };
+      fake.s.logs[id] = otherWay;
+    });
+  };
+  const read = async (answers) => {
+    const fake = fakeGitHub();
+    const asked = [];
+    let step;
+    await withGitHub(fake, async () => {
+      queueRed(fake, { at: ago(20 * MIN) });
+      onMain(fake);
+      fake.s.removals = [queueDrop(ago(18 * MIN))];
+      assert.equal(await merge({}), "queue-red");
+      const home = mkdtempSync(join(tmpdir(), "nokey-"));
+      try {
+        const decider = { decide: async (input, q) => (asked.push(q.name), answers[q.name]) };
+        const triage = openTriage({ inputs: {}, env: {}, home, repo, issue: ISSUE, prNumber: PR, token: "t", actionsToken: "job", decider });
+        step = await readQueueRed({ repo, issue: ISSUE, prNumber: PR, base: "main", head: HEAD, names: async () => ["Quality"], triage, token: "t", actionsToken: "job" });
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+    return { step, asked, records: records(fake) };
+  };
+  const unsure = { verdict: "flaky_or_infra", confidence: 0.5 };
+  const out = await read({ red_cause: unsure, same_failure: { verdict: null, confidence: null, error: "unavailable" } });
+  assert.equal(out.step.state, "requeued");
+  assert.match(out.step.line, /could not be judged.+\(unjudged-outage\), enqueued again as any drop$/);
+  assert.deepEqual(out.records.map((r) => [r.state, r.kind]), [["requeued", "unjudged-outage"]]);
+  const timeout = await read({ red_cause: unsure, same_failure: { verdict: null, confidence: null, error: "timeout" } });
+  assert.equal(timeout.records[0].kind, "unjudged");
+  const same = await read({ red_cause: unsure, same_failure: { verdict: "same_failure", confidence: 0.95 } });
+  assert.deepEqual(same.records.map((r) => [r.state, r.kind]), [["requeued", "base"]]);
+  // Triage read it as the change's at the floor: the model is not asked whether the default branch fails the same way.
+  const caused = await read({ red_cause: { verdict: "change_caused", confidence: 0.9 }, same_failure: { verdict: "same_failure", confidence: 0.95 } });
+  assert.equal(caused.step.state, "fixing");
+  assert.ok(!caused.asked.includes("same_failure"), caused.asked.join(","));
 });

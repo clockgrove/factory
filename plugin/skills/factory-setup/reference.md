@@ -18,7 +18,7 @@ Offer to commit the Factory skills and agent definitions, which only vendors' cl
 
 ## Several accounts
 
-Several subscriptions or keys of one harness can share the work as accounts. Each stage runs on one account for its whole run: its harness's default, or the one a trusted `factory:account:<name>` label pins. With automatic choice on, a stage with no pin starts on a free account instead: a usage limit sets aside only the account that met it, stages go on on the others, and that account comes back into use on its own. Automatic choice is off by default.
+Several subscriptions or keys of one harness can share the work as accounts. Each stage runs on one account for its whole run: its harness's default, or the one a trusted `factory:account:<name>` label pins. With automatic choice on, a stage with no pin starts on the free account with the most quota left instead (as Claude Code and Codex last reported it; Copilot reports none, so its accounts take turns): a usage limit sets aside only the account that met it, stages go on on the others, and that account comes back into use on its own. Automatic choice is off by default.
 
 **GitHub Actions and the cloud sandbox** (docs/INSTALL.md, Several accounts):
 

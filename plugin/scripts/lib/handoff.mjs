@@ -264,7 +264,9 @@ if (op === "write") {
   }
 } else if (op === "put") {
   // Files into a tree that already exists (a checkout, the agent's home): parents made as needed, a file that is there
-  // kept unless its entry says replace, never written through a symlink. Prints the paths written.
+  // kept unless its entry says replace, never written through a symlink. Each is written whole to a new file beside it
+  // and renamed over it, so a reader (git's credential helper reading the agent's token) sees the old file or the new
+  // one, never a part (#405). Prints the paths written.
   const files = JSON.parse(fs.readFileSync(0, "utf8"));
   const wrote = [];
   for (const [rel, f] of Object.entries(files)) {
@@ -272,10 +274,21 @@ if (op === "write") {
     const there = fs.lstatSync(file, { throwIfNoEntry: false });
     if (there && (!f.replace || !there.isFile())) continue;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const fd = fs.openSync(file, C.O_WRONLY | C.O_CREAT | C.O_TRUNC | C.O_NOFOLLOW, f.mode || 0o644);
-    fs.writeSync(fd, String(f.text));
-    fs.closeSync(fd);
-    if (f.mode) fs.chmodSync(file, f.mode);
+    const tmp = path.join(path.dirname(file), "." + path.basename(file) + "." + process.pid + "." + require("crypto").randomBytes(6).toString("hex") + ".tmp");
+    const fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, f.mode || 0o644);
+    try {
+      try {
+        fs.writeSync(fd, String(f.text));
+        if (f.mode) fs.fchmodSync(fd, f.mode);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      fs.rmSync(tmp, { force: true });
+      throw e;
+    }
     wrote.push(rel);
   }
   out.wrote = wrote;

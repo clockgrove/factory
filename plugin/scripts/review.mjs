@@ -60,6 +60,7 @@ import {
   exitStep,
   outageExit,
   outageFirst,
+  servedSilent,
   usageLimitExit,
   restoreTranscript,
   saveTranscript,
@@ -321,6 +322,26 @@ export async function validatedOn({ repo, issue, prNumber, sha, token }) {
   await removeLabel(repo, prNumber, REVIEW_LABEL, token).catch(() => {});
   await addLabels(repo, prNumber, [REVIEW_LABEL], token);
   return { pr, moved: `PR #${prNumber}'s head moved to ${pr.head.sha.slice(0, 7)} while ${sha.slice(0, 7)} was validated; the review runs again on the new head` };
+}
+
+/**
+ * The review stage's step for the repository's third-party reviewers, before its answer pass (thirdPartyStep). A review
+ * still to come ends the stage: `beforeEnd` first (the stage's stop check, whose end stands), then the review label off
+ * and the Objective In review (waitEnd), and the step returns the `wait`, for the stage to end `waiting`. Where that
+ * fails, the wait record goes (clearWait), the progress says so, and the stage goes on without the wait. `opts` are the
+ * stage's request options ({token, notice}): each call gets its token getter, so every request carries the current
+ * token (#405). `waitMs`: the bound of a wait (third_party_wait_minutes; thirdPartyStep's default without one). Returns
+ * {logins, wait}.
+ */
+export async function thirdPartyGate({ repo, issue, pr, labels, names, own, skip, progress, waitMs, opts, beforeEnd = async () => {} }) {
+  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names, own, skip, progress, waitMs, token: opts.token });
+  if (!third.wait) return third;
+  await beforeEnd();
+  const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels, token: opts.token });
+  if (ended.ok) return third;
+  await clearWait({ repo, issue, prNumber: pr.number, token: opts.token });
+  await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+  return { logins: third.logins, wait: null };
 }
 
 /** The harness, model and effort of a worker pass the review job runs (the answer pass): the worker's own, effort included. */
@@ -787,6 +808,8 @@ async function main() {
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
+    // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
+    if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
@@ -971,6 +994,7 @@ async function main() {
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
+  if (limits) LIMIT.hold = limits.hold;
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
@@ -999,7 +1023,7 @@ async function main() {
   const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
-  const identity = await gitIdentity(app, keeper.token);
+  const identity = await gitIdentity(app, keeper.getter);
   // Factory's own commits (its rebases, its merge of a default branch that changed a workflow file) carry its identity.
   const botWho = commitAuthor(identity);
   outbox.author = botWho;
@@ -1510,21 +1534,15 @@ async function main() {
   // records the wait on the PR and ends `waiting`, its label off, holding no slot or runner; the dispatcher puts the
   // label back once that review exists or the bound has passed, and that review stage, with Factory's own review
   // already posted (reviewsCover), runs no reviewer pass and goes on from here.
-  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, ...token });
+  // A stop's end stands (holdIfStopped); otherwise the stage ends only where the dispatcher will resume it (thirdPartyGate).
+  const third = await thirdPartyGate({ repo, issue, pr, labels: issueData.labels, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, waitMs: inputs.thirdPartyWaitMs, opts: token, beforeEnd: holdIfStopped });
   if (third.wait) {
-    // A stop's end stands; otherwise the stage ends only where the dispatcher will resume it (third-party-review.mjs waitEnd).
-    await holdIfStopped();
-    const ended = await waitEnd({ repo, issue, prNumber: pr.number, labels: issueData.labels, token });
-    if (ended.ok) {
-      // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
-      await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
-      const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
-      log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
-      await finish("waiting", reason);
-      return;
-    }
-    await clearWait({ repo, issue, prNumber: pr.number, ...token });
-    await progress(`third-party review: ${ended.why}, so this stage goes on without ${third.wait.missing.join(", ")}`);
+    // What this stage covers so far (a fix pass after the reviewer), recorded for the stage that takes the wait up.
+    await settleCover({ answerFrom: outbox.expected() || read.head, answerTo: outbox.expected() || read.head, comments: [] });
+    const reason = `waiting for ${third.wait.missing.join(", ")} to review ${pr.head.sha.slice(0, 7)}, until ${new Date(third.wait.until).toISOString()}`;
+    log(`${reason}; this stage ends, and the review goes on when the dispatcher puts the review label back`);
+    await finish("waiting", reason);
+    return;
   }
   // The reviewers outside Factory the answer pass handles: the named ones, and code scanning on every repository (#331).
   const thirdParty = answeredReviewers(third.logins);
@@ -1608,7 +1626,7 @@ async function main() {
         ...workerRun(inputs),
         resume,
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
-        // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
+        // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
@@ -1632,7 +1650,7 @@ async function main() {
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
       fed = answerFed({ fresh: true, decisions, listed: listedFor(null), afterPush: afterPush.length > 0 });
-      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider" };
     }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {

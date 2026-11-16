@@ -7,6 +7,8 @@
 import { addLabels, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
 import { CLOCK_SKEW_MS, blockCauseOf, isSelf, marker, restartedAt, selfLogin, trustedAuthor } from "./logic.mjs";
 import { startTime } from "./objective-trust.mjs";
+import { failedStep, neverStarted, reports } from "./triage.mjs";
+import { parseYaml } from "./yaml.mjs";
 
 /** How many times a lost stage is relaunched since a person last started the Objective, before it Blocks. */
 export const RELAUNCH_MAX = 2;
@@ -103,13 +105,14 @@ export const triesSince = (record, start) => (record?.tries || []).filter((t) =>
 /**
  * What the dispatcher does with a lost stage: `{relaunch: true, tries}` with the record to write (`record`, null when the
  * same loss was counted already and only its relaunch is to finish), or `{block: true, tries}` once RELAUNCH_MAX
- * relaunches since `start` were used.
+ * relaunches since `start` were used. `setup`: the step a vanished work job failed at before Factory ran (endedNotLost
+ * `{step, number}`), kept on the try so the next loss can be told to fail at the same step (setupAgain).
  */
-export function relaunchDecision({ record, start, key, lost, at, run = null, max = RELAUNCH_MAX }) {
+export function relaunchDecision({ record, start, key, lost, at, run = null, setup = null, max = RELAUNCH_MAX }) {
   const since = triesSince(record, start);
   if (since.some((t) => t.key === key)) return { relaunch: true, tries: since.length, record: null };
   if (since.length >= max) return { block: true, tries: since.length };
-  const tries = [...(record?.tries || []), { at, lost, key, start: start ?? null, ...(run ? { run: String(run) } : {}) }].slice(-KEEP_TRIES);
+  const tries = [...(record?.tries || []), { at, lost, key, start: start ?? null, ...(run ? { run: String(run) } : {}), ...(setup ? { setup: { step: setup.step ?? null, number: setup.number ?? null } } : {}) }].slice(-KEEP_TRIES);
   return { relaunch: true, tries: since.length + 1, record: { tries } };
 }
 
@@ -121,11 +124,85 @@ export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
 }
 
 /**
- * Whether a vanished stage left a sign that its network was not what ended it, so it keeps the vanished Block: on the
- * sandbox, a record that says its stage ended (stage.mjs writes `ended`, with `endedBy` for a watchdog's kill: it
- * reached GitHub); on the Action, its last `work (N)` job concluded `cancelled` (a person, or the job's timeout).
+ * How a vanished stage ended when its runner or network was not what ended it, so it is not relaunched; null when it
+ * was lost (relaunch it). Decided on structure only, never a log's words:
+ * - `{by: "sandbox"}`: on the sandbox, a record that says its stage ended (stage.mjs writes `ended`, with `endedBy` for
+ *   a watchdog's kill: it reached GitHub);
+ * - on the Action, its last `work (N)` job (stintWorkJob, GitHub's jobs API with its `conclusion` and `steps[]`):
+ *   `{by: "cancelled"}` when the job concluded `cancelled` or `timed_out` (a person, or the job's timeout): a stop;
+ *   `{by: "setup", step, number}` when GitHub never started it (triage.mjs neverStarted: no step, no runner; `step` and
+ *   `number` null), or its first failed step came before Factory's own ran: GitHub's Set up job (step 1), or a step
+ *   numbered below `workStep`, Factory's work step's number read from the workflow file (workStepNumber); `step` and
+ *   `number` are the failed step's. One such failure may be passing (a checkout's or a token mint's 5xx, a runner not
+ *   acquired), so the dispatcher relaunches it once; the same step failing on the relaunch's job too (setupAgain) is a
+ *   set-up that fails the same way every time, and Blocks.
+ * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), Factory's own step
+ * failing with no exit written (its network), or a failed step that cannot be placed (`workStep` null: the workflow
+ * file unread; the caller logs that).
  */
-export const endedNotLost = ({ record = null, job = null }) => record?.state === "ended" || !!record?.endedBy || job?.conclusion === "cancelled";
+export function endedNotLost({ record = null, job = null, workStep = null }) {
+  if (record?.state === "ended" || record?.endedBy) return { by: "sandbox" };
+  if (!job) return null;
+  if (job.conclusion === "cancelled" || job.conclusion === "timed_out") return { by: "cancelled" };
+  if (neverStarted(job)) return { by: "setup", step: null, number: null };
+  const failed = failedStep(job);
+  if (failed && (failed.number === 1 || (Number.isInteger(workStep) && failed.number < workStep))) return { by: "setup", step: String(failed.name ?? "").slice(0, 120), number: failed.number };
+  return null;
+}
+
+/**
+ * Whether a set-up failure (endedNotLost `{by: "setup"}`) is the second in a row at the same step: the latest relaunch
+ * since `start` (triesSince) was made for a job that failed at that step too (its try's `setup`: the same number and
+ * name, or both never started).
+ */
+export function setupAgain(record, start, end) {
+  const last = triesSince(record, start).at(-1)?.setup;
+  return !!last && end?.by === "setup" && (last.number ?? null) === (end.number ?? null) && (last.step ?? null) === (end.step ?? null);
+}
+
+/**
+ * Whether placing a vanished stage's work job needs its workflow file (endedNotLost `workStep`): a job GitHub started,
+ * not cancelled, whose first failed step is after GitHub's Set up job.
+ */
+export const needsWorkStep = (job) => !!job && job.conclusion !== "cancelled" && job.conclusion !== "timed_out" && !neverStarted(job) && (failedStep(job)?.number ?? 1) !== 1;
+
+/**
+ * The number Factory's work step has in GitHub's `steps[]` for the job reporting `jobName`, read from the workflow file's
+ * text: GitHub's Set up job is step 1 and the job's YAML steps follow in order, so the step at index i is i + 2. Factory's
+ * work step is the top-level step that `uses: clockgrove/factory@…` with `mode: work` (Factory renders the workflow;
+ * the account step runs the same action with `mode: account`). Null when the text does not parse or names no such step.
+ */
+export function workStepNumber(text, jobName) {
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""));
+  } catch {
+    return null;
+  }
+  for (const [id, j] of Object.entries(doc?.jobs || {})) {
+    if (!reports(typeof j?.name === "string" ? j.name : id, jobName) || !Array.isArray(j?.steps)) continue;
+    const i = j.steps.findIndex((st) => /^clockgrove\/factory@\S+$/.test(String(st?.uses ?? "").trim()) && st?.with?.mode === "work");
+    if (i >= 0) return i + 2;
+  }
+  return null;
+}
+
+/**
+ * Factory's work step's number for a vanished work job (workStepNumber), from the workflow file at the job's commit
+ * (`head_sha`): this workflow's own file (github.mjs workflowFile), one contents read. Null when it cannot be read.
+ */
+export async function stintWorkStep(repo, job, opts) {
+  if (!job?.head_sha) return null;
+  const text = await rest(`repos/${repo.full}/contents/.github/workflows/${workflowFile()}?ref=${job.head_sha}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => "");
+  return text ? workStepNumber(text, job.name) : null;
+}
+
+/** The dispatcher's Block reason and cause for a vanished stage endedNotLost placed (`end`), after `note`. */
+export function notLostBlock(end, note = "") {
+  if (end?.by === "setup") return { reason: `worker job failed before Factory ran: ${end.step ? `its step "${end.step}" failed, as it did on the job Factory relaunched it from` : "GitHub never started it (no runner was assigned), nor the job Factory relaunched it from"}${note}; a set-up failure that fails the same way every time, so it was not relaunched again`, cause: "setup" };
+  if (end?.by === "cancelled") return { reason: `worker job vanished: its work job was cancelled (a person, or its timeout)${note}; a stop, so it was not relaunched`, cause: "factory" };
+  return { reason: `worker job vanished: Running with no job in progress${note}`, cause: "factory" };
+}
 
 /**
  * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that

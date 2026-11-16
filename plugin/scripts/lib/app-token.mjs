@@ -3,7 +3,7 @@
 // needed; the same code serves the Action and `/factory doctor` on a laptop.
 // Factory never creates an App; it only verifies and uses the one it is given.
 import { createSign } from "node:crypto";
-import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, quotaNow, spentCandidate, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 const b64url = (buf) => Buffer.from(buf).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 
@@ -52,12 +52,30 @@ async function api(path, { token, method = "GET", body } = {}) {
     e.status = r.status;
     // GitHub throttling (its headers say so), not a refusal of the mint itself: transient, as github.mjs's GitHubError says it.
     e.rateLimited = r.status === 429 || (r.status === 403 && (r.headers.get("x-ratelimit-remaining") === "0" || r.headers.has("retry-after")));
-    // GitHub's primary rate limit spent: the code and reset every GitHub call's error carries (github.mjs markSpent).
-    const resetAt = e.rateLimited ? spentResetOf(r.status, r.headers, json?.message || text) : null;
+    // GitHub's primary rate limit spent, by GitHub's count of the quota (network.mjs spentResetOf): the code and reset
+    // every GitHub call's error carries (github.mjs markSpent). The mint's calls carry the App's JWT, and GitHub may
+    // answer GET /rate_limit for no JWT, so here only a count that says none remaining marks it spent: with no count
+    // the answer is a rate limit with no stated end, as a refusal on the last quota point (a suspended installation)
+    // must stay.
+    const count = e.rateLimited && spentCandidate(r.headers) ? await rateLimitCount(token, r.headers.get("x-ratelimit-resource") || "core") : null;
+    const resetAt = count ? spentResetOf(r.headers, count) : null;
     if (resetAt !== null) Object.assign(e, { code: RATE_LIMIT_SPENT, resetAt });
     throw e;
   }
   return json;
+}
+
+/**
+ * GitHub's count of quota `resource` for `token` (GET /rate_limit: network.mjs quotaNow), or null when it cannot be read.
+ * The read is not counted against the primary rate limit (it can count toward the secondary one).
+ */
+async function rateLimitCount(token, resource) {
+  try {
+    const r = await fetch(`${API}/rate_limit`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "clockgrove-factory" } });
+    return r.ok ? quotaNow(await r.json(), resource, r.headers.get("date")) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

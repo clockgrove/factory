@@ -19,19 +19,19 @@
 //   requeue an answered Question goes back to Queued for the dispatcher, the one place caps are decided
 // The vendor SDK runs in this process. GitHub comments carry codes and times only, never a command's or a vendor's words.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { workflowTokenChecks } from "./doctor.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
-import { PLUGIN_ROOT } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit, doctorBlock, objectiveDecisions } from "./lib/session.mjs";
@@ -310,19 +310,8 @@ export async function mintTokens(inputs, repo, { read = false } = {}) {
 
 /** Factory's plugin as a tarball for the sandbox, and a digest of its files (not the tarball's bytes, which carry times). */
 export function pluginPackage(root = PLUGIN_ROOT) {
-  const hash = createHash("sha256");
-  const walk = (dir) => {
-    for (const name of readdirSync(dir).sort()) {
-      if (name === "node_modules" || name === "test") continue;
-      const p = join(dir, name);
-      const st = statSync(p);
-      if (st.isDirectory()) walk(p);
-      else if (st.isFile()) hash.update(`${p.slice(root.length)}\0`).update(readFileSync(p)).update("\0");
-    }
-  };
-  walk(root);
   const tgz = execFileSync("tar", ["czf", "-", "--exclude=./node_modules", "--exclude=./test", "-C", root, "."], { maxBuffer: 64 * 1024 * 1024 });
-  return { tgz, digest: hash.digest("hex").slice(0, 16) };
+  return { tgz, digest: pluginDigest(root).slice(0, 16) };
 }
 
 /**
@@ -1109,7 +1098,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     if (quota) return out({ ...(await quotaWait(run, ctx, { stage, error, quota })), stage });
     if (retried) {
       // Worth another try, by the dispatcher (startRetryAt, a growing pause): a work stage stays Running and a review
-      // stays labelled, and nothing new starts on this route meanwhile (logic.mjs transientHold). Going back to Queued
+      // stays labelled, and nothing new starts on this route while the vendor refuses others too (logic.mjs vendorEvidence). Going back to Queued
       // would let each re-pick start a new stint and drain the queue into the outage.
       const why = `the ${inputs.sandbox} sandbox was unavailable (${error.code}); it is tried again after a pause`;
       const since = stage === "review" ? (ctx.review?.since ?? ctx.runningSince) : ctx.runningSince;
@@ -1118,7 +1107,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
       // A deferred stage says so on its issue, in one note it updates: at the first deferral and at each 30-minute try.
       if (tries <= 1 || startBackoffMs(tries) >= START_RETRY_MAX_MS) {
         const next = rec ? startRetryAt(rec, since) : Date.now() + startBackoffMs(1);
-        await upsertComment(repo, n, marker(n, "deferred"), deferredNote({ stage, vendor: inputs.sandbox, code: error.code, tries, next, holds: rec ? transientHold(rec, since) : true }), opts).catch((x) => log(`#${n}: the deferral note was not written (${x.status ?? "error"})`));
+        await upsertComment(repo, n, marker(n, "deferred"), deferredNote({ stage, vendor: inputs.sandbox, code: error.code, tries, next }), opts).catch((x) => log(`#${n}: the deferral note was not written (${x.status ?? "error"})`));
       }
       return out({ exit: "deferred", stage, reason: `#${n}: ${why}` });
     }
@@ -1164,12 +1153,12 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
 }
 
 /**
- * The deferral note on the Objective (marker `deferred`): codes and times only. `holds`: whether this Objective still
- * holds its route's new picks (logic.mjs transientHold).
+ * The deferral note on the Objective (marker `deferred`): codes and times only. Whether it holds its route's new picks
+ * is the dispatcher's, from other Objectives' records (logic.mjs vendorEvidence).
  */
-export function deferredNote({ stage, vendor, code, tries, next, holds }) {
+export function deferredNote({ stage, vendor, code, tries, next }) {
   const when = Number.isFinite(next) ? new Date(next).toISOString().slice(0, 16).replace("T", " ") + "Z" : "soon";
-  const route = holds ? "New Objectives on this route wait until a start gets through." : "It no longer holds new Objectives on this route; only its own tries go on.";
+  const route = "Until another Objective starts on this route, new ones start one at a time, each once the try before it has its answer; once another starts, only this one's own tries go on.";
   return `Factory: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
 }
 

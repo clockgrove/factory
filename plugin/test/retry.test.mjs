@@ -213,7 +213,7 @@ test("rest: a wait past the caller's deadline or the bound is not taken; the err
     () => json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(1_000_000 / 1000) + 3600) }),
     async ({ seen, waits }) => {
       await assert.rejects(rest("repos/o/r"), (e) => e.rateLimited === true);
-      assert.equal(seen.length, 1, "an hour's wait is beyond the bound");
+      assert.deepEqual(seen.filter((k) => k !== "GET /rate_limit"), ["GET /repos/o/r"], "an hour's wait is beyond the bound");
       assert.deepEqual(waits, []);
     },
   );
@@ -426,16 +426,23 @@ test("outbox: a refused push (a hook's rejection, a rejected ref) is never retri
   }
 });
 
-test("gitTransport: transport words count only without a refusal and without the ref's own porcelain line", () => {
+test("#420 gitTransport: a failure goes again unless the remote answered: the ref's porcelain line or an HTTP 4xx refusal", () => {
   const fail = (stderr, stdout = "") => ({ code: 128, stdout, stderr });
+  // No answer from the remote, in any words: DNS, a 5xx, LFS's server error, and ones no list of words had.
   assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com")), true);
   assert.equal(gitTransport(fail("error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502")), true);
   assert.equal(gitTransport(fail("batch response: Fatal error: Server error: https://github.com/o/r.git/info/lfs/objects/batch")), true);
+  assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': OpenSSL SSL_connect: SSL_ERROR_ZERO_RETURN in connection to github.com:443")), true);
+  assert.equal(gitTransport(fail("error: 7124 bytes of body are still expected\nfetch-pack: invalid index-pack output")), true);
+  assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 408")), true, "a 408 is the request timing out");
+  // The remote's answer: an HTTP 4xx, or the push's porcelain line for the ref.
   assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403")), false);
   assert.equal(gitTransport(fail("error: RPC failed; HTTP 413 curl 22\nfatal: the remote end hung up unexpectedly")), false);
   assert.equal(gitTransport(fail("fatal: the remote end hung up unexpectedly", "To o\n!\trefs/heads/incoming:refs/heads/f\t[remote rejected] (pre-receive hook declined)\nDone\n"), "refs/heads/f"), false);
-  assert.equal(gitTransport(fail("fatal: couldn't find remote ref refs/heads/x")), false);
+  // git's own porcelain status for a remote that never reported the ref's outcome: no answer.
+  assert.equal(gitTransport(fail("fatal: the remote end hung up unexpectedly", "To o\n!\trefs/heads/incoming:refs/heads/f\t[remote failure] (remote failed to report status)\nDone\n"), "refs/heads/f"), true);
   assert.equal(gitTransport({ code: 0, stdout: "", stderr: "" }), false);
+  assert.equal(gitTransport({ code: null, stdout: "", stderr: "", timedOut: true }), false, "a command Factory timed out is not sent again");
 });
 
 // ------------------------------------------------------------------ serve and a 401
@@ -444,7 +451,7 @@ test("gitTransport: transport words count only without a refusal and without the
  * The real serve loop against a GitHub that answers 401 while `refuses(authorization)` says so. `onRefused(file)` runs
  * once the refusal is logged; the loop stops after its first dispatch read GitHub answers, or after `stopMs`.
  */
-async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
+async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = null }) {
   const home = mkdtempSync(join(tmpdir(), "factory-home-"));
   const file = join(home, ".config", "factory", "tokens", "o", "r");
   mkdirSync(join(file, ".."), { recursive: true });
@@ -454,6 +461,9 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000 }) {
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (refuses(req.headers.authorization)) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://x");
+    // The test's own answer, when it gives one (`answer(req, url)`: [status, body, headers] or null).
+    const own = answer?.(req, url);
+    if (own) return res.writeHead(own[0], { "content-type": "application/json", ...(own[2] || {}) }).end(JSON.stringify(own[1]));
     if (url.pathname === "/repos/o/r/issues") reads += 1;
     return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
   });
@@ -514,6 +524,21 @@ test("serve: a 401 on the local token stops new work and names its source; a ren
   assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
   assert.equal(run.token, "github_pat_new");
   assert.ok(run.reads > 0, "the dispatcher read GitHub again with the new token");
+});
+
+test("#421: serve: a new token whose write check GitHub's rate limit turned away is checked again a minute later, and taken once it passes", async () => {
+  let limited = 0;
+  const answer = (req, url) => {
+    if (req.headers.authorization !== "Bearer github_pat_new") return null;
+    if (url.pathname === "/user/repos") return [200, [{ full_name: "o/r", permissions: { admin: true, push: true } }, { full_name: "o/other", permissions: { push: true } }]];
+    if (url.pathname === "/repos/o/other/issues" && req.method === "POST") return (limited += 1) === 1 ? [403, { message: "You have exceeded a secondary rate limit" }, { "retry-after": "60" }] : [404, { message: "Not Found" }];
+    return null;
+  };
+  const run = await serveThrough401({ refuses: (auth) => auth !== "Bearer github_pat_new", onRefused: (file) => writeFileSync(file, "github_pat_new\n"), answer });
+  assert.ok(run.lines.some((l) => /the new token in .* is not taken: .*o\/other: rate limited.*; it is checked again in a minute/.test(l)), "the first check got no clear answer");
+  assert.equal(limited, 2, "checked again, once");
+  assert.ok(run.lines.some((l) => /a new token in .*: taking work again/.test(l)));
+  assert.equal(run.token, "github_pat_new");
 });
 
 test("serve: a 401 GitHub gives for a moment does not stop the loop: the same token, tried again, resumes it", async () => {

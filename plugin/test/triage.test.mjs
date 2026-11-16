@@ -359,6 +359,128 @@ test("failureSignature: only the failing step counts; setup noise and post-job l
   assert.deepEqual(failingStep(["x", "##[error]boom"]), ["x", "##[error]boom"]);
 });
 
+test("#420 logWindow: the failed step, cut at its ##[group] boundaries: no other step's output, its command kept when it is long", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const log = fixture("steps-mocha.txt");
+  const w = logWindow(log, 4000);
+  assert.equal(w.split("\n")[0], "##[group]Run npm test");
+  assert.equal(w.split("\n").at(-1), "##[error]Process completed with exit code 1.");
+  assert.match(w, /AssertionError/);
+  assert.doesNotMatch(w, /Cache service|npm warn deprecated|Post job cleanup|post-step/, "the set-up steps' and the post-job step's lines are not why it failed");
+  assert.doesNotMatch(w, /^\d{4}-\d{2}-\d{2}T/m, "cleaned of the runner's timestamps");
+  // A step longer than the window: its command and its end, whole lines, the cut counted; never the step before it.
+  const long = ["##[group]Run npm ci", ...Array.from({ length: 50 }, (_, i) => `npm warn deprecated pkg-${i}`), "##[group]Run npm test", "npm test", ...Array.from({ length: 400 }, (_, i) => `ok ${i + 1} - a passing check with a fairly long title number ${i}`), "not ok 401 - the failing check", "  AssertionError: expected 1 to equal 2", "##[error]Process completed with exit code 1.", "##[group]Post job cleanup.", "git config --unset-all http.extraheader"].join("\n");
+  const cut = logWindow(long, 1000);
+  const lines = cut.split("\n");
+  assert.ok(cut.length <= 1000, String(cut.length));
+  assert.equal(lines[0], "##[group]Run npm test");
+  assert.match(lines[1], /^\(\d+ lines of this step not shown\)$/);
+  assert.deepEqual(lines.slice(-3), ["not ok 401 - the failing check", "  AssertionError: expected 1 to equal 2", "##[error]Process completed with exit code 1."]);
+  assert.ok(lines.slice(2).every((l) => /^(ok \d+|not ok|  AssertionError|##\[error\])/.test(l)), "whole lines of the failed step only");
+  // No ##[error]: the log's end, whole.
+  assert.equal(logWindow("a\nb", 4000), "a\nb");
+});
+
+test("#420 logWindow: never longer than its size, however long the step's command or last line", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const log = [`##[group]Run ${"x".repeat(5000)}`, "line 2", "##[error]Process completed with exit code 1.", "y".repeat(200_000)].join("\n");
+  const w = logWindow(log, 4000);
+  assert.ok(w.length <= 4000, String(w.length));
+  assert.ok(w.startsWith("##[group]Run xxx"), "the command's start");
+  assert.match(w, /##\[error\]Process completed with exit code 1\./);
+  // One over-long last line and no error: its end, within the size.
+  const one = logWindow(["##[group]Run a", "z".repeat(200_000)].join("\n"), 4000);
+  assert.ok(one.length <= 4000 && one.endsWith("zzz"), String(one.length));
+  // A size too small for anything but the command's start: still within it.
+  assert.ok(logWindow(log, 100).length <= 100);
+});
+
+test("#420 logWindow: a step that goes on after its first error keeps that error and the lines before it, as well as its end", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const log = ["##[group]Run tsc", "tsc -p .", "##[endgroup]", "src/a.ts(1,1): building", "##[error]src/a.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'.", ...Array.from({ length: 2000 }, (_, i) => `noise ${i}`), "##[error]Process completed with exit code 2."].join("\n");
+  const w = logWindow(log, 4000);
+  const lines = w.split("\n");
+  assert.ok(w.length <= 4000, String(w.length));
+  assert.equal(lines[0], "##[group]Run tsc");
+  assert.match(w, /error TS2322/);
+  assert.ok(lines.includes("src/a.ts(1,1): building"), "the lines just before the error");
+  assert.equal(lines.at(-1), "##[error]Process completed with exit code 2.");
+  assert.ok(lines.some((l) => /^\(\d+ lines of this step not shown\)$/.test(l)));
+});
+
+test("#420 logWindow: with the job, the failed step is cut by its times: a step's own ##[group]s are no boundary, nor do other steps in its first or last second get in", async () => {
+  const { logWindow, stepByTime } = await import("../scripts/lib/github.mjs");
+  const at = (s, l) => `2026-11-16T08:50:${s}.1234567Z ${l}`;
+  const raw = [
+    at("40", "##[group]Run npm ci"),
+    at("40", "npm warn deprecated old-pkg"),
+    at("42", "added 10 packages"),
+    at("42", "##[group]Run mkdir \"$RUNNER_TEMP/tests\""),
+    at("42", "##[endgroup]"),
+    at("42", "##[group]Run npm test"),
+    at("42", "npm test"),
+    at("42", "##[endgroup]"),
+    at("43", "##[group]suite A"),
+    at("43", "1) A fails"),
+    at("43", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2"),
+    at("43", "    at test/a.test.js:10:5"),
+    at("43", "##[endgroup]"),
+    at("44", "##[group]suite B"),
+    at("44", "ok B"),
+    at("44", "##[endgroup]"),
+    at("45", "##[error]Process completed with exit code 1."),
+    at("45", "Post job cleanup."),
+    at("45", "[command]/usr/bin/git version"),
+  ].join("\n");
+  const job = { id: 1, steps: [
+    { name: "Run npm ci", number: 2, conclusion: "success", started_at: "2026-11-16T08:50:40Z", completed_at: "2026-11-16T08:50:42Z" },
+    { name: "Run mkdir", number: 3, conclusion: "success", started_at: "2026-11-16T08:50:42Z", completed_at: "2026-11-16T08:50:42Z" },
+    { name: "Run npm test", number: 4, conclusion: "failure", started_at: "2026-11-16T08:50:42Z", completed_at: "2026-11-16T08:50:45Z" },
+    { name: "Post Run actions/checkout@v4", number: 6, conclusion: "success", started_at: "2026-11-16T08:50:45Z", completed_at: "2026-11-16T08:50:45Z" },
+  ] };
+  const w = logWindow(raw, 4000, job);
+  const lines = w.split("\n");
+  assert.equal(lines[0], "##[group]Run npm test");
+  assert.equal(lines.at(-1), "##[error]Process completed with exit code 1.");
+  for (const l of ["1) A fails", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2", "    at test/a.test.js:10:5", "ok B"]) assert.ok(lines.includes(l), l);
+  assert.doesNotMatch(w, /npm ci|added 10|mkdir|Post job cleanup|git version/, "no other step's lines");
+  assert.doesNotMatch(w, /^\d{4}-\d{2}-\d{2}T/m);
+  // No job, no step times, or no line in their range: the cut at the ##[group] boundaries.
+  assert.equal(stepByTime(raw, null), null);
+  assert.equal(stepByTime(raw, { steps: [{ conclusion: "failure", started_at: null }] }), null);
+  assert.equal(stepByTime(raw, { steps: [{ conclusion: "failure", started_at: "2026-11-16T09:00:00Z", completed_at: "2026-11-16T09:01:00Z" }] }), null);
+  assert.equal(logWindow(raw, 4000, null), logWindow(raw, 4000));
+});
+
+test("#420 logWindow: a step's own groups in its first second are kept unless an earlier step ended in that second", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const at = (s, l) => `2026-11-16T08:50:${s}.1234567Z ${l}`;
+  const raw = [
+    at("40", "##[group]Run npm ci"),
+    at("41", "added 10 packages"),
+    at("42", "##[group]Run npm test"),
+    at("42", "npm test"),
+    at("42", "##[endgroup]"),
+    at("42", "##[group]suite A"),
+    at("42", "1) A fails"),
+    at("42", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2"),
+    at("42", "##[endgroup]"),
+    at("42", "##[group]suite B"),
+    at("44", "ok B"),
+    at("44", "##[endgroup]"),
+    at("45", "##[error]Process completed with exit code 1."),
+  ].join("\n");
+  const failed = { name: "Run npm test", number: 4, conclusion: "failure", started_at: "2026-11-16T08:50:42Z", completed_at: "2026-11-16T08:50:45Z" };
+  // The step before ended a second earlier, or ended in this second having started before it: suite A's failure stays.
+  for (const ended of ["2026-11-16T08:50:41Z", "2026-11-16T08:50:42Z"]) {
+    const job = { id: 1, steps: [{ name: "Run npm ci", number: 3, conclusion: "success", started_at: "2026-11-16T08:50:40Z", completed_at: ended }, failed] };
+    const lines = logWindow(raw, 4000, job).split("\n");
+    assert.equal(lines[0], "##[group]Run npm test", ended);
+    for (const l of ["1) A fails", "AssertionError [ERR_ASSERTION]: expected 1 to equal 2", "ok B"]) assert.ok(lines.includes(l), `${ended}: ${l}`);
+    assert.equal(lines.at(-1), "##[error]Process completed with exit code 1.");
+  }
+});
+
 // ------------------------------------------------------------------ a required job GitHub never started (#2676)
 
 // The real one: clockgrove/clockgrove's `quality` job while its Actions were locked for billing (no step, no runner).
@@ -827,7 +949,7 @@ async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
-  const seen = { reruns: 0, contents: 0 };
+  const seen = { reruns: 0, contents: 0, logs: 0, jobs: 0 };
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname;
@@ -840,9 +962,9 @@ async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow
       return json({ total_count: now.length, check_runs: now });
     }
     let m = /\/actions\/jobs\/(\d+)\/logs$/.exec(p);
-    if (m) return new Response(logs[m[1]] ?? "", { status: 200 });
+    if (m) return (seen.logs += 1), new Response(logs[m[1]] ?? "", { status: 200 });
     m = /\/actions\/jobs\/(\d+)$/.exec(p);
-    if (m && jobs[m[1]]) return json(jobs[m[1]]);
+    if (m && jobs[m[1]]) return (seen.jobs += 1), json(jobs[m[1]]);
     if (method === "POST" && /\/actions\/runs\/\d+\/rerun-failed-jobs$/.test(p)) {
       if (rerun >= 400) return json({ message: "Resource not accessible by integration" }, rerun);
       seen.reruns += 1;
@@ -955,6 +1077,94 @@ test("triage: a changed file's name in an unrelated stack frame is asked of the 
   }
 });
 
+test("#420 triage: a red as wide as a matrix is asked once per failure, not cut at a job count; each job gets its failure's verdict", async () => {
+  const legs = Array.from({ length: 12 }, (_, i) => ({ ...red41[0], id: 300 + i, name: `test (${i})` }));
+  const jobs = Object.fromEntries(legs.map((r) => [r.id, { ...testFailed, id: r.id, name: r.name }]));
+  // Eleven legs fail one way (one outage on every leg), one another way.
+  const logs = Object.fromEntries(legs.map((r, i) => [r.id, legLog(i === 11 ? MAC : LINUX)]));
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.95 });
+  const lines = [];
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+    const r = await t.red({ sha: "d".repeat(40), failedRuns: legs, required: [] });
+    assert.equal(decider.asked.length, 2, "one question per failure");
+    assert.match(decider.asked[0], /^Failing CI job: test \(0\)$/m);
+    assert.match(decider.asked[1], /^Failing CI job: test \(11\)$/m);
+    assert.equal(r.rerun, true, lines.join("\n"));
+    assert.equal(seen.reruns, 1, "the legs' one workflow run");
+    assert.match(lines[0], /test \(5\): flaky_or_infra 0\.95 \(asked as test \(0\): the same failure\)/);
+    assert.match(lines[0], /test \(11\): flaky_or_infra 0\.95 \[/);
+  });
+  // One failure the change's: no rerun, whatever the others read.
+  const split = { asked: [], decide: async (input) => (split.asked.push(input), /test \(11\)/.test(input) ? { verdict: "change_caused", confidence: 0.9 } : { verdict: "flaky_or_infra", confidence: 0.95 }) };
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: split });
+    assert.equal((await t.red({ sha: "e".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(split.asked.length, 2);
+    assert.equal(seen.reruns, 0);
+  });
+});
+
+test("#420 triage: the asking stops at the first answer that sends a wide red to the fix pass; the jobs after it are neither read nor asked", async () => {
+  const legs = Array.from({ length: 12 }, (_, i) => ({ ...red41[0], id: 520 + i, name: `test (${i})` }));
+  const jobs = Object.fromEntries(legs.map((r) => [r.id, { ...testFailed, id: r.id, name: r.name }]));
+  // Every leg fails its own way (one cause, other failure lines per platform).
+  const logs = Object.fromEntries(legs.map((r, i) => [r.id, legLog(`AssertionError [ERR_ASSERTION]: leg ${i} differs`)]));
+  const decider = asking({ verdict: "change_caused", confidence: 0.9 });
+  const lines = [];
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+    const r = await t.red({ sha: "f".repeat(40), failedRuns: legs, required: ["test (7)"] });
+    assert.equal(r.rerun, false);
+    assert.equal(decider.asked.length, 1, "one question: the first answer already sends the red to the fix pass");
+    assert.match(decider.asked[0], /^Failing CI job: test \(7\)$/m, "the required job first");
+    assert.equal(seen.logs, 1, "one log read");
+    assert.equal(seen.jobs, 1, "one job read");
+    assert.match(lines.at(-1), /test \(7\): change_caused 0\.90/);
+    assert.match(lines.at(-1), /test \(0\): not read nor asked, test \(7\)'s answer already sends the red to the fix pass/);
+    assert.match(lines.at(-1), /→ fix pass$/);
+    // The unchanged head after a fix pass that committed nothing: the change's verdict stands, nothing read again.
+    assert.match((await t.again({ sha: "f".repeat(40), failedRuns: legs })).skipped, /caused by the change: test \(7\) 0\.90/);
+    assert.equal(seen.logs, 1);
+  });
+  // No verdict (an error) decides it too: the second leg is not asked.
+  const failing = { asked: [], decide: async (input) => (failing.asked.push(input), { verdict: null, confidence: null, error: "HTTP 429" }) };
+  await withHead({ runs: [], jobs, logs }, async () => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: failing });
+    assert.equal((await t.classify({ sha: "a".repeat(40), failedRuns: legs, required: [] })).flaky, false);
+    assert.equal(failing.asked.length, 1);
+  });
+});
+
+test("#420 triage: an answer below the floor decides no reader of the verdicts, so the asking goes on and every job gets its verdict", async () => {
+  const legs = Array.from({ length: 2 }, (_, i) => ({ ...red41[0], id: 540 + i, name: `test (${i})` }));
+  const jobs = Object.fromEntries(legs.map((r) => [r.id, { ...testFailed, id: r.id, name: r.name }]));
+  const logs = Object.fromEntries(legs.map((r, i) => [r.id, legLog(i ? MAC : LINUX)]));
+  const inTurn = (...answers) => {
+    const d = { asked: [], decide: async (input) => (d.asked.push(input), answers[d.asked.length - 1]) };
+    return d;
+  };
+  // The change's below the floor, then flaky at it: the model may still judge a base red, and both jobs were asked.
+  const caused = inTurn({ verdict: "change_caused", confidence: 0.5 }, { verdict: "flaky_or_infra", confidence: 0.9 });
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: caused });
+    assert.equal((await t.red({ sha: "b".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(caused.asked.length, 2, "both jobs asked");
+    assert.equal(seen.reruns, 0);
+    assert.deepEqual(await t.modelBase({ sha: "b".repeat(40), failedRuns: legs }), { ok: true, why: "" });
+  });
+  // Flaky below the floor, then flaky at it: the red goes to the fix pass, and an unchanged head after it is rerun once.
+  const low = inTurn({ verdict: "flaky_or_infra", confidence: 0.5 }, { verdict: "flaky_or_infra", confidence: 0.9 });
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: low });
+    assert.equal((await t.red({ sha: "c".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(low.asked.length, 2, "both jobs asked");
+    const r = await t.again({ sha: "c".repeat(40), failedRuns: legs });
+    assert.equal(r.rerun, true, JSON.stringify(r));
+    assert.equal(seen.reruns, 1);
+  });
+});
+
 test("failureSignature: Git LFS's own failure lines are a signature, also behind a tool's prefix", () => {
   const sig = failureSignature("quality", lfsLog);
   assert.ok(sig.id);
@@ -993,9 +1203,6 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
     assert.equal((await t.again({ sha: "b".repeat(40), failedRuns })).rerun, true, "another head, flaky below the bar");
     assert.deepEqual([...recs.at(-1).sigs], [failureSignature("quality", failingLog).id]);
     assert.deepEqual((await t.again({ sha: "c".repeat(40), failedRuns })).skipped, "the failure of quality was already rerun once on this Objective");
-    // More failing jobs than MAX_JOBS: no rerun.
-    const many = Array.from({ length: 11 }, (_, i) => ({ ...red41[0], id: 100 + i }));
-    assert.equal((await t.again({ sha: "d".repeat(40), failedRuns: many })).skipped, "11 failing jobs, more than 10");
   });
   // No key: red() is off, but the unchanged head's rerun needs no model.
   const home = mkdtempSync(join(tmpdir(), "nokey-"));
@@ -1746,12 +1953,12 @@ test("#413 review: the same-failure question shows each side's own failure lines
   assert.match(input, /Failure lines only the second run printed:\n<<<BEGIN a{16}>>>\n\(none: every failure line it printed, folded, the other printed too\)\n<<<END a{16}>>>/);
 });
 
-test("#413 review: a failure window is cut hard; a question still too large is not the same failure, never undecided, and is not asked", async () => {
+test("#413 review: a failure window stays within its size; a question still too large is not the same failure, never undecided, and is not asked", async () => {
   const { FAILURE_WINDOW, SAME_INPUT_CAP, failureWindow } = await import("../scripts/lib/triage.mjs");
   const huge = ["##[group]Run npm test", "##[error]first", ...Array.from({ length: 50_000 }, (_, i) => `noise line ${i} between the errors`), "##[error]last"].join("\n");
   const w = failureWindow(huge);
-  assert.ok(w.length < FAILURE_WINDOW + 100, `${w.length}`);
-  assert.match(w, /\n\[\d+ characters cut\]\n/);
+  assert.ok(w.length <= FAILURE_WINDOW, `${w.length}`);
+  assert.match(w, /\n\(\d+ lines of this step not shown\)\n/);
   assert.ok(w.includes("##[error]first") && w.endsWith("##[error]last"), "the head and the tail are kept");
   // A step name past the cap on both sides (the jobs API's text): no question, neither the same nor surely another.
   const decider = byQuestion({ same_failure: { verdict: "same_failure", confidence: 0.99 } });

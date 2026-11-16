@@ -760,15 +760,15 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
 
 /**
  * One dispatcher tick on a repository whose workflow sets a cloud sandbox and which runs both routes (#235): #50 a
- * factory:local Objective Running on a live local claim, whose record holds three dispatch markers older than
- * START_LOST_MS (a local loop wrote them before #235: each reads as a `lost` start); #51 a factory:local Objective
+ * factory:local Objective Running on a live local claim, whose record holds three dispatch markers from 20 to 40
+ * minutes old naming no run (a local loop wrote them before #235); #51 a factory:local Objective
  * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
  * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
  */
 async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const { marker, sandboxMarkerLine, setSelf, START_LOST_MS } = await import("../scripts/lib/logic.mjs");
+  const { marker, sandboxMarkerLine, setSelf } = await import("../scripts/lib/logic.mjs");
   const { BASE, BOT, REPO, githubStore } = await import("./fixtures/github-records.mjs");
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
@@ -777,7 +777,7 @@ async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = 
   const more = extra({ now, iso, iss, marker, sandboxMarkerLine, BOT });
   const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, []), ...(more.open || [])];
   const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
-  const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(START_LOST_MS + 30 * 60_000), named(START_LOST_MS + 20 * 60_000), named(START_LOST_MS + 10 * 60_000)] };
+  const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(40 * 60_000), named(30 * 60_000), named(20 * 60_000)] };
   const comments = {
     50: [
       { id: 500, user: BOT, updated_at: iso(now), body: `${marker(50, "sandbox")}\n${sandboxMarkerLine(lostRecord)}` },

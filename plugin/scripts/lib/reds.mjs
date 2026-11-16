@@ -137,17 +137,21 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     }
     return out.slice(0, BASE_RUNS);
   };
-  // A job's failed step (its Actions job's first failed step), read once and only when a same-failure judgement needs it.
-  const steps = new Map();
-  const stepOf = (id) => {
-    if (!steps.has(id)) steps.set(id, rest(`repos/${repo.full}/actions/jobs/${id}`, actions).then((j) => failedStep(j)?.name || "", () => ""));
-    return steps.get(id);
+  // A job's Actions job, read once: its failed step's name, when a same-failure judgement needs it, and the step's times,
+  // which cut the failed job's window (github.mjs logWindow).
+  const actionsJobs = new Map();
+  const jobOf = (id) => {
+    if (!actionsJobs.has(id)) actionsJobs.set(id, rest(`repos/${repo.full}/actions/jobs/${id}`, actions).catch(() => null));
+    return actionsJobs.get(id);
   };
+  const stepOf = (id) => jobOf(id).then((j) => failedStep(j)?.name || "");
   const short = (s) => String(s).slice(0, 7);
   const jobs = [];
   for (const r of picked) {
     const log = await jobLog(repo, r.id, actions).catch(() => "");
     const sig = failureSignature(r.name, log);
+    // Its Actions job: when its failed step ran, so the window is that step's lines by time (github.mjs logWindow).
+    const job = log ? await jobOf(r.id) : null;
     // The base's newest runs of the job; each red one's log is read once, and only its failure window kept.
     const runs = await baseRunsOf(r.name);
     for (const x of runs) {
@@ -159,11 +163,11 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     // A required check that only gathers the others (isAggregate) and printed no failure line of its own: never asked.
     const aggregate = isAggregate(r, failedRuns, required) && !sig.lines.length;
     // Handed back only on a steady match of the same failure (`same`: the signature, else the decision model).
-    const match = aggregate ? { base: false, said: "", undecided: null } : await baseMatch({ id: r.id, name: r.name, sig, step: () => stepOf(r.id), window: failureWindow(log), label: `job ${r.id}, on the head ${short(sha)}` }, runs, same ?? sameBySignature);
+    const match = aggregate ? { base: false, said: "", undecided: null } : await baseMatch({ id: r.id, name: r.name, sig, step: () => stepOf(r.id), window: failureWindow(log, job), label: `job ${r.id}, on the head ${short(sha)}` }, runs, same ?? sameBySignature);
     const base = match.base ? { sha: runs[0].sha, said: match.said, exact: match.exact } : null;
     const u = match.undecided;
     const baseUndecided = u ? { cause: u.cause || "factory", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
-    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
+    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
   // needs and which may fail without failing the run (triage.mjs workflowJobs), so the Block's lead (leadJobs) quotes a

@@ -32,7 +32,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, queueCheckTimeout, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -40,9 +40,9 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
+import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, queueHungMs, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, QUEUE_CONFLICT_WAIT_MS, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -2862,25 +2862,43 @@ export class Local {
 
   /**
    * --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. The follow's
-   * bound is the repository's own: while the merge pass has the PR in the queue (or waiting for the queue ahead of it),
-   * the pass's hung and drop rules end it, and the follow has none of its own. Out of the queue (its own checks, a
-   * person's merge with auto_merge off), it stops once it has waited `hungMs` there, counted from its start or from when
-   * it last saw the PR in the queue: the bound past which the queue calls a running required check hung (queueBoundMs,
-   * from the queue's check timeout), naming that bound and what is still pending.
+   * bounds are the repository's own, from the merge queue's check timeout (setup's default when unread), with `hungMs`
+   * the bound past which the queue calls a running required check hung (logic.mjs queueHungMs). In the queue, it follows
+   * while the entry makes progress (its state, merge_group commit or place changes), and stops once it has not for the
+   * check timeout plus `hungMs`; waiting for the queue ahead of it (queue-wait), it stops after QUEUE_CONFLICT_WAIT_MS
+   * plus `hungMs`. Out of the queue (its own checks, or a person's merge with auto_merge off), it stops once it has
+   * waited `hungMs`, counted from its start or from when it last saw the PR in the queue. With auto_merge off, one read of
+   * the PR's queue entry per poll tells whether a person put it in the queue. It logs where the PR is whenever that
+   * changes, and its stop line names the bound and what is still pending.
    */
   async followMerge(issue, prNumber, { pollMs = 60_000 } = {}) {
     const now = () => (this.clock ?? Date.now)();
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const queue = await hasMergeQueue(this.repo, this.opts).catch(() => true);
-    // The hung-check bound, read once for this follow rather than every poll; with no Actions token here (the local
-    // App has no Actions permission), the merge pass judges a queue check by that time bound only (session.mjs hangsOn).
-    const hungMs = await queueBoundMs(this.repo, this.opts);
+    // The queue's check timeout and the hung-check bound from it, read once for this follow rather than every poll; with
+    // no Actions token here (the local App has no Actions permission), the merge pass judges a queue check by that time
+    // bound only (session.mjs hangsOn).
+    const timeoutMin = queue ? await queueCheckTimeout(this.repo, this.opts).catch(() => null) : null;
+    const hungMs = queueHungMs(timeoutMin);
+    const minutes = (ms) => Math.round(ms / 60_000);
+    const timeoutText = timeoutMin ? `the merge queue's ${timeoutMin}-min check timeout` : `setup's default ${SETUP_QUEUE_TIMEOUT_MIN}-min check timeout`;
+    // How long the PR may stay in the queue with no change of its entry, and wait for the queue ahead of it.
+    const stillMs = { queue: (timeoutMin || SETUP_QUEUE_TIMEOUT_MIN) * 60_000 + hungMs, wait: QUEUE_CONFLICT_WAIT_MS + hungMs };
+    const inQueue = (entry) => {
+      if (entry === "queued") return { kind: "queue", key: "queued", desc: "just enqueued", text: "put in the merge queue" };
+      const desc = entry ? [entry.state, entry.position && `position ${entry.position}`, entry.head && `merge_group commit ${entry.head.slice(0, 7)}`].filter(Boolean).join(", ") : "unread";
+      return { kind: "queue", key: entry ? `${entry.state}:${entry.position}:${entry.head}` : "unread", desc, text: `in the merge queue (entry ${desc})` };
+    };
     const cache = {};
-    // When this wait outside the merge queue began (null while the merge pass has the PR in it), and what it waits on.
+    // When this wait outside the merge queue began (null while the PR is in it, or waits for the queue ahead), and
+    // since when the PR has been in the queue (or waited for it) with nothing changed.
     let outSince = now();
+    let still = null;
+    let said = null;
     let pending = "";
+    let stop = null;
     while (!this.stopping) {
-      pending = inputs.autoMerge ? "the merge pass" : "a person's merge (auto_merge is off)";
+      let phase;
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
@@ -2903,12 +2921,19 @@ export class Local {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
         }
-        // In the queue, or out of it waiting for the queue ahead to move: the merge pass bounds that wait.
-        if (how === "queued" || how === "in-queue" || how === "queue-wait") outSince = null;
-        else outSince ??= now();
-        const checks = report.checks;
-        pending = checks ? `its required checks on ${checks.sha.slice(0, 7)} (${[...checks.pending.map((n) => `${n} running`), ...checks.missing.map((n) => `${n} not reported`)].join(", ")})` : `the merge pass (${how ?? "unread"})`;
+        if (how === "queue-wait") phase = { kind: "wait", key: "wait", text: "out of the merge queue, waiting for the queue ahead of it to move" };
+        else if (how === "queued" || how === "in-queue") phase = inQueue(how === "queued" ? "queued" : report.entry);
+        else {
+          const checks = report.checks;
+          pending = checks ? `its required checks on ${checks.sha.slice(0, 7)} (${[...checks.pending.map((n) => `${n} running`), ...checks.missing.map((n) => `${n} not reported`)].join(", ")})` : `the merge pass (${how ?? "unread"})`;
+          phase = { kind: "out", text: `${queue ? "out of the merge queue, " : ""}waiting on ${pending}` };
+        }
+      } else {
+        // auto_merge off: a person merges it or puts it in the queue; one read of its queue entry tells which.
+        const entry = queue ? await mergeQueueEntry(this.repo, prNumber, this.opts).catch(() => null) : null;
+        phase = entry ? inQueue(entry) : { kind: "out", text: `waiting for a person to merge it${queue ? " or put it in the merge queue" : ""} (auto_merge is off)` };
       }
+      if (phase.text !== said) log(`#${issue}: following PR #${prNumber}: ${(said = phase.text)}`);
       const pr = await getPr(this.repo, prNumber, this.opts).catch(() => null);
       if (pr?.merged_at) {
         const project = await findProject(this.repo, this.opts).catch(() => null);
@@ -2923,11 +2948,31 @@ export class Local {
         log(`#${issue}: PR #${prNumber} closed without a merge`);
         return false;
       }
-      if (outSince !== null && now() - outSince >= hungMs) break;
+      if (phase.kind === "out") {
+        still = null;
+        outSince ??= now();
+      } else {
+        outSince = null;
+        if (still?.key !== phase.key) still = { kind: phase.kind, key: phase.key, since: now() };
+        still.desc = phase.desc;
+      }
+      if (outSince !== null && now() - outSince >= hungMs) {
+        stop = inputs.autoMerge
+          ? ` after ${minutes(hungMs)} min ${queue ? "out of the merge queue" : "waiting for its merge"}, the bound for a hung required check (from ${timeoutText}); still pending: ${pending}`
+          : ` after ${minutes(hungMs)} min with no person merging it${queue ? " or putting it in the merge queue" : ""} (auto_merge is off)`;
+        break;
+      }
+      if (still && now() - still.since >= stillMs[still.kind]) {
+        stop =
+          still.kind === "queue"
+            ? `: its merge queue entry (${still.desc}) made no progress in ${minutes(stillMs.queue)} min, past ${timeoutText} plus the bound for a hung required check (${minutes(hungMs)} min)`
+            : ` after ${minutes(stillMs.wait)} min waiting for the merge queue ahead of it to move, past Factory's ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h wait for it plus the bound for a hung required check (${minutes(hungMs)} min, from ${timeoutText})`;
+        break;
+      }
       await this.pause(pollMs);
     }
     if (this.stopping) return false;
-    log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(hungMs / 60000)} min ${queue ? "out of the merge queue" : "waiting for its merge"}, the bound for a hung required check (from the merge queue's check timeout); still pending: ${pending}`);
+    log(`#${issue}: stopped following PR #${prNumber}${stop}`);
     log((await this.pendingMergeLine(issue)) || `#${issue}: PR #${prNumber} is merged or closed`);
     return false;
   }

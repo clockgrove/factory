@@ -1149,14 +1149,14 @@ export async function mergeQueueRemovals(repo, number, opts) {
 }
 
 /**
- * The PR's merge queue entry, or null when it is not in the queue: `{state, enqueuedAt, head, headAt}`, `state` GitHub's
- * (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), `head` the queue's merge_group commit once it is made and
- * `headAt` that commit's time.
+ * The PR's merge queue entry, or null when it is not in the queue: `{state, enqueuedAt, head, headAt, position}`, `state`
+ * GitHub's (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), `head` the queue's merge_group commit once it is
+ * made, `headAt` that commit's time and `position` its place in the queue (1 is next).
  */
 export async function mergeQueueEntry(repo, number, opts) {
-  const d = await graphql(`query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { mergeQueueEntry { state enqueuedAt headCommit { oid committedDate } } } } }`, { owner: repo.owner, name: repo.name, n: Number(number) }, opts);
+  const d = await graphql(`query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { mergeQueueEntry { state enqueuedAt position headCommit { oid committedDate } } } } }`, { owner: repo.owner, name: repo.name, n: Number(number) }, opts);
   const e = d?.repository?.pullRequest?.mergeQueueEntry;
-  return e ? { state: e.state ?? null, enqueuedAt: e.enqueuedAt ?? null, head: e.headCommit?.oid ?? null, headAt: e.headCommit?.committedDate ?? null } : null;
+  return e ? { state: e.state ?? null, enqueuedAt: e.enqueuedAt ?? null, head: e.headCommit?.oid ?? null, headAt: e.headCommit?.committedDate ?? null, position: e.position ?? null } : null;
 }
 
 /**

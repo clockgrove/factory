@@ -75,7 +75,7 @@ function recordOf(v, account) {
  * Another clock's (or a hand-made) record: no end past the longest window, and one made "after now" is the oldest for the
  * streak, so it never stands over every later record.
  */
-const clamped = (r, now) => ({ ...r, until: Math.min(r.until, now + HOLD_MAX_MS), at: r.at > now ? 0 : r.at });
+export const clamped = (r, now) => ({ ...r, until: Math.min(r.until, now + HOLD_MAX_MS), at: r.at > now ? 0 : r.at });
 
 /**
  * A record kept somewhere other than this machine's files (route-holds.mjs: GitHub Actions and the cloud sandbox keep
@@ -90,7 +90,8 @@ export function heldRecord(v, now) {
 
 /**
  * The records that stand: every release record (`release`) ends each record of its account made at or before it, and
- * goes itself. A release made "after now" (another clock's) was clamped to the oldest, so it ends nothing.
+ * goes itself. Every record here, a release included, is already held to the reader's clock (clamped): one dated after
+ * now (another clock's) reads as the oldest, so such a release ends nothing until that time comes.
  */
 export function standing(records) {
   const released = new Map();

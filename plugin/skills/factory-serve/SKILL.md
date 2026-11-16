@@ -26,7 +26,7 @@ Each stage runs on one account of its harness for its whole run (docs/LOCAL.md, 
 
 - **Move it:** the label `factory:account:<name>`, applied by someone who can push (or a maintainer the workflow names), moves a paused Objective to that account at once when it is free, and pins every later stage there; a running stage finishes where it started. Apply it only on the user's yes.
 - **Automatic choice:** with `FACTORY_LOCAL_AUTO_ACCOUNT=1` in the shell that starts `serve`, a stage with no account label starts on a free account, and a paused Objective moves to one by itself at the next tick. It waits only while every account of its harness is held, until the first reset.
-- **Lift a hold:** when the user says an account has quota again, `factory hold list` shows the holds and `factory hold release <account>` (named as listed; `--repo OWNER/NAME` for Actions) lifts one, on the user's yes. Never delete hold files by hand.
+- **Lift a hold:** when quota is back, `factory hold list` shows holds; `factory hold release <account>` (as listed; `--repo OWNER/NAME` for Actions and the cloud sandbox) lifts one, on the user's yes. An older `serve` sees it only after a restart on this release. Never delete hold files.
 
 ## Stop
 

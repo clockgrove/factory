@@ -698,6 +698,14 @@ test("#376: a person who can push releases an account's holds on GitHub: their r
     const noAssoc = { ...editedClaude, updated_at: editedClaude.created_at, author_association: "NONE" };
     assert.equal((await by(noAssoc)).store.until("claude", later), null, "kirk's permission is write: it counts");
     assert.equal((await by({ ...noAssoc, user: { login: "reader", type: "User" } })).store.until("claude", later), now + 2 * H, "read permission: it does not");
+    // An App's comment (another App, or the workflow's token) is no release, whatever its association.
+    assert.equal((await by({ ...noAssoc, user: { login: "github-actions[bot]", type: "Bot" }, author_association: "MEMBER" })).store.until("claude", later), now + 2 * H, "a Bot's release ends nothing");
+    assert.equal((await by({ ...noAssoc, user: { login: BOT, type: "Bot" } })).store.until("claude", later), now + 2 * H, "nor Factory's own App's");
+    // Held to the reader's clock as a hold record is: a release dated after the reader's now ends nothing until then.
+    const ahead = { ...noAssoc, created_at: iso(later + 60_000), updated_at: iso(later + 60_000) };
+    assert.equal((await by(ahead)).store.until("claude", later), now + 2 * H, "dated after now: nothing yet");
+    const readAt = (t) => withGitHub({ issues: [holdsIssue([holdComment(1, { account: "claude", until: now + 2 * H, at: now - 60_000 }), ahead])] }, () => readHolds(REPO, { token: "t" }, { now: t, actions: true }));
+    assert.equal((await readAt(later + 2 * 60_000)).store.until("claude", later + 2 * 60_000), null, "once its time comes, it counts");
   });
 });
 
@@ -718,9 +726,18 @@ test("#376: factory hold --repo lists and releases on the holds issue with the p
       assert.match(said.pop(), /^ERR factory: nothing is held or passed over for "claude" on acme\/app's holds issue .*; the accounts that are: claude-2\n$/);
       st.poster = { login: "kirk", association: "COLLABORATOR" };
       assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 0);
-      assert.match(said.pop(), /^released claude-2 \(Claude Code\), which was held until /);
+      assert.match(said.pop(), /^released claude-2 \(Claude Code\), which was held until .*\nthe next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Factory release or later; a job on an earlier release still holds it until its reset\n$/);
       assert.equal(reads.filter((r) => r.startsWith("POST")).length, 1);
       assert.match(st.issues[0].comments.at(-1).body, /^<!-- factory:release \{"account":"claude-2"\} -->/);
+      // Posted with a token that will not count: read back as a job reads it, said, and exit 1.
+      st.issues[0].comments.pop();
+      st.poster = { login: "reader" };
+      assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 1);
+      assert.match(said.pop(), /^ERR factory: the release of claude-2 was posted on acme\/app#50, Factory's holds issue, but it will not count: reader cannot push to acme\/app, and Factory counts a release only from a person who can push; delete that comment/);
+      st.issues[0].comments.pop();
+      st.poster = null;
+      assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 1);
+      assert.match(said.pop(), /will not count: it was posted as factory-test\[bot\], which is no person/);
     });
   } finally {
     if (saved === undefined) delete process.env.FACTORY_LOCAL_TOKEN;

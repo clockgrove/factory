@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
-import { HOLD_MAX_MS, accountHolds, forgotten as forgottenAt, heldRecord, holdKey } from "./holds.mjs";
+import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey } from "./holds.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
@@ -61,11 +61,21 @@ export const RELEASE_LINE = /^<!-- factory:release (\{[^\n]*\}) -->(?:\r?\n|$)/;
 export const releaseLine = (account) => `<!-- factory:release ${JSON.stringify({ account })} -->`;
 const WRITE = new Set(["admin", "maintain", "write"]);
 
+/** Whether a login can push to `repo` (its permission read once per login per `pushCheck`); a failed read is no. */
+const pushCheck = (repo, opts) => {
+  const asked = new Map();
+  return (login) => {
+    if (!asked.has(login)) asked.set(login, collaboratorPermission(repo, login, opts).then((p) => WRITE.has(p), () => false));
+    return asked.get(login);
+  };
+};
+
 /**
- * The release a comment carries, as holds.mjs keeps one (`released`, at the comment's creation by GitHub's clock), when
- * a person who can push wrote it and it was never edited; else null. `canPush` reads a login's permission once per read.
+ * The release a comment carries, as holds.mjs keeps one (`released`, at the comment's creation by GitHub's clock, held
+ * to the reader's `now` as a hold record is: holds.mjs clamped), when a person who can push wrote it and it was never
+ * edited; else null. `canPush` is pushCheck's.
  */
-async function releaseOf(c, canPush) {
+async function releaseOf(c, canPush, now) {
   const m = RELEASE_LINE.exec(String(c.body || ""));
   if (!m || c.user?.type !== "User" || edited(c)) return null;
   let v;
@@ -77,7 +87,7 @@ async function releaseOf(c, canPush) {
   const at = Date.parse(c.created_at || "");
   if (typeof v?.account !== "string" || !holdKey(v.account) || !Number.isSafeInteger(at)) return null;
   if (!pushAuthor(c) && !(await canPush(c.user.login))) return null;
-  return { harness: "release", account: v.account, until: at + HOLD_MAX_MS, streak: 0, at, served: true, released: true };
+  return clamped({ harness: "release", account: v.account, until: at + HOLD_MAX_MS, streak: 0, at, served: true, released: true }, now);
 }
 
 /**
@@ -89,18 +99,14 @@ async function recordsOn(repo, number, opts, now, own = isSelf) {
   const records = [];
   const releases = [];
   const forgotten = [];
-  const asked = new Map();
-  const canPush = (login) => {
-    if (!asked.has(login)) asked.set(login, collaboratorPermission(repo, login, opts).then((p) => WRITE.has(p), () => false));
-    return asked.get(login);
-  };
+  const canPush = pushCheck(repo, opts);
   if (number) {
     for (const c of await listComments(repo, number, opts)) {
       if (own(c) && LINE.test(String(c.body || "")) && edited(c)) {
         forgotten.push(c.id);
         continue;
       }
-      const rel = await releaseOf(c, canPush);
+      const rel = await releaseOf(c, canPush, now);
       if (rel) {
         if (forgottenAt(rel, now)) forgotten.push(c.id);
         else releases.push(rel);
@@ -176,7 +182,8 @@ export async function personHolds(repo, opts, { now = Date.now() } = {}) {
  * Release `account`'s holds on GitHub (`factory hold release --repo`, #376): a release record, the person's own comment on
  * the oldest holds issue, which every reader takes as the end of each record of that account made before it. Returns
  * {released (holds.mjs list's entry for it, or null when nothing of it is held: then nothing is written), known (the
- * keys of the accounts that are), issue}. A failed read or write throws.
+ * keys of the accounts that are), issue, refused (why readers will not count the comment posted, read back as a reader
+ * reads it: a token that is no person's, or a person who cannot push; else null)}. A failed read or write throws.
  */
 export async function releaseRouteHold(repo, account, opts, { now = Date.now() } = {}) {
   const { issue, store } = await personHolds(repo, opts, { now });
@@ -184,8 +191,11 @@ export async function releaseRouteHold(repo, account, opts, { now = Date.now() }
   const released = known.find((x) => x.account === account) ?? null;
   if (!released) return { released, known: known.map((x) => x.account), issue };
   const text = `Factory: account \`${account}\` (${HARNESS_NAMES[released.harness] || released.harness}) released by a person; every hold and guess on it recorded before this comment is over, and its back-off count starts again.`;
-  await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${releaseLine(account)}\n${text}` } });
-  return { released, known: known.map((x) => x.account), issue };
+  const posted = await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${releaseLine(account)}\n${text}` } });
+  const who = posted?.user?.login || "an unknown login";
+  const counts = !!posted && (await releaseOf(posted, pushCheck(repo, opts), Infinity)) !== null;
+  const refused = counts ? null : posted?.user?.type !== "User" ? `it was posted as ${who}, which is no person (an App's or a workflow's token), and Factory counts a release only from a person who can push` : `${who} cannot push to ${repo.full}, and Factory counts a release only from a person who can push`;
+  return { released, known: known.map((x) => x.account), issue, refused };
 }
 
 /** An issue of Factory's that is no holds record (a stray from a race or a failed lock): retitled, its label off, closed. */

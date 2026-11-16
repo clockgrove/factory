@@ -46,6 +46,7 @@ test("#376: hold list shows each held or passed-over account; hold release lifts
   const rel = hold(home, "release", "alpha");
   assert.equal(rel.status, 0, rel.stderr);
   assert.match(rel.stdout, /^released alpha \(Claude Code\), which was held until \S+ \(seven_day\), back-off count 2; passed over until about /);
+  assert.match(rel.stdout, /\nevery serve on this Factory release or later on this machine may start on it at its next tick, .*; a serve on an earlier release still holds it until its reset: restart that serve on this release/);
   const after = readdirSync(dir).sort();
   assert.equal(after.length, files.length + 1, "one release record, and no file removed");
   assert.ok(files.every((f) => after.includes(f)));

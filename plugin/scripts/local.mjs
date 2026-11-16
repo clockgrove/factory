@@ -3172,7 +3172,9 @@ export async function holdCommand(flags, { home = homedir(), now = Date.now(), o
   }
   let released;
   let known;
-  if (repo) ({ released, known } = await releaseRouteHold(repo, account, opts, { now }));
+  let refused = null;
+  let issue = null;
+  if (repo) ({ released, known, refused, issue } = await releaseRouteHold(repo, account, opts, { now }));
   else {
     let failed = null;
     const store = accountHolds({ dir: holdsDir(home), onError: (e) => (failed = e) });
@@ -3188,7 +3190,11 @@ export async function holdCommand(flags, { home = homedir(), now = Date.now(), o
     err(`factory: nothing is held or passed over for ${JSON.stringify(account)} ${where}; ${known.length ? `the accounts that are: ${known.join(", ")}` : "no account is"}\n`);
     return 1;
   }
-  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it" : "every serve on this machine may start on it at its next tick, and an Objective paused on it resumes then"}\n`);
+  if (refused) {
+    err(`factory: the release of ${account} was posted on ${repo.full}#${issue}, Factory's holds issue, but it will not count: ${refused}; delete that comment, and release it again with a token of a person who can push\n`);
+    return 1;
+  }
+  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it, when its workflow pins this Factory release or later; a job on an earlier release still holds it until its reset" : `every serve on this Factory release or later on this machine may start on it at its next tick, and an Objective paused on it resumes then; a serve on an earlier release still holds it until its reset: restart that serve on this release for it to see the release`}\n`);
   return 0;
 }
 

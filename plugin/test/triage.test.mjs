@@ -1608,7 +1608,8 @@ test("#413: a failure rerun once is not rerun again when the decision model judg
       assert.equal(same.length, 1, "asked once, about the job rerun before");
       assert.match(same[0].input, new RegExp(`Run: job ${second}, on the PR's head eeeeeee\\nFailed step: Run npm test\\n`));
       assert.match(same[0].input, new RegExp(`Run: job ${first}, rerun earlier on this Objective\\nFailed step: Run npm test\\n`));
-      assert.ok(same[0].input.includes("registry.npmjs.org") && same[0].input.includes("registry.yarnpkg.com"), "both failure windows");
+      assert.match(same[0].input, /^ {2}AssertionError \[ERR_ASSERTION\]: 2 supply-chain failures: registry\.npmjs\.org ECONNRESET$/m, "the earlier run's failure window");
+      assert.match(same[0].input, /^ {2}AssertionError \[ERR_ASSERTION\]: 2 supply-chain failures: registry\.yarnpkg\.com ETIMEDOUT$/m, "this run's failure window");
       if (!rerun) {
         assert.equal(decider.asked.filter((a) => a.q === "red_cause").length, 1, "a failure already rerun is not asked about again");
         assert.match(lines.at(-1), new RegExp(`quality: no verdict \\(already rerun once\\) \\[[0-9a-f]{12}, rerun before as job ${first}: .+ \\(perplexity/pplx-decider-v1\\.2, default floor 0\\.7\\) \``));
@@ -1819,6 +1820,7 @@ test("#413 review: a red whose head the change is named in, or that triage read 
     [failingLog, [], change(0.9), false],
     [failingLog, [], change(0.5), true],
     [framed, ["src/sum.js"], flaky(0.5), false],
+    [failingLog, [], { verdict: null, confidence: null, error: "timeout" }, false],
   ]) {
     const [id] = fresh413(1);
     const decider = byQuestion({ red_cause: answer });
@@ -1827,6 +1829,26 @@ test("#413 review: a red whose head the change is named in, or that triage read 
       await t.red({ sha: "d".repeat(40), failedRuns: [quality(id)], required: ["quality"] });
       const same = await baseJudge(t, { sha: "d".repeat(40), failedRuns: [quality(id)] });
       assert.equal(same === t.same, judged, `${JSON.stringify(answer)} ${prFiles}`);
+    });
+  }
+  // Triage skipped the head (a check that is no Actions job; a rerun refused earlier on the Objective): no verdicts, so
+  // the signature alone decides.
+  {
+    const [id] = fresh413(1);
+    const decider = byQuestion({ red_cause: flaky(0.5) });
+    await withHead({ runs: [], jobs: {}, logs: { [id]: failingLog } }, async () => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+      assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: [quality(id)], required: ["quality"] })).rerun, false);
+      assert.equal(decider.asked.length, 0, "not an Actions job: triage asked nothing");
+      assert.equal(await baseJudge(t, { sha: "d".repeat(40), failedRuns: [quality(id)] }), null);
+    });
+    const [first, second] = fresh413(2);
+    await withHead({ runs: [], jobs: { [first]: { ...testFailed, id: first }, [second]: { ...testFailed, id: second } }, logs: { [first]: failingLog, [second]: movedLog }, rerun: 403 }, async () => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: byQuestion({ red_cause: flaky(0.95) }) });
+      assert.ok((await t.red({ sha: "d".repeat(40), failedRuns: [quality(first)], required: ["quality"] })).refused, "the rerun is refused");
+      await t.red({ sha: "e".repeat(40), failedRuns: [quality(second)], required: ["quality"] });
+      assert.equal(await baseJudge(t, { sha: "e".repeat(40), failedRuns: [quality(second)] }), null, "a rerun refused earlier: triage skipped this head");
+      assert.equal(await baseJudge(t, { sha: "d".repeat(40), failedRuns: [quality(first)] }), t.same, "the head it gave verdicts on");
     });
   }
   // In the validation loop: read as the change's, the default branch's same-step red is not asked about, and the fix pass runs.
@@ -1840,9 +1862,11 @@ test("#413 review: a red whose head the change is named in, or that triage read 
 test("#413 review: the stage harness's usage limit that stopped a same-failure question ends the stage, on the red and on the red after a rerun", async () => {
   const { sameExact } = await import("../scripts/lib/triage.mjs");
   const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
-  // The real triage, but its same-failure question meets the harness's usage limit where the exact part cannot tell.
+  // The real triage, but its same-failure question meets the harness's usage limit where the exact part cannot tell,
+  // and the head is one the model may judge (with triage off, the movedRed run gives it no verdicts of its own).
   const limited = (labels) => (t) => ({
     ...t,
+    modelBase: async () => ({ ok: true, why: "" }),
     same: async (a, b) => {
       const step = async (x) => (typeof x.step === "function" ? await x.step() : x.step) || "";
       if (sameExact({ ...a, step: await step(a) }, { ...b, step: await step(b) }) === "different") return { same: false, different: true, exact: true, said: "another failed step" };

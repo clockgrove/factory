@@ -2850,8 +2850,9 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
 
 /**
  * The same-failure judge redDetail may judge a red on `sha` the default branch's with (triage.mjs openTriage `same`),
- * or null for the failure signature alone: only when triage's `modelBase` says nothing points at the change (no
- * failing job read as the change's at the floor on this head, no failure naming a file or test the PR changes). A
+ * or null for the failure signature alone: only when triage's `modelBase` says nothing points at the change (triage
+ * gave this head's failing jobs verdicts, none the change's at the floor, and no failure names a file or test the PR
+ * changes). A
  * triage with no such check, or one that fails, is the signature alone.
  */
 export async function baseJudge(triage, { sha, failedRuns }) {

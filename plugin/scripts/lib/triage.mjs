@@ -1083,8 +1083,9 @@ export function triageLine({ sha, model, jobs, outcome, floor = confidenceFloor(
  * is `undecided` with its Block's `cause` (`outage` for the vendor's outage, else `factory`) and `limited` (the stage
  * harness's usage limit that stopped it). `said` names how it was decided, with the verdict, confidence and floor.
  * `floor()`: the confidence floor (confidenceFloor) a verdict here is read at now. `modelBase({sha, failedRuns})`: whether
- * the decision model may judge a red on `sha` the default branch's ({ok, why}): not when its triage (red(), classify())
- * read a failing job as the change's at the floor, nor when a failure names a file or test the PR changes.
+ * the decision model may judge a red on `sha` the default branch's ({ok, why}): only when its triage (red(), classify())
+ * gave each failing job it read on that head a verdict, none the change's at the floor, and no failure names a file or
+ * test the PR changes.
  */
 export function openTriage({ inputs, env = process.env, home = homedir(), repo, issue, prNumber, token, actionsToken = token, progress = null, stage = null, decider = null }) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
@@ -1345,11 +1346,14 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   };
 
   // Whether a red on `sha` may be judged the default branch's by the decision model (reds.mjs redDetail `same`), rather
-  // than by the signature alone: not when this head's triage read a failing job as the change's at the floor, nor when a
-  // failure names a file or test the PR changes (namesChange). {ok, why}.
+  // than by the signature alone: only when triage gave every failing job it read on this head a verdict (red(),
+  // classify(); a red it skipped, an earlier refused rerun or a check that is no Actions job, says nothing), none of them
+  // the change's at the floor, and no failure names a file or test the PR changes (namesChange). {ok, why}.
   const modelBase = async ({ sha, failedRuns = [] }) => {
     const floor = floorNow();
-    const caused = (asked.get(sha) || []).filter((j) => j.verdict === "change_caused" && typeof j.confidence === "number" && j.confidence >= floor.min);
+    const read = asked.get(sha) || [];
+    if (!read.length || read.some((j) => !j.verdict)) return { ok: false, why: `triage gave ${read.length ? "not every failing job" : "no failing job"} on ${String(sha).slice(0, 7)} a verdict` };
+    const caused = read.filter((j) => j.verdict === "change_caused" && typeof j.confidence === "number" && j.confidence >= floor.min);
     if (caused.length) return { ok: false, why: `triage read ${caused.map((j) => `${j.name} ${j.confidence.toFixed(2)}`).join(", ")} as caused by the change (${floor.text})` };
     if (failedRuns.length && (await namesChange(failedRuns))) return { ok: false, why: "a failure names a file or test the PR changes" };
     return { ok: true, why: "" };

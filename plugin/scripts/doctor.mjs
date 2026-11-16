@@ -57,6 +57,12 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
+/** The `claude credential` row of a repository on `credential: plan` (docs/INSTALL.md, Claude on your subscription). */
+const PLAN_ROW = {
+  detail: "credential: plan: Claude stages run on your subscription's CLAUDE_CODE_OAUTH_TOKEN secret",
+  fix: "plan limits assume ordinary individual use: use it only on your own repository, never for a product; Factory does not check whose repository it is (docs/INSTALL.md, Claude on your subscription)",
+};
+
 export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
   // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs), as the stage runs it.
   const inputs = routeInputs(asked, given);
@@ -75,6 +81,13 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
   if (jobLevel.length) out.push(WARN(`${h} credential`, `${jobLevel.join(", ")} ${jobLevel.length === 1 ? "is a job-level variable" : "are job-level variables"}, which a stage on account \`${account}\` never uses`, "remove them from the workflow's env block: each account's credential is its own secret, passed to the stage's step as its input"));
   // A developer's run: the job's credential is a secret (checked by name under secrets); here the CLI's own login runs.
   const planToken = h === "claude" && (inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN);
+  // A person's shell checking a repository on the Actions route with `credential: plan`: the stages run on the
+  // CLAUDE_CODE_OAUTH_TOKEN secret (secretChecks checks it by name), which this shell never holds.
+  if (h === "claude" && inputs.credential === "plan" && !planToken && !env.GITHUB_ACTIONS && !local) {
+    out.push(WARN("claude credential", PLAN_ROW.detail, PLAN_ROW.fix));
+    if (probe) out.push(await probeHarness({ inputs: { ...inputs, credential: "login" }, env }));
+    return out;
+  }
   const localFallback = !env.GITHUB_ACTIONS && ((inputs.credential === "api" && !hasApiCredential({ harness: h, inputs, env })) || (inputs.credential === "plan" && !planToken));
   if (inputs.credential === "login" || localFallback) {
     out.push(env.GITHUB_ACTIONS ? FAIL(`${h} credential`, "credential: login inside Actions", "use api (ANTHROPIC_API_KEY, CODEX_API_KEY or the job token) or plan on your own repository") : WARN(`${h} credential`, `the ${CLI[h].bin} CLI's own login on this machine${localFallback ? " (no API credential present; local fallback)" : ""}`, "a developer's run; unattended runs bill an API credential"));
@@ -87,8 +100,9 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     const fed = !!(env.ACTIONS_ID_TOKEN_REQUEST_URL && inputs.anthropicOidcExchangeUrl);
     if (inputs.credential === "plan") {
       if (!oauth) out.push(FAIL("claude credential", "credential: plan but CLAUDE_CODE_OAUTH_TOKEN is absent", "claude setup-token, then gh secret set CLAUDE_CODE_OAUTH_TOKEN; or credential: api"));
-      else out.push(WARN("claude credential", "plan token in use", "plan limits assume ordinary individual use; use only on your own repository"));
-      if (key) out.push(WARN("claude credential", "ANTHROPIC_API_KEY is also set and silently wins over the plan token", "remove one of them"));
+      else out.push(WARN("claude credential", PLAN_ROW.detail, PLAN_ROW.fix));
+      // credentialEnv gives the harness the plan token alone, so a key beside it is never used.
+      if (key) out.push(WARN("claude credential", "ANTHROPIC_API_KEY is also set and goes unused: credential: plan runs on CLAUDE_CODE_OAUTH_TOKEN alone", "delete the ANTHROPIC_API_KEY secret, or set credential: api to bill it instead"));
     } else if (key) out.push(PASS("claude credential", "ANTHROPIC_API_KEY present"));
     else if (fed) out.push(PASS("claude credential", "workload identity federation configured (id-token: write, exchange URL set)"));
     else if (account) out.push(FAIL("claude credential", "no ANTHROPIC_API_KEY for this account", "gh secret set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN with credential: plan); an account takes no federation"));

@@ -975,6 +975,7 @@ async function main() {
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
+  if (limits) LIMIT.hold = limits.hold;
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
@@ -1614,7 +1615,7 @@ async function main() {
         ...workerRun(inputs),
         resume,
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
-        // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
+        // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
@@ -1638,7 +1639,7 @@ async function main() {
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
       fed = answerFed({ fresh: true, decisions, listed: listedFor(null), afterPush: afterPush.length > 0 });
-      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider" };
     }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {

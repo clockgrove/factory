@@ -728,7 +728,7 @@ export function filterSkips(filters, files) {
  * at the head has a job reporting that name (workflowChecks), else the workflow of that check's run on an older commit
  * (`history()`: commit ids, newest first, read only when needed), found through its check suite. `skips`: workflow id
  * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `chained`: a workflow at the
- * head runs `on: workflow_run`, so a check may come after every run listed completed. `workflowRuns` null: they
+ * head runs `on: workflow_run`, or one could not be read, so a check may come after every run listed completed. `workflowRuns` null: they
  * could not be read (`readError`).
  */
 export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null, cache = new Map() }) {
@@ -753,7 +753,7 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
     // A workflow file at the head is read once per stage (`cache`, the caller's), however often the wait is classified.
     const read = (path) => {
       const key = `${sha}:${path}`;
-      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => ""));
+      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => null));
       return cache.get(key);
     };
     // Every workflow of the repository, a path-filtered one that never ran on the head included, and those that ran.
@@ -762,8 +762,10 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
     let changed;
     for (const [id, path] of all) {
       if (/(^|\/)factory\.ya?ml$/.test(path)) continue;
-      const { checks, filters, chained: after } = await workflowChecks(await read(path), read);
-      chained ||= after;
+      const text = await read(path);
+      const { checks, filters, chained: after } = await workflowChecks(text, read);
+      // A file that could not be read may run `on: workflow_run`: that is never read as no such workflow.
+      chained ||= after || text === null;
       const its = missing.filter((n) => checks.some((c) => reports(c, n)));
       for (const n of its) add(n, id);
       // Every producer is recorded, filtered or not: a check is filtered out only when each of them skips the change.

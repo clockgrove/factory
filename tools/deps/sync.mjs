@@ -17,6 +17,7 @@ export const VENDORED = {
   "@actions/expressions": (p) => p === "LICENSE" || p === "package.json" || /^dist\/.+\.js$/.test(p),
   yaml: (p) => p === "LICENSE" || p === "package.json" || p.startsWith("browser/"),
   "smol-toml": (p) => p === "LICENSE" || p === "package.json" || /^dist\/[^/]+\.js$/.test(p),
+  unbash: (p) => p === "LICENSE" || p === "package.json" || /^dist\/[^/]+\.js$/.test(p),
 };
 
 /** Every file under `dir`, relative; a link or anything but a directory or a regular file throws (a link would pass a byte check and break every installed copy). */

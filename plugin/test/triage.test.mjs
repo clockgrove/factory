@@ -1918,7 +1918,7 @@ test("#413: every decision call on the triage model reads its verdict at the flo
   const { answerDecider, answerGate } = await import("../scripts/review.mjs");
   const inputs = { triageModel: "t/m", triageMinConfidence: 0.9 };
   const at = (verdict) => ({ name: "ai-gateway", decide: async () => ({ verdict, confidence: 0.8 }) });
-  assert.deepEqual(await openKeptCheck({ inputs, decider: at("kept") }).judge({ path: "a.txt", branch: "", base: "", head: "" }), { kept: false, why: "the decision model (t/m) said kept at 0.80, under 0.9" });
+  assert.deepEqual(await openKeptCheck({ inputs, decider: at("kept") }).judge({ path: "a.txt", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+a" }], file: "a\n" }), { kept: false, lost: false, why: "the decision model (t/m) said kept at 0.80, under 0.9" });
   const sig = (id) => ({ id, line: `${id} failed` });
   const p = await openProgressCheck({ inputs, decider: at("closer") }).judge({ before: { jobs: [{ name: "a", sig: sig("aaaaaaaaaaaa") }] }, after: { jobs: [{ name: "b", sig: sig("bbbbbbbbbbbb") }] } });
   assert.equal(p.progress, false);
@@ -1932,7 +1932,7 @@ test("#413: every decision call on the triage model reads its verdict at the flo
   assert.equal((await openEditCheck({ inputs, decider: { ...at("wording"), name: "ai-gateway" } }).judge({ title: "a", body: "b" }, { title: "a", body: "b." })).verdict, "requirement", "0.8 is under the set floor");
   // The stage's harness is another model: the default floor reads its verdict, whatever the setting.
   const harness = (verdict) => ({ name: "harness", decide: async () => ({ verdict, confidence: 0.8 }) });
-  assert.equal((await openKeptCheck({ inputs, decider: harness("kept") }).judge({ path: "a.txt", branch: "", base: "", head: "" })).kept, true);
+  assert.equal((await openKeptCheck({ inputs, decider: harness("kept") }).judge({ path: "a.txt", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+a" }], file: "a\n" })).kept, true);
   assert.equal(openFindingCheck({ inputs, decider: harness("rebutted") }).floor().text, "default floor 0.7");
   assert.equal((await openEditCheck({ inputs, decider: harness("wording") }).judge({ title: "a", body: "b" }, { title: "a", body: "b." })).verdict, "wording");
   assert.equal(keepsOpen({ verdict: "no_decision", confidence: 0.8 }, 0.9), false);

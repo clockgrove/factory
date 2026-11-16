@@ -65,11 +65,13 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
  * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
  * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a file not exactly the
  * branch's (kept.mjs openKeptCheck), null with no decider; `progress`: where the check's note goes (outbox rebaseNote).
+ * In local mode a finished rebase the check stops is kept on a branch of the Objective's clone (`issue`'s, outbox.mjs
+ * setAside), and the reason gives its full sha, what to check and the command that delivers it.
  * `limited()`: the stage harness's usage limit that stopped the check's questions (kept.mjs). Then nothing is pushed and
  * it throws UsageLimitReached: the stage ends as a pass meeting the limit does (paused locally until the reset, held or
  * Blocked `provider-quota` elsewhere), and an unanswered question never reads as a change not kept.
  */
-export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null }) {
+export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null, issue = null }) {
   if (!onto) return "";
   const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
   const limit = limited?.() ?? null;
@@ -89,7 +91,17 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
     }
   }
   if (!left) return "";
-  const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed`;
+  // Local mode keeps what the pass left in the Objective's clone (outbox.mjs setAside), and the Block says how to deliver it.
+  const kept = await Promise.resolve(outbox.setAside?.()).catch(() => null);
+  const clone = issue ? `the Objective's local clone (\`.factory/${issue}/repo\`)` : "the Objective's local clone";
+  const resume = !kept
+    ? ""
+    : kept.removed
+      ? `; this pass left nothing to keep, so the result of an earlier one kept on the branch \`${kept.name}\` of ${clone} was removed`
+      : kept.failed
+        ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
+        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
+  const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);
   return why;
@@ -897,7 +909,7 @@ async function main() {
   // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
   // branch's is judged by the decision model when there is a key (kept.mjs); without one the commits are matched.
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs, stage: decisionStage }) : null;
-  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null });
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null, issue });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a

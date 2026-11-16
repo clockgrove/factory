@@ -79,7 +79,8 @@ export const DEFAULTS = {
   codex_api_key: "",
   codex_gateway_key: "", // Codex through the Vercel AI Gateway (harness.mjs credentialEnv); wins over codex_api_key when set
   copilot_github_token: "",
-  ai_gateway_api_key: "", // red-check triage (triage.mjs) and the drift advisory (drift.mjs); empty turns both off
+  ai_gateway_api_key: "", // the decision calls' AI Gateway models (decider.mjs); empty: the stage's own harness answers them
+  decision_route: "auto", // auto | gateway | off: who answers the decision calls (decider.mjs DECISION_ROUTES)
   worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
   worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
   triage_model: "", // empty: triage.mjs TRIAGE_MODEL
@@ -183,7 +184,7 @@ export const MODEL_SETTINGS = ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTO
  * The settings this machine's own environment sets over the repository's in local mode (local.mjs baseEnv): the harness,
  * models and session settings, set to a non-empty value, and local mode's own settings (FACTORY_LOCAL_*), set at all.
  */
-export const MACHINE_SETTINGS = ["FACTORY_HARNESS", ...MODEL_SETTINGS, "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_WORKER_SECRETS"];
+export const MACHINE_SETTINGS = ["FACTORY_HARNESS", ...MODEL_SETTINGS, "FACTORY_RESUME_POLICY", "FACTORY_COMPACTION_WINDOW", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_TRIAGE_MODEL", "FACTORY_DRIFT_MODEL", "FACTORY_DECISION_ROUTE", "FACTORY_WORKER_SECRETS"];
 const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("FACTORY_LOCAL_"));
 
 /**
@@ -239,6 +240,7 @@ const VALUE_RULES = (() => {
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
     FACTORY_SIBLING_HOLD: oneOf("on", "off"),
+    FACTORY_DECISION_ROUTE: oneOf("auto", "gateway", "off"),
     FACTORY_PROMPT_CACHE_TTL: oneOf("off", "auto", "1h", "5m"),
     FACTORY_IMAGE_REFRESH: oneOf("merge", "nightly"),
   };
@@ -514,6 +516,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     siblingHold: (get("sibling_hold") || "on").trim().toLowerCase() !== "off",
     rebaseLimit: Math.floor(above0(get("rebase_limit"), 5)) || 5,
     guessMs: guessHoursMs(get("guess_hours")) ?? guessHoursMs(DEFAULTS.guess_hours),
+    // Who answers the decision calls (decider.mjs): any other value reads as the default, `auto`.
+    decisionRoute: ((v) => (["auto", "gateway", "off"].includes(v) ? v : "auto"))((get("decision_route") || "auto").trim().toLowerCase()),
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
     timeoutMinutes: num(get("timeout_minutes"), 240),

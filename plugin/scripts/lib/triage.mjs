@@ -2,23 +2,21 @@
 // job, whether the change broke it or it is infrastructure or a flake; only when every failing job reads flaky at
 // MIN_CONFIDENCE or more, and no failure points at a file the PR changes, are the failed jobs rerun, once per head.
 // Anything else (a change verdict, a low confidence, an error, a refusal, a failure signature already rerun once, an
-// earlier refused rerun, no key) goes to the fix pass exactly as before. Each triage line, and why triage is off at a red,
-// goes to the job log and the run's progress comment.
+// earlier refused rerun, no decider) goes to the fix pass exactly as before. Each triage line, and why triage is off at a
+// red, goes to the job log and the run's progress comment.
 // A required job GitHub never started (neverStarted: no step, no runner) is no question at all: the validation loop
 // Blocks on it before triage (session.mjs validationLoop), quoting GitHub's annotation.
-// The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md). This runs in Factory's
-// own process, never in a harness: the key stays here, and scrubbedEnv (harness.mjs) keeps it out of every child.
+// The question goes through the one decision interface (decider.mjs, docs/ADAPTERS.md): the AI Gateway's decision
+// model with a key, else the stage's own harness on its login. This runs in Factory's own process, never in a harness.
 import { createHash } from "node:crypto";
 import { Evaluator, Lexer, Parser, data as exprData } from "../../vendor/@actions/expressions/dist/index.js";
 import { Binary, ContextAccess, Grouping, IndexAccess, Literal, Logical, Unary } from "../../vendor/@actions/expressions/dist/ast.js";
 import { falsy } from "../../vendor/@actions/expressions/dist/result.js";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname } from "node:path";
-import { openDecider } from "./adapters/decider.mjs";
+import { basename } from "node:path";
+import { deciderKeyState, openDecider } from "./decider.mjs";
 import { cleanLog, jobLog, listComments, logWindow, rest } from "./github.mjs";
-import { log, mask } from "./inputs.mjs";
-import { gatewayKeyFile, keyDirExposedBy } from "./local.mjs";
+import { log } from "./inputs.mjs";
 import { isSelf } from "./logic.mjs";
 import { parseYaml } from "./yaml.mjs";
 
@@ -45,48 +43,10 @@ export const TRIAGE_QUESTION = {
   ],
 };
 
-/**
- * The key, or why there is none (a code). On Actions the `ai_gateway_api_key` input only; off Actions the file
- * ~/.config/factory/ai-gateway-key only, which Factory's own process reads and no sandbox can (the sandboxes deny that
- * literal path), so the key is in no process's environment. The file is held to local mode's rules for key files
- * (lib/local.mjs localApp): ~/.config/factory a real directory, the key a regular file (no symlink) with one link and
- * no group or world bits, and no home of the harness (`inputs.harness`, which the outer sandbox leaves readable) equals
- * or holds ~/.config/factory. Codes: no-key, key-dir-exposed, key-dir-symlink, key-file-not-regular, key-file-links,
- * key-file-mode, key-file-empty, key-file-<errno> (any other fs error, for example key-file-eacces).
- */
-export function triageKeyState({ inputs = {}, env = process.env, home = homedir() } = {}) {
-  const none = (code) => ({ key: "", code });
-  if (env.GITHUB_ACTIONS) {
-    const key = String(inputs.aiGatewayApiKey || "").trim();
-    return key ? { key, code: null } : none("no-key");
-  }
-  const file = gatewayKeyFile(home);
-  const dir = dirname(file);
-  const errno = (e) => (e?.code === "ENOENT" ? "no-key" : `key-file-${String(e?.code || "error").toLowerCase()}`);
-  let st;
-  try {
-    st = lstatSync(file);
-  } catch (e) {
-    return none(errno(e));
-  }
-  if (keyDirExposedBy(inputs.harness, env, home)) return none("key-dir-exposed");
-  try {
-    if (realpathSync(dir) !== dir) return none("key-dir-symlink");
-  } catch (e) {
-    return none(errno(e));
-  }
-  if (!st.isFile()) return none("key-file-not-regular");
-  if (st.nlink > 1) return none("key-file-links");
-  if (st.mode & 0o077) return none("key-file-mode");
-  try {
-    const key = readFileSync(file, "utf8").trim();
-    return key ? { key, code: null } : none("key-file-empty");
-  } catch (e) {
-    return none(errno(e));
-  }
-}
+/** The AI Gateway key, or why there is none (decider.mjs deciderKeyState). */
+export const triageKeyState = deciderKeyState;
 
-/** The key alone ("" turns triage off). */
+/** The key alone ("": no AI Gateway key, so the stage's own harness answers, decider.mjs). */
 export const triageKey = (opts) => triageKeyState(opts).key;
 
 /** Whether this process has said triage is off: once per stage (one stage is one process). */
@@ -936,19 +896,18 @@ export function triageLine({ sha, model, jobs, outcome }) {
  * (workflow-template.yml gives the work and review jobs actions: write), locally the repository token (Actions: read
  * and write). `progress` is the run's progressReporter. `red({sha, failedRuns, required, until})` returns {rerun,
  * ignoreIds, jobs}; `until` (ms) bounds its wait for a workflow run still in progress, which must complete before its
- * failed jobs can be rerun. Without a key (`off` is the code why) every red goes to the fix pass, and the first says
- * so, once per stage.
+ * failed jobs can be rerun. The model is the decider's (decider.mjs openDecider): the AI Gateway's `triage_model` with a
+ * key, else the stage's own harness (`stage`: its harness, model, env and usage record) on its login. With neither
+ * (`off` is the key's code why) every red goes to the fix pass, and the first says so, once per stage.
  * `again({sha, failedRuns, until})`, with or without a key: the failed jobs rerun once on a head a fix pass left
  * unchanged, no model asked, unless the red reads as the change's (session.mjs validationLoop); returns {rerun,
  * ignoreIds} or why not ({already}, {refused}, {skipped}).
  * `infra({sha, failedRuns})`: whether every failed job failed on GitHub's side (set-up or checkout, a server or network
  * failure, naming nothing the PR changes).
  */
-export function openTriage({ inputs, env = process.env, home = homedir(), repo, issue, prNumber, token, actionsToken = token, progress = null, decider = null }) {
-  const { key, code } = decider ? { key: null, code: null } : triageKeyState({ inputs, env, home });
-  const model = inputs?.triageModel || TRIAGE_MODEL;
-  if (key) mask(key);
-  let ask = decider;
+export function openTriage({ inputs, env = process.env, home = homedir(), repo, issue, prNumber, token, actionsToken = token, progress = null, stage = null, decider = null }) {
+  const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
+  const { model, off: code } = ask;
   // What this job recorded, on top of what earlier jobs left on the issue (read once, at the first red).
   let mine = mergeTriage();
   let earlier = null;
@@ -1084,7 +1043,6 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   const askJobs = async ({ sha, failedRuns, required, seen, actionsJob }) => {
     const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
     const names = changedNames(files);
-    ask ??= await openDecider({ key, model });
     const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
     const sigs = new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))]));
     const picked = jobsToTriage(failedRuns, required, sigs);
@@ -1190,7 +1148,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure names what the PR changes
   // (namesChange: a changed path, or a changed file or added test by name), the only sign left that it is the PR's own.
   const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await namesChange(r.failedRuns) : false });
-  if (!decider && !key) return { model, off: code, red: offRed, again, infra, classify: offClassify };
+  if (code) return { model, off: code, red: offRed, again, infra, classify: offClassify };
   return { model, red, again, infra, classify };
 }
 

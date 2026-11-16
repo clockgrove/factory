@@ -8,7 +8,7 @@ import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
@@ -35,6 +35,7 @@ import { triageKey, triageKeyState } from "./lib/triage.mjs";
 import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
+import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
 import { TokenType } from "../vendor/@actions/expressions/dist/lexer.js";
 import { dropOwned } from "./lib/fsafe.mjs";
@@ -593,10 +594,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   if (queue && ((squash[0] && squash[0] !== "PR_TITLE") || (squash[1] && !["PR_BODY", "BLANK"].includes(squash[1])))) out.push(FAIL("squash message", `squash commits default to ${squash.join(" and ")}`, "setup --apply protection sets them to the PR's title and body (Settings > General > Pull Requests > Allow squash merging: Default to pull request title and description)"));
   // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.
   const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token });
-  if (ci.error) out.push(WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions"));
-  else if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
-  else if (!ci.mergeGroup) out.push((queue ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}`, `add "merge_group:" under on: in ${ci.path}`));
-  else out.push(PASS("ci workflow", `${ci.name} on pull_request and merge_group`));
+  out.push(ciWorkflowCheck(ci, { queue }));
   const runner = text !== null ? runnerMatchCheck(text, ci, { commands: [inputs.setup, ...inputs.validation], checks: [...checks, ...inputs.ciChecks] }) : null;
   if (runner) out.push(runner);
   // Sandbox mode resumes a stage on workflow_run, which filters by workflow name: a name no workflow has never fires.
@@ -744,12 +742,15 @@ export function unreadableRunners(labels) {
 
 /** A workflow's jobs: `check` (the job's name, else its id), `runner` (runnerLabel) and the text of its `run` steps. */
 export function workflowJobs(text) {
-  let doc;
   try {
-    doc = parseYaml(text);
+    return jobsOf(parseYaml(text));
   } catch {
     return [];
   }
+}
+
+/** workflowJobs of a parsed workflow. */
+function jobsOf(doc) {
   return Object.entries(doc?.jobs || {}).map(([id, job]) => ({
     check: typeof job?.name === "string" && !job.name.includes("${{") ? job.name : id,
     runner: runnerLabel(job?.["runs-on"]),
@@ -815,7 +816,8 @@ export function runnerMatchCheck(factoryText, ci, hints = {}) {
 
 /**
  * Find a workflow (other than factory.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
- * that name. `jobs`: its jobs (workflowJobs).
+ * that name. Each workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
+ * `unread`: the workflows that could not be read or parsed here, whose triggers are unknown (each with its reason).
  */
 export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
   let list;
@@ -825,6 +827,7 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
     return { found: false, error: `${e.status || ""} ${e.message.slice(0, 120)}`.trim() };
   }
   let found = null;
+  const unread = [];
   // GitHub lists a workflow file it cannot parse under its path instead of its name, and runs nothing from it.
   const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
   const factoryParses = factory ? factory.name !== factory.path : null;
@@ -832,16 +835,39 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
     if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     const named = Boolean(name) && w.name === name;
     if (name && !named) continue;
-    const raw = await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }).catch(() => "");
-    const text = String(raw || "");
-    const pr = /^\s*pull_request\s*:/m.test(text) || /on:\s*\[[^\]]*pull_request/.test(text);
-    const mg = /^\s*merge_group\s*:/m.test(text) || /on:\s*\[[^\]]*merge_group/.test(text);
-    if (pr || named) {
-      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: workflowJobs(text), factoryParses };
-      if (mg || named) return found;
+    let doc = null;
+    try {
+      doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
+    } catch (e) {
+      // Listed but not on the default branch (it ran from a branch once): nothing runs from it on the default branch.
+      if (e.status === 404 && !named) continue;
+      unread.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
+    }
+    // GitHub lists a workflow it cannot parse by its path, as it also names one with no `name:`: a file that sets a
+    // name and is listed by its path is one GitHub runs nothing from.
+    if (doc && w.name === w.path && typeof doc.name === "string" && doc.name !== w.path && !named) continue;
+    const events = workflowEvents(doc);
+    const mg = events.includes("merge_group");
+    if (events.includes("pull_request") || named) {
+      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: doc ? jobsOf(doc) : [], factoryParses };
+      if (mg || named) return { ...found, unread };
     }
   }
-  return found || { found: false, factoryParses };
+  return found ? { ...found, unread } : { found: false, factoryParses, unread };
+}
+
+/**
+ * The ci workflow row, from ciWorkflowTriggers's result: a workflow on pull_request and merge_group, the second needed
+ * only with a merge queue (`queue`). A workflow doctor could not read or parse may be the one listening: its triggers
+ * are unknown, so no FAIL rests on it and the WARN names it.
+ */
+export function ciWorkflowCheck(ci, { queue = false } = {}) {
+  const unread = ci.unread?.length ? `; could not read the triggers of ${ci.unread.join(", ")}` : "";
+  const readFix = "make each workflow named readable to the token (contents: read) and valid YAML, then run doctor again";
+  if (ci.error) return WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions");
+  if (!ci.found) return unread ? WARN("ci workflow", `no workflow doctor read listens on pull_request${unread}`, readFix) : FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit");
+  if (!ci.mergeGroup) return (queue && !unread ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}${unread}`, `add "merge_group:" under on: in ${ci.path}${unread ? `, or ${readFix}` : ""}`);
+  return PASS("ci workflow", `${ci.name} on pull_request and merge_group`);
 }
 
 /**
@@ -1003,33 +1029,191 @@ export async function workflowText({ repo, branch, token, env = process.env, roo
 
 // ------------------------------------------------------------- repository
 
+/**
+ * The bash doctor starts: the first `bash` among the absolute PATH entries outside the checkout (the system's newest,
+ * such as Homebrew's on macOS, whose /bin/bash is 3.2), else SAFE_PATH's. Never a relative entry (`.`, an empty one,
+ * `node_modules/.bin`) or one in the checkout, where the repository's own file named `bash` would run. Null when there
+ * is none. With the agent set up on Actions, SAFE_PATH's alone.
+ */
+export function systemBash(env = process.env, checkout = null) {
+  const real = (d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return resolve(d);
+    }
+  };
+  const root = checkout ? real(checkout) : null;
+  const inside = (d) => root !== null && (real(d) === root || real(d).startsWith(`${root}${sep}`));
+  // On Actions with the agent set up, only the system directories, as proc.mjs runnerCommand pins every bare command.
+  const dirs = agentUser() ? [] : String(env.PATH || "").split(delimiter).filter((d) => isAbsolute(d) && !inside(d));
+  return whichSync("bash", { PATH: [...dirs, SAFE_PATH].join(delimiter) });
+}
+
+/**
+ * Bash's own parse of `command` with the flags Factory runs it with (`bash -n`: read, never executed), from `/`, with
+ * extglob on (a command may turn it on before the line that uses it, which a parse never runs). Null when it parses;
+ * else {refused: true, message: bash's error} when bash refused it, or {refused: false, message} when bash could not
+ * parse it here (none found, it did not start, or it ran out of time).
+ */
+export async function shellSyntax(command, { env = process.env, checkout = null } = {}) {
+  const bash = systemBash(env, checkout);
+  if (!bash) return { refused: false, message: "no bash found" };
+  let r;
+  try {
+    r = await exec(bash, ["-n", "-O", "extglob", "-eo", "pipefail", "-c", command], { cwd: "/", env: { PATH: SAFE_PATH }, timeoutMs: 30_000 });
+  } catch (e) {
+    return { refused: false, message: `bash could not start: ${e.code || e.message}` };
+  }
+  if (r.code === 0) return null;
+  if (r.code === null) return { refused: false, message: r.timedOut ? "bash -n timed out" : `bash -n ended on ${r.signal}` };
+  return { refused: true, message: r.stderr.trim().split("\n").join("; ").slice(0, 300) || `bash -n exited ${r.code}` };
+}
+
+/** Whether a bash word is one fixed string: no expansion, substitution, glob or brace. */
+const fixedWord = (w) => !w?.parts || w.parts.every((p) => p.type === "Literal" || p.type === "SingleQuoted" || p.type === "AnsiCQuoted" || (p.type === "DoubleQuoted" && (p.parts || []).every((c) => c.type === "Literal")));
+
+/**
+ * The first simple command `command` runs at its own level, read from its bash syntax tree (unbash): {first: that
+ * Command node (null when it has none), functions: the functions defined before it, failing: failingFirst}, or {error}
+ * when unbash reports one. A function's body runs only when called, so it is no first command.
+ */
+export function firstCommand(command) {
+  const tree = parseShell(command);
+  if (tree.errors?.length) return { error: tree.errors[0].message };
+  const functions = new Set();
+  let first = null;
+  const visit = (n) => {
+    if (first) return;
+    if (n.type === "Function") return void functions.add(n.name.value);
+    if (n.type === "Command" && n.name) return void (first = n);
+    forEachChild(n, visit);
+  };
+  visit(tree);
+  return { first, functions, failing: failingFirst(tree) };
+}
+
+/**
+ * The simple command `bash -eo pipefail` runs first whose failure ends the shell, or null: the lead of the first
+ * statement (past function definitions and bare assignments), through a subshell or brace group, never one in a `&&`
+ * or `||` list, behind `!`, sent to the background or in a condition, whose failure the shell goes on past.
+ */
+export function failingFirst(tree) {
+  const lead = (n) => {
+    switch (n?.type) {
+      case "Script":
+      case "CompoundList": {
+        const s = n.commands.find((c) => c.command?.type !== "Function" && !(c.command?.type === "Command" && !c.command.name));
+        return s ? lead(s) : null;
+      }
+      case "Statement":
+        return n.background ? null : lead(n.command);
+      case "AndOr":
+        return n.commands.length === 1 ? lead(n.commands[0]) : null;
+      case "Pipeline":
+        return n.prefixes.some((p) => p.type === "Negation") ? null : lead(n.commands[0]);
+      case "Subshell":
+      case "BraceGroup":
+        return lead(n.body);
+      case "Redirected":
+        return lead(n.command);
+      case "Command":
+        return n.name ? n : null;
+      default:
+        return null;
+    }
+  };
+  return lead(tree);
+}
+
+/** Whether the repository's .npmrc sets `if-present` to anything but false (npm and pnpm then skip a missing script). */
+function ifPresent(checkout) {
+  const file = join(checkout, ".npmrc");
+  if (!existsSync(file)) return false;
+  return readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .some((line) => {
+      const at = line.indexOf("=");
+      return at > 0 && line.slice(0, at).trim() === "if-present" && line.slice(at + 1).trim() !== "false";
+    });
+}
+
+/**
+ * `npm run X` and `pnpm run X` fail when the checkout's package.json has no script X (yarn runs a binary named X
+ * instead, so it is not judged). Only a first command of exactly that shape counts: fixed words, no assignment or
+ * redirection before it (npm_config_* would change it), X no option, and for npm no option after X before `--` (npm
+ * reads one such as --if-present or --workspace itself). The reason it fails, or null.
+ */
+export function missingScript(cmd, checkout) {
+  const words = cmd.suffix.filter((w) => w.type === "Word");
+  const pm = fixedWord(cmd.name) ? cmd.name.value : "";
+  if (!["npm", "pnpm"].includes(pm) || cmd.prefix.length || words.length < 2 || !fixedWord(words[0]) || words[0].value !== "run" || !fixedWord(words[1]) || words[1].value.startsWith("-")) return null;
+  if (pm === "npm") {
+    const after = words.slice(2);
+    const end = after.findIndex((w) => w.text === "--");
+    if ((end < 0 ? after : after.slice(0, end)).some((w) => !fixedWord(w) || w.value.startsWith("-"))) return null;
+  }
+  const script = words[1].value;
+  // What runs without a script: npm's own `run env`, `start` as `node server.js`, pnpm's `/regex/` for every script it
+  // matches, and the repository's .npmrc if-present.
+  if ((pm === "npm" && script === "env") || (script === "start" && existsSync(join(checkout, "server.js"))) || (pm === "pnpm" && script.length > 1 && script.startsWith("/") && script.endsWith("/")) || ifPresent(checkout)) return null;
+  const file = join(checkout, "package.json");
+  if (!existsSync(file)) return `${pm} run ${script} needs a package.json, and the checkout has none`;
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    return `package.json does not parse (${e.message})`;
+  }
+  const scripts = pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  return Object.hasOwn(scripts, script) ? null : `no script "${script}" in package.json`;
+}
+
+/** What bash takes `name` for in `cwd` (`type -t`: file, builtin, function…), or "" when it finds nothing. */
+async function commandType(name, { cwd, env }) {
+  const bash = systemBash(env, cwd);
+  if (!bash) return "";
+  // `type` reads PATH and the files there and runs none of them; the PATH is the command's own, as it runs in `cwd`.
+  const r = await exec(bash, ["-c", 'type -t -- "$1"', "_", name], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 }).catch(() => null);
+  return r?.code === 0 ? r.stdout.trim() : "";
+}
+
+/**
+ * One command's row (setup or validation), never running it: bash parses it (`bash -n`, a refusal FAILs), a
+ * `npm|pnpm run X` first command names a script package.json has (missingScript, a FAIL), and bash finds its first
+ * simple command here (`type -t`; not found is a WARN, as `missing` says why it may still run). A first command that
+ * is no fixed word, or that unbash cannot read, cannot be looked up: a WARN saying so.
+ */
+export async function commandCheck(row, command, { checkout, env = process.env, missing, pass = "" }) {
+  const syntax = await shellSyntax(command, { env, checkout });
+  if (syntax?.refused) return FAIL(row, `${command}: bash cannot parse it (${syntax.message})`, `fix the ${row} command: Factory runs it with bash -eo pipefail -c`);
+  if (syntax) return WARN(row, `${command}: not parsed here (${syntax.message})`, "run doctor where bash runs");
+  const read = firstCommand(command);
+  if (read.error) return WARN(row, `${command}: bash parses it but doctor's parser does not (${read.error}), so its first command is not looked up`, "nothing to fix if it runs; report it to Factory");
+  if (!read.first) return PASS(row, `${command}${pass}`);
+  const name = read.first.name;
+  if (!fixedWord(name)) return WARN(row, `${command}: its first command, ${name.text}, is not a fixed word, so doctor cannot look it up`, `nothing to fix if it runs; a fixed command name lets doctor check it`);
+  // A missing script fails the command only where its failure ends the shell (`npm run lint || true` goes on).
+  const why = read.failing === read.first ? missingScript(read.first, checkout) : null;
+  if (why) return FAIL(row, `${command}: ${why}`, `fix the ${row} command or add the script`);
+  const type = read.functions.has(name.value) ? "function" : await commandType(name.value, { cwd: checkout, env });
+  if (!type) return WARN(row, `${command}: ${name.value} is not found here; ${missing}`, `install ${name.value}, or fix the ${row} command`);
+  return PASS(row, `${command}${pass}`);
+}
+
 export async function repositoryChecks({ inputs, checkout, env = process.env, runSetup = false, local = false, wf = readWorkflowEnv(checkout) }) {
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
   const install = installCommand(checkout, inputs.install);
   out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
-  const pkg = existsSync(join(checkout, "package.json")) ? JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")) : null;
-  for (const cmd of inputs.validation.map(commandText)) {
-    // `pnpm <script>` / `pnpm run <script>` must name a package.json script; `pnpm exec|dlx|x|-r|--filter …` and
-    // `env …` prefixes are not scripts and are only warned about when their binary is absent here.
-    const m = /^(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/.exec(cmd);
-    const notScript = m && /^(exec|dlx|x|test|install|i|ci|-.*)$/.test(m[1]) && !pkg?.scripts?.[m[1]];
-    if (m && pkg && !notScript) {
-      out.push(pkg.scripts?.[m[1]] ? PASS("validation", cmd) : FAIL("validation", `${cmd}: no script "${m[1]}" in package.json`, "fix the validation input or add the script"));
-    } else {
-      const bin = cmd.split(/\s+/)[0];
-      const local = existsSync(join(checkout, bin));
-      out.push(local || (await onPath(bin)) ? PASS("validation", cmd) : WARN("validation", `${cmd}: ${bin} not found here`, "it may exist on the runner after setup"));
-    }
-  }
+  for (const cmd of inputs.validation.map(commandText)) out.push(await commandCheck("validation", cmd, { checkout, env, missing: "setup may install it" }));
   if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Factory has a feedback loop"));
   if (inputs.setup) {
     if (runSetup) {
       const r = await exec("bash", ["-eo", "pipefail", "-c", inputs.setup], { cwd: checkout, env, timeoutMs: 20 * 60_000 });
       out.push(r.code === 0 ? PASS("setup", inputs.setup) : FAIL("setup", `${inputs.setup} exited ${r.code}`, "fix the setup command"));
     } else {
-      const bin = inputs.setup.split(/\s+/)[0];
-      out.push(existsSync(join(checkout, bin)) || (await onPath(bin)) ? PASS("setup", `${inputs.setup} (present; run with --run-setup to execute)`) : FAIL("setup", `${bin} not found`, "fix the setup command"));
+      out.push(await commandCheck("setup", inputs.setup, { checkout, env, missing: "the runner may have it", pass: " (parsed and looked up; doctor did not run it: --run-setup does)" }));
     }
   }
   // `local`: the developer's own checkout in local mode (doctor --local). A worker job's checkout in local mode is the

@@ -12,6 +12,14 @@ The workflow does nothing until `.github/workflows/factory.yml` is on the defaul
 
 A re-render on an upgrade lands the same way, on a branch `upgrade-factory`, with the release notes linked in the body.
 
+## Claude on a subscription
+
+When the user picks Claude and has no Anthropic API key, offer `--credential plan`: stages run on their Claude subscription (Pro, Max, Ultra, Team or Enterprise) through a `CLAUDE_CODE_OAUTH_TOKEN` secret. Say plainly: it is for their own repository only, never for a product; Factory does not check whose repository it is, every Objective in it runs on their subscription, and doctor warns of this on every check.
+
+1. The user runs `claude setup-token` on their own machine: a browser sign-in, then a long-lived token printed to their terminal. Never run it, ask for the token or read it.
+2. The user saves it with `gh secret set CLAUDE_CODE_OAUTH_TOKEN`, pasting at the prompt, which does not echo it (not `--body`, which leaves it in shell history).
+3. Render the workflow with `--credential plan`; only the workflow file sets it. An `ANTHROPIC_API_KEY` secret beside it goes unused.
+
 ## Skills in the repository
 
 Offer to commit the Factory skills and agent definitions, which only vendors' cloud sessions need: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say plainly: committed copies override the plugin's and never update; copy again on every upgrade.

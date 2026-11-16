@@ -156,6 +156,24 @@ test("doctor: no harness's commands can read its credential off local mode, so n
   assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" }, local: false })), []);
 });
 
+test("doctor: credential: plan reads as the subscription token on the Actions route, from the runner or a person's shell (#459)", async () => {
+  const plan = { harness: "claude", credential: "plan" };
+  const rows = async (inputs, env, local = false) => (await credentialChecks({ inputs, env, local })).map((r) => `${r.status} ${r.detail} | ${r.fix}`);
+  // A person's shell holds no plan token: the stages run on the repository's secret, not on this machine's login.
+  const shell = await rows(plan, {});
+  assert.equal(shell.length, 1);
+  assert.match(shell[0], /^WARN credential: plan: Claude stages run on your subscription's CLAUDE_CODE_OAUTH_TOKEN secret \| .*own repository.*docs\/INSTALL\.md, Claude on your subscription/);
+  assert.doesNotMatch(shell[0], /API credential|local fallback/);
+  // On the runner: the same row with the token; without it a FAIL naming the secret.
+  assert.deepEqual(await rows({ ...plan, claudeCodeOauthToken: "sk-ant-oat-dummy" }, { GITHUB_ACTIONS: "true" }), shell);
+  assert.match((await rows(plan, { GITHUB_ACTIONS: "true" }))[0], /^FAIL .*CLAUDE_CODE_OAUTH_TOKEN is absent/);
+  // The harness gets the plan token alone (harness.mjs credentialEnv), so a key beside it goes unused.
+  const both = await rows({ ...plan, claudeCodeOauthToken: "sk-ant-oat-dummy", anthropicApiKey: "k" }, { GITHUB_ACTIONS: "true" });
+  assert.match(both[1], /^WARN ANTHROPIC_API_KEY is also set and goes unused/);
+  // Local mode runs every stage on the CLI's own login, as before.
+  assert.match((await rows(plan, {}, true))[0], /^WARN the claude CLI's own login on this machine/);
+});
+
 test("doctor: with local triage on, a dry rerun tells whether the token can rerun CI jobs (#74)", async () => {
   const { githubChecks, rerunProbeCheck } = await import("../scripts/doctor.mjs");
   const realFetch = globalThis.fetch;

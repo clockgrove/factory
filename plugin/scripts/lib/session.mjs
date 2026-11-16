@@ -1730,7 +1730,8 @@ export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, deliv
  * `notice` (local mode with a Factory App, app-token.mjs noticeMinter): the notices that @mention `notify` post as the
  * App, since local mode writes as the operator and GitHub notifies no one of their own mention (#2522).
  * `cause` (logic.mjs BLOCK_CAUSES) goes on a Blocked notice as its cause line (blockMarker), for the bench scorer, and
- * decides whether the notice says to resume or restart (nextStep), unless `next` says it.
+ * decides whether the notice says to resume or restart (nextStep), unless `next` says it. Returns the exit applied and
+ * its reason: a Question whose PR GitHub would not draft is applied as a Block (cause `factory`).
  */
 export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "factory", next = null }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
@@ -1751,10 +1752,20 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
     // `key` names a Block whose repeats are one condition (local mode's git-identity): each repeat updates that comment.
     const body = `${at}${blockedLine({ issue, pr, stage, reason, fix, delivered, cause, next })}${detail ? `\n\n<details><summary>Last output</summary>\n\n\`\`\`\n${String(detail).slice(-DETAIL_CHARS).replace(/\`\`\`/g, "\`\`'")}\n\`\`\`\n</details>` : ""}\n${blockMarker(cause)}`;
     await postNotice("Blocked notice", (o) => upsertComment(repo, issue, marker(issue, "blocked", key || `${stage}:${runId}`), body, o));
-    return;
+    return { exit, reason };
   }
   if (exit === "question") {
-    if (pr) await setDraft(repo, pr.number, true, { token }).catch(() => {});
+    // A Question's PR is a draft until it is answered: serve reviews a Question's PR out of draft as the answer (#339),
+    // so a PR GitHub kept ready would be asked again on every tick. One it would not draft Blocks once instead, naming it.
+    const undrafted = pr ? await setDraft(repo, pr.number, true, { token }).then(() => null, (e) => e || new Error("draft failed")) : null;
+    if (undrafted) {
+      const code = Number.isInteger(undrafted.status) && undrafted.status > 0 ? `HTTP ${undrafted.status}` : undrafted.transport ? "network" : String(undrafted.message || "error").slice(0, 160);
+      log(`draft: ${String(undrafted.message || undrafted).slice(0, 120)}`);
+      const why = `PR #${pr.number} could not be made a draft for its Question (${code}), so the Question is not asked; the question was: ${reason.replace(/^question:\s*/i, "")}`;
+      // No PR to the Block: it would try the same draft again, and say the PR is one.
+      const fix = `Fix by letting Factory's token convert PR #${pr.number} to a draft, or by making it one by hand, then re-apply \`factory:objective\`.`;
+      return applyExit(repo, { issue, pr: null, exit: "blocked", reason: why, notify, stage, cause: "factory", fix }, { token, notice });
+    }
     await setStateLabel(repo, issue, "question", { token });
     await moveCard(project, repo, issue, "In review", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
     // A question asked on the issue (`askOnIssue`) is answered there, never on the PR: no review request for it.
@@ -1766,12 +1777,12 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
       const body = questionNotice({ at, stage, reason, pr, askOnIssue });
       await postNotice("Question notice", (o) => upsertComment(repo, issue, marker(issue, "question", `${stage}:${runId}`), body, o)).catch((e) => log(`Question notice: ${e.message.slice(0, 120)}`));
     }
-    return;
+    return { exit, reason };
   }
   if (exit === "delivered") {
     await setStateLabel(repo, issue, "in-review", { token });
     await moveCard(project, repo, issue, "In review", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
-    return;
+    return { exit, reason };
   }
   throw new Error(`unknown exit ${exit}`);
 }

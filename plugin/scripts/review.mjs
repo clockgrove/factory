@@ -320,6 +320,20 @@ export function answerScope(comments, protectedList) {
   });
 }
 
+/**
+ * Whether this review is a person marking a Question's PR ready, the Question's answer cue: then only what a maintainer
+ * said since the Question answers it, and with nothing new a PR whose body still asks a `QUESTION:` goes back to a
+ * Question. A Question asked on the issue (plan time) is not in the body: its review goes on and may merge the part
+ * done so far, as its notice (session.mjs questionNotice) warns. On Actions it is the
+ * `ready_for_review` event a person fired (`action`, `sender`). The local route fires no event: serve starts the review
+ * for a PR out of draft whose issue is still a Question (local.mjs pendingReviews), so on that route (`local`) that state
+ * is the mark. Read on the PR and the issue as this stage sees them.
+ */
+export function readyMark({ action = null, sender = null, local = false, issue = null, pr = null }) {
+  if (action === "ready_for_review") return sender?.type !== "Bot";
+  return !!local && !!pr && !pr.draft && (issue?.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === "factory:question");
+}
+
 /** The worker's prompt for the one pass that answers the review. */
 export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red }) {
   const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}`).join("\n");
@@ -611,15 +625,17 @@ async function main() {
   // ready_for_review is that transition seen first, never a review cue (the workflow's `if:` filters it out; this skip
   // covers a workflow rendered before that filter). A person marking it ready is how a Question is answered (PLAN.md): the review job runs, and the answer pass applies
   // the maintainers' decisions even when the PR was already reviewed.
-  const humanReady = eventAction() === "ready_for_review" && eventSender()?.type !== "Bot";
-  if (eventAction() === "ready_for_review" && !humanReady) {
+  if (eventAction() === "ready_for_review" && !readyMark({ action: eventAction(), sender: eventSender() })) {
     log(`PR #${pr.number} marked ready; the review runs on the factory:review label, not on this event`);
     await finish("skipped", "ready_for_review is not a review cue");
     return;
   }
   // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review: the label comes off and nothing
   // else changes. From here on the stage stops when a person stops it (session.mjs stopStage).
-  const stopped = stopCause(await getIssue(repo, issue, token), inputs.objectiveLabel);
+  const issueNow = await getIssue(repo, issue, token);
+  const stopped = stopCause(issueNow, inputs.objectiveLabel);
+  // A person's ready mark on a Question (readyMark): its answer, or no answer and the Question again.
+  const humanReady = readyMark({ action: eventAction(), sender: eventSender(), local, issue: issueNow, pr });
   if (stopped) {
     log(`#${issue}: ${stopText(stopped, inputs.objectiveLabel)}; no review`);
     await dropLabel();
@@ -819,8 +835,8 @@ async function main() {
     const reason = "marked ready, but no maintainer answer since the question; answer in a comment on the issue or the PR, then mark it ready again";
     log(`PR #${pr.number}: ${reason}`);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "question", reason, notify: inputs.notify, stage: "review" }, token);
-    await finish("question", reason);
+    const applied = await applyExit(repo, { issue, pr, exit: "question", reason, notify: inputs.notify, stage: "review" }, token);
+    await finish(applied?.exit ?? "question", applied?.reason ?? reason);
     return;
   }
   // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
@@ -1405,7 +1421,7 @@ async function main() {
   }
   await dropLabel();
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
-  // back to draft (locally nothing runs an unlabelled ready PR, so the Question stands there). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
+  // back to draft (locally the Question stands: logic.mjs answerDuring). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
   // applies the answer (or, with nothing new since the Question, makes it a Question again). Either alone, or
   // unreadable comments, keep the Question.
   if (decision.exit === "question") {
@@ -1489,8 +1505,8 @@ async function main() {
   // A Block that came from an outage (a merge-path step that met it) ends the stage on that outage instead (session.mjs
   // outageFirst, outageExit); with its label already off, serve's resume runs the review again (local.mjs resume).
   outageFirst(decision);
-  await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
-  await finish(decision.exit, decision.reason);
+  const applied = await applyExit(repo, { issue, pr, exit: decision.exit, reason: decision.reason, detail: decision.exit === "blocked" ? validation.lastOutput : "", notify: inputs.notify, stage: "review", fix, cause: decision.cause }, token);
+  await finish(applied?.exit ?? decision.exit, applied?.exit === decision.exit ? decision.reason : (applied?.reason ?? decision.reason));
   }
 }
 

@@ -2144,7 +2144,8 @@ export function unreadDecisions(decisions, read) {
  * after the job read the decisions (`readAt`, ms), and the PR marked ready by a person after the job started
  * (`startedAt`, ms; `events`, the PR's timeline). Factory's own ready marks are not a person's: a bot's, or the token's
  * own login (`self`; in local mode that is the developer's). Either one alone keeps the Question. In local mode
- * (`local`) the Question always stands: nothing there runs the review a ready mark alone would start. Returns what
+ * (`local`) the Question always stands: no event runs the review there, serve does, and only for a PR out of draft
+ * whose issue is still a Question (local.mjs pendingReviews), so the person marks the PR ready again. Returns what
  * arrived, or "" when the Question stands.
  */
 export function answerDuring({ unread = [], writers = new Set(), events = [], readAt, startedAt, self = null, local = false }) {

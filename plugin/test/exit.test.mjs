@@ -1092,7 +1092,7 @@ test("a Question raised in review is answered during the run only by a writer's 
   assert.equal(answerDuring({ ...base, unread: answer, events: [ready("kirk", "User", "2026-11-08T09:59:00Z")] }), "", "a ready mark before the run");
   assert.equal(answerDuring({ ...base, unread: answer, events: [ready("factory-app[bot]", "Bot", "2026-11-08T10:07:00Z")] }), "", "Factory's own ready mark on Actions");
   assert.equal(answerDuring({ ...base, self: "kirk", unread: answer, events: marked }), "", "local mode: Factory marks ready as the developer's login");
-  assert.equal(answerDuring({ ...base, self: "someone-else", local: true, unread: answer, events: marked }), "", "local mode keeps the Question: no local loop runs an unlabelled ready PR");
+  assert.equal(answerDuring({ ...base, self: "someone-else", local: true, unread: answer, events: marked }), "", "local mode keeps the Question: serve runs a ready mark only while the issue is a Question");
 });
 
 test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is 0; unmetered runs add nothing", () => {

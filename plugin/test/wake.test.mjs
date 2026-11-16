@@ -151,7 +151,10 @@ test("dispatch deadlines: a stage's lease, a quota retry and the UTC day's turn,
   assert.equal(capped.reason, "daily_usd reached");
   const kinds = (r) => r.deadlines.map((d) => `${d.kind}${d.issue ? ` #${d.issue}` : ""} ${d.at}`).sort();
   assert.deepEqual(kinds(capped), [`daily-cap ${iso(nextUtcMidnight(now))}`, `lease #10 ${iso(Date.parse(leaseUntil) + WAKE_SLACK_MS)}`, `quota #11 ${retryAt}`].sort());
-  assert.deepEqual(nextWake(capped.deadlines, { now }), { kind: "lease", at: iso(Date.parse(leaseUntil) + WAKE_SLACK_MS), issue: 10 });
+  // The nearest deadline: the lease, unless the test runs within minutes of UTC midnight, when the day's turn comes first.
+  const lease = { kind: "lease", at: iso(Date.parse(leaseUntil) + WAKE_SLACK_MS), issue: 10 };
+  const midnight = { kind: "daily-cap", at: iso(nextUtcMidnight(now)) };
+  assert.deepEqual(nextWake(capped.deadlines, { now }), Date.parse(midnight.at) < Date.parse(lease.at) ? nextWake([midnight], { now }) : lease);
   // Today's spend unread: the cap counts as reached, but the day's turn is no deadline; one retry is.
   const unread = await tick({ spendFails: true });
   assert.deepEqual(unread.deadlines.filter((d) => d.kind === "retry" || d.kind === "daily-cap").map((d) => d.kind), ["retry"]);

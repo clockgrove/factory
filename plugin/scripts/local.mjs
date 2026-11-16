@@ -27,7 +27,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, minutesText, probe as probeHost, waitOutages } from "./lib/network.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -396,6 +396,16 @@ async function checkToken(repoFull, token) {
 
 /** The issue a PR is a review trigger for: on factory/<issue>, labelled factory:review, not a draft; else 0. */
 export const reviewIssue = (pr) => (pr?.draft || !(pr?.labels || []).some((l) => l.name === REVIEW_LABEL) ? 0 : Number(/^factory\/(\d+)$/.exec(pr?.head?.ref || "")?.[1]) || 0);
+/**
+ * The issue a PR may be an answered Question's review cue for (#339): on factory/<issue>, open, out of draft and not
+ * labelled for review (that is reviewIssue's); else 0. pendingReviews checks the issue is a Question and a ready mark.
+ */
+export const readyIssue = (pr) => (!pr || pr.draft || pr.state === "closed" || labelled(pr, REVIEW_LABEL) ? 0 : Number(/^factory\/(\d+)$/.exec(pr.head?.ref || "")?.[1]) || 0);
+/**
+ * Whether the PR was marked ready after the issue last became a Question (`askedAt`, its last factory:question label):
+ * a Question's exit drafts the PR before it labels the issue, so a PR GitHub kept out of draft then has no mark after it.
+ */
+export const readyAfter = (prEvents, askedAt) => !!askedAt && (prEvents || []).some((e) => e?.event === "ready_for_review" && Date.parse(e.created_at) > Date.parse(askedAt));
 /** An issue labelled factory:blocked. */
 export const isBlocked = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === "factory:blocked");
 const labelled = (item, name) => (item?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
@@ -2494,16 +2504,27 @@ export class Local {
   /**
    * Open PRs labelled factory:review whose Objective is routed here and held by no loop: the label is the review trigger,
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
+   * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
+   * draft, its issue still a Question, marked ready after the Question was asked (readyAfter). The review applies the
+   * answer; with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
    */
   async pendingReviews() {
     const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];
+    // Conditional reads (a 304 for an unchanged page is not counted): the Questions, only when a PR may be one's.
+    const cached = { ...this.opts, cache: (this.timelines ??= new Map()) };
+    const questions = prs.some(readyIssue) ? new Map(((await listIssuesByLabel(this.repo, "factory:question", cached).catch(() => [])) || []).map((i) => [i.number, i])) : new Map();
     const out = [];
     for (const pr of prs) {
-      const issue = reviewIssue(pr);
+      const asked = questions.get(readyIssue(pr)) ?? null;
+      const issue = reviewIssue(pr) || asked?.number || 0;
       if (!issue) continue;
-      const data = await getIssue(this.repo, issue, this.opts).catch(() => null);
+      const data = asked ?? (await getIssue(this.repo, issue, this.opts).catch(() => null));
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
+      if (asked) {
+        const askedAt = await objectiveLabeledAt(this.repo, issue, "factory:question", cached).catch(() => null);
+        if (!readyAfter(askedAt ? await timelineOf(this.repo, pr.number, cached).catch(() => []) : [], askedAt)) continue;
+      }
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;
       out.push({ issue, pr: pr.number, labels: data.labels || [], updatedAt: data.updated_at ?? null });
     }

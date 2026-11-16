@@ -43,7 +43,7 @@ Run the proof: `npm ci --ignore-scripts --prefix plugin && node bench/sandbox-co
 
 ## Decision model
 
-Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decider there: red-check triage (`lib/triage.mjs`) and the drift advisory (`lib/drift.mjs`), each with its own gateway model setting, and the finding check (`lib/finding-check.mjs`), the answer gate (`review.mjs` answerGate), the rebase check (`lib/kept.mjs`) and the answer check (`lib/answer-check.mjs`), on triage's. Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK) and `harness` (`decider-harness.mjs`, the stage's own harness on its login).
+Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decider there: red-check triage (`lib/triage.mjs`) and the drift advisory (`lib/drift.mjs`), each with its own gateway model setting, and the finding check (`lib/finding-check.mjs`), the answer gate (`review.mjs` answerGate), the rebase check (`lib/kept.mjs`), the answer check (`lib/answer-check.mjs`) and the fix-progress check (`lib/fix-progress.mjs`), on triage's. Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK) and `harness` (`decider-harness.mjs`, the stage's own harness on its login).
 
 | Operation | Does |
 | --- | --- |

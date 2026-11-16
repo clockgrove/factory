@@ -80,7 +80,7 @@ test("validation: a fix pass the stop ends is the stage's last step; the validat
     import { passesRunning, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
     import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     const root = process.env.FAKE_STATE;
-    const loop = validationLoop({ checkout: root, commands: ["echo ran >> " + root + "/ran; exit 1"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, deadlineAt: Date.now() + 600_000, eventsFile: root + "/events.jsonl", maxPasses: 2 });
+    const loop = validationLoop({ checkout: root, commands: ["echo ran >> " + root + "/ran; exit 1"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, deadlineAt: Date.now() + 600_000, eventsFile: root + "/events.jsonl" });
     let ended = false;
     loop.then(() => (ended = true), () => (ended = true));
     const t0 = Date.now();

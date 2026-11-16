@@ -176,6 +176,13 @@ export const noResetLimit = (r) => !!r && refusalCause(r) === "provider-quota" &
 /** An epoch time in seconds or ms as ms; null when it is no positive number. */
 const epochMs = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? (v < 1e12 ? v * 1000 : v) : null);
 
+/**
+ * The AI Gateway's error types for a 5xx it sends as a bare body with no status (gateway-relay.mjs UNAVAILABLE_ERRORS
+ * and `internal_server_error`, docs/PLAN.md's decider): the provider busy, as a 5xx with its status is (providerBusy),
+ * and the outage code of a pause on one (busyCode, network.mjs serverDown).
+ */
+export const BARE_BUSY_TYPES = new Set(["service_unavailable_error", "overloaded_error", "internal_server_error"]);
+
 /** 4xx statuses that are worth retrying: a timeout, a conflict, too early, a rate limit. */
 const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 /** 4xx statuses that mean the provider is busy, not refusing (HTTP's own meaning): a request timeout, too early, too many requests. */
@@ -304,24 +311,33 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   // Claude Code's API error with no status (a connection it could not make) is no refusal.
   if (!e || (harness === "claude" && e.status === null)) return null;
   const { reset, retryAt, ...r } = e;
-  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r)) : refusedKind(r);
+  // A 5xx with an auth, permission, quota or billing type or code is that refusal, not the provider busy (providerBusy).
+  const refused = r.status !== null ? (r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r))) || (r.status >= 500 && refusedKind(r)) : refusedKind(r);
   if (!refused) return null;
   return { ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
 /**
  * The provider saying it is busy, from its error (providerError) on a failed run: {harness, status, type, code, message,
- * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included),
- * with no refusal type or code (REFUSED_KINDS: a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or
- * global rate limit is a refusal). No status (a transport error, a bare body) is never busy. `retryAt` is the error's
- * own (providerError: a 429's only); runHarness waits for it, else the outage doubling, and runs the pass again: no death.
+ * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included);
+ * with no status, the AI Gateway's bare 5xx types (BARE_BUSY_TYPES: `service_unavailable_error`,
+ * `overloaded_error`, `internal_server_error`). A refusal type or code (REFUSED_KINDS: auth, permission, quota or
+ * billing; a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or global rate limit) is a refusal
+ * instead, whatever the status: providerRefusal reads a 5xx with one as a refusal too, so no such error falls between.
+ * `retryAt` is the error's own (providerError: a 429's only); runHarness waits for it, else the outage doubling, and runs
+ * the pass again: no death. busyCode is its code as an outage's.
  */
 export function providerBusy(harness, events) {
   const e = providerError(harness, events);
-  if (!e || e.status === null || refusedKind(e) || !(BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600))) return null;
+  if (!e || refusedKind(e)) return null;
+  const busy = e.status !== null ? BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600) : BARE_BUSY_TYPES.has(e.type);
+  if (!busy) return null;
   const { reset, retryAt, ...r } = e;
   return { ...r, ...(Number.isFinite(retryAt) ? { retryAt } : {}) };
 }
+
+/** A busy answer (providerBusy) as an outage's code (network.mjs serverDown): `HTTP 503`, or the bare body's type. */
+export const busyCode = (r) => (r.status !== null ? `HTTP ${r.status}` : r.type);
 
 /**
  * Whether a refusal refuses only the request a resumed session sends (its transcript), so one fresh pass can tell: a
@@ -333,7 +349,7 @@ export const requestRefused = (r) => !!r && REQUEST_4XX.has(r.status) && !refuse
 /**
  * The provider error a failed run ended on, as the harness reported it in structure: {harness, status, type, code,
  * message, reset, retryAt}, else null (no such structure: a crash, a run killed, an error reported as prose only).
- * providerRefusal and providerBusy are read from it, never from the words:
+ * providerRefusal, providerBusy and outageError are read from it, never from the words:
  *   claude  : the result line with is_error and an API error message: the result's `api_error_status` (else the
  *             message's; null for a connection Claude Code could not make), the message's `error` as the type and the
  *             result's (else the message's) `api_error` as the code
@@ -461,6 +477,17 @@ export function quotaReading(harness, stdout, { rollout = null, since = null } =
 }
 
 /**
+ * Whether a provider error (providerError) with no status is its provider or the network failing: the type is a server
+ * error. Claude Code reports a connection it could not make or a request that timed out as an API error message whose
+ * `error` is `server_error` with no `api_error_status` (2.1.325). A 5xx or a 429 that carries its status is the provider
+ * busy instead (providerBusy).
+ */
+export const outageError = (r) => !!r && r.status === null && r.type === "server_error";
+
+/** Whether a provider error (providerError) is a 4xx: the provider answered and said why, so no probe asks the network. */
+export const answeredError = (r) => !!r && r.status !== null && r.status >= 400 && r.status < 500;
+
+/**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by
  * component on the bench's scorecard.
@@ -523,6 +550,11 @@ export function parseClaude(stdout, model) {
   if (refusal) rec.refusal = refusal;
   const busy = refusal ? null : providerBusy("claude", lines);
   if (busy) rec.busy = busy;
+  // Its provider error (providerError) when it is no refusal and no busy answer; also `providerOutage` when it names a
+  // provider or network failure with no status (outageError).
+  const failure = refusal || busy ? null : providerError("claude", lines);
+  if (failure) rec.providerError = failure;
+  if (outageError(failure)) rec.providerOutage = failure;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -666,6 +698,11 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   if (refusal) rec.refusal = refusal;
   const busy = rec.ok || refusal ? null : providerBusy("codex", events);
   if (busy) rec.busy = busy;
+  // Its provider error (providerError) when it is no refusal and no busy answer; also `providerOutage` when it names a
+  // provider or network failure with no status (outageError).
+  const failure = rec.ok || refusal || busy ? null : providerError("codex", events);
+  if (failure) rec.providerError = failure;
+  if (outageError(failure)) rec.providerOutage = failure;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
   rec.usd = priceCodex(rec.model, rec.tokens);
@@ -823,6 +860,11 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   if (refusal) rec.refusal = refusal;
   const busy = rec.ok || refusal ? null : providerBusy("copilot", events);
   if (busy) rec.busy = busy;
+  // Its provider error (providerError) when it is no refusal and no busy answer; also `providerOutage` when it names a
+  // provider or network failure with no status (outageError).
+  const failure = rec.ok || refusal || busy ? null : providerError("copilot", events);
+  if (failure) rec.providerError = failure;
+  if (outageError(failure)) rec.providerOutage = failure;
   if (p.aiu !== null) rec.aiu = p.aiu;
   if (p.lowerBound) rec.usdLowerBound = true;
   rec.sessionStartTime = a.sessionStartTime;

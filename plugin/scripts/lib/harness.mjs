@@ -8,14 +8,14 @@ import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
+import { agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./claude-local-probe.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
-import { NetworkDown, OUTAGE, githubOrigin, givenUp, minutesText, networkBack, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
+import { COPILOT_CREDIT_USD, answeredError, busyCode, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
+import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -25,6 +25,7 @@ import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, g
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
+import { harnessActivity } from "./logic.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -348,7 +349,10 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, credentials: local.credentials, readOnly: local.readOnly, writable: caches, readable: local.readable || [], secretEnv: hidden, ripgrep: local.ripgrep || null }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
-      const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
+      // --include-partial-messages: the model's answer shows on stdout as it arrives (`stream_event` lines), so a silent
+      // pass with no command open is one whose model stream stalled (proc.mjs hangVerdict). Those lines are kept out
+      // of the events file and the parsed output (HARNESS_DELTAS).
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", ...perms, "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);
@@ -393,7 +397,9 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // without -p a piped stdin is a non-interactive prompt (1.0.107, checked live with 200 KB, fresh and --resume).
       // Every route: the credentials (SHELL_SECRET_KEYS, its own COPILOT_GITHUB_TOKEN included) are removed from its shell
       // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
-      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+      // --stream on: the model's answer shows on stdout as it arrives (`assistant.*_delta` events), as Claude Code's above.
+      // Copilot streams by default; the flag overrides a user config with `stream: false`.
+      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json", "--stream", "on"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
       // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.
@@ -416,6 +422,28 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
  * prompt or the env.
  */
+/**
+ * The stream lines that only carry the model's answer as it arrives, by harness: what tells a silent harness's model
+ * stream stalled. They count as output for the hung check and are dropped before anything stores or parses the
+ * stream (the events file, the pass's stdout, the stream parsers). Codex prints none: it ends a stalled model stream
+ * itself (its `stream_idle_timeout_ms`, then its retries, each an `error` line), so for it a silence with no command
+ * open decides nothing.
+ */
+export const HARNESS_DELTAS = { claude: new Set(["stream_event"]), copilot: new Set(["assistant.message_delta", "assistant.reasoning_delta", "assistant.streaming_delta", "assistant.tool_call_delta"]) };
+
+/** Whether a stream line of `harness` is one of its HARNESS_DELTAS. */
+export function deltaLine(harness, line) {
+  const kinds = HARNESS_DELTAS[harness];
+  if (!kinds) return false;
+  try {
+    return kinds.has(JSON.parse(line)?.type);
+  } catch {
+    return false;
+  }
+}
+
+// The window a silent harness is checked over (proc.mjs exec `idleMs`): one that printed nothing across it is killed as
+// hung only when its own state says so (proc.mjs hangVerdict), never for the silence alone.
 export const HARNESS_IDLE_MS = 30 * 60_000;
 
 /**
@@ -989,13 +1017,15 @@ async function runBusy(opts) {
     }
     const origin = providerOrigin(opts.harness, opts.env);
     if (!origin) break;
+    // An outage of the provider's host for any other pass of this process that fails meanwhile (network.mjs passCutOff).
+    noteBusy(origin, busyCode(r), now);
     const label = opts.label || "run";
     const limit = given !== null && given >= LIMIT.minRunMs ? { ...r, resetAt: r.retryAt } : null;
     const bound = waitBound(since);
     const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - waitMs : Infinity;
     if (bound === null || now + waitMs > bound || left < LIMIT.minRunMs) {
       if (limit) throw new UsageLimitReached(limit, { since: now, label });
-      throw new NetworkDown({ origin, code: `HTTP ${r.status}`, since });
+      throw new NetworkDown({ origin, code: busyCode(r), since });
     }
     if (limit && waitMs > LIMIT.movePastMs) {
       if (LIMIT.elsewhere && (await LIMIT.elsewhere(limit))) throw new UsageLimitReached(limit, { since: now, label });
@@ -1023,10 +1053,10 @@ async function runCutOff(opts) {
   const startedAt = Date.now();
   const lost = [];
   let rec = await runResumable(opts);
-  // A pass this machine's network cut off (network.mjs passCutOff) is no death and no answer: once the network is back,
-  // the same pass runs again, resuming its session when it has one (a reviewer's runs from its own prompt), on what is
-  // left of its budget and wall clock, at most OUTAGE.passReruns times. The wait throws NetworkDown past the stage's
-  // limit: the stage then ends on it.
+  // A pass its harness reported cut off by its provider or the network (outageCut) is no death and no answer: once its
+  // provider answers, the same pass runs again, resuming its session when it has one (a reviewer's runs from its own
+  // prompt), on what is left of its budget and wall clock, at most OUTAGE.passReruns times. The wait throws NetworkDown
+  // past the stage's limit: the stage then ends on it.
   for (;;) {
     if (lost.length >= OUTAGE.passReruns) break;
     const cut = await outageCut(rec, opts);
@@ -1043,7 +1073,7 @@ async function runCutOff(opts) {
     }
     lost.push(rec);
     const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
-    log(`${opts.label || "run"}: the pass was cut off by this machine's network (${cut.code} reaching ${new URL(cut.origin).host}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
+    log(`${opts.label || "run"}: the pass was cut off by its provider or this machine's network (${cut.code}${cut.origin ? ` reaching ${new URL(cut.origin).host}` : ""}); running it again${session ? ` from its session ${session.slice(0, 8)}` : ""}`);
     rec = await runResumable({ ...opts, maxUsd, timeoutMs, ...(session ? { resume: session, prompt: LOST_PASS_PROMPT } : {}) });
   }
   return lost.length ? joinLost(lost, rec) : rec;
@@ -1072,15 +1102,21 @@ export function providerOrigin(harness, env = {}) {
 }
 
 /**
- * Whether a pass was cut off by this machine's network, in a process that waits outages out: a pass that failed (no
- * answer, no cap, no stop, no provider refusal) while an outage was under way near its end, or whose provider
- * or GitHub does not answer a probe now (network.mjs passCutOff). Decided on those probes, never on the harness's words.
- * In a process that gave up waiting (stoppedWaiting), a pass that failed while a host it gave up on still does not answer
- * (network.mjs givenUp) is no death and runs no more: it throws that outage, which the stage ends on (session.mjs
- * outageExit). With every such host answering again, the outage it gave up on cut the pass off as any other would.
+ * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out. Only a pass
+ * that failed (no answer, no cap, no stop, no provider refusal, and no busy answer: a 5xx or 429 with its status is
+ * runBusy's) is asked, on its harness's structured error (usage.mjs providerError): a provider or network failure with
+ * no status (`providerOutage`: a connection it could not make, a timeout) is a cut, and the provider's API is probed only
+ * to know whether to wait for it before the pass runs again; a 4xx (the provider answered and said why: answeredError) is
+ * no cut, and nothing probes. Any other pass (no structured error at all: a harness that prints a 5xx or a lost
+ * connection as prose only, a crash; or one with no status that names no outage) is a cut exactly when, while it ran,
+ * this process met an outage on its provider's host or lost a host to this machine's network, or when its provider's API
+ * does not answer a probe now (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a pass
+ * while a host it gave up on still does not answer (network.mjs givenUp) runs no more: it throws that outage, which the
+ * stage ends on (session.mjs outageExit). With every such host answering again, it is judged as any other would be.
  */
 async function outageCut(rec, { harness, env }) {
   if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.busy || rec.noRun) return null;
+  if (!rec.providerOutage && answeredError(rec.providerError)) return null;
   const gaveUp = stoppedWaiting();
   if (gaveUp) {
     const down = await givenUp();
@@ -1089,7 +1125,7 @@ async function outageCut(rec, { harness, env }) {
   if (!gaveUp && !waitingOutages()) return null;
   const ended = Number.isFinite(Date.parse(rec.ended)) ? Date.parse(rec.ended) : Date.now();
   const started = Number.isFinite(Date.parse(rec.started)) ? Date.parse(rec.started) : ended;
-  return passCutOff(started, ended, [providerOrigin(harness, env), githubOrigin()]);
+  return passCutOff(rec.providerOutage ?? null, providerOrigin(harness, env), { startedMs: started, endedMs: ended });
 }
 
 /**
@@ -1280,12 +1316,15 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const metered = meterPass(live, { session: resume || null, label, harness, model: model || null });
   if (eventsFile && !STAGE_SPEND.dir) Object.assign(STAGE_SPEND, { dir: dirname(eventsFile), harness });
   relay?.beginPass(maxUsd, live.usd);
+  // What the harness has in flight, from its own stream: the hung check names it.
+  const activity = harnessActivity();
   const lines = (l) => {
     live.line(l);
+    activity.feed(l);
     onLine?.(l);
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd, childEnv), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
@@ -1382,7 +1421,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     rec.error = rec.error || "wall clock reached";
   } else if (r.idle) {
     rec.ok = false;
-    rec.error = `no output from the harness for ${Math.round(idleMs / 60000)} min; killed`;
+    const min = Math.round(idleMs / 60000);
+    rec.error = r.idleOpen ? `hung: no output for ${min} min with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open and no CPU or I/O by its commands; killed` : `hung: no output for ${min} min with no command open, so its model stream stalled; killed`;
   } else if (r.code !== 0 && rec.ok) {
     rec.ok = false;
     rec.error = `${cmd} exited ${r.code ?? r.signal}`;

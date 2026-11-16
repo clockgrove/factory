@@ -96,6 +96,20 @@ Rules:
 - **The key never leaves Factory's process.** On Actions it is the `ai_gateway_api_key` input; locally only the file `~/.config/factory/ai-gateway-key`. `scrubbedEnv` keeps it out of every child.
 - **Doctor names the decider** (`decision calls`): the gateway's models, the stage's harness with the key's code, or off. A local key file Factory refuses is a warning.
 
+## GitHub status
+
+Contract: `plugin/scripts/lib/adapters/github-status.mjs`. Vendor: GitHub's status page, githubstatus.com, an Atlassian Statuspage read through its public v2 JSON API (`/api/v2/summary.json`, plain `fetch`, no key, no SDK). `GITHUB_STATUS_URL` sets its base URL, as `GITHUB_API_URL` does the API's; unset, githubstatus.com speaks only for GitHub.com (`GITHUB_API_URL` unset or `https://api.github.com`), so GitHub Enterprise Server and GHE.com get no reading. Used by `serve` for an Objective paused on GitHub answering 5xx past the client's retries (LOCAL.md).
+
+| Operation | Does |
+| --- | --- |
+| `githubStatus()` → `{state, components, incidents, maintenances, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, when the page lists an unresolved incident (any status but `resolved` or `postmortem`) that affects one of those components or names none (one with no `components` list counts, and its name in the log says so), or when a scheduled maintenance is `in_progress`; `operational` when none of that holds; null when the page cannot say: no page for this GitHub host, no answer, no JSON, or one of the components missing. `error` is then the reason as a code (`no page`, `HTTP 503`, a connect-level code, `no answer`, `invalid`, `missing <name>`). Never throws. |
+
+Rules:
+
+- **Decided on the components' `status`, the incidents' and maintenances' `status` fields**, never on an incident's words.
+- **A component missing is Factory's contract with the page breaking**: logged as such, once per pause, and waited on as an incident.
+- **A page that cannot be read counts as an incident**: Factory waits on within its bound rather than Block on a guess.
+
 ## Codex model provider
 
 Contract: Codex's own model-provider configuration, set by flags (`lib/harness.mjs` `codexGatewayArgs`), so no Factory module talks to the vendor. Vendors: the direct OpenAI API (`CODEX_API_KEY`) and the Vercel AI Gateway (`FACTORY_CODEX_GATEWAY_KEY`, the `codex_gateway_key` input; it wins when both are set). A second gateway is another provider block and key name beside these.

@@ -1,7 +1,9 @@
 // One machine's room for Factory's local stages, shared by every local loop on it (serve and run, any repository, any
 // harness login): the machine's stage budget, the slots its loops hold against it, and how loaded the machine is now.
 // Both live under the user's ~/.cache/factory, which no sandbox may write:
-//   machine.json   {"stages": N}: the budget, set once per machine; without it, from the machine's size (defaultStages)
+//   machine.json   {"stages": N}: the budget, set once per machine; without it, from the machine's size (defaultStages);
+//                  beside it the machine's limits (machineLimits): when it counts as saturated, and how long a usage
+//                  limit with no reset passes an account over
 //   slots/         numbered slots, each a file <slot>.<generation>.json: its holder's process record (pid, start time,
 //                  boot) and what it runs (repository, issue, stage), or {"free": true} once let go
 // A slot's highest generation says who holds it. Taking a slot is creating its next generation, which the file system
@@ -14,6 +16,8 @@ import { linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, sta
 import { availableParallelism, homedir, loadavg, totalmem } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { writeNew } from "./fsafe.mjs";
+import { SPENT_GUESS_MS } from "./holds.mjs";
+import { GUESS_MAX_HOURS, guessHoursValid } from "./inputs.mjs";
 import { processRecord, sameProcess, startTime } from "./proc.mjs";
 
 const GB = 2 ** 30;
@@ -30,22 +34,77 @@ export const defaultStages = ({ cpus = availableParallelism(), memBytes = totalm
  * cannot be read or is no positive whole number gives the default, with `problem` saying why.
  */
 export function machineBudget({ home = homedir(), cpus = availableParallelism(), memBytes = totalmem() } = {}) {
+  const fallback = { stages: defaultStages({ cpus, memBytes }), from: "default", file: machineFile(home), cpus, memBytes };
+  const { data, problem } = readMachine(home);
+  if (problem) return { ...fallback, problem };
+  const stages = data?.stages;
+  if (stages === undefined) return fallback;
+  if (!Number.isSafeInteger(stages) || stages < 1) return { ...fallback, problem: `${fallback.file}: "stages" is not a positive whole number` };
+  return { ...fallback, stages, from: "setting" };
+}
+
+/** machine.json as `{data}` (null when there is none), or `{problem}` when it cannot be read or is not a JSON object. */
+function readMachine(home) {
   const file = machineFile(home);
-  const fallback = { stages: defaultStages({ cpus, memBytes }), from: "default", file, cpus, memBytes };
   let raw;
   try {
     raw = readFileSync(file, "utf8");
   } catch (e) {
-    return e?.code === "ENOENT" ? fallback : { ...fallback, problem: `${file} cannot be read (${e?.code || "error"})` };
+    return e?.code === "ENOENT" ? { data: null } : { problem: `${file} cannot be read (${e?.code || "error"})` };
   }
-  let stages;
   try {
-    stages = JSON.parse(raw)?.stages;
+    const data = JSON.parse(raw);
+    return data && typeof data === "object" && !Array.isArray(data) ? { data } : { problem: `${file} is not a JSON object` };
   } catch {
-    return { ...fallback, problem: `${file} is not JSON` };
+    return { problem: `${file} is not JSON` };
   }
-  if (!Number.isSafeInteger(stages) || stages < 1) return { ...fallback, problem: `${file}: "stages" is not a positive whole number` };
-  return { ...fallback, stages, from: "setting" };
+}
+
+/** machine.json's names for PRESSURE's limits (`available_gb` in GB, memAvailable in bytes), each a number above 0. */
+const PRESSURE_KEYS = { cpu_psi: "cpuPsi", load: "load", memory_psi: "memPsi", available_gb: "memAvailable" };
+
+/**
+ * The machine's limits a person owns, from machine.json beside `stages`: `pressure` (an object of PRESSURE_KEYS's
+ * names, each optional) is when the machine counts as saturated (saturation); `guess_hours` (a list of hours, each
+ * above 0 and at most inputs.mjs GUESS_MAX_HOURS) is how long automatic account choice passes over an account whose usage limit reported no reset, by how
+ * many in a row (holds.mjs SPENT_GUESS_MS). Returns `{pressure, guessMs, from: {pressure, guess}, file, problems}`:
+ * a value that is not given, or cannot be used (named in `problems`), is Factory's default.
+ */
+export function machineLimits({ home = homedir() } = {}) {
+  const file = machineFile(home);
+  const { data, problem } = readMachine(home);
+  const problems = problem ? [problem] : [];
+  const pressure = { ...PRESSURE };
+  const from = { pressure: "default", guess: "default" };
+  const given = data?.pressure;
+  if (given !== undefined && (!given || typeof given !== "object" || Array.isArray(given))) problems.push(`${file}: "pressure" is not an object`);
+  else if (given) {
+    for (const [k, v] of Object.entries(given)) {
+      const to = Object.hasOwn(PRESSURE_KEYS, k) ? PRESSURE_KEYS[k] : null;
+      if (!to) problems.push(`${file}: "pressure" has no limit "${k}" (${Object.keys(PRESSURE_KEYS).join(", ")})`);
+      else if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) problems.push(`${file}: "pressure.${k}" is not a number above 0`);
+      else {
+        pressure[to] = to === "memAvailable" ? v * GB : v;
+        from.pressure = "setting";
+      }
+    }
+  }
+  let guessMs = SPENT_GUESS_MS;
+  const hours = data?.guess_hours;
+  if (hours !== undefined) {
+    if (!guessHoursValid(hours)) problems.push(`${file}: "guess_hours" is not a list of hours, each above 0 and at most ${GUESS_MAX_HOURS}`);
+    else {
+      guessMs = hours.map((h) => h * 3600_000);
+      from.guess = "setting";
+    }
+  }
+  return { pressure: Object.freeze(pressure), guessMs, from, file, problems };
+}
+
+/** The limits in force as one line, for doctor: when the machine counts as saturated, and the no-reset guess's steps. */
+export function limitsLine({ pressure, guessMs }) {
+  const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
+  return `saturated at CPU pressure ${pressure.cpuPsi}% over a minute (without PSI, a load of ${pressure.load} per CPU thread), memory pressure ${pressure.memPsi}%, or under ${gb(pressure.memAvailable)} memory available; a usage limit with no reset passes its account over for ${guessMs.map(h).join(", ")} by how many in a row`;
 }
 
 /**
@@ -376,9 +435,10 @@ export function saturation(p, limits = PRESSURE) {
  * `running`: the stages this loop holds; `cap`: its own cap (loopCap). Room is what the machine's budget and the loop's
  * cap leave, and none while the machine is saturated; but a loop that holds no stage may always start one (`force`),
  * so no loop waits forever behind the others or behind work outside Factory. `why` says what holds starts, or null.
+ * `limits`: when the machine counts as saturated (machineLimits's `pressure`).
  */
-export function machineRoom({ running, cap, budget, held, pressure }) {
-  const sat = saturation(pressure);
+export function machineRoom({ running, cap, budget, held, pressure, limits = PRESSURE }) {
+  const sat = saturation(pressure, limits);
   const free = Math.max(0, budget - held);
   const mine = Math.max(0, cap - running);
   let room = sat ? 0 : Math.min(free, mine);

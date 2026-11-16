@@ -12,6 +12,7 @@
 // through to the env block rather than overriding it with "".
 import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { HOLD_MAX_MS } from "./holds.mjs";
 
 /**
  * Per-harness model defaults (Kirk, Nov 3: Opus high worker, Sonnet implementers, Fable reviewer; Opus xhigh when Fable's
@@ -42,6 +43,8 @@ export const DEFAULTS = {
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
   max_concurrent: "3",
   sibling_hold: "on", // on | off: a hand-off to review waits for a sibling on the same files (lib/overlap.mjs)
+  rebase_limit: "5", // send-backs for a rebase one Objective gets in 24 h before it Blocks (logic.mjs staleDecision)
+  guess_hours: "1, 4, 24", // how long automatic account choice passes over an account whose usage limit reported no reset, by how many in a row (holds.mjs spent)
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
@@ -56,6 +59,7 @@ export const DEFAULTS = {
   protected_paths: "",
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
+  third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
@@ -169,7 +173,7 @@ export function workflowSettings(wf = {}) {
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
-    ...["THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
+    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
   ].map((n) => `FACTORY_${n}`),
 );
@@ -208,6 +212,13 @@ export function variableSettings(vars = {}) {
   return { kept, excluded: excluded.sort(), unknown: unknown.sort(), invalid: invalid.sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
+/** The longest third-party wait (third_party_wait_minutes), and the most a wait record's `minutes` is taken as. */
+export const THIRD_PARTY_WAIT_MAX_MINUTES = 24 * 60;
+/** The longest step of the no-reset guess (guess_hours): the longest hold a record keeps (holds.mjs HOLD_MAX_MS). */
+export const GUESS_MAX_HOURS = HOLD_MAX_MS / 3600_000;
+/** Whether `hours` (numbers) is a usable guess: at least one step, each above 0 and at most GUESS_MAX_HOURS. */
+export const guessHoursValid = (hours) => Array.isArray(hours) && hours.length > 0 && hours.every((h) => typeof h === "number" && Number.isFinite(h) && h > 0 && h <= GUESS_MAX_HOURS);
+
 const number = (v) => v.trim() !== "" && Number.isFinite(Number(v));
 /**
  * What a variable's value must be for Factory to take it as given (#284), where the env block's parsing would fall back
@@ -222,6 +233,7 @@ const VALUE_RULES = (() => {
   return {
     FACTORY_HARNESS: oneOf("claude", "codex", "copilot"),
     FACTORY_MAX_CONCURRENT: whole,
+    FACTORY_REBASE_LIMIT: whole,
     FACTORY_LOCAL_MAX_CONCURRENT: whole,
     FACTORY_COMPACTION_WINDOW: whole,
     FACTORY_DAILY_USD: atLeast0,
@@ -230,6 +242,8 @@ const VALUE_RULES = (() => {
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
+    FACTORY_THIRD_PARTY_WAIT_MINUTES: [(v) => number(v) && Number(v) > 0 && Number(v) <= THIRD_PARTY_WAIT_MAX_MINUTES, `a number above 0, at most ${THIRD_PARTY_WAIT_MAX_MINUTES} (24 hours)`],
+    FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, `a list of hours, each a number above 0, at most ${GUESS_MAX_HOURS}`],
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
@@ -239,6 +253,15 @@ const VALUE_RULES = (() => {
     FACTORY_IMAGE_REFRESH: oneOf("merge", "nightly"),
   };
 })();
+/**
+ * A `guess_hours` value as milliseconds: a list of hours, comma or space separated, each a number above 0 and at most
+ * GUESS_MAX_HOURS (the same rule as machine.json's `guess_hours`, machine.mjs machineLimits); null when it is not one.
+ */
+export function guessHoursMs(value) {
+  const hours = String(value ?? "").split(/[\s,]+/).filter(Boolean).map(Number);
+  return guessHoursValid(hours) ? hours.map((h) => h * 3600_000) : null;
+}
+
 /** Why a variable's value for setting `name` is not taken (VALUE_RULES), or null. */
 export const valueProblem = (name, value) => (VALUE_RULES[name] && !VALUE_RULES[name][0](value) ? `not ${VALUE_RULES[name][1]}` : null);
 
@@ -467,6 +490,11 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
   };
+  // A limit that must be above 0: anything else is its default.
+  const above0 = (v, fallback) => {
+    const n = num(String(v).trim() || "x", fallback);
+    return n > 0 ? n : fallback;
+  };
   const list = (v) =>
     String(v || "")
       .split(/\r?\n|,/)
@@ -493,6 +521,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     credential: get("credential").toLowerCase(),
     maxConcurrent: num(get("max_concurrent"), 3),
     siblingHold: (get("sibling_hold") || "on").trim().toLowerCase() !== "off",
+    rebaseLimit: Math.floor(above0(get("rebase_limit"), 5)) || 5,
+    guessMs: guessHoursMs(get("guess_hours")) ?? guessHoursMs(DEFAULTS.guess_hours),
     // Who answers the decision calls (decider.mjs): any other value reads as the default, `auto`.
     decisionRoute: ((v) => (["auto", "gateway", "off"].includes(v) ? v : "auto"))((get("decision_route") || "auto").trim().toLowerCase()),
     dailyUsd: num(get("daily_usd"), 100),
@@ -511,6 +541,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     protectedAdditions: list(get("protected_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
+    thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,
     harnessVersion: get("harness_version"),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),

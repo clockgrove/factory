@@ -1595,8 +1595,9 @@ export function acceptanceEntries(body) {
 
 // ------------------------------------------------------- no-queue fallback
 
-/** Send-backs for a rebase one Objective gets in REBASE_WINDOW_MS before it Blocks: a batch of five parallel Objectives
- * on one area has at most four siblings merging ahead of it, plus one merge from outside the batch. */
+/** Send-backs for a rebase one Objective gets in REBASE_WINDOW_MS before it Blocks, by default (the rebase_limit setting):
+ * a batch of five parallel Objectives on one area has at most four siblings merging ahead of it, plus one merge from
+ * outside the batch. */
 export const REBASE_LIMIT = 5;
 export const REBASE_WINDOW_MS = 24 * 3600_000;
 
@@ -1611,10 +1612,10 @@ export const REBASE_WINDOW_MS = 24 * 3600_000;
  * "rebase" sends it back to a worker job, again each time other PRs merged since its last rebase (a new base is
  * progress). It Blocks only when rebasing cannot progress: "stuck" (`stuck`, session.mjs rebaseMarkers: the default
  * branch is still the base the last rebase resolved a conflict against, and the branch still conflicts with it), or
- * "limit" (`rebases`: REBASE_LIMIT send-backs that pushed in REBASE_WINDOW_MS, so two Objectives cannot chase each
- * other forever). "ignore" covers drafts, clean and unknown states.
+ * "limit" (`rebases`: `limit` send-backs that pushed in REBASE_WINDOW_MS, the rebase_limit setting, so two Objectives
+ * cannot chase each other forever). "ignore" covers drafts, clean and unknown states.
  */
-export function staleDecision({ pr, rebases = 0, stuck = null, queue = false, reviewing = false, reviewRunning = false }) {
+export function staleDecision({ pr, rebases = 0, stuck = null, queue = false, reviewing = false, reviewRunning = false, limit = REBASE_LIMIT }) {
   if (!pr || pr.draft) return "ignore";
   // A review job is running on it (the label comes off at that job's exit): its answer pass may
   // push and its own validation decides; a send-back now would race it (two jobs on one branch).
@@ -1625,7 +1626,7 @@ export function staleDecision({ pr, rebases = 0, stuck = null, queue = false, re
   if (!stale) return "ignore";
   if (!queue && pr.mergeable_state === "behind") return "update";
   if (stuck) return "stuck";
-  return rebases >= REBASE_LIMIT ? "limit" : "rebase";
+  return rebases >= limit ? "limit" : "rebase";
 }
 
 /** At most this many conflicting files go into a rebase record (ontoRecord) and its Block. */
@@ -1665,13 +1666,13 @@ export function conflictFiles(files = []) {
 /**
  * Why a send-back Blocks (staleDecision): "stuck" with the record whose conflict came back on the same base, or
  * "limit" with the last record seen (its files, when there is one). `behind`: the PR only fell behind (no merge queue)
- * and GitHub's update-branch refused it, so it is said as behind, not conflicting.
+ * and GitHub's update-branch refused it, so it is said as behind, not conflicting. `limit`: the rebase_limit in force.
  */
-export function rebaseBlockReason(why, { record = null, defaultBranch = "main", behind = false } = {}) {
+export function rebaseBlockReason(why, { record = null, defaultBranch = "main", behind = false, limit = REBASE_LIMIT } = {}) {
   const against = behind ? `is behind \`${defaultBranch}\`` : `conflicts with \`${defaultBranch}\``;
   if (why === "stuck") return `rebasing makes no progress: the branch still ${against} at ${String(record?.base).slice(0, 7)}, the base the worker's last rebase resolved a conflict against (in ${conflictFiles(record?.files)})`;
   const last = record ? ` (last conflict: ${conflictFiles(record.files)})` : "";
-  return `the branch was rebased ${REBASE_LIMIT} times in 24 h as other PRs merged, and it ${against} again${behind ? " with GitHub unable to update it" : ""}${last}: these Objectives keep overlapping. Order them (\`blocked_by\`) or set \`max_concurrent: 1\` for the stretch`;
+  return `the branch was rebased ${limit} times in 24 h as other PRs merged, and it ${against} again${behind ? " with GitHub unable to update it" : ""}${last}: these Objectives keep overlapping. Order them (\`blocked_by\`) or set \`max_concurrent: 1\` for the stretch`;
 }
 
 /**

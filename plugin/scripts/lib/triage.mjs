@@ -908,13 +908,14 @@ export function triageLine({ sha, model, jobs, outcome }) {
 /**
  * Triage. `token` reads the issue and the PR; `actionsToken` reads the jobs and reruns them: on Actions the job token
  * (workflow-template.yml gives the work and review jobs actions: write), locally the repository token (Actions: read
- * and write). `progress` is the run's progressReporter. `red({sha, failedRuns, required})` returns {rerun, ignoreIds,
- * jobs}. The model is the decider's (decider.mjs openDecider): the AI Gateway's `triage_model` with a key, else the
- * stage's own harness (`stage`: its harness, model, env and usage record) on its login. With neither (`off` is the key's
- * code why) every red goes to the fix pass, and the first says so, once per stage.
- * `again({sha, failedRuns})`, with or without a key: the failed jobs rerun once on a head a fix pass left unchanged,
- * no model asked, unless the red reads as the change's (session.mjs validationLoop); returns {rerun, ignoreIds} or why
- * not ({already}, {refused}, {skipped}).
+ * and write). `progress` is the run's progressReporter. `red({sha, failedRuns, required, until})` returns {rerun,
+ * ignoreIds, jobs}; `until` (ms) bounds its wait for a workflow run still in progress, which must complete before its
+ * failed jobs can be rerun. The model is the decider's (decider.mjs openDecider): the AI Gateway's `triage_model` with a
+ * key, else the stage's own harness (`stage`: its harness, model, env and usage record) on its login. With neither
+ * (`off` is the key's code why) every red goes to the fix pass, and the first says so, once per stage.
+ * `again({sha, failedRuns, until})`, with or without a key: the failed jobs rerun once on a head a fix pass left
+ * unchanged, no model asked, unless the red reads as the change's (session.mjs validationLoop); returns {rerun,
+ * ignoreIds} or why not ({already}, {refused}, {skipped}).
  * `infra({sha, failedRuns})`: whether every failed job failed on GitHub's side (set-up or checkout, a server or network
  * failure, naming nothing the PR changes).
  */
@@ -951,10 +952,11 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return { jobs };
   };
   // The failed jobs of each workflow run rerun once. Returns null when rerun, else the refusal (recorded) or the run not
-  // completed (its line for the caller to record). `outcome(why)` words the line.
-  const rerunRuns = async (runIds, outcome) => {
-    // Rerun-failed-jobs needs each workflow run completed; a run still going after ten minutes is left alone.
-    for (const id of runIds) if (!(await waitRunCompleted(repo, id, actions))) return { incomplete: id, line: outcome(`workflow run ${id} did not complete`) };
+  // completed (its line for the caller to record). `outcome(why)` words the line. `until` (ms): how long the caller's
+  // checks wait and its stage's wall clock allow.
+  const rerunRuns = async (runIds, outcome, until) => {
+    // Rerun-failed-jobs needs each workflow run completed: one still going is waited for while it runs, up to `until`.
+    for (const id of runIds) if (!(await waitRunCompleted(repo, id, { ...actions, until }))) return { incomplete: id, line: outcome(`workflow run ${id} did not complete`) };
     for (const id of runIds) {
       try {
         await rest(`repos/${repo.full}/actions/runs/${id}/rerun-failed-jobs`, { ...actions, method: "POST", body: {} });
@@ -1011,7 +1013,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     return { rerun: false };
   };
 
-  const red = async ({ sha, failedRuns = [], required = [] }) => {
+  const red = async ({ sha, failedRuns = [], required = [], until = 0 }) => {
     const no = { rerun: false };
     if (!failedRuns.length) return no;
     const seen = await known();
@@ -1039,7 +1041,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       await record(triageLine({ sha, model, jobs, outcome: "fix pass" }), {});
       return no;
     }
-    const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})` }));
+    const failed = await rerunRuns(runIds, (why) => triageLine({ sha, model, jobs, outcome: `fix pass (${why})` }), until);
     if (failed?.line) await record(failed.line, {});
     // What the Block says when this red is the last (session.mjs validationLoop, refusedRerunText): every job's
     // verdict and failure line, and the refusal.
@@ -1115,7 +1117,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // says the change caused the red: no change_caused verdict on this head, no failure pointing at a file the PR changes, no
   // failure signature already rerun on the Objective, and each job either answered by the model on this head or failed
   // on GitHub's side. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
-  const again = async ({ sha, failedRuns = [] }) => {
+  const again = async ({ sha, failedRuns = [], until = 0 }) => {
     const short = String(sha).slice(0, 7);
     if (!failedRuns.length) return { rerun: false, skipped: "no failed job" };
     if (failedRuns.length > MAX_JOBS) return { rerun: false, skipped: `${failedRuns.length} failing jobs, more than ${MAX_JOBS}` };
@@ -1138,7 +1140,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       if (!answered.has(r.name) && !(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sig, names))) return { rerun: false, skipped: `${r.name} has no triage verdict and did not fail on GitHub's side` };
     }
     const line = (outcome) => `triage: the fix pass committed nothing, so the red on ${short} is unchanged → ${outcome}`;
-    const failed = await rerunRuns(new Set([...jobs.values()].map((j) => j.run_id)), line);
+    const failed = await rerunRuns(new Set([...jobs.values()].map((j) => j.run_id)), line, until);
     if (failed?.refusal) return { rerun: false, refused: { ...failed.refusal, unchanged: true } };
     if (failed) {
       await record(failed.line, {});
@@ -1164,12 +1166,18 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   return { model, red, again, infra, classify };
 }
 
-async function waitRunCompleted(repo, id, { token, timeoutMs = 10 * 60_000, pollMs = 20_000 }) {
-  const until = Date.now() + timeoutMs;
+/** How often a workflow run that must complete before its rerun is read. */
+const RUN_POLL_MS = 20_000;
+
+/**
+ * Whether workflow run `id` completed: its status read until it is `completed`, while it is not and `until` (ms) is
+ * ahead. A run whose read fails is read again, within the same bound.
+ */
+async function waitRunCompleted(repo, id, { token, until = 0, pollMs = RUN_POLL_MS }) {
   for (;;) {
     const run = await rest(`repos/${repo.full}/actions/runs/${id}`, { token }).catch(() => null);
     if (run?.status === "completed") return true;
-    if (Date.now() > until) return false;
-    await new Promise((r) => setTimeout(r, pollMs));
+    if (!(Date.now() < until)) return false;
+    await new Promise((r) => setTimeout(r, Math.min(pollMs, until - Date.now())));
   }
 }

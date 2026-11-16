@@ -771,7 +771,15 @@ test("queue red: a roll-up with no failure line of its own is left out of the qu
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0][0], "test");
   assert.equal(jobs[0][1], "aaaaaaaaaaaa");
-  assert.match(jobs[0][2], /^[0-9a-f]{12}$/, "the failure lines' digest");
+  assert.match(jobs[0][2], /^[0-9a-f]{12}$/, "the folded failure lines' digest");
+  // The record's digest counts folded lines: durations fold away, how many failures do not.
+  const { failureSignature } = await import("../scripts/lib/triage.mjs");
+  const of = (lines) => queueJobs([{ name: "test", sig: failureSignature("test", lines.join("\n")) }])[0];
+  const three = of(["✖ parses row 1 (2.1ms)", "✖ parses row 2 (3.4ms)", "✖ parses row 3 (0.9ms)"]);
+  assert.deepEqual(of(["✖ parses row 1 (1.7ms)", "✖ parses row 2 (4.2ms)", "✖ parses row 3 (1.1ms)"]), three, "only durations changed: the same");
+  const one = of(["✖ parses row 3 (1.3ms)"]);
+  assert.equal(one[1], three[1], "one class");
+  assert.notEqual(one[2], three[2], "three failures are not one");
 });
 
 test("queue red: with no decision model, a new failure of the same job after a fix pass is no progress and Blocks (#399)", async () => {

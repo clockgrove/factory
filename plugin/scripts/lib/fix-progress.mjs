@@ -2,8 +2,8 @@
 // fix pass only when that pass made progress on the red it was handed. There is no count of passes: what bounds the loop
 // is the owner's max_usd and the stage's wall clock (the queue's, its Objective's re-entries), and within them a pass
 // judged to make no progress ends it. Exact checks first (redProgress): a pass that committed nothing is no progress;
-// the same jobs failing with the same failure lines as logged, or a red the stage has seen before, is none; the jobs
-// that failed now passing, with a different set or fewer failing, is progress. Anything else asks the decision model,
+// the same jobs failing with the same failure lines (folded, each as many times), or a red the stage has seen before
+// (by signature), is none; the jobs that failed now passing, with a different set or fewer failing, is progress. Anything else asks the decision model,
 // through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's key, model setting and
 // confidence floor: only `closer` at MIN_CONFIDENCE or more is progress, so a model that keeps answering `closer` is
 // bounded by max_usd and the wall clock alone. No decider is no progress; a decider that gives no answer leaves the
@@ -13,7 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, sameFailure } from "./triage.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL, foldLine, sameFailure } from "./triage.mjs";
 
 /** The one question asked when the exact checks cannot tell. */
 export const PROGRESS_QUESTION = {
@@ -42,35 +42,46 @@ export const redNames = (red) => [...new Set((red?.jobs || []).map((j) => j.name
 
 /**
  * A job's failure as the progress check compares it, from its signature (triage.mjs failureSignature): `id` the folded
- * class, `raw` a digest of its failure lines as logged (the fold turns every digit into 0, so the class alone cannot tell
- * three failing tests from one). Null when the job has no failure line. A record keeps it as [name, id, raw].
+ * class, `folds` a digest of its failure lines folded (triage.mjs foldLine: paths, hashes and numbers, so durations,
+ * folded) with a count per folded line. The class is a set, so it cannot tell three failing tests from one; the counts
+ * can, and a duration that differs still matches. Null when the job has no failure line. A record keeps it as [name, id,
+ * folds].
  */
 export function signed(sig) {
   if (!sig?.id) return null;
-  const raw = sig.raw ?? (Array.isArray(sig.lines) ? createHash("sha256").update(sig.lines.join("\n")).digest("hex").slice(0, 12) : null);
-  return { id: sig.id, raw, ...(sig.line ? { line: sig.line } : {}) };
+  return { id: sig.id, folds: sig.folds ?? (Array.isArray(sig.lines) ? foldCounts(sig.lines) : null), ...(sig.line ? { line: sig.line } : {}) };
 }
 
-// One name's failures in two reds: the same when every one is signed and, in order of class and lines, each pair has the
-// same class (sameFailure) and the same lines as logged. `byName`: two unsigned ones under that name count as the same
-// too (the seen check).
-const sameUnder = (a, b, byName = false) => {
-  const keys = (xs) => xs.map((j) => signed(j.sig)).sort((p, q) => `${p?.id}/${p?.raw}`.localeCompare(`${q?.id}/${q?.raw}`));
+/** The digest of failure lines as a multiset of folded lines: each folded line with how many times it is logged. */
+export function foldCounts(lines) {
+  const counts = new Map();
+  for (const l of lines) counts.set(foldLine(l), (counts.get(foldLine(l)) ?? 0) + 1);
+  const text = [...counts].map(([l, n]) => `${n}\t${l}`).sort().join("\n");
+  return createHash("sha256").update(text).digest("hex").slice(0, 12);
+}
+
+// One name's failures in two reds: the same when every one is signed and, in order of class and counts, each pair has
+// the same class (sameFailure) and the same folded lines as many times. `seen`: the class alone decides, and two unsigned
+// ones under that name count as the same too (a red that comes back, durations and all, is the same red).
+const sameUnder = (a, b, seen = false) => {
+  const key = (k) => `${k?.id}/${seen ? "" : k?.folds}`;
+  const keys = (xs) => xs.map((j) => signed(j.sig)).sort((p, q) => key(p).localeCompare(key(q)));
   const x = keys(a);
   const y = keys(b);
   if (x.length !== y.length) return false;
-  if (byName && x.every((k) => !k) && y.every((k) => !k)) return true;
-  return x.every((k, i) => !!k?.raw && !!y[i]?.raw && sameFailure(k, y[i]) && k.raw === y[i].raw);
+  if (seen && x.every((k) => !k) && y.every((k) => !k)) return true;
+  return x.every((k, i) => !!k && !!y[i] && sameFailure(k, y[i]) && (seen || (!!k.folds && k.folds === y[i].folds)));
 };
 
 /**
- * Whether two reds are the same red: the same failing names, each failing with the same signature and the same failure
- * lines as logged. `byName`: names with no signature on either side match by name alone (the seen check).
+ * Whether two reds are the same red: the same failing names, each failing with the same signature and the same folded
+ * failure lines as many times. `seen`: by signature alone, and names with no signature on either side by name (the
+ * check against the reds the stage has seen).
  */
-export function sameRed(a, b, { byName = false } = {}) {
+export function sameRed(a, b, { seen = false } = {}) {
   const x = new Set(redNames(a));
   const y = redNames(b);
-  return y.length > 0 && y.length === x.size && y.every((n) => x.has(n) && sameUnder(a.jobs.filter((j) => j.name === n), b.jobs.filter((j) => j.name === n), byName));
+  return y.length > 0 && y.length === x.size && y.every((n) => x.has(n) && sameUnder(a.jobs.filter((j) => j.name === n), b.jobs.filter((j) => j.name === n), seen));
 }
 
 /** What a reason calls a red: where it was seen (`at`) and what failed. */
@@ -91,7 +102,7 @@ export function redProgress(before, after, seen = []) {
   const now = redNames(after);
   if (!was.length || !now.length) return null;
   if (sameRed(before, after)) return { progress: false, why: "the same jobs fail with the same failure lines" };
-  const back = seen.find((r) => r !== before && sameRed(r, after, { byName: true }));
+  const back = seen.find((r) => r !== before && sameRed(r, after, { seen: true }));
   if (back) return { progress: false, why: `it brought back the red of ${named(back)}, failing the same way, after the red it was handed (${named(before)})` };
   const passed = new Set(after.passed || []);
   const gone = was.filter((n) => !now.includes(n));

@@ -55,6 +55,34 @@ test("redProgress: the same signature with other failure lines as logged is not 
   }
 });
 
+test("redProgress with durations in the failure lines: A again with only its durations changed is the same red; A, B, then A Blocks; 3 failures to 1 goes to the decision model (#399 review)", async () => {
+  const { failureSignature } = await import("../scripts/lib/triage.mjs");
+  const node = (ms) => [`✖ parses row 1 (${ms[0]}ms)`, `✖ parses row 2 (${ms[1]}ms)`, `✖ parses row 3 (${ms[2]}ms)`];
+  const go = (s) => ["--- FAIL: TestParse (0.02s)", `    --- FAIL: TestParse/case_1 (${s[0]}s)`, `    --- FAIL: TestParse/case_2 (${s[1]}s)`, `    --- FAIL: TestParse/case_3 (${s[2]}s)`, "FAIL"];
+  const cases = {
+    node: [node([2.1, 3.4, 0.9]), node([1.7, 4.2, 1.1]), [`✖ parses row 3 (1.3ms)`]],
+    go: [go(["0.01", "0.00", "0.03"]), go(["0.02", "0.01", "0.00"]), ["--- FAIL: TestParse (0.01s)", "    --- FAIL: TestParse/case_2 (0.04s)", "FAIL"]],
+  };
+  const lint = { ...red("2", ["lint", failureSignature("lint", "src/a.js\n  3:7  error  'x' is not defined  no-undef")]), at: "validation pass 2 on 2222222" };
+  for (const [kind, [first, again, one]] of Object.entries(cases)) {
+    const a = { ...red("1", ["test", failureSignature("test", first.join("\n"))]), at: "validation pass 1 on 1111111" };
+    const a2 = { ...red("3", ["test", failureSignature("test", again.join("\n"))]), at: "validation pass 3 on 3333333", passed: ["lint"] };
+    assert.notDeepEqual(a.jobs[0].sig.lines, a2.jobs[0].sig.lines, `${kind}: the durations differ as logged`);
+    // A, then A with only its durations changed: the same red, never a question.
+    assert.deepEqual(redProgress(a, { ...a2, passed: [] }), { progress: false, why: "the same jobs fail with the same failure lines" }, kind);
+    // A, B, then A again: lint passed on A's return, which alone would read as progress; A was seen.
+    assert.deepEqual(redProgress(lint, a2, [a, lint]), { progress: false, why: `it brought back the red of validation pass 1 on 1111111: test, failing the same way, after the red it was handed (validation pass 2 on 2222222: lint)` }, kind);
+    // Three failures, then one of them left (its duration changed too): the decision model is asked.
+    const fewer = red("4", ["test", failureSignature("test", one.join("\n"))]);
+    assert.equal(fewer.jobs[0].sig.id, a.jobs[0].sig.id, `${kind}: one class`);
+    assert.equal(redProgress(a, fewer), null, `${kind}: 3 to 1 is not the same red`);
+    const asked = [];
+    const check = openProgressCheck({ inputs: {}, decider: { name: "fake", decide: async (input) => (asked.push(input), { verdict: "closer", confidence: 0.9 }) } });
+    assert.equal((await check.judge({ before: a, after: fewer })).progress, true);
+    assert.equal(asked.length, 1, `${kind}: asked`);
+  }
+});
+
 test("the progress question: closer at the confidence floor or more is progress; under it or not_closer is none; no answer leaves it unjudged, Factory's or the outage's", async () => {
   const before = red("a", ["test", sig("t1", "not ok 1 - parses the header")]);
   const after = red("b", ["test", sig("t2", "not ok 4 - writes the footer")]);

@@ -2782,7 +2782,7 @@ export function queueRedRecords(comments, issue) {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
       if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
       const count = (x) => (Number.isInteger(x) && x > 0 ? x : 0);
-      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id, raw]) => [name, typeof id === "string" ? id : null, typeof raw === "string" ? raw : null]) : null, lead: typeof v.lead === "string" ? v.lead.slice(0, QUEUE_LEAD_CHARS) : "", tries: count(v.tries), ends: Array.isArray(v.ends) ? v.ends.filter((e) => QUEUE_TRY_ENDS.includes(e)) : null, reads: count(v.reads) };
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id, folds]) => [name, typeof id === "string" ? id : null, typeof folds === "string" ? folds : null]) : null, lead: typeof v.lead === "string" ? v.lead.slice(0, QUEUE_LEAD_CHARS) : "", tries: count(v.tries), ends: Array.isArray(v.ends) ? v.ends.filter((e) => QUEUE_TRY_ENDS.includes(e)) : null, reads: count(v.reads) };
       const key = new Date(Date.parse(v.at)).toISOString();
       const had = byAt.get(key);
       const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 1_000_000 + r.tries * 10_000 + (r.ends?.length ?? 0) * 100 + r.reads;
@@ -2801,8 +2801,8 @@ const sameDrop = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) <= 60_000;
 export const writeQueueRed = (repo, issue, prNumber, rec, opts) => upsertComment(repo, issue, queueRedMarker(issue, rec.at), queueRedBody(issue, prNumber, rec), opts);
 
 /**
- * A queue red's failing jobs as its record keeps them for the progress check: [name, signature id, digest of its failure
- * lines as logged] (fix-progress.mjs signed; null for a job with no failure line), a roll-up with none of its own left
+ * A queue red's failing jobs as its record keeps them for the progress check: [name, signature id, digest of its folded
+ * failure lines with their counts] (fix-progress.mjs signed; null for a job with no failure line), a roll-up with none of its own left
  * out (reds.mjs `aggregate`: it only repeats the jobs it gathers).
  */
 export const queueJobs = (jobs) =>
@@ -2810,7 +2810,7 @@ export const queueJobs = (jobs) =>
     .filter((j) => !j.aggregate)
     .map((j) => {
       const x = signed(j.sig);
-      return [j.name, x?.id ?? null, x?.raw ?? null];
+      return [j.name, x?.id ?? null, x?.folds ?? null];
     });
 
 /** A failure class of the queue's red: the failing job's failure signature (triage.mjs failureSignature), else its name. */
@@ -2919,7 +2919,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   // with what passed on the queue's commit, and for a decision call the before-red's failure lines and the fix pass's own
   // commits (`diffStat(from, to)`: from the PR head that drop was of to this one's). A fix pass is recorded only once it
   // committed (recordQueueFix), so the heads are not compared.
-  const shape = (r, jobs, more = {}) => ({ head: "", at: `the merge queue's run red at ${r.at}`, jobs: jobs.map(([name, id, raw]) => ({ name, sig: id ? { id, raw } : null })), lead: r.lead || "", ...more });
+  const shape = (r, jobs, more = {}) => ({ head: "", at: `the merge queue's run red at ${r.at}`, jobs: jobs.map(([name, id, folds]) => ({ name, sig: id ? { id, folds } : null })), lead: r.lead || "", ...more });
   const last = fixes.at(-1);
   const judge = progressCheck?.judge ?? exactJudge;
   const diff = last?.jobs?.length && diffStat && last.head && pending.head ? await Promise.resolve(diffStat(last.head, pending.head)).catch(() => null) : null;

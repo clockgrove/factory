@@ -49,10 +49,9 @@ test("label names: every model in Factory's defaults and price tables fits GitHu
 });
 
 test("modelProblem: each harness runs only what it can within Factory's caps, decided before any spend", () => {
-  for (const m of ["claude-opus-5-5", "claude-sonnet-5-5[1m]", "opus", "fable"]) assert.equal(modelProblem("claude", m), null, m);
-  const gpt = modelProblem("claude", "gpt-6.1-sol");
-  assert.match(gpt.reason, /Claude Code runs Anthropic's Claude models, and `gpt-6.1-sol` is not one/);
-  assert.match(gpt.fix, /`factory:harness:codex` or `factory:harness:copilot`/);
+  // #418: Claude Code's API answers whether the login serves an id (a refusal before any token, usage.mjs
+  // providerRefusal), so no id is judged by its form here: a new family or alias runs, a wrong one Blocks on the refusal.
+  for (const m of ["claude-opus-5-5", "claude-sonnet-5-5[1m]", "opus", "fable", "opusplan", "gpt-6.1-sol", "us.anthropic.claude-opus-5-5"]) assert.equal(modelProblem("claude", m), null, m);
   for (const m of ["gpt-6.1-sol", "gpt-5.5-2026-04-23"]) assert.equal(modelProblem("codex", m), null, m);
   assert.match(modelProblem("codex", "gpt-9-nova").reason, /no row in Factory's Codex price table, so max_usd could not stop its runs/);
   assert.match(modelProblem("codex", "claude-opus-5-5").fix, /codex-prices\.json/);
@@ -79,11 +78,12 @@ test("chosenInputs: no label is the defaults; a harness label takes that harness
 });
 
 test("chosenInputs: a model the chosen harness cannot run is refused, naming the label and the fix", () => {
-  const r = chosenInputs({ env: ENV, choice: { model: "gpt-6.1-sol" } });
+  const r = chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-9-nova" } });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /^`factory:model:gpt-6.1-sol` asks claude for a model it cannot run here/);
-  assert.match(r.fix, /factory:harness:codex.*re-apply `factory:objective`/);
-  assert.equal(chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-6.1-sol" } }).ok, true, "with the harness that runs it");
+  assert.match(r.reason, /^`factory:model:gpt-9-nova` asks codex for a model it cannot run here/);
+  assert.match(r.fix, /factory:harness:claude.*re-apply `factory:objective`/);
+  assert.equal(chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-6.1-sol" } }).ok, true, "a model the price table rows");
+  assert.equal(chosenInputs({ env: ENV, choice: { model: "gpt-6.1-sol" } }).ok, true, "#418: Claude Code's provider answers for the id, not its form");
   assert.match(chosenInputs({ env: ENV, choice: { harness: "codex", reviewer_model: "gpt-9-nova" } }).reason, /`factory:reviewer-model:gpt-9-nova`/);
   assert.equal(chosenInputs({ env: { ...ENV, FACTORY_CODEX_GATEWAY_KEY: "k" }, choice: { harness: "codex", model: "openai/gpt-6.1-sol" } }).ok, true);
 });
@@ -447,4 +447,15 @@ test("the launcher takes the repository's defaults once, before any start applie
   assert.doesNotMatch(src, /run\.defaults =/, "never again from `inputs`, which a start has changed");
   assert.match(src, /Object\.assign\(inputs, run\.defaults, chosen\.inputs\)/);
   assert.match(src, /const base = \{ vendor: inputs\.sandbox, stage, harness: inputs\.harness,/, "the stage's harness on its record");
+});
+
+// #418: a sub-agent's refusal names the label that chose its model (logic.mjs AGENT_MODELS): the labels are the choice's own.
+test("AGENT_MODELS names each pinned agent's model by the label and variable that choose it", async () => {
+  const { AGENT_MODELS } = await import("../scripts/lib/logic.mjs");
+  const { agentModel } = await import("../scripts/lib/checkout.mjs");
+  assert.equal(AGENT_MODELS.implementer.label, CHOICE_PREFIXES.subagent_model);
+  assert.equal(AGENT_MODELS.reviewer.label, CHOICE_PREFIXES.reviewer_model);
+  assert.equal(AGENT_MODELS["foundation-reviewer"].label, CHOICE_PREFIXES.reviewer_model);
+  const models = { subagent: "s-1", reviewer: "r-1" };
+  assert.deepEqual(["implementer", "reviewer", "foundation-reviewer", "planner", "constructor"].map((r) => agentModel(r, models)), ["s-1", "r-1", "r-1", null, null]);
 });

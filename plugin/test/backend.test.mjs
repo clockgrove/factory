@@ -1128,3 +1128,12 @@ test("host sockets: the ssh, gpg and tmux directories under /tmp, socket or not,
   for (const d of ["other", "ssh-file", "ssh-mine"]) assert.ok(!got.includes(join(t, d)), d);
   rmSync(t, { recursive: true, force: true });
 });
+
+// #418: any label text is a Claude model id now, so the pinned agent file holds it as one quoted scalar.
+test("pinModel writes a label's model id into an agent file as one YAML scalar, whatever its text", async () => {
+  const { agentDefinition, pinModel } = await import("../scripts/lib/checkout.mjs");
+  const text = "---\nname: implementer\ndescription: \"Does one item.\"\ntools: Read\nmodel: claude-sonnet-5-5\n---\n\nDo the item.\n";
+  for (const model of ["a #x", "{a: b}", "claude-sonnet-5-5[1m]", "x\": y"]) {
+    for (const harness of ["claude", "copilot"]) assert.equal(agentDefinition(pinModel(text, harness, model), "x").definition.model, model, `${harness}: ${model}`);
+  }
+});

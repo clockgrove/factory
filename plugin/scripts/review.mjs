@@ -1179,7 +1179,7 @@ async function main() {
     // The pass beside it ending the stage (a conflict, checks that never start, a red that stays) ends the reviewer too.
     ...(overlap ? { signal: overlap.signal } : {}),
   });
-  reviewLive?.finish();
+  await reviewLive?.finish();
   if (!alreadyReviewed) mark(reviewRec, reviewRec);
   // The pass beside the reviewer ended the stage: its end, with nothing posted (the next stage reviews the head it works on).
   const overlapEnded = async (...recs) => {
@@ -1278,7 +1278,7 @@ async function main() {
         return rec;
       },
     });
-    foundationLive.finish();
+    await foundationLive.finish();
     if (overlap?.ends()) return overlapEnded();
     if (found.stop === "cap") return blockedAtCap("the foundation pass");
     if (found.stop === "time") return blockedAtTime("the foundation pass");
@@ -1466,7 +1466,7 @@ async function main() {
       rec = await runHarness(answerArgs(null));
     }
     mark(rec, rec);
-    answerLive.finish();
+    await answerLive.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     answerRun = rec;

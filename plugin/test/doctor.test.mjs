@@ -169,11 +169,11 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     assert.match(no.detail, /cannot rerun CI jobs: GitHub refused a dry rerun \(403\)/);
     assert.match(no.fix, /Actions read and write/);
     assert.deepEqual(asked, ["POST /repos/o/r/actions/runs/0/rerun-failed-jobs"], "run 0, which no repository has: nothing can rerun");
-    // GitHub may answer 404 for run 0 with or without the permission: never a pass.
+    // #379: any answer but a 403 is a pass that says what GitHub answered, so a set-up machine gets a clean doctor.
     for (status of [404, 500]) {
       const r = await rerunProbeCheck({ repo, token: "t" });
-      assert.equal(r.status, "WARN", String(status));
-      assert.equal(r.detail, `not verified: GitHub answered a dry rerun with ${status}`);
+      assert.equal(r.status, "PASS", String(status));
+      assert.match(r.detail, new RegExp(`did not refuse a dry rerun \\(${status}\\)`));
     }
     // Only a local doctor run probes, with a gateway key or without (#379: the stage's harness triages then); a stage's
     // own checks never do. (Each run stops at its next read.)
@@ -187,7 +187,9 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     assert.equal(probed.length, 2, "doctor --local without one");
     await run(true, true);
     await run(false, false);
-    assert.equal(probed.length, 2, "a stage's job checks or another route: no probe");
+    await run(false, true, { decisionRoute: "off" });
+    await run(false, true, { decisionRoute: "gateway" });
+    assert.equal(probed.length, 2, "a stage's job checks, another route, or no decision call (route off, gateway with no key): no probe");
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;

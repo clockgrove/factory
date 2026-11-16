@@ -1484,30 +1484,40 @@ export function finalText(harness, stdout) {
 export const DECISION_RUN = { timeoutMs: 120_000, maxUsd: 0.3, maxTurns: 2 };
 
 /**
- * The command line for one decision call (decisionRun): the question on stdin, no tool, no file write, no session kept,
- * nothing of the user's or the repository's configuration loaded, and a low reasoning effort. Claude Code: no tools
- * (`--tools ""`), no setting source, MCP server, slash command or CLAUDE.md, and no session file. Codex: a read-only
- * sandbox with its shell tool and sub-agents off, no web search, no user config, rules or AGENTS.md, an ephemeral
- * thread, and the AI Gateway provider when the stage's Codex runs through it. Copilot: no tool available and shell, write and URL
- * permissions denied, no built-in MCP server, no custom instructions and no question form.
+ * Copilot's built-in tools, all excluded from a decision call beside `--available-tools=` (an empty list): its shell,
+ * file and fetch tools (as drift.mjs reads them from its stream) and its sub-agents.
  */
-export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.maxUsd, gateway = null, creditUsd = COPILOT_CREDIT_USD }) {
+const COPILOT_TOOLS = ["bash", "shell", "powershell", "view", "read", "grep", "glob", "rg", "edit", "create", "write", "str_replace", "str_replace_editor", "apply_patch", "web_fetch", "fetch", "task", "agent"];
+
+/**
+ * The command line for one decision call (runDecision): the question on stdin, no tool, no file write, no session kept,
+ * nothing of the user's or the repository's configuration loaded, and `effort` (low; null leaves the model's default).
+ * Claude Code: no tools (`--tools ""`), no setting source, MCP server, slash command or CLAUDE.md, and no session file.
+ * Codex: a read-only sandbox with its shell tool and sub-agents off, no web search, no user config, rules or AGENTS.md,
+ * and the AI Gateway provider when the stage's Codex runs through it; its thread is ephemeral only where `ephemeral` (a
+ * runner, where Codex runs on an API key: no subscription limit to read from the rollout). Copilot: no tool available,
+ * each built-in tool excluded, shell, write and URL permissions denied, no temp directory, no built-in MCP server, no
+ * custom instructions and no question form.
+ */
+export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.maxUsd, gateway = null, creditUsd = COPILOT_CREDIT_USD, effort = "low", ephemeral = true }) {
   const hidden = hiddenFromShell([]);
   switch (harness) {
     case "claude": {
-      const args = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--max-turns", String(DECISION_RUN.maxTurns), "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--exclude-dynamic-system-prompt-sections", "--effort", "low"];
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--max-turns", String(DECISION_RUN.maxTurns), "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--exclude-dynamic-system-prompt-sections"];
+      if (effort) args.push("--effort", effort);
       if (model) args.push("--model", model);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       return { cmd: "claude", args, stdin: prompt, env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } };
     }
     case "codex": {
-      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0", "-c", 'model_reasoning_effort="low"'];
+      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", ...(ephemeral ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0"];
+      if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
       if (gateway) args.push(...codexGatewayArgs(gateway));
       if (model) args.push("-m", gateway ? gatewayModel(model) : model);
       return { cmd: "codex", args: [...args, "-"], stdin: prompt, env: gateway?.session ? { FACTORY_GATEWAY_SESSION: gateway.session } : {} };
     }
     case "copilot": {
-      const args = ["--available-tools=", "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
+      const args = ["--available-tools=", `--excluded-tools=${COPILOT_TOOLS.join(",")}`, "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disallow-temp-dir", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
       if (model) args.push("--model", model);
       if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
       return { cmd: "copilot", args, stdin: prompt, env: {} };
@@ -1522,7 +1532,33 @@ export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.
  * made in the unit's private /tmp, which nothing the agent ran before can reach: never the running pass's state, which
  * each pass's start makes afresh.
  */
-const DECISION_SH = ['set -eu', 'd=$(mktemp -d /tmp/factory-decision.XXXXXX)', 'mkdir -m 700 "$d/.claude" "$d/.codex" "$d/.copilot"', 'cd "$d"', 'export HOME="$d" TMPDIR="$d" CLAUDE_CONFIG_DIR="$d/.claude" CODEX_HOME="$d/.codex" COPILOT_HOME="$d/.copilot"', 'exec "$@"'].join("\n");
+export const DECISION_SH = ['set -eu', 'd=$(mktemp -d /tmp/factory-decision.XXXXXX)', 'mkdir -m 700 "$d/.claude" "$d/.codex" "$d/.copilot"', 'cd "$d"', 'export HOME="$d" TMPDIR="$d" CLAUDE_CONFIG_DIR="$d/.claude" CODEX_HOME="$d/.codex" COPILOT_HOME="$d/.copilot"', 'exec "$@"'].join("\n");
+
+/** The variables that would make Copilot trust the folder or load its hooks and extensions (runPass removes the same). */
+const copilotTrust = (k) => k === "COPILOT_ALLOW_ALL" || k.startsWith("GITHUB_COPILOT_PROMPT_MODE_");
+
+/**
+ * How one decision call starts, `{cmd, args, env, stdin, cwd}`, with nothing run: decisionCommand's command and the
+ * stage's harness env (`env`: its credential, and locally its account's login folder), less every worker secret, by
+ * name and by value (worker-secrets.mjs harnessShell, as a reviewer call), and less Copilot's trust variables. On a
+ * runner (`agent`) as the agent through DECISION_SH (proc.mjs asAgent: only the agent's variables and the credential
+ * names pass), with a PATH of absolute entries outside the agent's home; locally in the harness's outer sandbox
+ * (`outer`, the stage's srt settings) with the stage's TMPDIR; else as is. `dir`: the call's own working directory.
+ */
+export function decisionLaunch({ harness, model = null, prompt, env: given = process.env, maxUsd = DECISION_RUN.maxUsd, creditUsd = COPILOT_CREDIT_USD, effort = "low", agent = agentUser(), outer = null, dir = null }) {
+  const { env } = harnessShell(given, { reviewer: true });
+  for (const k of Object.keys(env)) if (copilotTrust(k)) delete env[k];
+  const { cmd, args, stdin, env: extra } = decisionCommand({ harness, model, prompt, maxUsd, gateway: codexGatewayOf(harness, env), creditUsd, effort, ephemeral: !!agent });
+  if (agent) {
+    // Absolute PATH entries outside the agent's home only (claude-runner.mjs runnerLaunch).
+    const path = String(env.PATH || process.env.PATH || "").split(":").filter((d) => d.startsWith("/") && d !== agent.home && !d.startsWith(`${agent.home}/`)).join(":");
+    const [c, a, e] = asAgent("/bin/sh", ["-c", DECISION_SH, "factory-decision", cmd, ...args], { ...env, ...extra, PATH: path }, [...MODEL_SECRET_KEYS, ...Object.keys(extra)]);
+    return { cmd: c, args: a, env: e, stdin, cwd: null };
+  }
+  const childEnv = { ...env, ...extra };
+  if (outer) return { cmd: "srt", args: ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || dir}`, cmd, ...args], env: childEnv, stdin, cwd: dir };
+  return { cmd, args, env: childEnv, stdin, cwd: dir };
+}
 
 /** The last answer a harness gave: Claude Code's result text, Codex's last agent message, Copilot's last assistant message; never the prompt. */
 export function answerText(harness, stdout) {
@@ -1542,55 +1578,57 @@ export function answerText(harness, stdout) {
   return events.findLast((e) => e?.type === "assistant.message" && typeof e.data?.content === "string")?.data.content ?? "";
 }
 
+/** Whether a refusal is the provider rejecting the reasoning effort Factory set (Codex's `param`, structure only). */
+export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reasoning.effort";
+
 /**
- * One decision call on the stage's own harness and login (adapters/decider-harness.mjs): decisionCommand's command with
- * `prompt` on stdin, under DECISION_RUN's bounds. `env` is the stage's harness env (its credential, and locally its
- * account's login folder); no worker secret reaches it. Locally it runs in the harness's outer sandbox, as the stage's
- * passes do, in a temp directory of its own; on a runner as the agent (DECISION_SH); elsewhere as is. Never resumed,
- * never waited out: a usage limit is a refusal like any other. Its spend counts in the stage's spend so far and its
- * stopped usage (stagePasses), labelled `decision`. Returns the usage record with `answer` (answerText).
+ * One decision call on the stage's own harness and login (adapters/decider-harness.mjs): decisionLaunch's command with
+ * `prompt` on stdin, under DECISION_RUN's bounds. Locally in a temp directory of its own. Never resumed, never waited
+ * out: a usage limit is a refusal like any other. A Codex thread off a runner keeps its rollout only for this read: a
+ * failed run's usage limit is there alone (usage.mjs codexLimit), and the thread's rollout files are removed after it.
+ * A model that refuses the low effort is asked once more with none. Its spend counts in the stage's spend so far; the
+ * adapter keeps its record (keepDecision). Returns the usage record with `answer` (answerText).
  */
-export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision" }) {
+export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low" }) {
   const at = () => new Date().toISOString();
   const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
   if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
-  const { env } = harnessShell(given, { reviewer: true });
   const creditUsd = copilotCreditUsd();
-  const { cmd, args, stdin, env: extra } = decisionCommand({ harness, model, prompt, maxUsd, gateway: codexGatewayOf(harness, env), creditUsd });
   const agent = agentUser();
-  const local = backend(env).name === "local";
-  let dir = null;
-  let launch;
-  if (agent) {
-    // Absolute PATH entries outside the agent's home only (claude-runner.mjs runnerLaunch).
-    const path = String(env.PATH || process.env.PATH || "").split(":").filter((d) => d.startsWith("/") && d !== agent.home && !d.startsWith(`${agent.home}/`)).join(":");
-    launch = asAgent("/bin/sh", ["-c", DECISION_SH, "factory-decision", cmd, ...args], { ...env, ...extra, PATH: path }, [...MODEL_SECRET_KEYS, ...Object.keys(extra)]);
-  } else {
-    if (!(await onPath(cmd))) return none(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
-    dir = local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "factory-decision-"));
-    const outer = local ? backend(env).sandbox.outer(env) : null;
-    const childEnv = { ...env, ...extra };
-    launch = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || dir}`, cmd, ...args], childEnv] : [cmd, args, childEnv];
-  }
+  const local = backend(given).name === "local";
+  if (!agent && !(await onPath(CLI[harness].bin))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+  const dir = agent ? null : local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "factory-decision-"));
+  const launch = decisionLaunch({ harness, model, prompt, env: given, maxUsd, creditUsd, effort, agent, outer: local && !agent ? backend(given).sandbox.outer(given) : null, dir });
   const live = liveSpend(harness, model || null, { creditUsd });
   const metered = meterPass(live, { label, harness, model: model || null });
   const started = at();
   let r;
   try {
-    r = await exec(launch[0], launch[1], { cwd: dir ?? undefined, env: launch[2], input: stdin, timeoutMs, onLine: live.line, group: local, signal: stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
+    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, onLine: live.line, group: local, signal: stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
   } catch (e) {
     await metered.end(0);
-    return { ...none(`${cmd} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
+    return { ...none(`${CLI[harness].bin} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
   } finally {
     if (dir) local ? dropOwned(dir) : rmSync(dir, { recursive: true, force: true });
   }
-  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd });
+  let rollout = null;
+  if (harness === "codex" && !agent) {
+    const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
+    if (thread && r.code !== 0) rollout = await codexPassRollout(thread, null, launch.env, { label });
+    if (thread) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
+  }
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
   await metered.end(rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
   else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Factory" });
-  else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${cmd} exited ${r.code ?? r.signal}` });
-  PASSES.push(keepDecision(rec));
+  else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${CLI[harness].bin} exited ${r.code ?? r.signal}` });
+  if (effort && effortRefused(rec.refusal)) {
+    log(`${label}: ${harness} refused the ${effort} reasoning effort for ${model || "its default model"}; asking once more with the model's own`);
+    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null });
+    // The refused run's own spend stays with it (`earlier`), for the adapter to keep beside the second's.
+    return { ...again, earlier: keepDecision(rec) };
+  }
   return rec;
 }
 
@@ -1598,9 +1636,20 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
  * A decision call's record as the stage's usage keeps it: its spend, tokens and times, labelled `decision`, with no
  * session (a decision is never resumed, and the stage's saved session is its passes'), no refusal (a usage limit on a
  * decision call holds no account and Blocks nothing) and no answer text. `ok` is the stage's, not the answer's: a
- * decision with no answer fails no pass. runDecision keeps one with the stage's passes, so a stopped stage counts it
- * (stop.mjs stoppedRecords).
+ * decision with no answer fails no pass. The adapter folds a stage's calls into one such record (foldDecision), kept
+ * with the stage's passes (keepDecisionPass) so a stopped stage counts it (stop.mjs stoppedRecords).
  */
 export function keepDecision(rec) {
-  return { harness: rec.harness, model: rec.model ?? null, label: rec.label || "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...(rec.usdLowerBound ? { usdLowerBound: true } : {}), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true };
+  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...(rec.usdLowerBound ? { usdLowerBound: true } : {}), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
 }
+
+/** One more call (`one`, keepDecision's) folded into the stage's decision record `kept`, in place: spend, tokens, credits, turns, end. */
+export function foldDecision(kept, one) {
+  const calls = (kept.calls ?? 1) + (one.calls ?? 1);
+  return Object.assign(kept, mergeUsage([kept, one]), { label: "decision", ok: true, decision: true, calls, started: kept.started, basis: kept.basis });
+}
+
+/** The stage's decision record among its passes (stagePasses), once: what a stopped stage's usage counts. */
+export const keepDecisionPass = (rec) => {
+  if (!PASSES.includes(rec)) PASSES.push(rec);
+};

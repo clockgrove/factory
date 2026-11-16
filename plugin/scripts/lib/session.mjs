@@ -744,7 +744,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
     const exitBefore = io?.files?.()?.["exit.json"];
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, freshPrompt: `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
-    live.finish();
+    await live.finish();
     if (io) await io.collect();
     usage.push(rec);
     if (rec.sessionId && session) session.id = rec.sessionId;
@@ -1029,8 +1029,9 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     onLine,
     onResume: tracker.since,
     tracker,
-    finish: () => {
-      drift?.stop();
+    // The drift check in flight lands first, so its decision record is in the stage's usage before it is written.
+    finish: async () => {
+      await drift?.stop();
       progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
     },
   };
@@ -1279,7 +1280,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onResume: live.onResume });
-    live.finish();
+    await live.finish();
     if (io) await io.collect();
     usage.push(rec);
     if (!fresh) red.rec = rec;
@@ -1691,6 +1692,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
   // choice passes that account over for a while.
   const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
+  const runs = (records || []).filter((r) => r && !r.decision);
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1707,9 +1709,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     models: merged.models ?? null,
     // With a relayed worker key the dollars are the harness's plus the key's, and the basis says so: added once already.
     basis: kb.fields.workerKeyUsd > 0 ? `${merged.basis}; plus ${kb.fields.workerKeyUsd} USD through the relayed worker key (workerKeyUsd), included in usd` : merged.basis,
-    started: records[0]?.started ?? merged.started ?? null,
-    ended: records.at(-1)?.ended ?? merged.ended ?? null,
-    runs: records.length,
+    started: runs[0]?.started ?? merged.started ?? null,
+    ended: runs.at(-1)?.ended ?? merged.ended ?? null,
+    // Harness passes only: the stage's decision record (harness.mjs keepDecision) is in usd and tokens, never a run.
+    runs: runs.length,
     passes,
     exit,
     reason,

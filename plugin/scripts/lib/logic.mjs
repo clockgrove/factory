@@ -887,9 +887,12 @@ export function copilotCount(usage) {
   return `; ${parts.join(", ")}`;
 }
 
-/** " (work-1 7.90, validation-fix-1 0.54)": each harness run's cost by its label, for the exit line; empty with one or no priced run. */
+/**
+ * " (work-1 7.90, validation-fix-1 0.54)": each harness pass's cost by its label, for the exit line; empty with one or no
+ * priced pass. The stage's decision record (harness.mjs keepDecision) is no pass: its spend is in the total only.
+ */
 export function costByPhase(records) {
-  const parts = (records || []).filter((r) => r && typeof r.usd === "number" && r.label).map((r) => `${r.label} ${r.usd.toFixed(2)}`);
+  const parts = (records || []).filter((r) => r && !r.decision && typeof r.usd === "number" && r.label).map((r) => `${r.label} ${r.usd.toFixed(2)}`);
   return parts.length > 1 ? ` (${parts.join(", ")})` : "";
 }
 

@@ -194,7 +194,7 @@ async function main() {
       // The earlier rebases are read from the issue, but not through an outage this stage is ending on; unread, the
       // line names this rebase alone. The rebase line is set before that read, so a stop's write carries it.
       const read = outage ? null : () => listComments(repo, issue, token);
-      const passesRan = records.filter((r) => r && !r.noRun).length;
+      const passesRan = records.filter((r) => r && !r.noRun && !r.decision).length;
       rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
@@ -727,7 +727,7 @@ async function main() {
       label: `work-${attempt}`,
       signal: planStop.signal,
     });
-    live.finish();
+    await live.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     // The restored session ran fresh instead (harness.mjs runHarness: the provider refused it for a rotated credential).
@@ -794,7 +794,7 @@ async function main() {
     const resume = session.canResume ? session.id : null;
     const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: () => io.tick() });
     const pass = await runHarness({ onLine: live.onLine, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, freshPrompt: catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
-    live.finish();
+    await live.finish();
     records.push(pass);
     if (pass.sessionId) session.id = pass.sessionId;
     // The pass answers for the branch like the work pass: a cap it reached Blocks with that cap, a death or a rebase or

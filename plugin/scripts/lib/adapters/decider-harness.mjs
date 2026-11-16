@@ -83,24 +83,55 @@ export function runError(rec) {
 }
 
 /**
- * The adapter: `harness` and `model` are the stage's, `env` its harness env (or a function returning it, read at each
- * call), `record(rec)` keeps each call's spend with the stage's usage (harness.mjs keepDecision). After a refused
- * credential or a usage limit no further call is made in this process: each later question is that error at once, so
- * an account at its limit is not asked again, and it holds nothing (the stage's own passes meet the limit as they do).
- * At most HARNESS_CALLS run at once; the rest wait their turn. `run` stands in for runDecision (tests).
+ * The adapter, one per stage (decider.mjs shares it among every decider the stage opens): `harness` and `model` are the
+ * stage's, `env` its harness env (or a function returning it, read at each call), and `record(rec)` gets the stage's one
+ * decision record (harness.mjs keepDecision) at its first call: every later call folds into that same record
+ * (foldDecision), so the stage's usage and max_usd count it and its passes are never more for it. After a refused
+ * credential or a usage limit no further call is made in the stage: each later question is that error at once, so an
+ * account at its limit is not asked again, and it holds nothing (the stage's own passes meet the limit as they do). At
+ * most HARNESS_CALLS run at once; the rest wait their turn, each slot handed straight to the next in line.
  */
-export function harnessDecider({ harness, model = null, env = process.env, record = null, run = null }) {
+export function harnessDecider({ harness, model = null, env = process.env, record = null }) {
   let quiet = null;
-  // At most HARNESS_CALLS calls at once on the account (triage asks one question per failing job).
+  let kept = null;
   let running = 0;
   const waiting = [];
-  const slot = async () => {
-    if (running >= HARNESS_CALLS) await new Promise((r) => waiting.push(r));
-    running += 1;
+  const slot = () => {
+    if (running < HARNESS_CALLS) {
+      running += 1;
+      return Promise.resolve();
+    }
+    return new Promise((r) => waiting.push(r));
   };
+  // The slot passes to the next waiter as it is: never free for a moment, so no new caller can take it first.
   const free = () => {
-    running -= 1;
-    waiting.shift()?.();
+    const next = waiting.shift();
+    if (next) next();
+    else running -= 1;
+  };
+  const keep = (h, rec) => {
+    const one = h.keepDecision(rec);
+    if (!kept) {
+      kept = one;
+      h.keepDecisionPass(kept);
+      record?.(kept);
+    } else h.foldDecision(kept, one);
+  };
+  const ask = async (input, question) => {
+    if (quiet) return no(quiet);
+    let rec;
+    try {
+      const h = await import("../harness.mjs");
+      rec = await h.runDecision({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env });
+      if (rec?.earlier) keep(h, rec.earlier);
+      if (rec && !rec.noRun) keep(h, rec);
+    } catch {
+      return no("vendor");
+    }
+    const error = runError(rec);
+    if (error === "auth" || error === "rate_limited") quiet = error;
+    if (error) return no(DECIDER_ERRORS.includes(error) ? error : "vendor");
+    return parseAnswer(rec.answer, question);
   };
   return {
     name: "harness",
@@ -115,19 +146,4 @@ export function harnessDecider({ harness, model = null, env = process.env, recor
       }
     },
   };
-  async function ask(input, question) {
-    if (quiet) return no(quiet);
-    let rec;
-    try {
-      const h = await import("../harness.mjs");
-      rec = await (run ?? h.runDecision)({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env });
-      if (rec && !rec.noRun) record?.(h.keepDecision(rec));
-    } catch {
-      return no("vendor");
-    }
-    const error = runError(rec);
-    if (error === "auth" || error === "rate_limited") quiet = error;
-    if (error) return no(DECIDER_ERRORS.includes(error) ? error : "vendor");
-    return parseAnswer(rec.answer, question);
-  }
 }

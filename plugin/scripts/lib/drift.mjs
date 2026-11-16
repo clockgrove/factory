@@ -216,7 +216,7 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
   const ask = openDecider({ inputs, env, ...(home ? { home } : {}), model: inputs?.driftModel || DRIFT_MODEL, stage, decider });
   if (ask.off) return null;
   const { model } = ask;
-  // A key the gateway refuses is refused at every checkpoint: asked no more in this job.
+  // A refused key or credits, or a usage limit, answers every later checkpoint the same: asked no more in this job.
   let off = false;
   const watch = ({ stage, goal, root = null, plan = () => null }) => {
     const acts = activityLog();
@@ -231,7 +231,7 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
       last = now();
       const input = driftInput({ stage, goal, items: planItems(plan() ?? ""), entries: acts.entries, root });
       const a = await ask.decide(input, DRIFT_QUESTION);
-      if (a.error === "auth") off = true;
+      if (a.error === "auth" || a.error === "billing" || a.error === "rate_limited") off = true;
       log(`drift check (${model}) in ${stage} after ${n} activity entries: ${a.verdict ? `${a.verdict}${typeof a.confidence === "number" ? ` ${a.confidence.toFixed(2)}` : ""}` : `no verdict (${a.error || "?"})`}`);
       if (flagged || !isDrift(a)) return;
       flagged = true;

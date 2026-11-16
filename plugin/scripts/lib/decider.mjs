@@ -53,42 +53,88 @@ export function deciderKeyState({ inputs = {}, env = process.env, home = homedir
 }
 
 /**
- * Which decider a repository's stages use, for doctor and the logs: `ai-gateway` with a usable key, else `harness` (the
- * stage's own harness on its login) with `code`, why there is no key (deciderKeyState).
+ * Which decider a repository's stages use, for doctor and the logs (openDecider's choice): `ai-gateway` with a usable
+ * key, else `harness` (the stage's own harness on its login) on the `auto` route, else `off`; `code` is why there is no
+ * key (deciderKeyState), `route` the decision route.
  */
 export function deciderKind({ inputs = {}, env = process.env, home = homedir() } = {}) {
+  const route = DECISION_ROUTES.includes(inputs?.decisionRoute) ? inputs.decisionRoute : "auto";
+  if (route === "off") return { name: "off", code: "route-off", route };
   const { key, code } = deciderKeyState({ inputs, env, home });
-  return key ? { name: "ai-gateway", code: null } : { name: "harness", code };
+  return { name: key ? "ai-gateway" : route === "auto" ? "harness" : "off", code: key ? null : code, route };
 }
+
+/** The decision routes (the `decision_route` setting): `auto` (the gateway with a key, else the stage's harness), `gateway` (the gateway only) and `off`. */
+export const DECISION_ROUTES = Object.freeze(["auto", "gateway", "off"]);
+
+/** The gateway's answers that end the gateway for the rest of the stage on the `auto` route: its key or its credits refused. */
+const GATEWAY_REFUSED = new Set(["auth", "billing"]);
 
 /** Whether this process has said which decider its stage uses without a key: once per stage (one stage is one process). */
 let harnessSaid = false;
 
 /**
+ * Each stage's shared decision state, by its `stage` object: the one harness adapter every decider of the stage asks
+ * (adapters/decider-harness.mjs, so its cap on calls at once and its stop after a usage limit hold for the stage, not
+ * per caller), and whether the gateway refused its key or credits (then the harness answers for the rest of the stage).
+ */
+const STAGES = new WeakMap();
+const shared = (stage) => {
+  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, gatewayRefused: null });
+  return STAGES.get(stage);
+};
+const harnessOf = (stage) => {
+  const s = shared(stage);
+  s.harness ??= openVendor({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null });
+  return s.harness;
+};
+
+/**
  * The decider for one kind of decision call: `{name, model, off, decide(input, question)}`, decide as in
  * adapters/decider.mjs (never throws; no answer is `error` with no verdict, which callers treat as they always have).
- * - With an AI Gateway key (deciderKeyState): the gateway, asked `model` (the caller's own model setting).
- * - Without one, with `stage` ({harness, model, env, record}: the stage's harness and model, its harness env or a
- *   function returning it, and where each call's spend joins the stage's usage): that harness, on that env's login.
- * - Neither: `off` is the key's code, and decide answers nothing.
+ * The route is `inputs.decisionRoute` (DECISION_ROUTES, `auto` by default):
+ * - With an AI Gateway key (deciderKeyState), on `auto` or `gateway`: the gateway, asked `model` (the caller's own
+ *   model setting). On `auto` with a stage, a gateway that refuses the key or its credits (GATEWAY_REFUSED) hands this
+ *   question and every later one of the stage to the stage's harness, said once in the log.
+ * - Without one, on `auto` with `stage` ({harness, model, env, record}: the stage's harness and model, its harness env or
+ *   a function returning it, and where the stage's decision record goes): that harness, on that env's login, through
+ *   the stage's one shared adapter.
+ * - Otherwise: `off` is why (the key's code, or `route-off`), and decide answers nothing.
  * `decider` stands in for the vendor (tests). The vendor module opens at the first question.
  */
 export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null } = {}) {
   if (decider) return { name: decider.name ?? "given", model, off: null, decide: (input, question) => decider.decide(input, question) };
+  const route = DECISION_ROUTES.includes(inputs?.decisionRoute) ? inputs.decisionRoute : "auto";
+  const none = (code) => ({ name: null, model, off: code, decide: async () => ({ verdict: null, confidence: null, error: "no_answer" }) });
+  if (route === "off") return none("route-off");
   const { key, code } = deciderKeyState({ inputs, env, home });
-  let opened = null;
-  // One vendor per decider, opened at the first question: concurrent first questions share it.
-  const lazy = (options) => async (input, question) => (await (opened ??= openVendor(options))).decide(input, question);
+  const withHarness = route === "auto" && !!stage?.harness;
+  const harnessDecide = async (input, question) => (await harnessOf(stage)).decide(input, question);
   if (key) {
     mask(key);
-    return { name: "ai-gateway", model, off: null, decide: lazy({ vendor: "ai-gateway", key, model }) };
+    // One vendor per decider, opened at the first question: concurrent first questions share it.
+    let opened = null;
+    const gateway = async (input, question) => (await (opened ??= openVendor({ vendor: "ai-gateway", key, model }))).decide(input, question);
+    if (!withHarness) return { name: "ai-gateway", model, off: null, decide: gateway };
+    const state = shared(stage);
+    return {
+      name: "ai-gateway",
+      model,
+      off: null,
+      decide: async (input, question) => {
+        if (state.gatewayRefused) return harnessDecide(input, question);
+        const a = await gateway(input, question);
+        if (!GATEWAY_REFUSED.has(a.error)) return a;
+        if (!state.gatewayRefused) log(`decision calls: the AI Gateway refused Factory's key (${a.error}); the stage's own harness (${stage.harness}) answers them for the rest of this stage`);
+        state.gatewayRefused = a.error;
+        return harnessDecide(input, question);
+      },
+    };
   }
-  if (stage?.harness) {
-    if (!harnessSaid) {
-      harnessSaid = true;
-      log(`decision calls: no AI Gateway key (${code}); the stage's own harness (${stage.harness}) answers them on its login`);
-    }
-    return { name: "harness", model: `${stage.harness}${stage.model ? ` ${stage.model}` : ""}`, off: null, keyCode: code, decide: lazy({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null, run: stage.run ?? null }) };
+  if (!withHarness) return none(code);
+  if (!harnessSaid) {
+    harnessSaid = true;
+    log(`decision calls: no AI Gateway key (${code}); the stage's own harness (${stage.harness}) answers them on its login`);
   }
-  return { name: null, model, off: code, decide: async () => ({ verdict: null, confidence: null, error: "no_answer" }) };
+  return { name: "harness", model: `${stage.harness}${stage.model ? ` ${stage.model}` : ""}`, off: null, keyCode: code, decide: harnessDecide };
 }

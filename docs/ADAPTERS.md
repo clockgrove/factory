@@ -47,26 +47,48 @@ Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decid
 
 | Operation | Does |
 | --- | --- |
-| `openDecider({inputs, env, model, stage})` → `{name, model, off, decide}` | With an AI Gateway key: `ai-gateway`, asked `model` (the caller's own setting, such as `triage_model`). Without one, with `stage` (`{harness, model, env, record}`: the stage's harness and model, its harness env, and where each call's usage record goes): `harness`. Neither: `off` is the key's code (`no-key`, a key-file code). |
+| `openDecider({inputs, env, model, stage})` → `{name, model, off, decide}` | Picks by the `decision_route` setting (`inputs.decisionRoute`). `auto` (default): with an AI Gateway key, `ai-gateway`, asked `model` (the caller's own setting, such as `triage_model`); without one, with `stage` (`{harness, model, env, record}`: the stage's harness and model, its harness env, and where the stage's decision record goes), `harness`. `gateway`: `ai-gateway` only. `off`: none. With none, `off` is why (`route-off`, `no-key`, a key-file code). |
 | `decide(input, question)` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. Each caller keeps its own confidence floor. |
 
-To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it), call `decide`, and act only on a verdict at the caller's floor. No answer is the same as no decider.
+To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it, the same object for every decider of the stage), call `decide`, and act only on a verdict at the caller's floor. No answer is the same as no decider.
+
+One stage, one harness adapter: every decider opened with the same `stage` asks through one shared `harness` adapter. Its cap on calls at once, its stop after a usage limit and its usage record are the stage's, whichever caller asks. On `auto`, a gateway that refuses Factory's key or its credits (`auth`, `billing`) hands that question and the rest of the stage to the stage's harness, said once in the log.
 
 The `harness` vendor:
 
-- **One short call per question** on the stage's harness, model and login (`harness.mjs` `runDecision`): Claude Code `-p` with stream JSON, Codex `exec --json`, Copilot `--output-format json`, the question on stdin. No tools (Claude Code `--tools ""`; Codex's shell tool and sub-agents off in a read-only sandbox; Copilot no tool available, shell, write and URL denied), no file writes, no session kept, no MCP server, no user or repository settings or instructions, low reasoning effort.
-- **Bounded:** `DECISION_RUN` sets two turns (Claude Code's `--max-turns`; Codex and Copilot, with no tool, answer in one), $0.30 (Claude Code's budget cap; Copilot's AI-credit cap at its 30-credit minimum) and two minutes of wall clock per call, and a stage runs at most three calls at once (`HARNESS_CALLS`).
+- **One short call per question** on the stage's harness, model and login (`harness.mjs` `runDecision`), the question on stdin, with no tools, no file writes, no session kept, no MCP server and no user or repository settings or instructions:
+  - Claude Code: `-p` with stream JSON, `--tools ""`, no setting sources, MCP, slash commands, CLAUDE.md or session.
+  - Codex: `exec --json`, with its shell tool and sub-agents off in a read-only sandbox, and no web search, user config, rules or AGENTS.md.
+  - Copilot: `--output-format json`, with an empty available-tool list and every built-in tool excluded by name, shell, write and URL permissions denied, no temp directory, and Copilot's trust variables (`COPILOT_ALLOW_ALL`, `GITHUB_COPILOT_PROMPT_MODE_*`) removed from its env.
+- **Low reasoning effort** (Claude Code `--effort low`, Codex `model_reasoning_effort="low"`; Copilot's default). A model whose provider refuses that effort as structure (Codex: HTTP 400 with `param` `reasoning.effort`) is asked once more with its own.
+- **Bounded:**
+  - `DECISION_RUN` sets $0.30 (Claude Code's budget cap; Copilot's AI-credit cap at its 30-credit minimum) and two minutes of wall clock per call.
+  - Claude Code gets two turns (`--max-turns`); Codex and Copilot, with no tool, answer in one.
+  - A stage runs at most three calls at once (`HARNESS_CALLS`), each freed slot passing straight to the next in line.
 - **The prompt** holds the question, its choices and a strict JSON Schema (`choice` from the choices, `confidence` from 0 to 1, nothing else). The input sits between two lines with a random marker it cannot know, marked untrusted. Only a reply that is exactly that JSON object (one surrounding code fence allowed) is a verdict.
-- **The stage's login:** locally the account the stage runs on, in the harness's outer sandbox, as the stage's passes run; on Actions and in a cloud sandbox as the agent, in a home of its own in the unit's private `/tmp`, with the stage's credential. No worker secret reaches it.
-- **Usage:** each call's spend joins the stage's usage record and its spend line, labelled `decision`, with no session and no refusal.
-- **Usage limit or refused credential:** no answer, and no further call in that stage. It holds no account and Blocks nothing; the stage's own passes meet the limit as they always do.
+- **Confidence is the model's own word.** On this route `confidence` is what the model says, not a calibrated score like the gateway decision models'. Callers keep the same floor (0.7), so a verdict counts only where the model states that much.
+- **The stage's login:**
+  - Locally: the account the stage runs on, in the harness's outer sandbox as the stage's passes run, in a temp directory of its own.
+  - On Actions and in a cloud sandbox: as the agent, in a home of its own in the unit's private `/tmp`, with the stage's credential. There Codex runs on an API key, and its thread is ephemeral.
+  - No worker secret reaches it, by name or by value.
+- **Codex usage limits:** a ChatGPT plan's limit is structure only in the thread's rollout, so off a runner the call keeps its rollout. The limit is read there as for any pass (`usage.mjs` `codexLimit`), and Factory then removes that thread's rollout files.
+- **Usage:**
+  - A stage's calls fold into one usage record, labelled `decision` (its `calls` counted), with no session and no refusal. It is in the stage's spend line, its total and its max_usd, and kept with its passes for a stopped stage.
+  - It is no pass: writeUsage's `runs`, the exit line's cost by phase and the passes a rebase counts leave it out, and `mergeUsage` never takes it as the base.
+- **Usage limit or refused credential:** no answer, and no further call in that stage. It holds no account and Blocks nothing; the stage's own passes meet the limit as they always do. The drift advisory stops asking on the same answers.
+- **What it costs:** by default (`decision_route` `auto` with no key), every decision call spends the stage's own subscription or key on the stage's model:
+  - Red-check triage asks one question per failing CI job.
+  - The drift advisory asks every two minutes while a worker runs.
+  - On Copilot each call is a premium request.
+  - All of it counts toward max_usd.
+  - `decision_route` `gateway` or `off` stops it.
 
 Rules:
 
 - **No vendor-side state.** Each question is one stateless call.
-- **Errors are codes** from `DECIDER_ERRORS` (`auth`, `rate_limited`, `unavailable`, `invalid`, `refused`, `no_answer`, `vendor`), with no verdict. Callers decide on the verdict and the code, never a message.
+- **Errors are codes** from `DECIDER_ERRORS` (`auth`, `billing`, `rate_limited`, `unavailable`, `invalid`, `refused`, `no_answer`, `vendor`), with no verdict. Callers decide on the verdict and the code, never a message.
 - **The key never leaves Factory's process.** On Actions it is the `ai_gateway_api_key` input; locally only the file `~/.config/factory/ai-gateway-key`. `scrubbedEnv` keeps it out of every child.
-- **Doctor names the decider** (`decision calls`): the gateway's models, or the stage's harness with the key's code; a local key file Factory refuses is a warning.
+- **Doctor names the decider** (`decision calls`): the gateway's models, the stage's harness with the key's code, or off. A local key file Factory refuses is a warning.
 
 ## Codex model provider
 

@@ -173,6 +173,9 @@ inputs:
   worker_secret_values:
     description: 'The values of the `worker_secrets` SOURCEs, one `SOURCE=value` line each: the template passes the secret FACTORY_WORKER_SECRET_VALUES (work, review and launch jobs). A line whose SOURCE `worker_secrets` does not name opts nothing in. Passed to the worker''s harness only (the work stage and the review stage''s fix and answer passes, never the reviewer), masked in the job log and the uploaded harness stream.'
     required: false
+  decision_route:
+    description: 'Who answers Factory''s decision calls (red-check triage, the drift advisory). `auto` (default): the AI Gateway''s decision models with `ai_gateway_api_key`, else the stage''s own harness on its own credential. `gateway`: the gateway only, so without a key no decision call runs. `off`: none run; every red goes to the fix pass and no drift check runs. On the harness, each call is one short request on the stage''s model whose spend counts toward max_usd: the drift advisory asks every two minutes while a worker runs, and on Copilot each call is a premium request.'
+    required: false
   triage_model:
     description: The decision model red-check triage asks with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
     required: false
@@ -387,6 +390,7 @@ runs:
         FACTORY_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
         FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
         FACTORY_INPUT_SIBLING_HOLD: ${{ inputs.sibling_hold }}
+        FACTORY_INPUT_DECISION_ROUTE: ${{ inputs.decision_route }}
         FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
         FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
         FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}

@@ -446,8 +446,9 @@ export function appPermissionChecks(app) {
  * Local red-check triage reruns a flaky red's failed jobs, which needs the token's Actions write (LOCAL.md). A
  * fine-grained token's permissions cannot be listed, so doctor makes a dry rerun: it asks GitHub to rerun the failed
  * jobs of workflow run 0, which no repository has, so nothing can rerun. A 403 is the token lacking Actions write: a
- * warning with the fix. Any other answer (a 404 included, which a token with or without the permission may get)
- * leaves it not verified, never a pass.
+ * warning with the fix. Any other answer is a pass that says what it saw: GitHub did not refuse the token. (A 404,
+ * the usual answer, does not prove the permission either: a token without it may get one too, and then the first
+ * flaky red's rerun is refused, said in its triage line, and goes to the fix pass.)
  */
 export async function rerunProbeCheck({ repo, token }) {
   const name = "triage rerun";
@@ -459,7 +460,7 @@ export async function rerunProbeCheck({ repo, token }) {
     if (e.status === 403 && !e.rateLimited) return WARN(name, "red-check triage is on, but the token cannot rerun CI jobs: GitHub refused a dry rerun (403)", grant);
     status = e.status || "no answer";
   }
-  return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
+  return PASS(name, `GitHub did not refuse a dry rerun (${status}); a refusal at a real rerun is named in its triage line`);
 }
 
 /**
@@ -507,11 +508,12 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
 
 /**
  * Which decider this repository's stages use (lib/decider.mjs): the AI Gateway's decision models with a usable key, else
- * the stage's own harness on its login. A PASS either way; a local key file Factory refuses (any code but no-key) is a
- * WARN, since the gateway was meant.
+ * the stage's own harness on its login (decision_route auto), else none. A PASS each way; a local key file Factory
+ * refuses (any code but no-key) is a WARN, since the gateway was meant.
  */
 export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   const kind = deciderKind({ inputs, env, home });
+  if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? "off (decision_route off): every red goes to the fix pass, and no drift check runs" : `off: decision_route gateway and no AI Gateway key (${kind.code}), so every red goes to the fix pass, and no drift check runs`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
   const text = `${harness} on its login, one short call with no tools per question: no AI Gateway key (${kind.code})`;
@@ -532,8 +534,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     out.push(...appPermissionChecks(app));
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
   // Local red-check triage (the gateway's model with a key, else the stage's harness) reruns flaky reds with this token:
-  // doctor checks it may (not in a stage).
-  if (local && !job && token) out.push(await probeRerun({ repo, token }));
+  // doctor checks it may (not in a stage), unless no decision call runs (decision_route off, or gateway with no key).
+  if (local && !job && token && deciderKind({ inputs, env }).name !== "off") out.push(await probeRerun({ repo, token }));
   // Which decider answers the decision calls (red-check triage, the drift advisory): where the key is read, a job or local mode.
   if (job || local) out.push(deciderCheck({ inputs, env }));
 

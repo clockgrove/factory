@@ -14,10 +14,10 @@
  */
 
 /** The error codes an answer carries. Callers decide on the code, never on a message. */
-export const DECIDER_ERRORS = Object.freeze(["auth", "rate_limited", "unavailable", "invalid", "refused", "no_answer", "vendor"]);
+export const DECIDER_ERRORS = Object.freeze(["auth", "billing", "rate_limited", "unavailable", "invalid", "refused", "no_answer", "vendor"]);
 
-/** An HTTP status as one of DECIDER_ERRORS. */
-export const errorOf = (status) => (status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limited" : status >= 500 ? "unavailable" : status >= 400 ? "invalid" : "vendor");
+/** An HTTP status as one of DECIDER_ERRORS: 402 is the vendor's credits or billing. */
+export const errorOf = (status) => (status === 401 || status === 403 ? "auth" : status === 402 ? "billing" : status === 429 ? "rate_limited" : status >= 500 ? "unavailable" : status >= 400 ? "invalid" : "vendor");
 
 /** The vendors: the AI Gateway's decision model, and the stage's own harness on its own login. */
 export const DECIDER_VENDORS = Object.freeze(["ai-gateway", "harness"]);

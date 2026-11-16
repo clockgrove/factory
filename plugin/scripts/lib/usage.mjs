@@ -175,7 +175,7 @@ const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 
 /**
- * The provider error a failed Codex run ended on, as structure: {status, type, code, message} from the last `turn.failed`
+ * The provider error a failed Codex run ended on, as structure: {status, type, code, message, param?} from the last `turn.failed`
  * (else `error`) event's JSON body, or null when the run's last word was a completed turn or the message is prose.
  */
 function codexError(events) {
@@ -191,7 +191,7 @@ function codexError(events) {
     }
   }
   if (!body || typeof body !== "object" || !body.error || typeof body.error !== "object") return null;
-  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message) };
+  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message), ...(str(body.error.param) ? { param: str(body.error.param) } : {}) };
 }
 
 /**
@@ -745,7 +745,9 @@ export function sinceSession(rec, prior) {
 }
 
 export function mergeUsage(records) {
-  const live = records.filter(Boolean);
+  // A stage's decision record (harness.mjs keepDecision) is never the base: its label, basis and model are no pass's.
+  const all = records.filter(Boolean);
+  const live = [...all.filter((r) => !r.decision), ...all.filter((r) => r.decision)];
   if (!live.length) return null;
   const first = live[0];
   // A negative dollar figure is no spend: it never lowers a total (every harness).

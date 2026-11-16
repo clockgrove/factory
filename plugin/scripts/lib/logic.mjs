@@ -718,7 +718,10 @@ export function priorityOf(issue) {
   return best;
 }
 
-/** Issue numbers named by `Blocked by #N` (or `blocked-by: #N, #M`) lines in a body. */
+/**
+ * Issue numbers named by `Blocked by #N` (or `blocked-by: #N, #M`) lines in a body: the fallback where GitHub's issue
+ * dependencies are unavailable (github.mjs blockedByRelations answers null). Where they answer, they are the only source.
+ */
 export function parseBlockedBy(body) {
   const out = new Set();
   for (const line of String(body || "").split(/\r?\n/)) {
@@ -1742,18 +1745,17 @@ export const entryKey = (id) =>
     .replace(/[:.]+$/, "")
     .toUpperCase();
 
-const ACCEPTANCE_HEADING = /\b(?:acceptance|must be true|done when|definition of done|criteria)\b/i;
-
 /**
- * The acceptance entries an issue states, so the reviewer judges each one: the top-level list items under a heading
- * (Markdown `#`, or a line that is only bold text) naming acceptance ("Acceptance", "What must be true", "Done when",
- * "Definition of done", "criteria"). Each is {id, text}: the id is the item's own label ("- **B:** ..." is B) or else its
- * 1-based position; nested items and continuation lines join their entry's text. [] when the issue has no such section;
- * the reviewer then names the entries from the issue text itself.
+ * The acceptance entries an issue states, so the reviewer judges each one: the top-level list items in the section the
+ * factory-file skill writes, a Markdown heading whose text is exactly `Acceptance` (any level, any case), down to the
+ * next heading of its level or above; items under its sub-headings are entries too. Each is {id, text}: the id is the
+ * item's own label ("- **B:** ..." is B) or else its 1-based position; nested items and continuation lines join their
+ * entry's text. [] when the issue has no such section: the reviewer then names the entries from the issue text itself.
  */
 export function acceptanceEntries(body) {
   const entries = [];
-  let inSection = false;
+  // The section's heading level while inside it, else 0.
+  let level = 0;
   let current = null;
   let fence = false;
   for (const raw of String(body || "").replace(/\r\n?/g, "\n").split("\n")) {
@@ -1762,13 +1764,14 @@ export function acceptanceEntries(body) {
       continue;
     }
     if (fence) continue;
-    const heading = /^\s{0,3}#{1,6}\s+(.*)$/.exec(raw) || /^\s{0,3}\*\*([^*]+)\*\*:?\s*$/.exec(raw);
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(raw);
     if (heading) {
-      inSection = ACCEPTANCE_HEADING.test(heading[1]);
       current = null;
+      if (level && heading[1].length > level) continue;
+      level = heading[2].toLowerCase() === "acceptance" ? heading[1].length : 0;
       continue;
     }
-    if (!inSection) continue;
+    if (!level) continue;
     const item = /^\s{0,1}(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(raw);
     if (item) {
       const label = /^\*\*([A-Za-z0-9]{1,3})[:.)]?\*\*:?\s*|^([A-Z]|\d{1,2})[:.)]\s+/.exec(item[1]);

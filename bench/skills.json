@@ -24,14 +24,14 @@
       "words": 446
     },
     "factory-file": {
-      "sha256": "0e4107d5bebc20a22bb1cee0edd13d85c9895961e7f1ca7f2168798ca32f49ed",
+      "sha256": "f32d9612b063f8b140359efa897f7b2ecb1dc59b7c2768515df46c3d4a7dc135",
       "lines": 41,
-      "words": 699,
+      "words": 693,
       "files": {
         "reference.md": {
-          "sha256": "180afc43692a74b490a76f4b6093cc48337cf9e5cc20048d383c2b64e9e06ee8",
-          "lines": 12,
-          "words": 233
+          "sha256": "f13ab17c5e45d4b2008a18becdd2fcfff71124e8fcdabdd3ac86329bcd1a34a5",
+          "lines": 31,
+          "words": 440
         }
       }
     },

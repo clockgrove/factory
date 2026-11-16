@@ -206,12 +206,12 @@ test("review: findings parse from a fenced block and snap to diff lines", () => 
   assert.deepEqual(snapComments(findings, "").map((c) => [c.path, c.line]), [["src/a.ts", 3], ["src/a.ts", 99], ["elsewhere.ts", 1]]);
 });
 
-test("review: the issue's acceptance entries are found under an acceptance heading, by label or position", () => {
+test("review: the issue's acceptance entries are the list under its exact Acceptance heading, by label or position", () => {
   const body = [
     "### Outcome",
     "- not an entry: the outcome section",
     "",
-    "### What must be true",
+    "### Acceptance",
     "- **A:** the widget stays keyboard-reachable,",
     "  from every view.",
     "- **B:** the limit stays in place. The fallback stays available, so callers are unaffected.",
@@ -221,19 +221,23 @@ test("review: the issue's acceptance entries are found under an acceptance headi
     "- inside a fence: not an entry",
     "```",
     "",
-    "**Acceptance criteria**",
-    "1. [ ] numbered and checked",
+    "#### API",
+    "1. [ ] numbered and checked, under a sub-heading",
     "",
-    "## Context",
+    "### Context",
     "- not an entry",
   ].join("\n");
   assert.deepEqual(acceptanceEntries(body), [
     { id: "A", text: "**A:** the widget stays keyboard-reachable, from every view." },
     { id: "B", text: "**B:** the limit stays in place. The fallback stays available, so callers are unaffected." },
     { id: "3", text: "The heading shows the display name. - a nested note joins its entry" },
-    { id: "4", text: "numbered and checked" },
+    { id: "4", text: "numbered and checked, under a sub-heading" },
   ]);
   assert.deepEqual(acceptanceEntries("## Want\n- something"), [], "no acceptance heading: the reviewer names the entries itself");
+  // A heading that only mentions acceptance words is not the section: the reviewer names the entries from the issue (#417).
+  const designNotes = "## Selection criteria for the ranking model\n- recall over precision\n- **R:** cheap to rerun\n\n## Done when\n- one\n\n## Acceptance criteria\n- two\n\n**Acceptance**\n- three";
+  assert.deepEqual(acceptanceEntries(designNotes), []);
+  assert.deepEqual(acceptanceEntries("## acceptance ##\n- one").map((e) => e.text), ["one"], "the heading's case and closing hashes are formatting");
   assert.deepEqual(acceptanceEntries("## Acceptance\n- **A:** one\n- **A:** two").map((e) => e.id), ["A", "2"], "a repeated label falls back to the position");
   assert.equal(entryKey("acceptance b."), "B");
   assert.equal(entryKey("**B:**"), "B");
@@ -287,6 +291,13 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   assert.match(none.body, /The reviewer judged no acceptance entry\.\n\nNot judged: A, B, C, D\.$/);
   assert.match(none.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
   assert.deepEqual(none.unjudged, ["A", "B", "C", "D"]);
+  // With no entries listed (no exact Acceptance section), an answer judging none says so too (#417).
+  const unnamed = reviewPost({ issue: 7, review: parseReview('{"acceptance": [], "comments": []}'), diff, entries: [] });
+  assert.equal(unnamed.body, ["<!-- factory:7:review -->", "Factory reviewer: one comment-only pass, 1 comment(s).", "", "The reviewer judged no acceptance entry."].join("\n"));
+  assert.match(unnamed.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
+  const namedClean = reviewPost({ issue: 7, review: parseReview('{"acceptance": [{"entry": "W1", "met": true}], "comments": []}'), diff, entries: [] });
+  assert.match(namedClean.comments[0].body, /no findings; the pass ran/);
+  assert.match(namedClean.body, /Acceptance as the reviewer judged it:\n- W1: met$/);
   // A comment that names its entry only in its body prefix still covers that entry's not-met judgment.
   const prefixed = reviewPost({ issue: 7, review: { comments: [{ path: "src/a.ts", line: 3, body: "acceptance A: the limit is gone" }], acceptance: [{ entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "gone" }] }, diff, entries: [{ id: "A", text: "a" }] });
   assert.deepEqual(prefixed.comments.map((c) => c.body), ["acceptance A: the limit is gone"]);
@@ -334,7 +345,19 @@ test("review: a pass that failed, held no JSON or judged no entry is missed; one
   assert.equal(reviewMissed({ review: parseReview("it looks fine"), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries }), true);
   assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"B","met":false}],"comments":[]}'), entries }), false);
-  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), entries: [] }), false, "no entries in the issue: nothing to judge");
+  // No exact Acceptance section: the prompt asked the reviewer to name the entries, so an answer that judges none missed (#417).
+  const named = "### Outcome\n- a ranked list\n\n### Completion experience\n- it feels instant\n\n### What must be true\n- **W1:** results are ranked\n- **W2:** a test covers it";
+  assert.deepEqual(acceptanceEntries(named), []);
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[],"comments":[]}'), entries: acceptanceEntries(named) }), true);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": [{"path": "a", "line": 1, "body": "x"}]}'), entries: acceptanceEntries(named) }), true, "comments only: still no judgment");
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"W1","met":true}],"comments":[]}'), entries: acceptanceEntries(named) }), false);
+  assert.equal(reviewMissed({ review: parseReview('{"comments": []}'), judges: false }), false, "a comments-only pass (the foundation pass) judges nothing");
+  // Design notes under a criteria heading are no entries: a pass that judged the outcomes it named itself is no miss (#417).
+  const body = "## Selection criteria\n- recall over precision\n- cheap to rerun\n\n## Outcomes\n- **O1:** ranked results\n- **O2:** a test covers it";
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"O1","met":true},{"entry":"O2","met":true}],"comments":[]}'), entries: acceptanceEntries(body) }), false);
+  // Entries under a sub-heading of Acceptance are entries: a pass that judged only those is no miss either.
+  const nested = "## Acceptance\n- one\n- two\n\n### API\n- **C:** three";
+  assert.equal(reviewMissed({ review: parseReview('{"acceptance":[{"entry":"C","met":false}],"comments":[]}'), entries: acceptanceEntries(nested) }), false);
 });
 
 test("review: post-review posts nothing from a file with no reviewer JSON or no judgment", async () => {
@@ -344,6 +367,7 @@ test("review: post-review posts nothing from a file with no reviewer JSON or no 
   // Unquoted key: not JSON, so nothing is posted (it would carry the review marker and stop the Action's pass).
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [ {"entry": "A", met: true} ], "comments": []}', file: "f.json", diff, entries }), /f\.json holds no reviewer JSON; nothing posted/);
   assert.throws(() => reviewPostFor({ issue: 7, text: '{"comments": []}', file: "f.json", diff, entries }), /judges none of the issue's acceptance entries \(A\); nothing posted/);
+  assert.throws(() => reviewPostFor({ issue: 7, text: '{"acceptance": [], "comments": []}', file: "f.json", diff, entries: [] }), /f\.json judges no acceptance entry \(its "acceptance" list is empty\); nothing posted/);
   const post = reviewPostFor({ issue: 7, text: '{"acceptance": [{"entry": "A", "met": true}], "comments": []}', file: "f.json", diff, entries });
   assert.equal(post.placeholder, true);
 });
@@ -354,6 +378,11 @@ test("review: the prompt lists the issue's entries by id and asks for a judgment
   assert.match(p, /"acceptance": \[\{"entry": "2", "met": true/);
   assert.match(p, /The issue's acceptance entries, by the ids to use[^\n]*\n- A: \*\*A:\*\* one\n- 2: two\n/);
   assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Want\n- x", prBody: "", diff: "", harness: "codex" }), /Name each acceptance entry the issue states by its own label/);
+  // Design notes under a criteria heading are not handed over as the entries: the reviewer names them (#417).
+  const notes = reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Selection criteria\n- recall over precision\n\n## Outcomes\n- ranked results", prBody: "", diff: "", harness: "claude" });
+  assert.doesNotMatch(notes, /by the ids to use/);
+  assert.match(notes, /Name each acceptance entry the issue states by its own label/);
+  assert.match(reviewerPrompt({ issue: 5, issueTitle: "t", issueBody: "## Acceptance\n- one\n\n### API\n- two", prBody: "", diff: "", harness: "claude" }), /by the ids to use[^\n]*\n- 1: one\n- 2: two\n/, "entries under a sub-heading are listed too");
 });
 
 test("review: the prompt tells the reviewer of a split part, and only of one that is not the last (#157)", async () => {

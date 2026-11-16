@@ -17,6 +17,8 @@ import { cleanMerge } from "../../bench/test/fixtures/github.mjs";
 RETRY.sleep = async () => {};
 
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
+// The repository's writer (its collaborators list names it).
+const MAINTAINER = { login: "maintainer", type: "User" };
 const OBJ = "factory:objective";
 const issue = (labels, state = "open", number = 7, extra = {}) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" }, ...extra });
 
@@ -259,10 +261,10 @@ test("a draft edited after its plan and started by taking its draft label off is
   // draft label off (factory:objective stayed on).
   const T0 = "2031-03-02T01:00:00Z";
   const timeline = [
-    { event: "labeled", label: { name: OBJ }, created_at: T0 },
+    { event: "labeled", label: { name: OBJ }, actor: MAINTAINER, created_at: T0 },
     { event: "labeled", label: { name: "factory:running" }, created_at: "2031-03-02T01:01:00Z" },
-    { event: "labeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:10:00Z" },
-    { event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:30:00Z" },
+    { event: "labeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:10:00Z" },
+    { event: "unlabeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:30:00Z" },
   ];
   await withApi({}, async () => {
     setSelf("factory-app[bot]");

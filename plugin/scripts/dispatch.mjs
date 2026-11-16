@@ -30,7 +30,8 @@ import { accountPin, routeAccounts, routeAutoAccounts, routeTwoLine } from "./li
 import { choiceOf } from "./lib/choice.mjs";
 import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, labelTrust, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
+import { startsOf } from "./lib/objective-trust.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, goNoted, goTrust, labelTrust, refusedMarker, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -247,6 +248,19 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Whose label counts as a person's go (stop.mjs labelTrust): a restart's, and the Objective label re-applied. One check
   // per tick, so each login's permission is read at most once.
   const mayGo = labelTrust(repo, opts);
+  // Factory's note that a go was not taken (stop.mjs refusedMarker), once per go: one already on the timeline read here
+  // costs no call. `stays`: the state the Objective keeps.
+  const refuseGo = async (n, events, r, stays) => {
+    if (dryRun || goNoted(events, n, r.at)) return;
+    const who = r.actor?.login || "someone";
+    const what = r.draft ? `\`${DRAFT_LABEL}\` taken off` : `\`${inputs.objectiveLabel}\` ${stays === "Queued" ? "applied" : "re-applied"}`;
+    log(`  #${n}: ${what} by ${who}, who cannot push and is no maintainer the workflow names: not taken`);
+    await upsertComment(repo, n, refusedMarker(n, r.at), `Factory: ${what} by ${who} was not taken, so the Objective stays ${stays}${stays === "Queued" ? " and does not run" : ""}: only someone who can push to this repository, or a maintainer the workflow names, can run it by applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: refusal note: ${String(e?.message || e).slice(0, 120)}`));
+  };
+  // The Action's live jobs (work and review, by Objective), read at most once a tick for the restart and recovery passes;
+  // a read that fails is `{failed}`.
+  let liveJobsRead = null;
+  const liveJobs = () => (liveJobsRead ??= activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true })));
   const listed = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
   // An open Objective blocks the ones that name it, a draft among them: it is not done.
   const openNumbers = new Set(listed.map((i) => i.number));
@@ -313,12 +327,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const restarting = {};
   const restarts = wanted.filter((i) => stopCause(i, inputs.objectiveLabel) === "restart");
   if (restarts.length) {
-    let jobs = null;
     // Whether a stage of the Objective may still run. A read that fails is a maybe.
     const mayRun = async (issue) => {
       const n = issue.number;
       if (!sandbox) {
-        jobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
+        const jobs = await liveJobs();
         if (jobs.failed || jobs.work.has(n) || jobs.review.has(n)) return true;
       }
       // A sandbox lease (any route's, when the repository has a sandbox): a local loop sees one left from before the
@@ -403,39 +416,42 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const recoveryWaits = new Set();
   // Each timeline read here, kept for the relaunch pass below (its outage notice and record are on it too).
   const timelines = {};
-  let reviewJobs = null;
   for (const issue of wanted) {
     const n = issue.number;
     const state = stateOf(issue, statuses[n] ?? null);
     if (state !== "Blocked" && state !== "Question" && state !== "In review") continue;
     let again = inputs.issue === n;
+    let goAt = null;
     if (!again) {
       timelines[n] = await timelineOf(repo, n, cached).catch(() => null);
       if (!timelines[n]) continue;
-      const go = await requeuedIn(timelines[n], inputs.objectiveLabel, mayGo);
+      const go = await requeuedIn(timelines[n], inputs.objectiveLabel, goTrust(timelines[n], n, mayGo));
       if (go.unread) {
         recoveryWaits.add(n);
         log(`  #${n}: who re-applied ${inputs.objectiveLabel} could not be checked; next tick`);
         retry(`#${n}'s re-apply permission`);
         continue;
       }
-      for (const r of dryRun ? [] : go.refused) {
-        const mark = marker(n, "relabel-refused", String(r.at || "").replace(/[^0-9TZ]/g, ""));
-        // Said once: the note already on the timeline read here costs no call.
-        if (commentsOf(timelines[n]).some((c) => isSelf(c) && (c.body || "").startsWith(mark))) continue;
-        const who = r.actor?.login || "someone";
-        const what = r.draft ? `\`${DRAFT_LABEL}\` taken off` : `\`${inputs.objectiveLabel}\` re-applied`;
-        log(`  #${n}: ${what} by ${who}, who cannot push and is no maintainer the workflow names: not taken`);
-        await upsertComment(repo, n, mark, `Factory: ${what} by ${who} was not taken, so the Objective stays ${state}: only someone who can push to this repository, or a maintainer the workflow names, can run it again by re-applying \`${inputs.objectiveLabel}\`.`, opts).catch((e) => log(`  #${n}: re-apply refusal note: ${String(e?.message || e).slice(0, 120)}`));
-      }
+      for (const r of go.refused) await refuseGo(n, timelines[n], r, state);
       again = go.requeued;
+      goAt = go.at ?? null;
     }
     if (!again) continue;
     if (state === "Question" && backend().name === "actions" && !sandbox) {
-      reviewJobs ??= await activeFactoryJobs(repo, readToken0, { strict: true }).catch(() => ({ failed: true }));
-      if (reviewJobs.failed || reviewJobs.review.has(n)) {
+      const jobs = await liveJobs();
+      // A list that cannot be read is waited out for as long as a stopping stage takes (STOP_GRACE_MS from the go),
+      // then the go is taken: a review job still alive by then has had its own start check.
+      const unreadPast = jobs.failed && (!goAt || Date.now() - Date.parse(goAt) >= STOP_GRACE_MS);
+      if (jobs.failed && !unreadPast) {
         recoveryWaits.add(n);
-        log(`  #${n}: ${inputs.objectiveLabel} re-applied while a review job of it ${reviewJobs.failed ? "may run (live jobs unread)" : "runs"}; requeued once it ends`);
+        log(`  #${n}: ${inputs.objectiveLabel} re-applied, but the live jobs could not be read to see whether a review job of it runs; next tick`);
+        retry("live jobs");
+        continue;
+      }
+      if (unreadPast) log(`  #${n}: the live jobs are still unread ${Math.round(STOP_GRACE_MS / 60_000)} min after ${inputs.objectiveLabel} was re-applied; requeued`);
+      else if (jobs.review.has(n)) {
+        recoveryWaits.add(n);
+        log(`  #${n}: ${inputs.objectiveLabel} re-applied while a review job of it is running; requeued once it ends`);
         retry(`#${n}'s review job`);
         continue;
       }
@@ -680,9 +696,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
   // `{block, tries}` (relaunchDecision).
-  const decideLost = (n, events, { lost, key, setup = null }) => {
+  const decideLost = async (n, events, { lost, key, setup = null }) => {
     const comments = commentsOf(events);
-    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo)), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
   };
   // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
   // Running stint. False when a write failed: the next tick tries again, never a Block (that would be a write too).
@@ -722,7 +738,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       const block = outageBlockOf(commentsOf(events), n, lastRunningAt(events));
       if (!block) continue;
-      const d = decideLost(n, events, { lost: "outage", key: block.key });
+      const d = await decideLost(n, events, { lost: "outage", key: block.key });
       if (!d.block) {
         if (capHold(n)) continue;
         if (busy >= inputs.maxConcurrent) {
@@ -893,7 +909,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         let notLost = null;
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
-          const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
+          const d = await decideLost(n, events, { lost: "vanished", key: stintKey(since) });
           if (d.block) note = `; Factory relaunched its stage ${d.tries} times since the Objective was last started`;
           else if (capHold(n)) continue;
           else {
@@ -905,9 +921,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             // One set-up failure may pass (a 5xx on the checkout, a runner not acquired): relaunched once, its step on the
             // record; the same step failing again on the relaunch's job is a set-up that fails every time, and Blocks.
             const comments = commentsOf(events);
-            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), personStart(events, comments, inputs.objectiveLabel), notLost)) {
+            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), await personStart(events, comments, inputs.objectiveLabel, goTrust(events, n, mayGo)), notLost)) {
               log(`  #${n}: its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : " (GitHub never started it)"}, the first time at that step; relaunched once to tell a passing failure from one that fails every time`);
-              await relaunchLost(issue, decideLost(n, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
+              await relaunchLost(issue, await decideLost(n, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
               continue;
             }
             if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
@@ -1374,17 +1390,52 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     watch.mark("quota");
   }
 
-  const picked = selectReady({
-    deferred,
-    issues: wanted,
-    running,
-    held,
-    statuses,
-    openIssues: openNumbers,
-    maxConcurrent: inputs.issue ? running + 1 : inputs.maxConcurrent,
-    dailyUsd: inputs.dailyUsd,
-    spentToday,
-  });
+  // Who started each pick (its latest start: the label applied or the draft label taken off, objective-trust.mjs
+  // startsOf) must be a person who can push or a pinned maintainer (stop.mjs labelTrust), as for a re-apply above: one
+  // anyone else started is held Queued, never run, with one note. Unread waits a tick. Checked on the picks alone, again
+  // until every pick is one a person started; a requeue or restart this tick, or one named by hand, was a person's go.
+  const startChecked = new Set([...reset, ...restarted, ...(inputs.issue ? [inputs.issue] : [])]);
+  const startRefused = async (n) => {
+    timelines[n] ??= await timelineOf(repo, n, cached).catch(() => null);
+    const events = timelines[n];
+    if (!events) {
+      retry(`#${n}'s timeline`);
+      return "who started it is unread (its timeline); next tick";
+    }
+    const start = startsOf(events, inputs.objectiveLabel)[0];
+    if (!start) return null;
+    const ok = await goTrust(events, n, mayGo)(start.actor ?? null, start);
+    if (ok === true) return null;
+    if (ok === "unread") {
+      retry(`#${n}'s start permission`);
+      return "who started it could not be checked; next tick";
+    }
+    await refuseGo(n, events, { at: start.created_at, actor: start.actor ?? null, draft: start.event === "unlabeled" }, "Queued");
+    return `started by ${start.actor?.login || "someone"}, who cannot push and is no maintainer the workflow names: not run`;
+  };
+  const pick = () =>
+    selectReady({
+      deferred,
+      issues: wanted,
+      running,
+      held,
+      statuses,
+      openIssues: openNumbers,
+      maxConcurrent: inputs.issue ? running + 1 : inputs.maxConcurrent,
+      dailyUsd: inputs.dailyUsd,
+      spentToday,
+    });
+  let picked = pick();
+  // GitHub's REST quota spent: nothing starts this tick (below), so no start is read.
+  if (!spentUntil(quotaKey(`${githubOrigin()}/repos`, token))) for (let unchecked = picked.ready.filter((n) => !startChecked.has(n)); unchecked.length; unchecked = picked.ready.filter((n) => !startChecked.has(n))) {
+    let refused = false;
+    for (const n of unchecked) {
+      startChecked.add(n);
+      const why = await startRefused(n);
+      if (why) [held[n], refused] = [why, true];
+    }
+    if (refused) picked = pick();
+  }
   // Queued work daily_usd held back starts when the UTC day turns (a spend that could not be read is a retry, above).
   if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
   // Siblings on the same files (#277, #340, lib/overlap.mjs): every pick starts, since each has work of its own to

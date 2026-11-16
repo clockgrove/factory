@@ -19,7 +19,7 @@ import { findProject, listComments, moveCard, primeSelf, setStateLabel, upsertCo
 import { log, redactSecrets } from "./inputs.mjs";
 import { isSelf, marker, questionMarker, selfLogin } from "./logic.mjs";
 import { timelineOf } from "./relaunch.mjs";
-import { RESTART_LABEL } from "./stop.mjs";
+import { RESTART_LABEL, goTrust, labelTrust } from "./stop.mjs";
 import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question asked about the comments since a Question. */
@@ -248,14 +248,16 @@ export async function screenAnswer({ check, repo, issue, since, comments, decisi
 /**
  * When the Question this stint resumes was asked: the issue's last factory:question label, unless a Block, a delivery
  * (a send-back's In review included), a restart or the objective label applied after it started the stint instead (a
- * person's go needs no answer). `events` is the issue's timeline. Null when the stint resumes no Question.
+ * person's go needs no answer: a re-apply counts only from someone `trusted` takes as a person, stop.mjs requeuedIn's
+ * rule). `events` is the issue's timeline. Null when the stint resumes no Question.
  */
-export function questionResumedAt(events, { objectiveLabel }) {
-  const ends = new Set(["factory:blocked", "factory:in-review", RESTART_LABEL, objectiveLabel]);
+export async function questionResumedAt(events, { objectiveLabel, trusted }) {
+  const ends = new Set(["factory:blocked", "factory:in-review", RESTART_LABEL]);
   let asked = null;
   for (const e of [...(events || [])].filter((x) => x?.event === "labeled" && x.label?.name).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
     if (e.label.name === "factory:question") asked = e.created_at;
     else if (ends.has(e.label.name)) asked = null;
+    else if (asked && e.label.name === objectiveLabel && (await trusted(e.actor ?? null, e)) === true) asked = null;
   }
   return asked;
 }
@@ -271,7 +273,8 @@ export function questionResumedAt(events, { objectiveLabel }) {
  */
 export async function answerAtStart({ repo, issue, check, decisions, label, appId = null, opts, prepare = null }) {
   if (!check?.judge) return { open: null };
-  const since = questionResumedAt(await timelineOf(repo, issue, opts).catch(() => []), { objectiveLabel: label });
+  const events = await timelineOf(repo, issue, opts).catch(() => []);
+  const since = await questionResumedAt(events, { objectiveLabel: label, trusted: goTrust(events, issue, labelTrust(repo, opts)) });
   if (!since) return { open: null };
   // Read only for a stint that resumes a Question: an array, or a function that reads them (objectiveDecisions).
   const writers = await Promise.resolve(typeof decisions === "function" ? decisions() : decisions).catch(() => null);

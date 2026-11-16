@@ -102,7 +102,7 @@ import {
   mirrorOwnStat,
   redLines,
 } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
@@ -399,13 +399,15 @@ export function workOwnsBranch({ action = null, sender = null, issue = null }) {
  * whose Objective `label` a person who can push re-applied since it was asked (stop.mjs requeuedIn, the dispatcher's own
  * rule). That go wins over the mark beside it: the dispatcher puts the Objective back to Queued and starts its work
  * stage, so this review ends at once. A re-apply by anyone else changes nothing, and one whose actor could not be
- * checked for now leaves the mark's review to run (the dispatcher waits for a Question's live review job before it
- * requeues it). The timeline is read only for a person's mark on a Question.
+ * checked for now, or a timeline that cannot be read, leaves the mark's review to run (the dispatcher waits for a
+ * Question's live review job before it requeues it). The timeline is read only for a person's mark on a Question.
  */
 export async function readyOwner({ repo, action = null, sender = null, issue = null, label, opts }) {
   const owned = workOwnsBranch({ action, sender, issue });
   if (owned || action !== "ready_for_review" || sender?.type === "Bot" || !issue || stateOf(issue, null) !== "Question") return owned;
-  const go = await requeuedIn(await timelineOf(repo, issue.number, opts), label, labelTrust(repo, opts));
+  const events = await timelineOf(repo, issue.number, opts).catch(() => null);
+  if (!events) return null;
+  const go = await requeuedIn(events, label, goTrust(events, issue.number, labelTrust(repo, opts)));
   return go.requeued ? `marked ready beside ${label} re-applied since the Question: its work stage runs again on factory/${issue.number}` : null;
 }
 

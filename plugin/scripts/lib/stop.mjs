@@ -6,7 +6,7 @@
 // stopped (its PR a draft without the review label, its state label off, its card back in Queued).
 import { collaboratorPermission, dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { REVIEW_LABEL, knownWriter, marker, pinnedMaintainer, restartedAt, trustedAuthor } from "./logic.mjs";
+import { REVIEW_LABEL, isSelf, knownWriter, marker, pinnedMaintainer, restartedAt, trustedAuthor } from "./logic.mjs";
 
 /** How often a running stage reads its issue for a stop. */
 export const STOP_POLL_MS = 60_000;
@@ -54,6 +54,20 @@ export function labelTrust(repo, opts) {
   };
 }
 
+/** The marker of Factory's note that the go at `at` (a label event's time) on issue `n` was not taken (one per go). */
+export const refusedMarker = (n, at) => marker(n, "relabel-refused", String(at || "").replace(/[^0-9TZ]/g, ""));
+
+/**
+ * `trusted` (labelTrust) on the issue's timeline `events`: a go Factory's note there already refused (refusedMarker) is
+ * refused again with no read, so a refusal holds for good and costs nothing at later ticks.
+ */
+export function goTrust(events, n, trusted) {
+  return async (actor, e) => (e && goNoted(events, n, e.created_at) ? false : trusted(actor, e));
+}
+
+/** Whether Factory's note that the go at `at` was not taken (refusedMarker) is on the issue's timeline `events`. */
+export const goNoted = (events, n, at) => (events || []).some((e) => e?.event === "commented" && isSelf({ user: e.user ?? e.actor }) && (e.body || "").startsWith(refusedMarker(n, at)));
+
 /** The states a person's go (the Objective label re-applied) puts back to Queued: their labels, by the issue's timeline. */
 const REQUEUED_FROM = ["factory:blocked", "factory:question", "factory:in-review"];
 
@@ -62,7 +76,8 @@ const REQUEUED_FROM = ["factory:blocked", "factory:question", "factory:in-review
  * Block, Question or In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage
  * (the dispatcher's recovery). serve's pendingReviews and the review job's start read the same rule, so a ready mark
  * beside such a go starts no review. A go counts only when `trusted` (labelTrust) holds for its actor; anyone else's
- * changes nothing. Newest go first, so the usual case is one check. Returns `{requeued, unread, refused}`: `unread`
+ * changes nothing. Newest go first, so the usual case is one check. Returns `{requeued, at, unread, refused}` (`at`: the
+ * go that counted): `unread`
  * when the check of a go's actor could not be made for now (nothing is decided on it), and `refused`, when neither, the
  * goes since that did not count (`{at, actor, draft}`, `draft` for a draft's start), newest first.
  */
@@ -74,8 +89,8 @@ export async function requeuedIn(events, label, trusted) {
   const go = (e) => (e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
   const goes = (events || []).filter((e) => go(e) && e.created_at > since).reverse();
   for (const e of goes) {
-    const ok = await trusted(e.actor ?? null);
-    if (ok === true) return { ...out, requeued: true, refused: [] };
+    const ok = await trusted(e.actor ?? null, e);
+    if (ok === true) return { ...out, requeued: true, at: e.created_at, refused: [] };
     if (ok === "unread") return { ...out, unread: true, refused: [] };
     out.refused.push({ at: e.created_at, actor: e.actor ?? null, draft: e.event === "unlabeled" });
   }

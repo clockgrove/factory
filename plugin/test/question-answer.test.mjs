@@ -24,8 +24,13 @@ const STRANGER = { login: "passer-by", type: "User" };
 // GitHub lets anyone with triage access, and an App installed with issue write, apply labels: neither can push.
 const TRIAGER = { login: "triager", type: "User" };
 const APP = { login: "helper-app[bot]", type: "Bot" };
+// A writer GitHub's collaborators list does not name (org-derived access): only a permission read shows it.
+const UNLISTED = { login: "org-owner", type: "User" };
+// A maintainer the workflow pins by id (FACTORY_MAINTAINERS `pinned#4242`), whose permission reads as read.
+const PINNED = { login: "pinned", id: 4242, type: "User" };
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 const OBJ = "factory:objective";
+const DRAFT = "factory:draft";
 const MIN = 60_000;
 
 /**
@@ -54,10 +59,11 @@ function fakeGitHub(open, { self = BOT } = {}) {
   const reads = [];
   // The AI Gateway's decisions endpoint: each call's input kept, answered by `verdict` (a function of the input).
   const gateway = { calls: [], verdict: () => ({ choice: "decision", confidence: 0.9 }) };
-  // Writes whose body matches one of `writes` fail with a 500; `permission`: every permission read fails.
-  const fail = { writes: [], permission: false };
+  // Writes whose body matches one of `writes` fail with a 500; `permission`: every permission read fails; `jobs`: the
+  // Action's live jobs cannot be listed.
+  const fail = { writes: [], permission: false, jobs: false };
   // What GitHub reads as each login's permission (anyone else: read). The App's says write: its type alone refuses it.
-  const permissions = { [PERSON.login]: "write", [TRIAGER.login]: "triage", [APP.login]: "write" };
+  const permissions = { [PERSON.login]: "write", [TRIAGER.login]: "triage", [APP.login]: "write", [UNLISTED.login]: "admin" };
   // The Objectives with a review job running on the Action (`review (factory/<n>)`).
   const reviewJobs = new Set();
   const fetch = async (url, init = {}) => {
@@ -138,7 +144,7 @@ function fakeGitHub(open, { self = BOT } = {}) {
     if (method === "GET" && path === "/collaborators") return json([{ login: PERSON.login }]);
     const perm = /^\/collaborators\/([^/]+)\/permission$/.exec(path);
     if (method === "GET" && perm) return fail.permission ? json({ message: "Server Error" }, 500) : json({ permission: permissions[perm[1]] ?? "read" });
-    if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) return json({ workflow_runs: reviewJobs.size ? [{ id: 1 }] : [] });
+    if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) return fail.jobs ? json({ message: "Server Error" }, 500) : json({ workflow_runs: reviewJobs.size ? [{ id: 1 }] : [] });
     if (method === "GET" && path === "/actions/runs/1/jobs") return json({ jobs: [...reviewJobs].map((n) => ({ name: `review (factory/${n})`, status: "in_progress" })) });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
     if (method === "GET" && path === "/issues/comments") return json([]);
@@ -155,11 +161,11 @@ function fakeGitHub(open, { self = BOT } = {}) {
       const c = [...issues.values()].flatMap((i) => i.comments).find((x) => x.id === id);
       Object.assign(c, { body: text, updated_at: stamp() });
     },
-    /** A label taken off now, as the dispatcher's requeue does. */
-    unlabel(n, name) {
+    /** A label taken off now, as the dispatcher's requeue does, or by `by`. */
+    unlabel(n, name, by = self) {
       const one = issues.get(n);
       one.issue.labels = one.issue.labels.filter((l) => l !== name);
-      one.timeline.push({ event: "unlabeled", label: { name }, actor: self, created_at: stamp() });
+      one.timeline.push({ event: "unlabeled", label: { name }, actor: by, created_at: stamp() });
     },
     timeline: (n) => issues.get(n).timeline,
     /** A person (`by`, the maintainer by default) applying `name` to the issue now. */
@@ -214,7 +220,7 @@ async function ask(gh, n, { askOnIssue = false, pr = null, self = BOT, stage = "
 }
 
 /** One dispatcher tick on `gh`: the Action's route, or a local loop's (`local`, where Factory posts as the person). */
-async function tick(gh, { local = false, sandbox = undefined, localStopped = {}, localHeld = {}, readCache = null, key = false } = {}) {
+async function tick(gh, { local = false, sandbox = undefined, localStopped = {}, localHeld = {}, readCache = null, key = false, maintainers = undefined } = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const realFetch = globalThis.fetch;
   const keys = ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID", "GITHUB_ACTIONS"];
@@ -232,7 +238,7 @@ async function tick(gh, { local = false, sandbox = undefined, localStopped = {},
   globalThis.fetch = gh.fetch;
   setSelf(local ? PERSON.login : BOT.login);
   try {
-    return await dispatch({ repo: REPO.full, objectiveLabel: OBJ, maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, notify: "kirk", ...(sandbox ? { sandbox } : {}) }, { token: "t", localStopped, localHeld, readCache });
+    return await dispatch({ repo: REPO.full, objectiveLabel: OBJ, maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, notify: "kirk", ...(sandbox ? { sandbox } : {}), ...(maintainers ? { maintainers } : {}) }, { token: "t", localStopped, localHeld, readCache });
   } finally {
     globalThis.fetch = realFetch;
     setSelf(null);
@@ -486,11 +492,16 @@ test("answer check, pieces: comment versions, Factory's own records and notices,
     assert.match(input, /Comment 1 of 1, by maintainer at 2026-11-15T10:03:00Z:\n<<<BEGIN abc>>>/);
     assert.notEqual(answerInput({ repo: "acme/app", issue: 7, question: "q", comments: [] }).match(/<<<BEGIN (\w+)>>>/)[1], "abc", "a random tag a comment cannot know");
 
-    const ev = (name, m) => ({ event: "labeled", label: { name }, created_at: at(m) });
-    assert.equal(questionResumedAt([ev(OBJ, 0), ev("factory:running", 1), ev("factory:question", 2)], { objectiveLabel: OBJ }), at(2));
-    assert.equal(questionResumedAt([ev(OBJ, 0), ev("factory:question", 2), ev(OBJ, 4)], { objectiveLabel: OBJ }), null, "the label re-applied: a person's go");
-    assert.equal(questionResumedAt([ev("factory:question", 2), ev("factory:in-review", 3), ev("factory:running", 4)], { objectiveLabel: OBJ }), null, "delivered since, a send-back's stage included");
-    assert.equal(questionResumedAt([ev(OBJ, 0), ev("factory:running", 1)], { objectiveLabel: OBJ }), null, "no Question");
+    const ev = (name, m, actor = PERSON) => ({ event: "labeled", label: { name }, actor, created_at: at(m) });
+    // The trust check as the work stage makes it (stop.mjs labelTrust): only the maintainer counts here.
+    const trusted = async (actor) => actor?.login === PERSON.login && actor.type === "User";
+    const resumed = (events) => questionResumedAt(events, { objectiveLabel: OBJ, trusted });
+    assert.equal(await resumed([ev(OBJ, 0), ev("factory:running", 1), ev("factory:question", 2)]), at(2));
+    assert.equal(await resumed([ev(OBJ, 0), ev("factory:question", 2), ev(OBJ, 4)]), null, "the label re-applied: a person's go");
+    assert.equal(await resumed([ev(OBJ, 0), ev("factory:question", 2), ev(OBJ, 4, TRIAGER)]), at(2), "a triager's re-apply is no go: the Question still stands");
+    assert.equal(await resumed([ev(OBJ, 0), ev("factory:question", 2), ev(OBJ, 4, APP)]), at(2), "nor an App's");
+    assert.equal(await resumed([ev("factory:question", 2), ev("factory:in-review", 3), ev("factory:running", 4)]), null, "delivered since, a send-back's stage included");
+    assert.equal(await resumed([ev(OBJ, 0), ev("factory:running", 1)]), null, "no Question");
   } finally {
     setSelf(null);
   }
@@ -931,4 +942,108 @@ test("#449 the Actions review job: a non-writer's re-apply beside the ready mark
   assert.ok(!r.ready.includes(7));
   assert.ok(gh.labels(7).includes("factory:question"));
   assert.equal(refusals(gh, 7).length, 1);
+});
+
+/** A Question (its PR's) on `gh`'s Objective `n`, its Objective label then taken off: the next label is the re-apply. */
+async function questionToReapply(gh, n, { self = BOT } = {}) {
+  await ask(gh, n, { pr: gh.pr(n), self });
+  gh.age(n, 36_000);
+  gh.unlabel(n, OBJ);
+}
+
+test("#449 dispatcher: a re-apply whose actor's permission cannot be read waits a tick, saying nothing; once read, a writer the list does not name requeues it", async () => {
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await questionToReapply(gh, 7);
+  gh.label(7, OBJ, UNLISTED);
+  gh.fail.permission = true;
+  const unread = await tick(gh);
+  assert.ok(!unread.ready.includes(7) && gh.labels(7).includes("factory:question"), "nothing decided on it");
+  assert.ok(unread.deadlines.some((d) => d.kind === "retry"), "read again soon");
+  assert.deepEqual(refusals(gh, 7), [], "no refusal for an unread permission");
+  gh.fail.permission = false;
+  const read = await tick(gh);
+  assert.ok(read.ready.includes(7) && !gh.labels(7).includes("factory:question"), "an admin by permission is a person's go");
+});
+
+test("#448 Actions: a live-jobs list that cannot be read holds a re-applied Question for a stopping stage's grace from the re-apply, then requeues it", async () => {
+  const { STOP_GRACE_MS } = await import("../scripts/lib/stop.mjs");
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await questionToReapply(gh, 7);
+  gh.ready(7);
+  gh.label(7, OBJ);
+  gh.fail.jobs = true;
+  const held = await tick(gh);
+  assert.ok(!held.ready.includes(7) && gh.labels(7).includes("factory:question"), "a review job of it may still run");
+  assert.ok(held.deadlines.some((d) => d.kind === "retry"));
+  gh.age(7, STOP_GRACE_MS);
+  const past = await tick(gh);
+  assert.ok(past.ready.includes(7) && !gh.labels(7).includes("factory:question"), "past the grace the go is taken");
+});
+
+test("#449 dispatcher: Blocked and In review take a writer's re-apply; a triager's leaves each as it is, said once", async () => {
+  for (const state of ["factory:blocked", "factory:in-review"]) {
+    const gh = fakeGitHub([{ number: 7 }, { number: 8 }]);
+    for (const n of [7, 8]) {
+      gh.label(n, state, BOT);
+      gh.age(n, 36_000);
+      gh.unlabel(n, OBJ);
+    }
+    gh.label(7, OBJ, TRIAGER);
+    gh.label(8, OBJ, PERSON);
+    const r = await tick(gh);
+    assert.ok(!r.ready.includes(7) && gh.labels(7).includes(state), `${state}: the triager's re-apply changes nothing`);
+    assert.equal(refusals(gh, 7).length, 1);
+    assert.match(refusals(gh, 7)[0].body, new RegExp(`stays ${state === "factory:blocked" ? "Blocked" : "In review"}`));
+    assert.ok(r.ready.includes(8) && !gh.labels(8).includes(state), `${state}: the writer's requeues it`);
+  }
+});
+
+test("#449 dispatcher picks: a draft started by a triager, or a stopped Objective a triager labelled again, is never run; said once, and a refusal is not read again", async () => {
+  const gh = fakeGitHub([{ number: 7 }, { number: 8 }, { number: 9 }]);
+  // #7 and #8: drafts; the triager starts #7 by taking the draft label off, the maintainer starts #8.
+  for (const n of [7, 8]) gh.label(n, DRAFT, PERSON);
+  gh.age(7, 60_000);
+  gh.age(8, 60_000);
+  gh.unlabel(7, DRAFT, TRIAGER);
+  gh.unlabel(8, DRAFT, PERSON);
+  // #9: stopped by the maintainer (its label taken off), then labelled again by the triager.
+  gh.unlabel(9, OBJ, PERSON);
+  gh.label(9, OBJ, TRIAGER);
+  const r = await tick(gh);
+  assert.deepEqual(r.ready.filter((n) => n !== 8), [], "neither the triager's draft start nor their label runs anything");
+  assert.ok(r.ready.includes(8), "the maintainer's draft start runs");
+  assert.match(refusals(gh, 7)[0]?.body ?? "", /`factory:draft` taken off by triager was not taken, so the Objective stays Queued and does not run/);
+  assert.match(refusals(gh, 9)[0]?.body ?? "", /`factory:objective` applied by triager was not taken/);
+  const permissionReads = () => gh.reads.filter((x) => x.path === `/collaborators/${TRIAGER.login}/permission`).length;
+  const before = permissionReads();
+  const again = await tick(gh);
+  assert.ok(!again.ready.includes(7) && !again.ready.includes(9));
+  assert.deepEqual([refusals(gh, 7).length, refusals(gh, 9).length], [1, 1], "said once");
+  assert.equal(permissionReads(), before, "a refusal on the timeline is not read again");
+});
+
+test("#449 restart: factory:restart applied by an App is refused and taken off with its note; a maintainer pinned by id re-applies factory:objective", async () => {
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }, { number: 8, pr: PR_BODY }]);
+  gh.label(7, "factory:restart", APP);
+  await questionToReapply(gh, 8);
+  gh.label(8, OBJ, PINNED);
+  try {
+    const r = await tick(gh, { maintainers: ["pinned#4242"] });
+    assert.deepEqual(r.restarted, []);
+    assert.ok(!gh.labels(7).includes("factory:restart"), "the App's restart label is taken off");
+    assert.ok(gh.comments(7).some((c) => /restart-refused/.test(c.body) && /applied by helper-app\[bot\] was ignored/.test(c.body)));
+    assert.ok(r.ready.includes(8) && !gh.labels(8).includes("factory:question"), "the pinned maintainer's re-apply requeues it");
+  } finally {
+    await tick(fakeGitHub([]), { maintainers: [] });
+  }
+});
+
+test("#448 review job: a timeline that cannot be read leaves the ready mark's review to run", async () => {
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await questionToReapply(gh, 7);
+  gh.ready(7);
+  gh.label(7, OBJ);
+  const realFetch = gh.fetch;
+  gh.fetch = async (url, init) => (/\/issues\/7\/timeline/.test(String(url)) ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }) : realFetch(url, init));
+  assert.equal(await readyCheck(gh, 7), null);
 });

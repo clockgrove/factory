@@ -91,11 +91,12 @@ export function outageBlockOf(comments, issue, runningAt) {
 }
 
 /**
- * When a person last started the Objective, which starts the relaunch count over: its label applied, its draft label
- * taken off (objective-trust.mjs startTime), or a restart (logic.mjs restartedAt). Null when none can be told.
+ * When a person last started the Objective, which starts the relaunch count over: its label applied or its draft label
+ * taken off by someone `trusted` takes as a person's go (objective-trust.mjs startTime), or a restart (logic.mjs
+ * restartedAt). Null when none can be told.
  */
-export function personStart(events, comments, label) {
-  const times = [startTime(events, label), restartedAt(comments)].filter((t) => Number.isFinite(Date.parse(t)));
+export async function personStart(events, comments, label, trusted) {
+  const times = [await startTime(events, label, trusted), restartedAt(comments)].filter((t) => Number.isFinite(Date.parse(t)));
   return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 

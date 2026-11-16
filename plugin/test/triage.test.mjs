@@ -1918,7 +1918,7 @@ test("#413: every decision call on the triage model reads its verdict at the flo
   const { answerDecider, answerGate } = await import("../scripts/review.mjs");
   const inputs = { triageModel: "t/m", triageMinConfidence: 0.9 };
   const at = (verdict) => ({ name: "ai-gateway", decide: async () => ({ verdict, confidence: 0.8 }) });
-  assert.deepEqual(await openKeptCheck({ inputs, decider: at("kept") }).judge({ path: "a.txt", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+a" }], file: "a\n" }), { kept: false, why: "the decision model (t/m) said kept at 0.80, under 0.9" });
+  assert.deepEqual(await openKeptCheck({ inputs, decider: at("kept") }).judge({ path: "a.txt", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+a" }], file: "a\n" }), { kept: false, lost: false, why: "the decision model (t/m) said kept at 0.80, under 0.9" });
   const sig = (id) => ({ id, line: `${id} failed` });
   const p = await openProgressCheck({ inputs, decider: at("closer") }).judge({ before: { jobs: [{ name: "a", sig: sig("aaaaaaaaaaaa") }] }, after: { jobs: [{ name: "b", sig: sig("bbbbbbbbbbbb") }] } });
   assert.equal(p.progress, false);

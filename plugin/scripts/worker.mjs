@@ -93,12 +93,14 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
   if (!left) return "";
   // Local mode keeps what the pass left in the Objective's clone (outbox.mjs setAside), and the Block says how to deliver it.
   const kept = await Promise.resolve(outbox.setAside?.()).catch(() => null);
-  const clone = issue ? `the Objective's local clone (\`.factory/${issue}\`)` : "the Objective's local clone";
+  const clone = issue ? `the Objective's local clone (\`.factory/${issue}/repo\`)` : "the Objective's local clone";
   const resume = !kept
     ? ""
-    : kept.failed
-      ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
-      : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
+    : kept.removed
+      ? `; this pass left nothing to keep, so the result of an earlier one kept on the branch \`${kept.name}\` of ${clone} was removed`
+      : kept.failed
+        ? `; its result could not be kept on a branch of ${clone} (the local loop's log says why)`
+        : `; the conflict pass's result is kept as ${kept.sha} on the branch \`${kept.name}\` of ${clone}. To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin ${kept.name}:${kept.branch}\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`;
   const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);

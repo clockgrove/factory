@@ -1630,7 +1630,7 @@ test("outbox: a path the conflict reshaped goes to the decision model: kept at t
 
   // A decider that throws is no answer either; with no key there is no judge at all.
   const thrown = openKeptCheck({ inputs: {}, decider: { decide: async () => { throw new Error("boom"); } } });
-  assert.deepEqual(await thrown.judge({ path: "x", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+x" }], file: "" }), { kept: false, why: "the decision model gave no answer (vendor)" });
+  assert.deepEqual(await thrown.judge({ path: "x", hunks: [{ at: 1, text: "@@ -0,0 +1 @@\n+x" }], file: "" }), { kept: false, lost: false, why: "the decision model gave no answer (vendor)" });
   assert.equal(openKeptCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } }), null);
 });
 
@@ -2165,6 +2165,18 @@ test("#452: the rebase check shows a file over its limit as the lines around eac
   const a = hunkReader();
   assert.equal(await app.box.rebaseLeft({ from: app.from, onto: app.onto, judge: a.judge }), "");
   assert.match(a.asked[0].input, /\nobjective tail 200\n<<<END/);
+
+  // Both add the file (the hunk has no old line): the branch's 700 lines first in the head, main's 1,500 after them. The
+  // window starts at the file's first line and reaches past the branch's last.
+  const added = (who, n) => Array.from({ length: n }, (_, i) => `${who} line ${i + 1} of the added module`).join("\n") + "\n";
+  const both = await sentBack({ base: { "keep.txt": "keep\n" }, commits: [{ "new.txt": added("branch", 700) }], main: { "new.txt": added("main", 1500) } });
+  assert.throws(() => both.go("rebase", "-q", "origin/main"));
+  writeFileSync(join(both.r.work, "new.txt"), added("branch", 700) + added("main", 1500));
+  both.go("add", "new.txt");
+  both.go("rebase", "--continue");
+  const b = hunkReader();
+  assert.equal(await both.box.rebaseLeft({ from: both.from, onto: both.onto, judge: b.judge }), "");
+  assert.match(b.asked[0].input, /\nLines 1 to 760 of the 2200 the file has in the rebased branch, around where hunk 1 applies:\n<<<BEGIN [0-9a-f]{16}>>>\nbranch line 1 of the added module\n[\s\S]*\nbranch line 700 of the added module\n/);
 });
 
 test("#452: the file a hunk is judged against: an empty file is shown empty, a missing one as missing", () => {
@@ -2181,7 +2193,7 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
     const why = await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, say).judge, issue: 1 });
     assert.ok(
       why.endsWith(
-        `; nothing of it was pushed; the conflict pass's result is kept as ${head} on the branch \`factory/1-conflict-pass\` of the Objective's local clone (\`.factory/1\`). To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin factory/1-conflict-pass:factory/1\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`,
+        `; nothing of it was pushed; the conflict pass's result is kept as ${head} on the branch \`factory/1-conflict-pass\` of the Objective's local clone (\`.factory/1/repo\`). To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin factory/1-conflict-pass:factory/1\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`,
       ),
       why,
     );
@@ -2205,8 +2217,9 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
   busy.r.run(busy.r.work, "branch", "factory/1-conflict-pass", busy.from);
   busy.r.run(busy.r.work, "worktree", "add", "-q", join(busy.r.root, "wt"), "factory/1-conflict-pass");
   const why2 = await sendBackGuard({ outbox: busy.box, onto: { from: busy.from, base: busy.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge, issue: 1 });
-  assert.ok(why2.endsWith("; nothing of it was pushed; its result could not be kept on a branch of the Objective's local clone (`.factory/1`) (the local loop's log says why)"), why2);
-  // Nothing to keep (a rebase left in progress): an earlier kept branch is removed, so none stands for this Block.
+  assert.ok(why2.endsWith("; nothing of it was pushed; its result could not be kept on a branch of the Objective's local clone (`.factory/1/repo`) (the local loop's log says why)"), why2);
+  // Nothing to keep (a merge left in progress): an earlier kept branch is removed, so none stands for this Block, which
+  // says so.
   const stuck = await staleConflict(staleFile(300, touch, markStale), { outbox: { local: true } });
   stuck.r.run(stuck.r.work, "branch", "factory/1-conflict-pass", stuck.from);
   stuck.go("checkout", "-q", "-b", "side", "HEAD~1");
@@ -2218,11 +2231,55 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
   stuck.go("add", "x.txt");
   stuck.go("commit", "-q", "-m", "y");
   assert.throws(() => stuck.go("merge", "side"));
-  assert.match(await sendBackGuard({ outbox: stuck.box, onto: { from: stuck.from, base: stuck.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge().judge, issue: 1 }), /: the conflict pass left a merge in progress; nothing of it was pushed$/);
+  assert.match(await sendBackGuard({ outbox: stuck.box, onto: { from: stuck.from, base: stuck.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge().judge, issue: 1 }), /: the conflict pass left a merge in progress; nothing of it was pushed; this pass left nothing to keep, so the result of an earlier one kept on the branch `factory\/1-conflict-pass` of the Objective's local clone \(`\.factory\/1\/repo`\) was removed$/);
   assert.throws(() => stuck.r.run(stuck.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
   // On Actions the runner keeps nothing: no branch, and the Block says only that nothing was pushed.
   const a = await staleConflict(staleFile(300, touch, markStale), { adapt: true });
   const why = await sendBackGuard({ outbox: a.box, onto: { from: a.from, base: a.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge });
   assert.ok(why.endsWith("; nothing of it was pushed"), why);
   assert.throws(() => a.r.run(a.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
+});
+
+/** #452: a decider that answers the whole path's question with `whole` and each hunk asked alone with `alone`. */
+function wholeThenAlone(whole, alone) {
+  const asked = [];
+  const decider = {
+    name: "fake",
+    model: "fake/model",
+    async decide(input) {
+      const n = (input.match(/\nHunk \d+ of \d+ /g) || []).length;
+      asked.push(n);
+      return n > 1 ? whole : alone;
+    },
+  };
+  return { asked, judge: openKeptCheck({ inputs: { triageModel: "fake/model" }, decider }).judge };
+}
+
+test("#452: a sure `lost` for the whole path stands though every hunk asked alone reads kept; an unsure one gives way to them", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  // Sure lost for the whole (0.95, over the 0.7 floor), each hunk alone kept: still Blocked, nothing pushed.
+  const dropped = await staleConflict(staleFile(300, touch));
+  const sure = wholeThenAlone({ verdict: "lost", confidence: 0.95 }, { verdict: "kept", confidence: 0.8 });
+  const why = await sendBackGuard({ outbox: dropped.box, onto: { from: dropped.from, base: dropped.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: sure.judge });
+  assert.match(why, /: src\/stale\.ts \([0-9a-f]{7}\): the decision model \(fake\/model\) judged it lost at 0\.95 for the file as a whole, though no hunk asked alone was; nothing of it was pushed$/);
+  assert.deepEqual(sure.asked, [2, 1, 1]);
+  assert.equal(await dropped.box.push(), false);
+  // Unsure for the whole (kept at 0.23, or lost at 0.5 under the floor, or no answer), each hunk alone kept: kept, pushed.
+  for (const whole of [{ verdict: "kept", confidence: 0.23 }, { verdict: "lost", confidence: 0.5 }, { verdict: null, confidence: null, error: "unavailable" }]) {
+    const t = await staleConflict(staleFile(300, touch, markStale), { adapt: true });
+    const unsure = wholeThenAlone(whole, { verdict: "kept", confidence: 0.8 });
+    assert.equal(await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: unsure.judge }), "", JSON.stringify(whole));
+    assert.deepEqual(unsure.asked, [2, 1, 1]);
+    assert.equal(await t.box.push(), true, t.box.error);
+  }
+});
+
+test("#452: an empty file the branch deletes and the head keeps is named as that, not as a binary file", async () => {
+  const t = await sentBack({ base: { "empty.txt": "" }, commits: [{ "empty.txt": null }], main: { "empty.txt": "main\n" } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  t.go("add", "empty.txt");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const j = hunkReader();
+  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: j.judge }), /: empty\.txt \([0-9a-f]{7}\): the branch's change deletes the file, and the head keeps it$/);
+  assert.deepEqual(j.asked, []);
 });

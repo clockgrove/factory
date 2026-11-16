@@ -682,12 +682,16 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       if (branchDiff === null) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
       const list = hunksOf(branchDiff);
       if (!list.length) {
-        // No hunk with two different blobs: git reads one as binary.
-        if (oid(change.before) !== oid(change.after)) return "a binary file that is not the branch's version";
-        // The branch changes no line here; it only puts the file under this name (one side of a rename), which the head
-        // must still have. With neither side (the other name of a rename conflict, checked on its own): nothing here.
-        if (oid(change.after) && !oid(now)) return "the branch's change puts the file here, and the head has no such file";
-        return "";
+        const [b, a, n] = [oid(change.before), oid(change.after), oid(now)];
+        // Neither side: the other name of a rename conflict, checked on its own; nothing of the branch's here.
+        if (!b && !a) return "";
+        // An empty file the branch deletes.
+        if (!a) return n ? "the branch's change deletes the file, and the head keeps it" : "";
+        // The branch changes no line here: it adds an empty file, or only puts the file under this name (one side of a
+        // rename), which the head must still have.
+        if (!b || b === a) return n ? "" : "the branch's change puts the file here, and the head has no such file";
+        // Two different blobs with no hunk: git reads one as binary.
+        return "a binary file that is not the branch's version";
       }
       let file = null;
       if (oid(now)) {
@@ -714,7 +718,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     };
     let over = false;
     // One path: all its hunks in one question when they fit JUDGE_PATH_MAX_BYTES with the file or their views; unless
-    // that is kept, each hunk alone, in order, up to the first not kept. null when the time ran out first.
+    // that is kept, each hunk alone, in order, up to the first not kept. Every hunk kept alone keeps the path only when
+    // the whole's answer was unsure (kept under the floor, lost under it, no answer) or not asked. null when the time
+    // ran out first.
     const judgePath = async (p) => {
       const got = await ready(p);
       if (typeof got === "string") return got;
@@ -724,18 +730,21 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const item = (hs) => ({ path: p, of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
       const size = hunks.reduce((n, h) => n + Buffer.byteLength(h.text) + Buffer.byteLength(h.view?.file ?? ""), Buffer.byteLength(file ?? ""));
       const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
+      let all = null;
       if (size <= JUDGE_PATH_MAX_BYTES) {
         if (over) return null;
-        const all = await judge(item(hunks));
+        all = await judge(item(hunks));
         if (all.kept) return "";
         if (of === 1) return named(hunks[0], all.why);
       }
+      // Each hunk alone: to name the one not kept, and, after an unsure answer for the whole (or none asked), to decide.
+      // A sure `lost` for the whole stands even when every hunk alone reads kept.
       for (const h of hunks) {
         if (over) return null;
         const one = await judge(item([h]));
         if (!one.kept) return named(h, one.why);
       }
-      return "";
+      return all?.lost ? `${all.why} for the file as a whole, though no hunk asked alone was` : "";
     };
     let timer;
     const deadline = new Promise((done) => (timer = setTimeout(done, JUDGE_MAX_MS)));
@@ -827,16 +836,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * of the agent's checkout, the Objective's local clone, which a Blocked Objective keeps and the next stage's putOn
    * leaves alone, so a conflict pass the check stopped is not lost. With no such head, an earlier one kept there is
    * deleted: the branch is only ever the last stopped pass's. Written as the agent, in its sandbox, with no hooks.
-   * {name, sha, branch}; {name, failed: true} when git could not write it (the log says why); null elsewhere (an Actions
-   * runner keeps nothing) or with nothing to keep.
+   * {name, sha, branch}; {name, failed: true} when git could not write it (the log says why); {name, removed: true} when
+   * this pass left nothing to keep and an earlier one kept there was deleted; null elsewhere (an Actions runner keeps
+   * nothing) or with nothing to keep.
    */
   box.setAside = async () => {
     if (!local) return null;
     const name = `${branch}-conflict-pass`;
-    if (!box.rebaseHead) {
-      await dropAside();
-      return null;
-    }
+    if (!box.rebaseHead) return (await dropAside()) ? { name, removed: true } : null;
     const r = await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-f", name, box.rebaseHead]);
     if (r.code !== 0) {
       log(`the conflict pass's head could not be kept on ${name}: ${gitError(r.stderr) || `exit ${r.code}`}`);
@@ -846,10 +853,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
   // The branch setAside keeps, deleted once (a later push of this stage, or a stop with nothing to keep): best effort.
   let asideDropped = false;
+  // Whether there was one to delete.
   const dropAside = async () => {
-    if (!local || asideDropped) return;
+    if (!local || asideDropped) return false;
     asideDropped = true;
-    await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-q", "-D", `${branch}-conflict-pass`]).catch(() => null);
+    const r = await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-q", "-D", `${branch}-conflict-pass`]).catch(() => null);
+    return r?.code === 0;
   };
 
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */

@@ -76,8 +76,9 @@ export function hunkView({ file, hunk, moves = [], max, context }) {
   const text = String(file ?? "");
   if (Buffer.byteLength(text) <= max) return { file: text, lines: null };
   const all = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-  const first = newLine(moves, hunk.count ? hunk.from : hunk.from + 1);
-  const last = newLine(moves, hunk.count ? hunk.from + hunk.count - 1 : hunk.from + 1);
+  // A hunk with no old line (git's `-0,0`: a file the base did not have) has nothing to carry: from the file's start.
+  const first = hunk.count ? newLine(moves, hunk.from) : hunk.from === 0 ? 1 : newLine(moves, hunk.from) + 1;
+  const last = hunk.count ? newLine(moves, hunk.from + hunk.count - 1) : first;
   // The window reaches past every line the hunk's new side has, wherever its old lines landed: an addition of many
   // lines is shown whole.
   const from = Math.max(1, Math.min(first, last) - context);
@@ -106,7 +107,8 @@ export function keptInput({ path, hunks = [], of = hunks.length, merged = false,
 /**
  * The judge rebaseLeft asks, or null when there is no decider (decider.mjs openDecider: no AI Gateway key and no
  * `stage`, or `decision_route` off; rebaseLeft then matches commits instead). judge(item) resolves {kept, why} for a
- * path's hunks, all or one (keptInput's fields): `why` says, when not kept, what the model answered; it never throws.
+ * path's hunks, all or one (keptInput's fields), and `lost` for a `lost` at the floor or more: `why` says, when not kept,
+ * what the model answered; it never throws.
  */
 export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = null }) {
   // The one decision interface (decider.mjs): the AI Gateway's `triage_model` with a key, else the stage's own harness.
@@ -127,10 +129,11 @@ export function openKeptCheck({ inputs, env = process.env, stage = null, decider
     log(`rebase check (${model}): ${item.path} ${which}: ${a.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a.error || "?"})`}`);
     // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
     const floor = min ?? confidenceFloor(inputs, ask).min;
-    if (a.verdict === "kept" && sure && a.confidence >= floor) return { kept: true, why: "" };
-    if (a.verdict === "kept") return { kept: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${floor}` };
-    if (a.verdict === "lost") return { kept: false, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
-    return { kept: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
+    // `lost`: a sure `lost` (at the floor or more), which stands whatever a narrower question says after it.
+    if (a.verdict === "kept" && sure && a.confidence >= floor) return { kept: true, lost: false, why: "" };
+    if (a.verdict === "kept") return { kept: false, lost: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${floor}` };
+    if (a.verdict === "lost") return { kept: false, lost: sure && a.confidence >= floor, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
+    return { kept: false, lost: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
   };
   // `limited()`: the stage harness's usage limit that stopped its questions (decider.mjs); the send-back then ends as a
   // pass meeting the limit does (worker.mjs sendBackGuard), never on a "not kept" its unanswered question would read as.

@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, sh } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -659,13 +659,15 @@ async function main() {
     Object.assign(childBase, wrote);
     allowAgentEnv(Object.keys(wrote));
   }
-  const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // Which install runs is read from Factory's own checkout when the agent has a clone of its own.
+  const installTree = access.agent ? factoryTree : checkout;
+  const install = installCommand(installTree, inputs.install);
   // A continued stage's install that failed on its kept checkout: the pass is told, and finishes it (continue.mjs installEnd).
   let installNote = "";
   if (install) {
     log(`install: ${install}`);
     await progress(first ? "install (first time on this machine)" : "install");
-    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     const ended = installEnd(i, { continued: !!continued, command: install });
     if (ended.block) {

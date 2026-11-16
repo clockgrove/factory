@@ -9,7 +9,7 @@ import { agentUser, exec } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
-import { validationGroups } from "./logic.mjs";
+import { AGENT_MODELS, validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { log } from "./inputs.mjs";
@@ -34,7 +34,7 @@ const AGENT_SOURCE = { claude: "agents/claude", codex: "agents/codex", copilot: 
  * file's own: the implementer on the sub-agent model; the reviewer and the foundation pass's agent (review.mjs
  * FOUNDATION_AGENT) on the reviewer model, so both passes of a review run on the one the labels or workflow choose.
  */
-export const agentModel = (role, models = {}) => (role === "implementer" ? models.subagent : role === "reviewer" || role === "foundation-reviewer" ? models.reviewer : null) || null;
+export const agentModel = (role, models = {}) => (Object.hasOwn(AGENT_MODELS, role) ? models[AGENT_MODELS[role].model] : null) || null;
 
 /**
  * Copy the plugin's skills to .agents/skills and .claude/skills, mirror the
@@ -179,7 +179,7 @@ export function pinModel(text, harness, model) {
   const fm = /^---\n([\s\S]*?)\n---/.exec(text);
   if (!fm) return text;
   let front = fm[1];
-  front = /^model:/m.test(front) ? front.replace(/^model:.*$/m, `model: ${model}`) : `${front}\nmodel: ${model}`;
+  front = /^model:/m.test(front) ? front.replace(/^model:.*$/m, `model: ${JSON.stringify(model)}`) : `${front}\nmodel: ${JSON.stringify(model)}`;
   if (harness === "copilot" && !/^model-policy:/m.test(front)) front += "\nmodel-policy: required";
   return text.replace(fm[0], `---\n${front}\n---`);
 }

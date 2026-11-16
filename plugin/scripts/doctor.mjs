@@ -10,7 +10,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
-import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, installCommand, installTools } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
 import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, packageManagerOf, pinnedVersion, prepareCopilotHome, repositoryTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
@@ -18,7 +18,7 @@ import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { FACTORY_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -132,6 +132,34 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
 export function defaultsCheck(inputs) {
   const m = (v) => v || `${inputs.harness}'s own default`;
   return PASS("defaults", `harness ${inputs.harness}, worker ${m(inputs.model)}, sub-agents ${m(inputs.subagentModel)}, reviewer ${m(inputs.reviewerModel)}: the repository's defaults; an Objective overrides any of them for itself with a ${Object.values(CHOICE_PREFIXES).map((p) => `${p}<${p === CHOICE_PREFIXES.harness ? "name" : "id"}>`).join(", ")} label (docs/USAGE.md); one on another harness needs that harness's credential too, and Blocks naming it when it is missing`);
+}
+
+/**
+ * The limits a person owns in force (#423, inputs.mjs OWNER_LIMITS), from the settings as a stage reads them (`inputs`,
+ * resolveInputs): one PASS; in local mode with the local stage's settings (`stage`, local.mjs baseEnv's) the two local
+ * ones as well, and a WARN when the outage bound (FACTORY_LOCAL_OUTAGE_HOURS) is not under the claim pause
+ * (claim_pause_hours), so the dispatcher's Block would come first and name a quiet claim rather than the outage, or when
+ * the in-place wait (FACTORY_LOCAL_WAIT_MINUTES) is not under the outage bound, so a stage that waits it out ends paused
+ * already past the bound and is Blocked at once. The wait's own maximum keeps it under the least claim pause.
+ */
+export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
+  const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
+  const min = (ms) => `${Number((ms / 60_000).toFixed(2))} min`;
+  const { stall, relay } = inputs;
+  const lines = [
+    `a usage limit waited out in place ${inputs.usageLimitWaits} time(s) per pass, and on Actions and the cloud sandbox a reset over ${min(inputs.usageLimitMoveMs)} away moves to a free account`,
+    `a quiet local claim Blocked after ${h(inputs.claimPauseMs)}`,
+    `a sibling waited for ${h(inputs.siblingWaitMs)} at most`,
+    `${inputs.maxParts} part(s) per Objective at most`,
+    `a queue check's step hung past ${stall.factor} x its normal duration and at least ${min(stall.floorMs)} over it, a queue commit with no CI begun stalled after ${min(stall.queueMs)}`,
+    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost, each booked at least $${relay.unknownFloorUsd} ($${relay.slowFloorUsd} past 30 s upstream)`,
+  ];
+  const own = local ? localLimits(stage) : null;
+  if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);
+  const rows = [PASS("owner limits", `${lines.join("; ")} (the settings in docs/INSTALL.md and docs/LOCAL.md)`)];
+  if (own && own.waitMs >= own.outageMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_WAIT_MINUTES (${min(own.waitMs)}) is not under FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}), so a stage that waits out an outage in place ends paused past the outage bound and is Blocked at once`, "lower FACTORY_LOCAL_WAIT_MINUTES under FACTORY_LOCAL_OUTAGE_HOURS, or raise FACTORY_LOCAL_OUTAGE_HOURS"));
+  if (own && own.outageMs >= inputs.claimPauseMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}) is not under claim_pause_hours (${h(inputs.claimPauseMs)}), so a long outage meets the dispatcher's Block for a quiet claim first, which does not name the outage`, "lower FACTORY_LOCAL_OUTAGE_HOURS under claim_pause_hours, or raise claim_pause_hours"));
+  return rows;
 }
 
 /**
@@ -520,7 +548,7 @@ export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
-  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check): no AI Gateway key (${kind.code})`;
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check): no AI Gateway key (${kind.code})`;
   if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
   return PASS("decision calls", text);
 }
@@ -680,7 +708,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
 
   const label = await rest(`repos/${repo.full}/labels/${encodeURIComponent(inputs.objectiveLabel)}`, { token }).catch(() => null);
   out.push(label ? PASS("label", inputs.objectiveLabel) : FAIL("label", `${inputs.objectiveLabel} missing`, "setup --apply labels"));
-  const project = await findProject(repo, { token }).catch(() => null);
+  const project = await findProject(repo, { token, project: inputs.project }).catch(() => null);
   // A local loop's token is scoped to the one repository and usually cannot see an organisation's projects: the
   // board is then out of view, card moves are skipped, and the labels carry the state, as the dispatcher already does.
   // A local token is scoped to one repository: an organisation's board may be out of its sight with or without an error
@@ -1364,7 +1392,14 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
   const install = installCommand(checkout, inputs.install);
-  out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
+  const auto = installTools(checkout, inputs.install);
+  // Each program the automatic install runs, looked up where doctor runs (a stage's install needs it on PATH).
+  const noTool = [];
+  for (const i of auto) if (!(await commandType(i.tool, { cwd: checkout, env }))) noTool.push(i);
+  const lockfiles = auto.map((i) => `${i.lockfile}: ${i.command}`).join("; ");
+  if (!install) out.push(WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
+  else if (noTool.length) out.push(WARN("lockfile", `${lockfiles}; ${noTool.map((i) => `${i.tool} is not found here`).join(", ")}, so every stage's install fails unless setup installs it`, `install ${noTool.map((i) => i.tool).join(" and ")} in the setup command, or set install: to the command this repository needs (install: none skips)`));
+  else out.push(PASS("lockfile", auto.length ? lockfiles : install));
   for (const cmd of inputs.validation.map(commandText)) out.push(await commandCheck("validation", cmd, { checkout, env, missing: "setup may install it" }));
   if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Factory has a feedback loop"));
   if (inputs.setup) {
@@ -2233,7 +2268,7 @@ async function main() {
   // The variables are listed as serve lists them: with local mode's token in local mode.
   const varsToken = (local && localToken(repo.full)) || token;
   const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers)];
+  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

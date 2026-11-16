@@ -1,7 +1,8 @@
 // The worker's checkout: the branch, the plugin's skills and agent definitions
 // written in (git-excluded, never committed), the repository's validation and
 // setup commands, and the commit guard for protected paths.
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { putFiles, readAgentTree } from "./handoff.mjs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,25 @@ import { copilotRunnerLayout, prepareCopilotHome } from "./copilot-runner.mjs";
 
 /** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
 export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/**
+ * A digest of the plugin's files under `root` (paths and contents, not times; node_modules and test left out): which
+ * Factory this is. The stage upload's (launch.mjs pluginPackage) and the image's (lib/image.mjs imageMade).
+ */
+export function pluginDigest(root = PLUGIN_ROOT) {
+  const hash = createHash("sha256");
+  const walk = (dir) => {
+    for (const name of readdirSync(dir).sort()) {
+      if (name === "node_modules" || name === "test") continue;
+      const p = join(dir, name);
+      const st = statSync(p);
+      if (st.isDirectory()) walk(p);
+      else if (st.isFile()) hash.update(`${p.slice(root.length)}\0`).update(readFileSync(p)).update("\0");
+    }
+  };
+  walk(root);
+  return hash.digest("hex");
+}
 /** Kept for callers that name the scripts' home; it is the plugin now. */
 export const ACTION_ROOT = PLUGIN_ROOT;
 
@@ -369,6 +389,10 @@ async function installGaps(checkout, opts) {
   }
 }
 
+/** What to do about INSTALLS entries whose program is not on PATH: each named, with its lockfile, and the fix. */
+export const absentTools = (entries) =>
+  `${entries.map((t) => `${t.tool} is not on PATH (for ${t.lockfile})`).join("; ")}; the setup command must install ${entries.length > 1 ? "them" : "it"}, or set install: to the command this repository needs (install: none skips)`;
+
 /**
  * A set-up step that needs the network (`run()`, an sh result: the repository's install or setup) that failed while
  * this machine's network was down (network.mjs stepCutOff: an outage this stage recorded while it ran, the general
@@ -438,9 +462,11 @@ const remainingUntil = (deadlineAt) => (Number.isFinite(deadlineAt) ? Math.max(1
  * the reason naming the install as infrastructure, never as a validation result: what follows an install that did not
  * finish is no verdict on the branch. A timed-out install is not retried (the stage's deadline is spent). An install
  * that fails while this machine's network is down is no try: it runs again once the network is back (throughOutages),
- * and a failure that stands says the network was up.
+ * and a failure that stands says the network was up. `tools`: the INSTALLS entries the command runs (installTools); a
+ * failed install whose program for one of them is not on PATH where the install runs names it (`absent`, the programs)
+ * and is not reinstalled: only setup can bring the program.
  */
-export async function installDeps(checkout, command, { timeoutMs, env = process.env, now = Date.now } = {}) {
+export async function installDeps(checkout, command, { timeoutMs, env = process.env, now = Date.now, tools = [] } = {}) {
   const started = now();
   const left = () => (timeoutMs ? Math.max(1000, timeoutMs - (now() - started)) : timeoutMs);
   const deadlineAt = timeoutMs ? OUTAGE.now() + timeoutMs : Infinity;
@@ -455,6 +481,9 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
   const what = (a) => (a.timedOut ? "timed out" : a.missing.length ? `exited 0 but left ${a.missing.slice(0, 3).join(", ")}${a.missing.length > 3 ? ` and ${a.missing.length - 3} more` : ""} missing` : `exited ${a.code ?? "on a signal"}`);
   const infra = (detail) => `install failed (infrastructure, not a validation result; validation did not run): ${command} ${detail}`;
   if (first.timedOut) return { ok: false, reason: infra(what(first)), missing: [] };
+  const absent = [];
+  for (const t of tools) if (!(await sh(checkout, `command -v ${t.tool} >/dev/null 2>&1`, { env, timeoutMs: left(), echo: false })).ok) absent.push(t);
+  if (absent.length) return { ok: false, reason: infra(`${what(first)}: ${absentTools(absent)}${stepText(first)}`), missing: [], absent: absent.map((t) => t.tool) };
   const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" clear', { env, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
   const second = await attempt();
   if (second.ok) return { ok: true, repaired: true, first: what(first) };
@@ -462,19 +491,56 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
 }
 
 /**
- * Pick the install command from the lockfile present: the versions it pins, over the network (pnpm tries its store
- * offline first). npm, pnpm and yarn run no install scripts (--ignore-scripts); poetry and uv run a source package's
- * build. It runs with the stage's scrubbed env (sh), so no credential. `install: none` skips; a given command wins.
+ * The installs `auto` knows, a closed list (security policy: no file in the repository picks its own command), each
+ * from the versions its lockfile pins, over the network (pnpm tries its store offline first). npm, pnpm and yarn run no
+ * install scripts (--ignore-scripts); poetry and uv run a source package's build. `tool`: the program each runs, which
+ * must be on PATH where the install runs (setup installs it otherwise). Lockfiles of one ecosystem are
+ * alternatives for the same manifest, so one install per ecosystem: for Node.js the one package.json's
+ * `packageManager` names when its lockfile is there, else the first present in this order.
+ */
+export const INSTALLS = Object.freeze([
+  { ecosystem: "node", manager: "pnpm", tool: "pnpm", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts" },
+  { ecosystem: "node", manager: "npm", tool: "npm", lockfile: "package-lock.json", command: "npm ci --ignore-scripts" },
+  { ecosystem: "node", manager: "yarn", tool: "yarn", lockfile: "yarn.lock", command: "yarn install --frozen-lockfile --ignore-scripts" },
+  { ecosystem: "rust", tool: "cargo", lockfile: "Cargo.lock", command: "cargo fetch --locked" },
+  { ecosystem: "python", tool: "poetry", lockfile: "poetry.lock", command: "poetry install --no-root" },
+  { ecosystem: "python", tool: "uv", lockfile: "uv.lock", command: "uv sync --frozen" },
+  { ecosystem: "go", tool: "go", lockfile: "go.sum", command: "go mod download" },
+]);
+
+/** The manager package.json's `packageManager` names (`pnpm@9.1.0` gives pnpm), or "". */
+function namedManager(checkout) {
+  try {
+    return /^(npm|pnpm|yarn)@/.exec(String(JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")).packageManager || ""))?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The installs `auto` runs in `checkout` (INSTALLS entries): one for every ecosystem whose lockfile is in its root, in
+ * that table's order, so a repository with a package-lock.json and a Cargo.lock gets both.
+ */
+export function autoInstalls(checkout) {
+  const present = INSTALLS.filter((i) => existsSync(join(checkout, i.lockfile)));
+  const named = namedManager(checkout);
+  const picked = [];
+  for (const i of present) {
+    if (picked.some((p) => p.ecosystem === i.ecosystem)) continue;
+    picked.push(present.find((x) => x.ecosystem === i.ecosystem && named && x.manager === named) ?? i);
+  }
+  return picked;
+}
+
+/**
+ * The install command: autoInstalls' commands joined with `&&`, for `auto`. It runs with the stage's scrubbed env (sh),
+ * so no credential. `install: none` skips; a given command wins.
  */
 export function installCommand(checkout, setting = "auto") {
   if (setting && setting !== "auto") return setting === "none" ? null : setting;
-  const has = (f) => existsSync(join(checkout, f));
-  if (has("pnpm-lock.yaml")) return "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts";
-  if (has("package-lock.json")) return "npm ci --ignore-scripts";
-  if (has("yarn.lock")) return "yarn install --frozen-lockfile --ignore-scripts";
-  if (has("Cargo.lock")) return "cargo fetch --locked";
-  if (has("poetry.lock")) return "poetry install --no-root";
-  if (has("uv.lock")) return "uv sync --frozen";
-  if (has("go.sum")) return "go mod download";
-  return null;
+  const picked = autoInstalls(checkout);
+  return picked.length ? picked.map((i) => i.command).join(" && ") : null;
 }
+
+/** The INSTALLS entries installCommand's command runs for `setting` (autoInstalls for `auto`; none for a given command or `none`). */
+export const installTools = (checkout, setting = "auto") => (!setting || setting === "auto" ? autoInstalls(checkout) : []);

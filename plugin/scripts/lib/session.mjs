@@ -23,6 +23,7 @@ import {
   dequeuePr,
   inMergeQueue,
   mergeQueueEntry,
+  mergeQueueHeads,
   mergeGroupRuns,
   mergeQueueRemovals,
   mergeVerified,
@@ -65,14 +66,14 @@ import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
-import { rebaseWaitOf, reviewWaitOf } from "./overlap.mjs";
+import { TrialCap, rebaseWaitOf, reviewWaitOf, siblingTrials } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { versionKey } from "./answer-check.mjs";
 import { judgeUnread } from "./comment-check.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
-import { credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
+import { TrialUnread, credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
@@ -86,7 +87,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -340,6 +341,9 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   return savedRecord({ harness, sessionId, saved, checkout });
 }
 
+/** The usage artifacts a restore on Actions downloads at most, newest first: each is a download of up to two minutes. */
+export const ARTIFACT_LOOKS = 3;
+
 /**
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
@@ -353,9 +357,10 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
   const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
-  // newest first, to the most recent one that did.
+  // newest first, to the most recent one that did. Locally each is a file read: every stage directory is looked at. On
+  // Actions each is an artifact download: at most ARTIFACT_LOOKS of them.
   let last = "no earlier run saved a session";
-  for (const src of sources.slice(0, 3)) {
+  for (const src of fromStageDirs ? sources : sources.slice(0, ARTIFACT_LOOKS)) {
     const dir = await src.dir();
     if (!dir) {
       last = src.error || last;
@@ -663,9 +668,9 @@ export function fixClosingText({ commands = [], setupGuard = null } = {}) {
   return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null, maxParts = undefined }) {
   const template = readFileSync(templatePath, "utf8");
-  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard }));
+  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard, maxParts }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
   return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
@@ -1244,7 +1249,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const running = queueTargets(checks.names, runs).targets.length > 0;
       if (!running) return { running, hung: [] };
       hungMs ??= await queueCheckTimeout(checks.repo, { token: checks.token, cache: rulesRead }).then((m) => (m ? m * 60_000 : Infinity), () => Infinity);
-      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache }, { token: checks.token });
+      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache, stall: checks.stall ?? STALL_DEFAULTS }, { token: checks.token });
       if (hung.length && !waived.has(sha)) waived.set(sha, headMarks(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).then((m) => m.noProgress));
       return { running, hung: hung.length && !(await waived.get(sha)) ? hung : [] };
     };
@@ -2570,7 +2575,6 @@ export async function recordedMergeable(repo, prNumber, issue, opts) {
   return /^<!-- factory:\d+:mergeable:([0-9a-f]{40,64}) -->/.exec(mine?.body || "")?.[1] ?? null;
 }
 
-const QUEUE_STALL_MIN = QUEUE_STALL_MS / 60_000;
 const errCode = (e) => (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : e?.transport ? "network" : "error");
 
 /** A check's name as Factory quotes it in a notice: one line, no backticks, at most 80 characters. */
@@ -2669,22 +2673,23 @@ export async function queueBoundMs(repo, opts) {
  * `cache` (one merge pass, or one watch). Actions are read with `actionsToken` (the job token's `actions: read`); with
  * none (the local route, whose App has no Actions permission), or an unread job or history, a check is judged by the
  * time bound `hungMs` only. `checks` are the commit's checks when the caller has read them (awaitChecks' `progress`).
- * A job is read only once its check could be hung (past min(STEP_STALL_FLOOR_MS, `hungMs`)), and read again only when
+ * `stall`: when a step counts as hung (logic.mjs STALL_DEFAULTS, the repository's settings). A job is read only once its
+ * check could be hung (past min(`stall.floorMs`, `hungMs`)), and read again only when
  * its last reading in `cache` is that old, judges it stalled now, or is past `hungMs`: until then no step it moved on to
  * could be stalled, so that reading stands.
  */
-export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null }, opts) {
+export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null, stall = STALL_DEFAULTS }, opts) {
   const checks = given ?? (await queueCommitChecks(repo, sha, opts));
   const aopts = { ...opts, token: actionsToken || opts.token };
   const jobs = new Map();
   const baselines = new Map();
   cache.baselines ??= new Map();
   cache.read ??= new Map();
-  const soonest = Math.min(STEP_STALL_FLOOR_MS, hungMs);
+  const soonest = Math.min(stall.floorMs, hungMs);
   const within = (t, ms) => now - Date.parse(t) <= ms;
   // The step's baseline, read once per cache and only once the step could be stalled by it.
   const baseline = async (job) => {
-    if (!needsBaseline(job, { fallbackMs: hungMs, now })) return null;
+    if (!needsBaseline(job, { fallbackMs: hungMs, now, stall })) return null;
     const key = stepKey(job, jobPosition(job).step);
     if (!cache.baselines.has(key)) cache.baselines.set(key, stepDurations(repo, { runId: job.run_id, jobName: job.name, stepName: jobPosition(job).step }, aopts, cache).then(stepBaselineMs, () => null));
     const b = await cache.baselines.get(key);
@@ -2697,7 +2702,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     const kept = cache.read.get(t.id);
     // A job that could not be read is not read again sooner either: the time bound judges it meanwhile.
     if (kept && !kept.job && within(kept.at, soonest - 1)) continue;
-    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at }) ? kept.job : null;
+    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at, stall }) ? kept.job : null;
     if (!job) {
       job = await rest(`repos/${repo.full}/actions/jobs/${t.id}`, aopts).catch(() => null);
       cache.read.set(t.id, { job, at: new Date(now).toISOString() });
@@ -2706,7 +2711,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     }
     jobs.set(t.id, job);
   }
-  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs });
+  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs, stall });
 }
 
 /**
@@ -2761,21 +2766,21 @@ export async function clearSlowHangs(repo, { issue, prNumber, removals, since, n
  * check that made no progress, or `waitMs` until it could be judged). `gate` is the required checks
  * (github.mjs requiredCheckSpecs): CI from their integration on the commit is the gate starting, code scanning's runs
  * are not (logic.mjs gateStarted). `hungMs` is the pass's or the watch's one fallback bound (queueBoundMs), `cache`
- * its one cache of step history (hangsOn), so both judge a check alike.
+ * its one cache of step history (hangsOn), so both judge a check alike; `stall` the repository's stall limits.
  */
-export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {} } = {}) {
+export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, stall = STALL_DEFAULTS } = {}) {
   const entry = await mergeQueueEntry(repo, prNumber, opts);
   if (!entry) return null;
   const checking = !!entry.head && entry.state === "AWAITING_CHECKS";
   const started = checking ? await checksStarted(repo, entry.head, gate, opts) : true;
   let hung = null;
   const at = Date.parse(entry.headAt ?? entry.enqueuedAt);
-  // No step on the commit can be stalled before the commit is STEP_STALL_FLOOR_MS old: only then are its checks read.
-  if (checking && started && Number.isFinite(at) && now - at >= STEP_STALL_FLOOR_MS) {
+  // No step on the commit can be stalled before the commit is `stall.floorMs` old: only then are its checks read.
+  if (checking && started && Number.isFinite(at) && now - at >= stall.floorMs) {
     const names = (gate || []).map((g) => (typeof g === "string" ? g : g?.name)).filter(Boolean);
-    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache }, opts);
+    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache, stall }, opts);
   }
-  return { ...entry, ...queueStall(entry, { started, now, hung }) };
+  return { ...entry, ...queueStall(entry, { started, now, hung, stall }) };
 }
 
 /**
@@ -3182,51 +3187,74 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
-/** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
-export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
-
 const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
 
-/** Factory's record of the merge queue's last conflict removal of the Objective's PR (queueConflictWait), or null. */
+/**
+ * Factory's record of the last time a PR the queue took out for a conflict went back in (queueConflictWait), from the
+ * issue's comments: `{pr, head, removal, queue}`, `queue` the default branch's head and the queue's entries then
+ * (queueState), or null.
+ */
 export function queueConflictRecord(comments, issue) {
   const mark = marker(issue, "queue-conflict");
   const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
   try {
     const v = JSON.parse(QUEUE_CONFLICT_LINE.exec(c?.body || "")?.[1] || "null");
-    return v && typeof v.removal === "string" && typeof v.main === "string" && typeof v.seen === "string" ? v : null;
+    return v && Number.isInteger(v.pr) && typeof v.head === "string" && typeof v.removal === "string" && typeof v.queue === "string" ? v : null;
   } catch {
     return null;
   }
 }
 
+/** The merge queue's state as one string: the default branch's head and each entry's PR and head, in order. */
+export const queueState = ({ base, entries }) => [base ?? "", ...entries.map((e) => `${e.pr}:${e.head}`)].join(" ");
+
 /**
  * A PR the merge queue took out for a conflict (logic.mjs queueRetry `conflict`) and that does not conflict with the
- * default branch: the conflict was with a PR ahead of it. The first time the merge pass sees that removal, it records on
- * the issue the default branch's head then (a record Factory owns: a commit's date says nothing of when a queue merged
- * it). The PR goes back in once the head is another commit, the queue is empty, or QUEUE_CONFLICT_WAIT_MS has passed
- * since the record (read on the first tick after it: then the queue's next answer decides). Returns null to enqueue it
- * now, else "queue-wait", or "pending" when GitHub could not be read.
+ * default branch: the conflict was with a PR ahead of it. It goes back in when no PR in the queue now conflicts with it,
+ * by a trial merge of the two heads against the default branch (overlap.mjs siblingTrials, git merge-tree in a scratch
+ * mirror); a sibling's merge or drop ticks the dispatcher. Pairwise trials cannot see every conflict (one with the
+ * queue's merge group, or a trial that cannot be computed: then the queue itself answers), so each time it goes back in,
+ * Factory records on the issue the queue's state then (queueState: the default branch's head and every entry's head):
+ * taken out again for a conflict, it goes back in only once that state has changed, never on the same queue twice.
+ * Returns null to enqueue it now, "queue-wait" while it waits, or "pending" when the queue or the record could not be
+ * read or written.
  */
-export async function queueConflictWait(repo, { issue, prNumber, base, removal }, opts, now = Date.now()) {
-  const branch = await branchState(repo, base, opts).catch((e) => (log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`), null));
-  if (!branch) return "pending";
-  // Unread comments say nothing of the record: no new one (its `seen` would restart the wait), the next tick reads again.
+export async function queueConflictWait(repo, { issue, prNumber, head, base, removal }, opts) {
+  const queue = await mergeQueueHeads(repo, base, opts).catch((e) => (log(`#${issue}: ${base}'s merge queue could not be read (${errCode(e)}); next tick`), null));
+  if (!queue) return "pending";
   const comments = await listComments(repo, issue, opts).catch((e) => (log(`#${issue}: the queue-conflict record could not be read (${errCode(e)}); next tick`), null));
   if (!comments) return "pending";
-  let rec = queueConflictRecord(comments, issue);
-  if (rec?.removal !== removal) {
-    rec = { removal, main: branch.head, seen: new Date(now).toISOString() };
-    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it. It goes back in once \`${base}\` moves past ${branch.head.slice(0, 7)}, the queue empties, or ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h pass.`;
-    await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).catch((e) => log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); it is written again next tick`));
-  }
-  const moved = branch.head !== rec.main;
-  const late = now - Date.parse(rec.seen) >= QUEUE_CONFLICT_WAIT_MS;
-  if (!moved && branch.queued > 0 && !late) {
-    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it; it waits for the queue to move (${branch.queued} waiting, ${base} still ${branch.head.slice(0, 7)})`);
+  const ahead = queue.entries.filter((e) => e.pr !== prNumber);
+  const state = queueState({ base: queue.base, entries: ahead });
+  const last = queueConflictRecord(comments, issue);
+  if (last && last.pr === prNumber && last.head === head && last.removal !== removal && last.queue === state) {
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict again, with the queue as it was when it went back in at ${last.removal}; it waits for the queue to change`);
     return "queue-wait";
   }
-  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${moved ? `${base} has moved since` : branch.queued ? `${QUEUE_CONFLICT_WAIT_MS / 3600_000} h have passed` : "the queue is empty now"}, so it goes back in`);
-  return null;
+  const back = async (why) => {
+    const rec = { pr: prNumber, head, removal, queue: state };
+    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict; it goes back in (${why}). Taken out again for a conflict, it waits until the queue changes.`;
+    const ok = await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).then(() => true, (e) => (log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); next tick`), false));
+    if (!ok) return "pending";
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${why}, so it goes back in`);
+    return null;
+  };
+  if (!ahead.length) return back("the queue is empty now");
+  const trials = siblingTrials(repo, opts);
+  try {
+    for (const e of ahead) {
+      const { conflict, files } = await trials.conflicts(head, e.head);
+      if (!conflict) continue;
+      log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal}; it still conflicts with PR #${e.pr} in the queue (${files.slice(0, 5).join(", ") || "no file named"}), so it waits for that one to leave`);
+      return "queue-wait";
+    }
+  } catch (e) {
+    if (!(e instanceof TrialUnread || e instanceof TrialCap)) throw e;
+    return back(`no trial merge with the queue's PRs could be computed (${String(e.message).slice(0, 160)}): the queue answers`);
+  } finally {
+    trials.close();
+  }
+  return back("no PR in the queue now conflicts with it by a trial merge");
 }
 
 /**
@@ -3532,7 +3560,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
  * or "stopped" (its Objective is stopped or waits for its restart, read first, from `issueData` when the caller has it: nothing merges; the stop's
  * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
- * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
+ * queue, an entry whose merge_group commit started no check run within `stall.queueMs`, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueHungMs of the queue's own timeout; logic.mjs queueHangs), is taken out and counts
  * as a drop. `queueTimeout` is that timeout in minutes (null when unread) as the caller read it with `hungMs`, else it
@@ -3541,7 +3569,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3565,7 +3593,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // The pass's one bound: the caller's (the dispatcher reads it once per tick), else read here once.
     if (timeout === undefined) timeout = await queueTimeoutMin(repo, opts);
     bound ??= queueHungMs(timeout);
-    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache }).catch((e) => {
+    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache, stall }).catch((e) => {
       log(`#${issue}: PR #${prNumber}'s merge queue entry is unreadable (${errCode(e)}); next tick`);
       return null;
     });
@@ -3585,7 +3613,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // GitHub made the queue's commit and started no check on it (#295), or a required check started there and made no
     // progress (#2683, logic.mjs queueHangs): out and back in once, as a drop (which restarts CI); the second
     // time it Blocks, rather than waiting out the ruleset's check timeout.
-    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(QUEUE_STALL_MIN)} min`;
+    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(stall.queueMs / 60_000)} min`;
     try {
       await dequeuePr(repo, pr.node_id, opts);
     } catch (e) {
@@ -3709,10 +3737,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return "held";
     }
     // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or
-    // the send-back would have taken it): no drop. It waits for that queue to move (queueConflictWait) rather than
-    // bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
+    // the send-back would have taken it): no drop. It waits while a PR in the queue conflicts with it (queueConflictWait)
+    // rather than bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
     if (retry.conflict) {
-      const wait = await queueConflictWait(repo, { issue, prNumber, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
+      const wait = await queueConflictWait(repo, { issue, prNumber, head: pr.head.sha, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
       if (wait) return wait;
     }
     // The newest drop is a red run on the queue's commit (QUEUE_RED_CODE): the review stage reads it first, once per drop

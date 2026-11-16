@@ -1,7 +1,8 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { keptArgs, keptNotify, pickRunner, settingsReport, workflowSettings, workflowText } from "../scripts/setup.mjs";
@@ -57,7 +58,8 @@ test("a re-render with no options keeps every setting a custom render states, on
 test("the real case: factory-scratch's factory.yml at 96ce800 keeps its validation, setup, checks, notify, plan credential, caps and timeout", () => {
   const text = readFileSync(join(PLUGIN, "test/fixtures/factory-scratch-96ce800.yml"), "utf8");
   const r = render({}, { text });
-  assert.deepEqual(r.after.env, r.before.env);
+  // Every setting the file states stays; one the template gained since the file was written comes in at its default.
+  assert.deepEqual(r.after.env, { ...r.before.env, FACTORY_IMAGE_MAX_AGE_DAYS: "7" });
   for (const [k, v] of Object.entries({
     FACTORY_VALIDATION: "npm run check, npm test, npm run test:db",
     FACTORY_SETUP: "scripts/ci/setup.sh",
@@ -80,6 +82,7 @@ test("the real case: factory-scratch's factory.yml at 96ce800 keeps its validati
   assert.deepEqual(r.report, [
     `kept ${Object.keys(r.before.env).join(", ")}, launch gate maintainer ids, CI workflow`,
     `changed action "clockgrove/factory@v0.7.106" -> "clockgrove/factory@${LATEST}" (the newest release: the template is that release's)`,
+    'new in this template FACTORY_IMAGE_MAX_AGE_DAYS="7"',
   ]);
 });
 
@@ -252,6 +255,113 @@ test("setup's protection step: no merge queue on a user's repository, and a rule
   }
 });
 
+test("the board's node id setup records is written as FACTORY_PROJECT and kept by a re-render; none is written before one is recorded", () => {
+  const first = render({ project: "PVT_board1" }, { notify: "kirk#318831919" });
+  assert.equal(first.after.env.FACTORY_PROJECT, "PVT_board1");
+  assert.equal((first.text.match(/FACTORY_PROJECT:/g) || []).length, 1);
+  const again = render({}, { text: first.text });
+  assert.equal(again.text, first.text, "kept, once");
+  assert.ok(!("FACTORY_PROJECT" in render({}, { notify: "kirk#318831919" }).after.env), "no empty line before a board is made");
+});
+
+test("findProject finds the board by the node id the settings record, never by a title or a column; without one, by its exact title only", async () => {
+  const { findProject } = await import("../scripts/lib/github.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = { url: process.env.GITHUB_GRAPHQL_URL, project: process.env.FACTORY_PROJECT };
+  process.env.GITHUB_GRAPHQL_URL = "https://github.test/graphql";
+  delete process.env.FACTORY_PROJECT;
+  const board = (id, title, options = ["Queued", "Running", "In review", "Blocked", "Done"]) => ({ id, title, number: 1, field: { id: `F_${id}`, options: options.map((name) => ({ id: name, name })) } });
+  // The repository links three boards: another team's titled "Factory", one with a Queued column, and Factory's own,
+  // renamed by a person. GitHub answers a node by its id, with the repositories it is linked to; `elsewhere` is another
+  // repository's board in the same organization (a workflow copied from there names it).
+  const linked = [board("PVT_other", "Factory"), board("PVT_kanban", "Team kanban"), board("PVT_ours", "Our pipeline")];
+  const elsewhere = { ...board("PVT_theirs", "Factory: api"), repositories: { nodes: [{ id: "R_2" }] } };
+  const queries = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const { query, variables } = JSON.parse(init.body);
+    queries.push(query.includes("node(id:") ? "node" : "linked");
+    // `PVT_big` and `PVT_wide` are linked to 150 repositories each, two pages: this one on the second page of `PVT_big`, on neither of `PVT_wide`'s.
+    const many = { PVT_big: "R_1", PVT_wide: "R_3" };
+    if (many[variables.id]) {
+      const page = variables.after === "c1" ? { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [...Array.from({ length: 49 }, (_, i) => ({ id: `R_x${100 + i}` })), { id: many[variables.id] }] } : { pageInfo: { hasNextPage: true, endCursor: "c1" }, nodes: Array.from({ length: 100 }, (_, i) => ({ id: `R_x${i}` })) };
+      return new Response(JSON.stringify({ data: { node: { ...board(variables.id, "Board"), repositories: page }, repository: { id: "R_1" } } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const node = variables.id === elsewhere.id ? elsewhere : linked.find((b) => b.id === variables.id);
+    const data = query.includes("node(id:") ? { node: node ? { repositories: { nodes: [{ id: "R_1" }] }, ...node } : null, repository: { id: "R_1" } } : { repository: { id: "R_1", projectsV2: { nodes: linked } } };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const repo = { owner: "o", name: "app", full: "o/app" };
+  try {
+    assert.equal((await findProject(repo, { token: "t", project: "PVT_ours" })).id, "PVT_ours", "by identity, whatever its title");
+    assert.deepEqual(queries, ["node"]);
+    process.env.FACTORY_PROJECT = "PVT_ours";
+    assert.equal((await findProject(repo, { token: "t" })).repositoryId, "R_1", "on Actions, from the workflow's env block");
+    assert.equal(await findProject(repo, { token: "t", project: "PVT_gone" }), null, "a recorded id that names no board is no board");
+    assert.equal(await findProject(repo, { token: "t", project: "PVT_theirs" }), null, "nor one naming another repository's board");
+    assert.ok(!("repositories" in (await findProject(repo, { token: "t", project: "PVT_ours" }))));
+    // A board linked to many repositories: every page is read until this one shows, and none past the last.
+    queries.length = 0;
+    const big = await findProject(repo, { token: "t", project: "PVT_big" });
+    assert.deepEqual([big?.id, big?.repositoryId, "repositories" in (big || {})], ["PVT_big", "R_1", false], "linked on its second page");
+    assert.deepEqual(queries, ["node", "node"]);
+    assert.equal(await findProject(repo, { token: "t", project: "PVT_wide" }), null, "not linked on any page");
+    delete process.env.FACTORY_PROJECT;
+    // No id recorded: only the exact title setup gives a board; a board titled "Factory" or one with a Queued column is not it.
+    queries.length = 0;
+    const none = await findProject(repo, { token: "t" }).catch(() => null);
+    assert.equal(none?.id ?? null, null);
+    linked.push(board("PVT_titled", "Factory: app"));
+    assert.equal((await findProject(repo, { token: "t" })).id, "PVT_titled");
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [k, v] of [["GITHUB_GRAPHQL_URL", saved.url], ["FACTORY_PROJECT", saved.project]]) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
+test("setup's project step takes the board the workflow records only when it is this repository's, and names an id the workflow does not record yet", async () => {
+  const { projectStep } = await import("../scripts/setup.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = { api: process.env.GITHUB_API_URL, gql: process.env.GITHUB_GRAPHQL_URL, project: process.env.FACTORY_PROJECT };
+  process.env.GITHUB_API_URL = "https://github.test";
+  process.env.GITHUB_GRAPHQL_URL = "https://github.test/graphql";
+  delete process.env.FACTORY_PROJECT;
+  const cols = { id: "F", options: ["Queued", "Running", "In review", "Blocked", "Done"].map((name) => ({ id: name, name })) };
+  // This repository (R_1) has its own board, titled by setup; the workflow was copied from another repository and names
+  // that one's board (linked to R_2), then a re-render keeps it.
+  const boards = { PVT_theirs: { id: "PVT_theirs", title: "Factory: api", number: 1, field: cols, repositories: { nodes: [{ id: "R_2" }] } }, PVT_ours: { id: "PVT_ours", title: "Factory: app", number: 2, field: cols, repositories: { nodes: [{ id: "R_1" }] } } };
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const json = (b) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/repos/o/app") return json({ default_branch: "main", owner: { type: "Organization" } });
+    const { query, variables } = JSON.parse(init.body);
+    if (query.includes("node(id:")) return json({ data: { node: boards[variables.id] ?? null, repository: { id: "R_1" } } });
+    if (query.includes("projectsV2(first: 20) {")) return json({ data: { repository: { id: "R_1", projectsV2: { nodes: [boards.PVT_ours] } } } });
+    return json({ data: {} });
+  };
+  const dir = mkdtempSync(join(tmpdir(), "proj-"));
+  const outPath = join(dir, ".github", "workflows", "factory.yml");
+  mkdirSync(dirname(outPath), { recursive: true });
+  const repo = { owner: "o", name: "app", full: "o/app" };
+  try {
+    writeFileSync(outPath, "name: Factory\non: {}\nenv:\n  FACTORY_PROJECT: PVT_theirs\njobs: {}\n");
+    // With the workflow step: the id goes to the workflow through args, this repository's board, not the copied one.
+    const args = { project: "PVT_theirs" };
+    assert.match(await projectStep({ repo, opts: { token: "t" }, args, explicit: {}, steps: ["project", "workflow"], outPath, checkout: dir }), /project "Factory: app" already has/);
+    assert.equal(args.project, "PVT_ours");
+    // Without it: the note says the workflow does not record the id yet, and how to record it.
+    const alone = await projectStep({ repo, opts: { token: "t" }, args: {}, explicit: {}, steps: ["project"], outPath, checkout: dir });
+    assert.match(alone, /the workflow does not record its id yet: run setup with --apply project,workflow, or set FACTORY_PROJECT: PVT_ours in the env block of \.github\/workflows\/factory\.yml/);
+    // Once recorded, nothing more to say.
+    writeFileSync(outPath, "name: Factory\non: {}\nenv:\n  FACTORY_PROJECT: PVT_ours\njobs: {}\n");
+    assert.doesNotMatch(await projectStep({ repo, opts: { token: "t" }, args: {}, explicit: {}, steps: ["project"], outPath, checkout: dir }), /does not record/);
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [k, v] of [["GITHUB_API_URL", saved.api], ["GITHUB_GRAPHQL_URL", saved.gql], ["FACTORY_PROJECT", saved.project]]) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 test("setup's project step skips the board on a repository a user owns: no GitHub App can move its cards (#199)", async () => {
   const { applyProjectStep } = await import("../scripts/setup.mjs");
   const realFetch = globalThis.fetch;
@@ -265,7 +375,8 @@ test("setup's project step skips the board on a repository a user owns: no GitHu
     return new Response(JSON.stringify({ message: "unexpected" }), { status: 500, headers: { "content-type": "application/json" } });
   };
   try {
-    const note = await applyProjectStep({ owner: "me", name: "app", full: "me/app" }, { token: "t" });
+    const { note, id } = await applyProjectStep({ owner: "me", name: "app", full: "me/app" }, { token: "t" });
+    assert.equal(id, null);
     assert.match(note, /^skipped: a repository a user owns gets no board/);
     assert.deepEqual(calls, ["GET /repos/me/app"], "no project query or mutation");
   } finally {

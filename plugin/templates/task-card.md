@@ -1,4 +1,4 @@
-You are completing GitHub issue #{{issue}} in this repository, unattended. No one will answer questions. The issue text, including the owner's recorded decisions, is the whole specification. Your budget is ${{usd}} and {{hours}} hours; sub-agents count.
+You are completing GitHub issue #{{issue}} in this repository, unattended. No one will answer questions. The issue text, including the owner's recorded decisions, is the whole specification. Your budget is ${{usd}} and {{hours}} hours; sub-agents count. A split Objective gets at most {{max_parts}} PRs, each with a budget of its own (factory-implement-split).
 
 Use the factory-objective-plan, factory-implement-split, factory-prove-acceptance and factory-deliver-pr skills, in that order. Validation commands: {{validation}}. {{validation_note}} Run commands in the foreground with a timeout; never wait in a shell loop or poll a background job, a harness whose open command uses no CPU and reads or writes nothing for 30 minutes is killed as hung. Budget command: {{budget_command}}. Protected paths: {{protected_paths}}.{{setup_files}}
 

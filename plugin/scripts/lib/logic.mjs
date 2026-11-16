@@ -812,7 +812,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *  question:   boolean, when the caller has already decided whether a question is open
  *              (the review job: the PR's draft state after the answer pass, so a human's
  *              "mark ready" answers it)
- *  reviewUnaddressed: number (review pass: comments without a worker reply)
+ *  reviewUnaddressed: number (review pass: findings still open, session.mjs unaddressedReviewComments)
  *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
  *  unresolved: string, why what a send-back's conflict pass left is not the branch rebased onto its base (worker.mjs,
  *              outbox.mjs rebaseLeft): Blocked with it after the hard stops, as the work's
@@ -888,9 +888,11 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }
-  if (reviewUnaddressed > 0) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) unaddressed after the one pass`, cause: "work" };
-  if (record?.exit === "blocked") return workerBlocked(record);
   const open = question !== undefined ? question : record?.exit === "question";
+  // A Question the answer pass raised stands with findings still open: it carries them to a maintainer. Otherwise
+  // `findingsOpen`: the review stage gives them another answer round within its bound before this Block stands.
+  if (reviewUnaddressed > 0 && !open) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) still open after the answer pass`, cause: "work", findingsOpen: true };
+  if (record?.exit === "blocked") return workerBlocked(record);
   if (open) return openQuestion(record);
   if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error", cause: "factory" };
   return { exit: "delivered", reason: "" };
@@ -2041,12 +2043,19 @@ export const CODE_SCANNING = "github-advanced-security[bot]";
 const REPLY_AT_START = /^<!-- factory:\d+:reply:\S+ -->/;
 
 /**
- * Whether `reply` answers the line comment that `rootLogin` opened, the same on every side (the answer pass's list, the
- * threads Factory resolves, the merge pass): a reply by Factory or someone who can push (trustedAuthor). On code
- * scanning's comment only Factory's own answer counts (its reply marker, by such an author): a person's "looking into
- * it" leaves a security finding to the answer pass, and never lets Factory resolve it.
+ * Whether `reply` is Factory's own answer to a line comment: its reply marker at the start (handoff.mjs postReplies), by
+ * Factory or someone who can push. Such an answer alone answers nothing: the finding check judges it (finding-check.mjs),
+ * and only its yes resolves the thread, which is what then marks the finding answered.
  */
-export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && (loginKey(rootLogin) !== CODE_SCANNING || REPLY_AT_START.test(String(reply?.body ?? "")));
+export const factoryReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
+
+/**
+ * Whether a person's `reply` answers the line comment that a named reviewer or code scanning (`rootLogin`) opened, the
+ * same on every side (the answer pass's list, the threads Factory resolves, the merge pass): a reply by someone who can
+ * push (trustedAuthor) that is not Factory's own answer (factoryReply). Never on code scanning's comment: a person's
+ * "looking into it" leaves a security finding to the answer pass, and never lets Factory resolve it.
+ */
+export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !factoryReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker

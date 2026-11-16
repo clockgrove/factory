@@ -7,7 +7,7 @@
 // rule: it counts once a person who can push applied it, and the plan's record covers it.
 import { DEFAULTS, MODEL_DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
-import { isSandboxHost, publicSuffix } from "./local.mjs";
+import { isSandboxHost, wildcardRefusal } from "./local.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
 /** Each choice's label prefix, keyed by the input it overrides; the rest of the name is the harness or the model id. */
@@ -79,7 +79,8 @@ export function hostsOf(names = []) {
   const hosts = new Set();
   for (const l of labels) {
     const host = l.slice(HOST_PREFIX.length).trim().toLowerCase();
-    if (host.startsWith("*.") && isSandboxHost(host.slice(2)) && publicSuffix(host.slice(2))) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, a public suffix anyone can register a name under (the Public Suffix List)`, fix: `Name the organisation's own host or its subdomains, as \`factory:host:*.example.${host.slice(2)}\`, or remove the label, then re-apply \`factory:objective\`.` };
+    const refusal = host.startsWith("*.") && isSandboxHost(host.slice(2)) ? wildcardRefusal(host.slice(2)) : null;
+    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`factory:host:app.${host.slice(2)}\`, or remove the label, then re-apply \`factory:objective\`.` };
     if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Factory's sandboxes can allow`, fix: `Name one host after the prefix, as \`factory:host:example.com\` or \`factory:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`factory:objective\`.` };
     hosts.add(host);
   }

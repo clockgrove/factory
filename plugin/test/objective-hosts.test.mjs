@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { HOST_PREFIX, LABEL_MAX, choiceLabels, choiceOf, hostsOf, hostsProblem, ranWith } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, EDITED_REASON, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { claudeRunner, codexRunner, copilotRunner, harnessCommand } from "../scripts/lib/harness.mjs";
-import { LOCAL_DOMAINS, gitPinFile, isSandboxHost, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
+import { LOCAL_DOMAINS, gitPinFile, isSandboxHost, suffixRuleUnder, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { deniedHostsFix, harnessMarker, setSelf } from "../scripts/lib/logic.mjs";
 import { hostsLine, progressReporter, writeUsage } from "../scripts/lib/session.mjs";
@@ -44,15 +44,27 @@ test("host labels: each names one host a sandbox enforces as written, lower case
   assert.deepEqual(choiceLabels(["factory:objective", HF, "factory:model:m"]), ["factory:host:huggingface.co", "factory:model:m"], "the set the plan's record and the trust check cover");
 });
 
-test("host labels: a wildcard over a public suffix (the Public Suffix List, private section included) is refused; one over an organisation's name opens", () => {
+test("host labels: a wildcard over a public suffix, or over a name with one below it (the Public Suffix List, private section included), is refused; one over an organisation's name opens", () => {
   for (const suffix of ["co.uk", "github.io", "vercel.app", "s3.amazonaws.com", "pages.dev"]) {
     const r = hostsOf([`${HOST_PREFIX}*.${suffix}`]);
     assert.equal(r.ok, false, suffix);
-    assert.match(r.reason, new RegExp(`opens every site under \`${suffix.replace(/\./g, "\\.")}\`, a public suffix`), suffix);
+    assert.match(r.reason, new RegExp(`opens every site under \`${suffix.replace(/\./g, "\\.")}\`, and the Public Suffix List names \`${suffix.replace(/\./g, "\\.")}\` there a public suffix`), suffix);
     assert.equal(isSandboxHost(`*.${suffix}`), false, "the runner's own filter drops it too");
   }
-  // One organisation's name under such a suffix, or the suffix's own host, is a host like any other.
-  for (const ok of ["*.clockgrove.github.io", "*.example.co.uk", "*.hf.co", "github.io"]) assert.deepEqual(hostsOf([`${HOST_PREFIX}${ok}`]).hosts, [ok], ok);
+  // A wildcard over a parent of public suffixes covers anyone's bucket or storage account under them.
+  for (const [parent, under] of [["amazonaws.com", /\.amazonaws\.com$/], ["windows.net", /\.windows\.net$/], ["core.windows.net", /\.core\.windows\.net$/]]) {
+    const r = hostsOf([`${HOST_PREFIX}*.${parent}`]);
+    assert.equal(r.ok, false, parent);
+    assert.match(r.reason, new RegExp(`opens every site under \`${parent.replace(/\./g, "\\.")}\`, and the Public Suffix List names \`[^\`]+\` there`), parent);
+    assert.match(suffixRuleUnder(parent), under, "the rule it names lies below it");
+    assert.equal(isSandboxHost(`*.${parent}`), false, parent);
+  }
+  // One organisation's name under such a suffix, or the suffix's own host, is a host like any other; so is a name an
+  // exception rule takes back out of a wildcard rule (`!city.kawasaki.jp` out of `*.kawasaki.jp`), and one under a
+  // top-level name the list does not hold.
+  for (const ok of ["*.clockgrove.github.io", "*.example.co.uk", "*.hf.co", "github.io", "*.mybucket.s3.amazonaws.com", "*.city.kawasaki.jp", "*.build.internal"]) assert.deepEqual(hostsOf([`${HOST_PREFIX}${ok}`]).hosts, [ok], ok);
+  // A wildcard over a top-level name alone is no host entry at all.
+  for (const tld of ["*.com", "*.internal"]) assert.match(hostsOf([`${HOST_PREFIX}${tld}`]).reason, /names no host Factory's sandboxes can allow/, tld);
 });
 
 test("a host label counts only when the person who last applied it can push or is a pinned maintainer; a bad name is refused before any read", async () => {

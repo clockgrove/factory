@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, utimesSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PRESSURE, defaultStages, loopCap, machineBudget, machineRoom, readPressure, saturation, slotHolders, slotsDir, takeSlot } from "../scripts/lib/machine.mjs";
+import { PRESSURE, defaultStages, loopCap, machineBudget, machineLimits, machineRoom, readPressure, saturation, slotHolders, slotsDir, takeSlot } from "../scripts/lib/machine.mjs";
 import { machineChecks } from "../scripts/doctor.mjs";
 import { Local } from "../scripts/local.mjs";
 import { bootId, startTime } from "../scripts/lib/proc.mjs";
@@ -403,6 +403,63 @@ test("serve: a saturated machine holds new starts, said in the tick line, but a 
     await c.stop();
     await gh.close();
   }
+});
+
+test("#402: the machine's limits are machine.json's beside stages: when it counts as saturated and the no-reset guess; each one unset or unusable is the default, named", () => {
+  const withFile = (data) => {
+    const dir = home();
+    mkdirSync(join(dir, ".cache", "factory"), { recursive: true });
+    writeFileSync(join(dir, ".cache", "factory", "machine.json"), typeof data === "string" ? data : JSON.stringify(data));
+    return dir;
+  };
+  const none = machineLimits({ home: home() });
+  assert.deepEqual([none.pressure, none.guessMs, none.from, none.problems], [PRESSURE, [1, 4, 24].map((h) => h * 3600_000), { pressure: "default", guess: "default" }, []]);
+  const set = machineLimits({ home: withFile({ stages: 3, pressure: { cpu_psi: 40, available_gb: 1.5 }, guess_hours: [0.5, 2] }) });
+  assert.deepEqual(set.pressure, { ...PRESSURE, cpuPsi: 40, memAvailable: 1.5 * GB });
+  assert.deepEqual(set.guessMs, [30 * 60_000, 2 * 3600_000]);
+  assert.deepEqual([set.from, set.problems], [{ pressure: "setting", guess: "setting" }, []]);
+  assert.deepEqual(machineBudget({ home: withFile({ pressure: { load: 2 } }), cpus: 24, memBytes: 45 * GB }).problem, undefined, "limits alone: the budget is the default, with nothing to name");
+  const bad = machineLimits({ home: withFile({ pressure: { cpu_psi: 0, swap: 3, load: 2 }, guess_hours: [] }) });
+  assert.deepEqual(bad.pressure, { ...PRESSURE, load: 2 }, "a usable limit beside unusable ones is taken");
+  assert.equal(bad.guessMs, none.guessMs);
+  assert.equal(bad.problems.length, 3);
+  assert.match(bad.problems.join("\n"), /"pressure\.cpu_psi" is not a number above 0[\s\S]*"pressure" has no limit "swap"[\s\S]*"guess_hours" is not a list of hours/);
+  assert.match(machineLimits({ home: withFile("{") }).problems[0], /is not JSON$/);
+  const huge = machineLimits({ home: withFile({ guess_hours: [1, 1e10] }) });
+  assert.deepEqual([huge.guessMs, huge.problems], [none.guessMs, [`${join(huge.file)}: "guess_hours" is not a list of hours, each above 0 and at most 192`]], "a step past the longest hold kept is named, never cut silently");
+  assert.deepEqual(machineLimits({ home: withFile({ guess_hours: [192] }) }).guessMs, [192 * 3600_000]);
+});
+
+test("#402: a loop holds new starts by the machine's own pressure limits, and doctor prints the limits in force", () => {
+  const busy = proc({ cpu: 20, availGb: 12 });
+  const loopAt = (homeDir) => Object.assign(Object.create(Local.prototype), { repoFull: "o/r", wf: {}, machine: { home: homeDir, proc: busy } });
+  const dflt = home(4);
+  assert.equal(loopAt(dflt).machineBox(1).room, 0, "CPU pressure 20% is saturated at the default 15%");
+  const relaxed = home();
+  mkdirSync(join(relaxed, ".cache", "factory"), { recursive: true });
+  writeFileSync(join(relaxed, ".cache", "factory", "machine.json"), JSON.stringify({ stages: 4, pressure: { cpu_psi: 30, available_gb: 8 }, guess_hours: [2, 8] }));
+  const box = loopAt(relaxed).machineBox(1);
+  assert.deepEqual([box.room, box.why], [3, null], "not at the machine's own 30%");
+  const by = (rows) => Object.fromEntries(rows.map((r) => [r.name, r]));
+  const rows = by(machineChecks({ env: {}, local: true, home: relaxed, proc: busy }));
+  assert.equal(rows["machine limits"].status, "PASS");
+  assert.equal(rows["machine limits"].detail, `saturated at CPU pressure 30% over a minute (without PSI, a load of 0.9 per CPU thread), memory pressure 10%, or under 8.0 GB memory available; a usage limit with no reset passes its account over for 2 h, 8 h by how many in a row; the pressure limits from ${join(relaxed, ".cache", "factory", "machine.json")}, the guess from ${join(relaxed, ".cache", "factory", "machine.json")}`);
+  assert.equal(rows["machine load"].status, "PASS", "doctor judges the load by the same limits");
+  const dfltRows = by(machineChecks({ env: {}, local: true, home: dflt, proc: busy }));
+  assert.match(dfltRows["machine limits"].detail, /^saturated at CPU pressure 15% over a minute .*under 4\.0 GB memory available; .* for 1 h, 4 h, 24 h by how many in a row; the pressure limits from Factory's defaults \(set them in .*\), the guess from Factory's default$/);
+  // Without machine.json's guess_hours, the repository's setting is the one in force.
+  const repoRows = by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: dflt, proc: busy }));
+  assert.match(repoRows["machine limits"].detail, /for 3 h, 9 h by how many in a row; .* the guess from the repository's FACTORY_GUESS_HOURS$/);
+  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: relaxed, proc: busy }))["machine limits"].detail, /for 2 h, 8 h by how many in a row/, "machine.json's wins on this machine");
+  // The source is what a stage reads (serve's baseEnv): a value in this shell alone is no repository's.
+  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, settings: {}, local: true, home: dflt, proc: busy }))["machine limits"].detail, /for 1 h, 4 h, 24 h by how many in a row; .* the guess from Factory's default$/);
+  assert.equal(dfltRows["machine load"].status, "WARN");
+  const wrong = home();
+  mkdirSync(join(wrong, ".cache", "factory"), { recursive: true });
+  writeFileSync(join(wrong, ".cache", "factory", "machine.json"), JSON.stringify({ pressure: { cpu_psi: "high" } }));
+  const warn = by(machineChecks({ env: {}, local: true, home: wrong, proc: busy }))["machine limits"];
+  assert.equal(warn.status, "WARN");
+  assert.match(warn.detail, /"pressure\.cpu_psi" is not a number above 0, so Factory's defaults stand for those; in force: saturated at CPU pressure 15%/);
 });
 
 test("run and review hold one slot of the machine's budget for each stage while it runs, whatever the machine holds, and none after it (#309)", async () => {

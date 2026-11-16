@@ -75,7 +75,7 @@ function world({ queue = false } = {}) {
   return { state, fetch, siblingMerges, workerRebases };
 }
 
-async function tick(w) {
+async function tick(w, more = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const realFetch = globalThis.fetch;
   const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
@@ -85,7 +85,7 @@ async function tick(w) {
   globalThis.fetch = w.fetch;
   const from = w.state.writes.length;
   try {
-    const r = await dispatch({ repo: REPO, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, autoMerge: true, notify: "" }, { token: "t" });
+    const r = await dispatch({ repo: REPO, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, autoMerge: true, notify: "", ...more }, { token: "t" });
     const writes = w.state.writes.slice(from);
     return { r, writes, blocked: writes.find((x) => x.startsWith("POST /issues/7/comments") && x.includes(marker(7, "blocked").replace(/ -->$/, ""))) };
   } finally {
@@ -173,6 +173,28 @@ test(`#243: the bound: ${REBASE_LIMIT} rebases in 24 h, then the next conflict B
   const t = await tick(v);
   assert.deepEqual(t.r.sentBack, [7]);
   assert.equal(t.blocked, undefined);
+});
+
+test("#402: the repository's rebase_limit is the bound: its notices count to it and the next conflict Blocks naming it", async () => {
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const { rebaseLimit } = resolveInputs({ env: { FACTORY_REBASE_LIMIT: "2" } });
+  assert.equal(rebaseLimit, 2);
+  const w = world();
+  const bases = ["e", "f", "1"].map(sha);
+  await tick(w, { rebaseLimit });
+  assert.match(notices(w).at(-1).body, /rebase 1 of at most 2 in 24 h/);
+  for (let n = 0; n < 2; n += 1) {
+    await w.workerRebases(["docs/decisions.md"], sha(String.fromCharCode(97 + n)));
+    w.siblingMerges(bases[n]);
+    const t = await tick(w, { rebaseLimit });
+    if (n === 0) {
+      assert.deepEqual(t.r.sentBack, [7], "the second rebase goes ahead");
+      assert.match(notices(w).at(-1).body, /rebase 2 of at most 2 in 24 h/);
+    } else {
+      assert.deepEqual(t.r.sentBack, [], "no third rebase");
+      assert.match(t.blocked, /the branch was rebased 2 times in 24 h as other PRs merged/);
+    }
+  }
 });
 
 test("#243: the worker's rebase record reads back as written, whatever the file names; a conflict pass that left the branch off its base Blocks as the work's, after the caps", async () => {

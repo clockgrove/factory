@@ -3142,6 +3142,8 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
   return (decisions || []).find((d) => Date.parse(d.created_at ?? d.at) > since && (graceMs <= 0 || now - Date.parse(d.created_at ?? d.at) > graceMs)) ?? null;
 }
 
+/** How long the sweep leaves a sandbox whose stage ended moments ago to its launcher's end, which answers it first. */
+export const END_GRACE_MS = 10 * 60_000;
 /**
  * What the sweep does with one of Factory's Objective sandboxes (tags `factory=objective`, this repository's id;
  * the caller lists only those). `issue` is the Objective (null when GitHub has none by that number), `state` its
@@ -3152,8 +3154,6 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * sandbox's grace; a stopped one's idle days, `idle: true`), the sweep's own next run (sweep.mjs sweepWaits).
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
-/** How long the sweep leaves a sandbox whose stage ended moments ago to its launcher's end, which answers it first. */
-export const END_GRACE_MS = 10 * 60_000;
 export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = END_GRACE_MS }) {
   if (holds) return { keep: "a stage holds it" };
   const mine = record?.id === sandbox.id;

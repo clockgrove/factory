@@ -952,8 +952,8 @@ async function main() {
   // One review pass per PR. A PR that already has it (a Question draft a human marked ready, or a
   // rebased PR relabelled by the worker) skips the reviewer, answers only what is still unanswered, and
   // still gets validation, the exit and auto-merge: the merge path is this job's, not the reviewer's.
-  // Only text a writer wrote reaches the reviewer and the answer and fix passes (objective-trust.mjs): the body read
-  // with its author and last editor, checked again at this stage before anything is set up for it, or a Block.
+  // Only text a writer wrote reaches the reviewer and the answer and fix passes (objective-trust.mjs): the title and body
+  // read with their author, last editor and latest title renamer, checked again at this stage before anything is set up for it, or a Block.
   const trusted = await authorGate({ repo, issue, issueData: await getIssue(repo, issue, token), pr, notify: inputs.notify, opts: token, apply: applyExit, before: dropLabel });
   if (!trusted.ok) {
     log(trusted.reason);

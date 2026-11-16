@@ -31,7 +31,7 @@ import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRep
 import { DEFAULTS, FACTORY_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
-import { ciRunner, ciWorkflowTriggers, runnerLabels, setupScripts, unreadableRunners } from "./doctor.mjs";
+import { ciRunner, ciWorkflowTriggers, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef } from "./lib/accounts.mjs";
 
@@ -502,15 +502,16 @@ export function keptNotify(before, explicit) {
 }
 
 /**
- * What setup runs, on every route: each repository file its command names (doctor.mjs setupScripts) joins the protected
+ * What setup runs, on every route: each repository file its command names (doctor.mjs setupRuns) joins the protected
  * paths unless one already covers it, anchored at the root (`/build.mjs`, logic.mjs protectedCovers) so a file of the
- * same name deeper in the tree stays the worker's. {scripts, adding, protectedList}: the list to render as
+ * same name deeper in the tree stays the worker's. {scripts, unresolved, adding, protectedList}: `scripts` the files
+ * named, `unresolved` what the command may run that cannot be named (doctor FAILs on it), and the list to render as
  * FACTORY_PROTECTED_PATHS.
  */
 export function protectSetup(inputs, checkout) {
-  const scripts = setupScripts(inputs.setup, checkout);
+  const { files: scripts, unresolved } = setupRuns(inputs.setup, checkout);
   const adding = unprotectedFiles(scripts, protectedPaths(inputs.protectedAdditions)).map((f) => `/${f}`);
-  return { scripts, adding, protectedList: [...inputs.protectedAdditions, ...adding] };
+  return { scripts, unresolved, adding, protectedList: [...inputs.protectedAdditions, ...adding] };
 }
 
 async function applyWorkflow({ inputs, args, explicit, before, template, checkout, latest, repo, opts }) {
@@ -532,13 +533,15 @@ async function applyWorkflow({ inputs, args, explicit, before, template, checkou
     const theirs = pr.found && pr.name !== ci.name ? ciRunner(pr, hints) : null;
     if (theirs && theirs.runner !== runner.runsOn) runner.note += `; doctor compares against ${pr.name} (the workflow on pull_request), which runs on ${theirs.runner}, so it will warn`;
   }
-  const { scripts, adding, protectedList } = protectSetup(inputs, checkout);
+  const { scripts, unresolved, adding, protectedList } = protectSetup(inputs, checkout);
   const defaultBranch = sandbox ? (await getRepo(repo, opts)).default_branch : "";
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));
   const text = workflowText({ template, inputs, args, explicit, before, latest, notify, runsOn: runner?.runsOn, ciWorkflow, defaultBranch, protectedPaths: protectedList });
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, text);
-  const added = adding.length
+  const added = unresolved.length
+    ? `; WARNING: the setup command runs ${unresolved.join(", ")}, which cannot be resolved to repository files, so nothing keeps a worker from changing what it runs and doctor FAILs; name each file literally or move the command into a script file`
+    : adding.length
     ? `; added ${adding.join(", ")} to FACTORY_PROTECTED_PATHS (setup runs it as the runner beside the App's key${sandbox ? ", as root into the image every stage starts from" : ""}, so a worker's commit may not change it)`
     : sandbox && inputs.setup && !scripts.length
       ? `; WARNING: no repository file found in the setup command to protect; with a sandbox setup runs as root into every stage's image, so add the files it runs to --protected-paths`

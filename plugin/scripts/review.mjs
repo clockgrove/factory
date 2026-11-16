@@ -22,7 +22,7 @@ import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runH
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, parseArgs, postedError, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
-import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
+import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, commandRefs, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
 import { agentUser } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
 import { openStageHosts, refusalExit } from "./lib/local.mjs";
@@ -848,7 +848,7 @@ async function main() {
   // starts at GitHub's head now. No GitHub token reaches a child: on Actions the agent reads with its own read-only
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
-  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), deadlineAt, base: tmp.factory });
+  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs), setupScripts: commandRefs(inputs.setup).scripts, deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
   const identity = await gitIdentity(app, keeper.token);

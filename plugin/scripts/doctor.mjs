@@ -19,7 +19,7 @@ import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offLi
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { FACTORY_VERSION, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
-import { commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
+import { commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupFiles, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
@@ -1050,11 +1050,12 @@ export async function repositoryChecks({ inputs, checkout, env = process.env, ru
 }
 
 /**
- * The repository files the setup command names (logic.mjs setupFiles: `scripts/ci/setup.sh`, `bash -e ./x.sh &&
- * scripts/ci/toolchain.sh`), each a file in `checkout`. Setup runs them as the runner beside the App's key on every
- * route (as root into the image every stage starts from, with a sandbox), so a worker's commit must not change them.
+ * What the setup command runs from the repository (logic.mjs setupFiles): {files, scripts, unresolved}, `files` each a
+ * file in `checkout` (`scripts/ci/setup.sh`, `bash -e ./x.sh && scripts/ci/toolchain.sh`). Setup runs as the runner
+ * beside the App's key on every route (as root into the image every stage starts from, with a sandbox), so a worker's
+ * commit must not change any of it.
  */
-export function setupScripts(setup, checkout) {
+export function setupRuns(setup, checkout) {
   return setupFiles(setup, (p) => {
     try {
       return statSync(join(checkout, p)).isFile();
@@ -1067,14 +1068,22 @@ export function setupScripts(setup, checkout) {
 /**
  * Setup runs as the runner beside the App's key on every route (with sudo on Actions, as root into a sandbox's image), so
  * every repository file its command names must be a protected path: otherwise a worker's change to it, once merged, runs
- * there. FAIL, in a job too: the run Blocks before an unprotected setup runs.
+ * there. What it may run that cannot be named (a variable, a substitution's output, a glob) cannot be protected at all.
+ * FAIL on either, in a job too: the run Blocks before such a setup runs. The package.json scripts it runs need no entry:
+ * Factory refuses a push that changes one (outbox.mjs). What the `install` command may run that cannot be named is a
+ * WARN: every file then counts as toolchain to a fix pass (logic.mjs fixScopeRefused).
  */
 export function setupFilesCheck({ inputs, checkout, list = protectedPaths(inputs.protectedAdditions) }) {
-  const named = setupScripts(inputs.setup, checkout);
-  if (!named.length) return [];
-  const bare = unprotectedFiles(named, list);
-  if (bare.length) return [FAIL("setup files", `the setup command runs ${bare.join(", ")} as the runner, beside the App's key, and no protected path covers it: a worker's merged change to it would run there`, `add ${bare.map((f) => `/${f}`).join(", ")} to protected_paths (FACTORY_PROTECTED_PATHS in .github/workflows/factory.yml; a leading / protects it at the root only); setup --apply workflow adds it`)];
-  return [PASS("setup files", `${named.join(", ")} protected (the files the command names; what they read, such as a Makefile or package.json script, is not)`)];
+  const out = [];
+  const install = inputs.install && inputs.install !== "auto" && inputs.install !== "none" ? commandRefs(inputs.install).unresolved : [];
+  if (install.length) out.push(WARN("install files", `the install command runs ${install.join(", ")}, which Factory cannot resolve to repository files, so a fix pass may change no file its scope does not name`, "name each file literally in the install command, or move the command into a script file"));
+  const { files, scripts, unresolved } = setupRuns(inputs.setup, checkout);
+  if (unresolved.length) return [FAIL("setup files", `the setup command runs ${unresolved.join(", ")}, which Factory cannot resolve to repository files, so it cannot keep a worker from changing what runs as the runner beside the App's key`, "name each file the setup runs literally (bash scripts/ci/setup.sh), or move the command into a script file in the repository; setup --apply workflow then protects it"), ...out];
+  const bare = unprotectedFiles(files, list);
+  if (bare.length) return [FAIL("setup files", `the setup command runs ${bare.join(", ")} as the runner, beside the App's key, and no protected path covers it: a worker's merged change to it would run there`, `add ${bare.map((f) => `/${f}`).join(", ")} to protected_paths (FACTORY_PROTECTED_PATHS in .github/workflows/factory.yml; a leading / protects it at the root only); setup --apply workflow adds it`), ...out];
+  const runs = [...(files.length ? [`${files.join(", ")} protected`] : []), ...(scripts.length ? [`package.json scripts ${scripts.join(", ")} fenced (a push changing one is refused)`] : [])];
+  if (runs.length) out.unshift(PASS("setup files", `${runs.join("; ")} (what the command names; what those read in turn, such as a Makefile, is not)`));
+  return out;
 }
 
 // ------------------------------------------------------------------ runner

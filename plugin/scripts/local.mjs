@@ -38,7 +38,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
+import { REVIEW_LABEL, acceptanceEntries, clip, commandRefs, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -3533,7 +3533,7 @@ async function deliver(issue, flags) {
   let handover;
   let ahead = 0;
   try {
-    const outbox = await openOutbox({ branch, defaultBranch, checkout: dir, remote: `https://github.com/${repo.full}.git`, token: () => opts.token, agentEnv: process.env, local: true, protectedList: protectedPaths(inputs.protectedAdditions), base: tmp.factory });
+    const outbox = await openOutbox({ branch, defaultBranch, checkout: dir, remote: `https://github.com/${repo.full}.git`, token: () => opts.token, agentEnv: process.env, local: true, protectedList: protectedPaths(inputs.protectedAdditions), setupScripts: commandRefs(inputs.setup).scripts, base: tmp.factory });
     // A merge Factory makes itself here (the default branch's workflow change, an unsynced checkout) carries the
     // identity of the token that pushes it, as on every other route.
     outbox.author = commitAuthor(await gitIdentity(null, opts.token));

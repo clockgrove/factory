@@ -160,3 +160,45 @@ test("local mode reads the workflow's settings from the default branch's commit,
   git(dev, "update-ref", "refs/remotes/origin/trunk", "HEAD");
   assert.deepEqual(committedWorkflowEnv(dev).wf, { FACTORY_MODEL: "m2" });
 });
+
+test("workflowEnv reads the env block the YAML parser reads, at any indent or style; expressions, mappings and lists are left out (#387)", () => {
+  const wf = workflowEnv(
+    [
+      "name: Factory",
+      "env:",
+      "    FACTORY_MODEL: claude-opus-5-5 # four-space indent",
+      '    "FACTORY_VALIDATION": |',
+      "      npm test",
+      "      npm run lint",
+      "    FACTORY_MAX_USD: 25",
+      "    FACTORY_SETUP:",
+      "    FACTORY_NOTIFY: ${{ vars.NOTIFY }}",
+      "    FACTORY_REVIEWERS: [a, b]",
+      "    OTHER: x",
+      "jobs:",
+      "  work:",
+      "    env:",
+      "      FACTORY_HARNESS: codex",
+    ].join("\n"),
+  );
+  assert.deepEqual(wf, { FACTORY_MODEL: "claude-opus-5-5", FACTORY_VALIDATION: "npm test\nnpm run lint\n", FACTORY_MAX_USD: "25", FACTORY_SETUP: "" }, "the top-level block only, every value as Actions sets it");
+  assert.deepEqual(workflowEnv("env: { FACTORY_MODEL: m, FACTORY_HARNESS: 'codex' }\njobs: {}\n"), { FACTORY_MODEL: "m", FACTORY_HARNESS: "codex" }, "a flow mapping is the same block");
+  assert.throws(() => workflowEnv("env:\n  FACTORY_MODEL: a\n  FACTORY_MODEL: b\n"), /factory\.yml does not parse \(unsupported YAML/, "a file the parser refuses is said, never read as no settings");
+});
+
+test("a default-branch workflow that does not parse is committedWorkflowEnv's error, said once, not an empty block (#387)", async () => {
+  const { committedWorkflowEnv } = await import("../scripts/lib/local.mjs");
+  const { workflowSourceChecks } = await import("../scripts/doctor.mjs");
+  const text = "name: Factory\nenv:\n  FACTORY_MODEL: [unclosed\njobs: {}\n";
+  const git = (args) => {
+    if (args[0] === "ls-remote") return { status: 0, stdout: "ref: refs/heads/trunk\tHEAD\n" };
+    if (args[0] === "show") return { status: 0, stdout: text };
+    return { status: 0, stdout: "" };
+  };
+  const read = committedWorkflowEnv("/repo", { git });
+  assert.deepEqual(read.wf, {});
+  assert.match(read.error, /^origin\/trunk's \.github\/workflows\/factory\.yml does not parse \(/);
+  const [warn] = workflowSourceChecks({}, read);
+  assert.equal(warn.status, "WARN");
+  assert.match(warn.detail, /does not parse .*so it uses none/);
+});

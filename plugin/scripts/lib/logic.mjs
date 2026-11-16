@@ -2,6 +2,7 @@
 // Everything here is covered by test/ with `node --test`.
 
 import { parseToml } from "./toml.mjs";
+import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { refusalCause, refusalFields, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
@@ -130,6 +131,10 @@ export function protectedReason(hits) {
   return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun` : why;
 }
 
+/** The push refusal for package.json scripts the `setup` command runs (setupFiles `scripts`) that a branch changed (`hits`: `<path> scripts.<name>`). */
+export const setupScriptsReason = (hits) =>
+  `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Factory never pushes one; a person changes it on the default branch`;
+
 /** Changed files that fall under a protected path (protectedCovers). */
 export function protectedTouched(files, protectedList) {
   const hits = [];
@@ -192,55 +197,20 @@ const dependencyFile = (path) => {
 };
 
 /**
- * The repository paths a shell command names (`setup`, an explicit `install`): each word that is a relative path with a
- * directory, an extension or a leading `./` (`scripts/setup.sh`, `./tools/install-deps.sh`, `setup.sh`, `./setup`), or
- * the script an interpreter runs (`sh configure`, `bash -e bootstrap`; interpreterScript),
- * quotes and a leading `./` dropped; flags, assignments, variables, absolute paths, URLs and `..` are not, nor are
- * manifests, lockfiles and requirements files (dependencyFile). A fix pass changing one is changing the toolchain (fixScopeRefused `extra`).
+ * What the shell command `command` (`setup`, an explicit `install`) refers to in the repository (shell.mjs
+ * commandRefs): {paths, scripts, unresolved}, with the manifests, lockfiles and requirements files an install reads
+ * (dependencyFile) left out of `paths`. A fix pass changing one of `paths`, or one of the package.json `scripts`, is
+ * changing the toolchain (fixScopeRefused, outbox.mjs); `unresolved` names what may be any file.
  */
-export function commandPaths(command) {
-  const out = new Set();
-  for (const segment of String(command || "").split(/[;&|()<>`\n]+/)) {
-    const script = interpreterScript(segment);
-    for (let w of segment.split(/\s+/)) {
-      w = w.replace(/^['"]+|['"]+$/g, "");
-      if (w.startsWith("-") && w.includes("=")) w = w.slice(w.indexOf("=") + 1);
-      if (!w || w.startsWith("-") || /[=$~*?{}\\]|:\/\//.test(w) || w.startsWith("/")) continue;
-      const dotted = /^\.\//.test(w);
-      const named = w === script;
-      w = w.replace(/^(\.\/)+/, "");
-      if (!w || w.split("/").some((s) => s === ".." || s === "")) continue;
-      if ((dotted || named || w.includes("/") || /\.[A-Za-z0-9]+$/.test(w)) && !dependencyFile(w)) out.add(w);
-    }
-  }
-  return [...out];
+export function commandRefs(command) {
+  const refs = shellRefs(command);
+  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)) };
 }
+/** The repository paths a shell command names (commandRefs `paths`). */
+export const commandPaths = (command) => commandRefs(command).paths;
 
-// Interpreters whose first operand is a script file (`sh configure`, `bash -e bootstrap`); the options that make the
-// next word inline code or a module instead (`node -e`, `python -m`) mean no script. `sudo`, `env` and assignments may
-// come first.
-const SHELL_INLINE = /^-[A-Za-z]*c$/;
-const INTERPRETERS = {
-  bash: SHELL_INLINE, sh: SHELL_INLINE, dash: SHELL_INLINE, zsh: SHELL_INLINE, ksh: SHELL_INLINE,
-  node: /^(-e|-p|--eval|--print)$/, python: /^-[A-Za-z]*[cm]$/, python3: /^-[A-Za-z]*[cm]$/, ruby: /^-[A-Za-z]*e$/, perl: /^-[A-Za-z]*[eE]$/,
-};
+// `sudo`, `env` and the like run the command after them (simpleCommands).
 const PREFIXES = new Set(["sudo", "env", "exec", "command", "nice", "time"]);
-
-/** The script word an interpreter runs in one simple command (`sh configure` → `configure`), quotes kept off; else null. */
-function interpreterScript(segment) {
-  const words = segment.trim().split(/\s+/).map((w) => w.replace(/^['"]+|['"]+$/g, "")).filter(Boolean);
-  let i = 0;
-  let prefixed = false;
-  for (; i < words.length; i += 1) {
-    if (PREFIXES.has(words[i])) prefixed = true;
-    else if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) && !(prefixed && words[i].startsWith("-"))) break;
-  }
-  const name = (words[i] ?? "").split("/").pop();
-  if (!Object.hasOwn(INTERPRETERS, name)) return null;
-  const inline = INTERPRETERS[name];
-  for (i += 1; i < words.length && words[i].startsWith("-"); i += 1) if (inline.test(words[i])) return null;
-  return words[i] ?? null;
-}
 
 // Shell keywords, skipped to the command they introduce (`if make; then …`), and builtins, which run no executable.
 const SHELL_KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "select", "function", "!", "{", "}", "[[", "]]"]);
@@ -275,15 +245,50 @@ export function simpleCommands(command) {
   return out;
 }
 
-/** The repository paths the `setup` command and an explicit `install` command name (commandPaths): toolchain to a fix pass. */
-export const setupPaths = ({ setup = "", install = "auto" } = {}) => [...new Set([...commandPaths(setup), ...(install && install !== "auto" && install !== "none" ? commandPaths(install) : [])])];
+/**
+ * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
+ * (outbox.mjs box.outside). {paths, scripts, unresolved}.
+ */
+export function setupPaths({ setup = "", install = "auto" } = {}) {
+  const all = [commandRefs(setup), install && install !== "auto" && install !== "none" ? commandRefs(install) : { paths: [], scripts: [], unresolved: [] }];
+  const join = (k) => [...new Set(all.flatMap((r) => r[k]))];
+  return { paths: join("paths"), scripts: join("scripts"), unresolved: join("unresolved") };
+}
 
 /**
- * The repository files the `setup` command names (commandPaths) that are files in the checkout (`isFile`, given a path
- * from its root). Setup runs as the runner, beside the App's key (with sudo on Actions, as root into a sandbox's image),
- * on every route, so each must be a protected path: no worker or fix pass may change what it runs.
+ * What the `setup` command runs from the repository (commandRefs): {files, scripts, unresolved}. `files`: the paths it
+ * names that are files in the checkout (`isFile`, given a path from its root), each to be a protected path; `scripts`:
+ * the package.json `scripts` entries it runs, which a push may not change (outbox.mjs); `unresolved`: what it may run
+ * that Factory cannot name, so nothing can keep a worker from changing it. Setup runs as the runner, beside the App's
+ * key (with sudo on Actions, as root into a sandbox's image), on every route: no worker or fix pass may change what it runs.
  */
-export const setupFiles = (setup, isFile) => commandPaths(setup).filter((p) => isFile(p));
+export function setupFiles(setup, isFile) {
+  const refs = commandRefs(setup);
+  return { files: refs.paths.filter((p) => isFile(p)), scripts: refs.scripts, unresolved: refs.unresolved };
+}
+
+/**
+ * The package.json `scripts` entries among `names` whose value differs between two texts of one package.json (`before`
+ * and `after`; null: no file there). A side that could not be read (undefined), or is not a JSON object while the
+ * texts differ, changes every name.
+ */
+export function scriptsChanged(before, after, names) {
+  if (!names.length || (before !== undefined && before === after)) return [];
+  const read = (text) => {
+    if (text === null) return {};
+    if (typeof text !== "string") return null;
+    try {
+      const doc = JSON.parse(text);
+      return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null;
+    } catch {
+      return null;
+    }
+  };
+  const [a, b] = [read(before), read(after)];
+  if (!a || !b) return [...names];
+  const entry = (doc, n) => (doc.scripts && typeof doc.scripts === "object" && Object.hasOwn(doc.scripts, n) ? JSON.stringify(doc.scripts[n]) : undefined);
+  return names.filter((n) => entry(a, n) !== entry(b, n));
+}
 /** The setup files no entry of the protected list covers (protectedTouched): doctor FAILs on any, setup adds them. */
 export const unprotectedFiles = (files, protectedList) => files.filter((f) => !protectedTouched([f], protectedList).length);
 
@@ -469,10 +474,12 @@ export const settingsFile = (path) => fileName(String(path)) === SETTINGS_FILE;
  * dependency may change it, and its lockfile follows). A workspace's root lockfile (`workspaces`, from
  * workspaceDeclarations) is in scope when one of its member manifests is changed before or by this pass. A lockfile
  * changed without its manifest or a member manifest in scope is refused. `extra` (the files the repository's `setup`
- * and `install` commands name, commandPaths) counts as toolchain too. A pnpm-workspace.yaml in `membership` (its change
- * touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may change as before.
+ * and `install` commands name, setupPaths) counts as toolchain too, and with `unknown` (what those commands may run that
+ * Factory cannot name, commandRefs `unresolved`) every file does: any one may be what they run. A pnpm-workspace.yaml in
+ * `membership` (its change touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may
+ * change as before.
  */
-export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], workspaces = [], membership = [] } = {}) {
+export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], unknown = [], workspaces = [], membership = [] } = {}) {
   const clean = (p) => String(p).replace(/^\.\//, "");
   const before = new Set(prior.map(clean));
   const setupPaths = new Set([...extra].map(clean));
@@ -482,12 +489,15 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], w
   const memberIn = (p) => workspaces.some((w) => w.dir === dirOf(p) && w.locks.includes(fileName(p)) && [before, now].some((s) => [...s].some((m) => workspaceMember(w, m))));
   const members = new Set(membership.map(clean));
   const membersOnly = (p) => settingsFile(p) && members.has(p) && !setupPaths.has(p);
-  return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p)) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
+  return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
 }
 
-/** The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. */
-export const fixScopeReason = (files) =>
-  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective`;
+/**
+ * The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. `unknown`: what
+ * the setup or install command may run that Factory cannot name (fixScopeRefused), said once, with its fix.
+ */
+export const fixScopeReason = (files, unknown = []) =>
+  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Factory cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
 
 /**
  * The Blocked reason for a push GitHub refused because it would create or update a workflow file, which a token

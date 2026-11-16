@@ -31,7 +31,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## Repository
 
-- `setup` is present (runs clean with `--run-setup`); each validation command names a script in `package.json` or a binary that exists; a lockfile is recognised (or `install` is set); the protected paths exist and cover every repository file the `setup` command names (it runs beside the App's key; a file those read, such as `make setup`'s `Makefile`, is not detected: protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
+- `setup` is present (runs clean with `--run-setup`); each validation command names a script in `package.json` or a binary that exists; a lockfile is recognised (or `install` is set); the protected paths exist and cover every repository file the `setup` command names, each literally (no variable or glob; it runs beside the App's key; a `Makefile` those read is not followed: protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
 
 ## Runner
 

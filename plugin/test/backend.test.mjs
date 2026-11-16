@@ -598,7 +598,7 @@ test("the sandboxes' scan (#154): srt, the outer sandbox and Claude Code (from t
 });
 
 test("Copilot's outer probe: names each missing tool its sandbox needs, and slirp4netns's own error when it fails", { skip: !existsSync("/dev/net/tun") && "no /dev/net/tun here" }, async () => {
-  const { COPILOT_OUTER_PROBE } = await import("../scripts/lib/local.mjs");
+  const { COPILOT_OUTER_PROBE, OUTER_PROBE_WAIT_S } = await import("../scripts/lib/local.mjs");
   const { mkdtempSync, mkdirSync, writeFileSync: write, symlinkSync, renameSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
@@ -607,7 +607,7 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   const bin = join(dir, "bin");
   mkdirSync(bin);
   // Real tools the probe text runs around the sandbox's own; each sandbox tool a stub, slirp4netns failing as it would.
-  for (const t of ["sh", "sleep", "grep", "tail", "cat", "id", "mkfifo"]) symlinkSync(spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout.trim(), join(bin, t));
+  for (const t of ["sh", "sleep", "grep", "tail", "cat", "id", "mkfifo", "timeout"]) symlinkSync(spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout.trim(), join(bin, t));
   const tools = ["slirp4netns", "nsenter", "unshare", "ip", "iptables", "ip6tables", "iptables-restore", "ip6tables-restore"];
   const stub = (t, body) => write(join(bin, t), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   // unshare as util-linux's: its options, then its command run.
@@ -645,6 +645,17 @@ test("Copilot's outer probe: names each missing tool its sandbox needs, and slir
   assert.equal(failed.status, 4);
   assert.equal(failed.stderr.trim(), "slirp4netns did not configure its interface: cannot open tap0");
   assert.ok(Date.now() - t < 3_000, "no wait on a clock");
+  // #421: one that hangs (neither writes its --ready-fd nor exits) is a no once the bounded wait ends, never a wait as
+  // long as the caller's own limit; `timeout` here keeps the probe's bound at one second.
+  const real = spawnSync("sh", ["-c", "command -v timeout"], { encoding: "utf8" }).stdout.trim();
+  renameSync(join(bin, "timeout"), join(dir, "timeout.real"));
+  stub("timeout", `[ "$1" = ${OUTER_PROBE_WAIT_S} ] || { echo "timeout $1, not the probe's bound" >&2; exit 9; }\nshift\nexec ${real} 1 "$@"`);
+  stub("slirp4netns", "exec sleep 60");
+  const h = Date.now();
+  const hung = run();
+  assert.equal(hung.status, 4, hung.stderr);
+  assert.match(hung.stderr.trim(), /^slirp4netns did not configure its interface/);
+  assert.ok(Date.now() - h < 10_000, "bounded by the probe's own wait");
 });
 
 test("local mode pins the clone's .git when it clones and refuses one put in its place; its git state too", async () => {

@@ -551,6 +551,30 @@ test("#421: withClaim's heartbeat reads the claim before it writes: one another 
   }
 });
 
+test("#421: a claim lost while withClaim's body runs no stage (a merge it follows) keeps the body's result: only a stage ended for it is skipped", async () => {
+  const { holderId, machineIdentity } = await import("../scripts/local.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    loop.heartbeatMs = 30;
+    loop.children = new Set();
+    const other = holderId({ ...machineIdentity(), host: "other-box" }, 4242);
+    // The merge it follows completes after another loop's claim landed and a heartbeat read it.
+    const r = await loop.withClaim(7, async () => {
+      const c = gh.comments[0];
+      c.body = c.body.replaceAll(loop.holder, other);
+      c.updated_at = new Date().toISOString();
+      await new Promise((ok) => setTimeout(ok, 300));
+      return { exit: "merged" };
+    });
+    assert.equal(r.exit, "merged", "the Objective was delivered: not reported skipped");
+    assert.ok(loop.ceded.has(7), "the claim is still the other loop's");
+    assert.match(gh.comments[0].body, new RegExp(`holder: ${other}`));
+  } finally {
+    gh.restore();
+  }
+});
+
 test("withClaim: a read-back that fails once is read again; one that never answers keeps the claim for this loop to resume (#167)", async () => {
   // The comments requests of one claim: the check for another holder, upsertComment's own, then the read-back (the 3rd),
   // which fails through all of the client's tries, so the loop's own second read is what answers.

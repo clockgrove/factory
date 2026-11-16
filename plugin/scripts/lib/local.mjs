@@ -1488,18 +1488,20 @@ export function writeBwrapTun(dir, bwrap = whichPath("bwrap", process.env), tun 
  * What Copilot's sandbox needs inside the outer one, checked as it would use it: the TUN device, its tools, and
  * slirp4netns wiring a fresh user and network namespace. Exit 0 and `ok` when all hold, else the first that does not.
  * Each step waits on the answer itself, never a clock: the namespace's process says on a pipe that it is inside it, and
- * slirp4netns writes its --ready-fd once the interface is configured (or exits, closing it, when it cannot). runOuterProbe's
- * own time limit bounds the whole.
+ * slirp4netns writes its --ready-fd once the interface is configured (or exits, closing it, when it cannot). Each wait
+ * is bounded (OUTER_PROBE_WAIT_S, through `timeout`): one that hangs is a no then, well inside runOuterProbe's own limit,
+ * since the probe blocks the loop that runs it.
  */
+export const OUTER_PROBE_WAIT_S = 30;
 export const COPILOT_OUTER_PROBE = `test -c /dev/net/tun || { echo "no /dev/net/tun" >&2; exit 2; }
-for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore mkfifo; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
+for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore mkfifo timeout; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
 unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" true 2>/dev/null || { echo "unshare cannot make a user and network namespace mapping the user (util-linux 2.36 or later)" >&2; exit 5; }
 mkfifo "$TMPDIR/ns.ready" "$TMPDIR/slirp.ready" || { echo "mkfifo cannot make a pipe in $TMPDIR" >&2; exit 6; }
 unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" --keep-caps sh -c 'echo in >&3; exec 3>&-; exec sleep 120' 3>"$TMPDIR/ns.ready" & ns=$!
-[ "$(cat "$TMPDIR/ns.ready")" = in ] || { echo "unshare did not start its namespace's process" >&2; exit 5; }
+[ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/ns.ready")" = in ] || { kill "$ns" 2>/dev/null; echo "unshare did not start its namespace's process" >&2; exit 5; }
 slirp4netns --configure --mtu=65520 --ready-fd=3 "$ns" tap0 3>"$TMPDIR/slirp.ready" >/dev/null 2>"$TMPDIR/slirp.err" & sl=$!
 ok=""
-if [ "$(cat "$TMPDIR/slirp.ready")" = 1 ] && nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; fi
+if [ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/slirp.ready")" = 1 ] && nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; fi
 kill "$sl" "$ns" 2>/dev/null
 [ -n "$ok" ] || { echo "slirp4netns did not configure its interface: $(tail -1 "$TMPDIR/slirp.err" 2>/dev/null)" >&2; exit 4; }
 echo ok

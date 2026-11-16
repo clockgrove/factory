@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { LOCAL_BOUNDS, localBound, valueProblem } from "../scripts/lib/inputs.mjs";
-import { Local, checkToken, deadHereHolder, holderId, machineIdentity } from "../scripts/local.mjs";
+import { bootId } from "../scripts/lib/proc.mjs";
+import { Local, checkToken, deadHereHolder, holderId, machineIdentity, thisBoot } from "../scripts/local.mjs";
 
 const TOKEN_PROBE_MAX = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback;
 
@@ -144,6 +145,8 @@ test("#421: a claim holder's boot is proc.mjs bootId's (macOS: the boot time's e
   const none = machineIdentity({ boot: () => null });
   assert.equal(none.boot, "");
   assert.equal(deadHereHolder(holderId(none, process.pid), { id: none, self: 1 }), false);
+  // This process's boot, read once (a subprocess on macOS), is the one bootId reads.
+  assert.equal(thisBoot(), bootId());
   // Linux: the boot_id, as liveStage and the slots read it, in the holder's 12 characters.
   if (process.platform === "linux") assert.equal(machineIdentity().boot, readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().replace(/-/g, "").slice(0, 12));
 });

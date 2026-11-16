@@ -276,13 +276,17 @@ const readId = (file) => {
   }
 };
 
+/** This process's boot (proc.mjs bootId), read once: a boot cannot change while the process runs (macOS reads it with a subprocess). */
+let bootRead = null;
+export const thisBoot = () => (bootRead ??= { id: bootId() }).id;
+
 /**
  * Who this machine is and which boot it is on, for claim holders: a host name alone is not unique (a devcontainer on
  * host networking, two laptops called the same), and a pid is only meaningful within one boot. Linux gives both ids;
  * elsewhere the machine is its host name and the boot is proc.mjs bootId's (macOS: the boot time's exact second, as
  * liveStage and the slots read it), or none where that is unreadable: a holder's pid is then probed alone.
  */
-export function machineIdentity({ boot = bootId } = {}) {
+export function machineIdentity({ boot = thisBoot } = {}) {
   const machine = readId("/etc/machine-id") || readId("/var/lib/dbus/machine-id");
   return { host: hostname(), machine, boot: String(boot() ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) };
 }
@@ -1479,6 +1483,8 @@ export class Local {
     setUp();
     // Stopping, or another loop took the claim meanwhile (withClaim's heartbeat): no process starts.
     if (this.stopping || this.lost?.has(issue)) {
+      // Refused for the lost claim: withClaim reports the stage as ended for it.
+      if (this.lost?.has(issue)) this.lost.get(issue).ended = true;
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
     }
@@ -1738,8 +1744,14 @@ export class Local {
         lost = now.holder;
         clearInterval(beat);
         log(`#${issue}: another local loop holds it now (${now.holder}); ending this loop's stage of it`);
-        (this.lost ??= new Set()).add(issue);
-        for (const child of this.children || []) if (child.issue === issue) child.kill("SIGTERM");
+        // `ended`: a stage of it ended here for the lost claim (a process killed, or stage() refusing to start one).
+        const mark = { ended: false };
+        (this.lost ??= new Map()).set(issue, mark);
+        for (const child of this.children || []) {
+          if (child.issue !== issue) continue;
+          child.kill("SIGTERM");
+          mark.ended = true;
+        }
         return;
       }
       // This loop's own claim read: rewritten in place, with no second read.
@@ -1758,7 +1770,8 @@ export class Local {
     let failure = null;
     try {
       result = await fn();
-      return lost ? { exit: "skipped" } : result;
+      // A stage ended for the lost claim is skipped; anything else the body did (a merge it followed to the end) stands.
+      return lost && this.lost?.get(issue)?.ended ? { exit: "skipped" } : result;
     } catch (e) {
       failure = e;
       throw e;

@@ -3,7 +3,7 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
@@ -1472,4 +1472,135 @@ export function finalText(harness, stdout) {
   // Copilot JSONL: the assistant's messages (user.message carries the prompt, not an answer); else the raw stdout.
   const texts = parsed.filter((e) => e.type === "assistant.message" && typeof e.data?.content === "string").map((e) => e.data.content);
   return texts.length ? texts.join("\n") : String(stdout || "");
+}
+
+// ------------------------------------------------------------------ decision calls
+
+/**
+ * A decision call's bounds (adapters/decider-harness.mjs): its wall clock, its dollar cap (Claude Code's
+ * --max-budget-usd, Copilot's AI credits at their 30-credit minimum) and Claude Code's turns. Codex has no cap flag: with
+ * no tool it answers in one turn, and the wall clock bounds it.
+ */
+export const DECISION_RUN = { timeoutMs: 120_000, maxUsd: 0.3, maxTurns: 2 };
+
+/**
+ * The command line for one decision call (decisionRun): the question on stdin, no tool, no file write, no session kept,
+ * nothing of the user's or the repository's configuration loaded, and a low reasoning effort. Claude Code: no tools
+ * (`--tools ""`), no setting source, MCP server, slash command or CLAUDE.md, and no session file. Codex: a read-only
+ * sandbox with its shell tool and sub-agents off, no web search, no user config, rules or AGENTS.md, an ephemeral
+ * thread, and the AI Gateway provider when the stage's Codex runs through it. Copilot: no tool available and shell, write and URL
+ * permissions denied, no built-in MCP server, no custom instructions and no question form.
+ */
+export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.maxUsd, gateway = null, creditUsd = COPILOT_CREDIT_USD }) {
+  const hidden = hiddenFromShell([]);
+  switch (harness) {
+    case "claude": {
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--max-turns", String(DECISION_RUN.maxTurns), "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--exclude-dynamic-system-prompt-sections", "--effort", "low"];
+      if (model) args.push("--model", model);
+      if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
+      return { cmd: "claude", args, stdin: prompt, env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } };
+    }
+    case "codex": {
+      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0", "-c", 'model_reasoning_effort="low"'];
+      if (gateway) args.push(...codexGatewayArgs(gateway));
+      if (model) args.push("-m", gateway ? gatewayModel(model) : model);
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, env: gateway?.session ? { FACTORY_GATEWAY_SESSION: gateway.session } : {} };
+    }
+    case "copilot": {
+      const args = ["--available-tools=", "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
+      if (model) args.push("--model", model);
+      if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
+      return { cmd: "copilot", args, stdin: prompt, env: {} };
+    }
+    default:
+      throw new Error(`unknown harness ${harness}`);
+  }
+}
+
+/**
+ * On a runner (the agent uid: GitHub Actions, a cloud sandbox VM) a decision call runs as the agent in a home of its own,
+ * made in the unit's private /tmp, which nothing the agent ran before can reach: never the running pass's state, which
+ * each pass's start makes afresh.
+ */
+const DECISION_SH = ['set -eu', 'd=$(mktemp -d /tmp/factory-decision.XXXXXX)', 'mkdir -m 700 "$d/.claude" "$d/.codex" "$d/.copilot"', 'cd "$d"', 'export HOME="$d" TMPDIR="$d" CLAUDE_CONFIG_DIR="$d/.claude" CODEX_HOME="$d/.codex" COPILOT_HOME="$d/.copilot"', 'exec "$@"'].join("\n");
+
+/** The last answer a harness gave: Claude Code's result text, Codex's last agent message, Copilot's last assistant message; never the prompt. */
+export function answerText(harness, stdout) {
+  const events = String(stdout || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("{")).flatMap((l) => {
+    try {
+      return [JSON.parse(l)];
+    } catch {
+      return [];
+    }
+  });
+  if (harness === "claude") {
+    const res = events.findLast((e) => e?.type === "result");
+    if (typeof res?.result === "string") return res.result;
+    return events.filter((e) => e?.type === "assistant" && !e.parent_tool_use_id).flatMap((e) => e.message?.content || []).filter((c) => c?.type === "text").at(-1)?.text ?? "";
+  }
+  if (harness === "codex") return events.findLast((e) => e?.type === "item.completed" && e.item?.type === "agent_message")?.item.text ?? "";
+  return events.findLast((e) => e?.type === "assistant.message" && typeof e.data?.content === "string")?.data.content ?? "";
+}
+
+/**
+ * One decision call on the stage's own harness and login (adapters/decider-harness.mjs): decisionCommand's command with
+ * `prompt` on stdin, under DECISION_RUN's bounds. `env` is the stage's harness env (its credential, and locally its
+ * account's login folder); no worker secret reaches it. Locally it runs in the harness's outer sandbox, as the stage's
+ * passes do, in a temp directory of its own; on a runner as the agent (DECISION_SH); elsewhere as is. Never resumed,
+ * never waited out: a usage limit is a refusal like any other. Its spend counts in the stage's spend so far and its
+ * stopped usage (stagePasses), labelled `decision`. Returns the usage record with `answer` (answerText).
+ */
+export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision" }) {
+  const at = () => new Date().toISOString();
+  const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
+  if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
+  const { env } = harnessShell(given, { reviewer: true });
+  const creditUsd = copilotCreditUsd();
+  const { cmd, args, stdin, env: extra } = decisionCommand({ harness, model, prompt, maxUsd, gateway: codexGatewayOf(harness, env), creditUsd });
+  const agent = agentUser();
+  const local = backend(env).name === "local";
+  let dir = null;
+  let launch;
+  if (agent) {
+    // Absolute PATH entries outside the agent's home only (claude-runner.mjs runnerLaunch).
+    const path = String(env.PATH || process.env.PATH || "").split(":").filter((d) => d.startsWith("/") && d !== agent.home && !d.startsWith(`${agent.home}/`)).join(":");
+    launch = asAgent("/bin/sh", ["-c", DECISION_SH, "factory-decision", cmd, ...args], { ...env, ...extra, PATH: path }, [...MODEL_SECRET_KEYS, ...Object.keys(extra)]);
+  } else {
+    if (!(await onPath(cmd))) return none(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+    dir = local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "factory-decision-"));
+    const outer = local ? backend(env).sandbox.outer(env) : null;
+    const childEnv = { ...env, ...extra };
+    launch = outer ? ["srt", ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || dir}`, cmd, ...args], childEnv] : [cmd, args, childEnv];
+  }
+  const live = liveSpend(harness, model || null, { creditUsd });
+  const metered = meterPass(live, { label, harness, model: model || null });
+  const started = at();
+  let r;
+  try {
+    r = await exec(launch[0], launch[1], { cwd: dir ?? undefined, env: launch[2], input: stdin, timeoutMs, onLine: live.line, group: local, signal: stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
+  } catch (e) {
+    await metered.end(0);
+    return { ...none(`${cmd} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
+  } finally {
+    if (dir) local ? dropOwned(dir) : rmSync(dir, { recursive: true, force: true });
+  }
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd });
+  await metered.end(rec.usd);
+  Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
+  if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
+  else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Factory" });
+  else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${cmd} exited ${r.code ?? r.signal}` });
+  PASSES.push(keepDecision(rec));
+  return rec;
+}
+
+/**
+ * A decision call's record as the stage's usage keeps it: its spend, tokens and times, labelled `decision`, with no
+ * session (a decision is never resumed, and the stage's saved session is its passes'), no refusal (a usage limit on a
+ * decision call holds no account and Blocks nothing) and no answer text. `ok` is the stage's, not the answer's: a
+ * decision with no answer fails no pass. runDecision keeps one with the stage's passes, so a stopped stage counts it
+ * (stop.mjs stoppedRecords).
+ */
+export function keepDecision(rec) {
+  return { harness: rec.harness, model: rec.model ?? null, label: rec.label || "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...(rec.usdLowerBound ? { usdLowerBound: true } : {}), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true };
 }

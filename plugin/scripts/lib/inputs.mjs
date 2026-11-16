@@ -76,7 +76,7 @@ export const DEFAULTS = {
   codex_api_key: "",
   codex_gateway_key: "", // Codex through the Vercel AI Gateway (harness.mjs credentialEnv); wins over codex_api_key when set
   copilot_github_token: "",
-  ai_gateway_api_key: "", // red-check triage (triage.mjs) and the drift advisory (drift.mjs); empty turns both off
+  ai_gateway_api_key: "", // the decision calls' AI Gateway models (decider.mjs); empty: the stage's own harness answers them
   worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
   worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
   triage_model: "", // empty: triage.mjs TRIAGE_MODEL

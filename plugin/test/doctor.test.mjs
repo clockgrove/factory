@@ -175,17 +175,19 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
       assert.equal(r.status, "WARN", String(status));
       assert.equal(r.detail, `not verified: GitHub answered a dry rerun with ${status}`);
     }
-    // Only a local doctor run with triage on probes; a stage's own checks never do. (Each run stops at its next read.)
+    // Only a local doctor run probes, with a gateway key or without (#379: the stage's harness triages then); a stage's
+    // own checks never do. (Each run stops at its next read.)
     const probed = [];
     const probeRerun = async () => (probed.push(1), { status: "WARN", name: "triage rerun" });
     const env = { GITHUB_ACTIONS: "true" };
     const run = (job, local, inputs = { aiGatewayApiKey: "k" }) => githubChecks({ inputs, repo, token: "t", app: null, env, job, local, probeRerun }).catch(() => null);
     await run(false, true);
     assert.equal(probed.length, 1, "doctor --local with a gateway key");
+    await run(false, true, {});
+    assert.equal(probed.length, 2, "doctor --local without one");
     await run(true, true);
     await run(false, false);
-    await run(false, true, {});
-    assert.equal(probed.length, 1, "a stage's job checks, another route, or triage off: no probe");
+    assert.equal(probed.length, 2, "a stage's job checks or another route: no probe");
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;

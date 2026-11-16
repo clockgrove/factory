@@ -581,8 +581,6 @@ async function main() {
   credentialBasis = cred.basis;
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
-  // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
-  const drift = openDrift({ inputs, progress });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
   // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
   const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
@@ -596,6 +594,11 @@ async function main() {
     return;
   }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
+  // call's spend in the stage's usage.
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
+  const drift = openDrift({ inputs, progress, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
@@ -864,9 +867,9 @@ async function main() {
       deadlineAt,
       eventsFile,
       io,
-      // Red-check triage (lib/triage.mjs): off without an AI Gateway key. Jobs are read and rerun with the job token on
+      // Red-check triage (lib/triage.mjs), asked through the stage's decider. Jobs are read and rerun with the job token on
       // Actions (actions: write), the repository token locally.
-      triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }) : null,
+      triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }) : null,
       drift,
       // A work pass that ended well hands its pushed head to the review stage without waiting for the required checks:
       // the review waits for them beside its reviewer, and its answer pass fixes a red with the review's comments. A

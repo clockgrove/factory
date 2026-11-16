@@ -948,10 +948,13 @@ async function main() {
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
-  // The drift advisory (lib/drift.mjs) on the answer and fix passes: off without an AI Gateway key; advice only.
-  const drift = openDrift({ inputs, progress });
   io.set({ decisions, prNumber: pr.number });
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login (the
+  // reviewer's env: no worker secret), each call's spend in the stage's usage.
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
+  const drift = openDrift({ inputs, progress, stage: decisionStage });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): the fix and answer passes
   // continue the worker's session, so they get them as the work stage's passes do (passEnv). The reviewer never does: it
   // runs on harnessEnv, and its calls are marked `reviewer` (runHarness strips them there too).
@@ -1086,7 +1089,7 @@ async function main() {
   else if (scope.since) log(`PR #${pr.number}: commits since the head Factory's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
-    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress) }), drift, checksOnlyFirst: marks.handedOff };
+    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
       overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
@@ -1108,7 +1111,7 @@ async function main() {
   // the merge below enqueues it again as any drop (or Blocks at the queue's bound).
   const queued = heldRed
     ? null
-    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
         // Unread, the drop stays handed: the merge pass hands it to the next review stage.
         log(`the merge queue's red run could not be read: ${String(e?.message || e).slice(0, 160)}`);
         return null;
@@ -1519,7 +1522,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

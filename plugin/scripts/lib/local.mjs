@@ -119,14 +119,14 @@ export async function dropClaim(repo, issue, holder, opts) {
 /** ~/.config/factory: the literal path every sandbox denies, where local mode's key files sit. */
 export const factoryKeyDir = (home = homedir()) => join(home, ".config", "factory");
 
-/** The AI Gateway key's file in local mode (red-check triage, triage.mjs triageKeyState). */
+/** The AI Gateway key's file in local mode (the decision calls, decider.mjs deciderKeyState). */
 export const gatewayKeyFile = (home = homedir()) => join(factoryKeyDir(home), "ai-gateway-key");
 
 /**
  * The `harness` home, or any harness login folder on the machine (harnessLogins: a stage may run on any of them), that
  * equals or holds ~/.config/factory, or null. The outer sandbox leaves the harness's own homes readable (#2551), so such
- * a home would expose every key file there: the App's key (localApp) and the AI Gateway key (triage.mjs
- * triageKeyState, and serve's start).
+ * a home would expose every key file there: the App's key (localApp) and the AI Gateway key (decider.mjs
+ * deciderKeyState, and serve's start).
  */
 export function keyDirExposedBy(harness, env = process.env, home = homedir()) {
   if (!harness) return null;
@@ -629,7 +629,7 @@ export const stageTmpBase = (home = homedir(), os = osPlatform()) => {
 };
 
 /** The names Factory makes under stageTmpBase: a stage's temp directory (`<issue>-XXXXXX`), a probe's and a version check's. */
-const STAGE_TMP_NAMES = /^(?:\d+|probe|version)-[A-Za-z0-9]{6}$/;
+const STAGE_TMP_NAMES = /^(?:\d+|probe|version|decision)-[A-Za-z0-9]{6}$/;
 
 /**
  * A temp directory under stageTmpBase held by this process (fsafe.mjs ownedTemp; remove it with dropOwned), made

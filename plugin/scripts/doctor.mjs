@@ -31,7 +31,9 @@ import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
-import { triageKey } from "./lib/triage.mjs";
+import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
+import { DRIFT_MODEL } from "./lib/drift.mjs";
+import { deciderKind } from "./lib/decider.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
@@ -503,6 +505,20 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
   return WARN("plugin version", `the installed plugin is v${version}, older than clockgrove/factory@${pinned}, which the workflow pins: a session's skills and local mode's stages run the older release`, PLUGIN_UPDATE);
 }
 
+/**
+ * Which decider this repository's stages use (lib/decider.mjs): the AI Gateway's decision models with a usable key, else
+ * the stage's own harness on its login. A PASS either way; a local key file Factory refuses (any code but no-key) is a
+ * WARN, since the gateway was meant.
+ */
+export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
+  const kind = deciderKind({ inputs, env, home });
+  if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
+  const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
+  const text = `${harness} on its login, one short call with no tools per question: no AI Gateway key (${kind.code})`;
+  if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
+  return PASS("decision calls", text);
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -515,8 +531,11 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   else if (app?.appSlug) {
     out.push(...appPermissionChecks(app));
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
-  // Local red-check triage (a usable gateway key) reruns flaky reds with this token: doctor checks it may (not in a stage).
-  if (local && !job && token && triageKey({ inputs, env })) out.push(await probeRerun({ repo, token }));
+  // Local red-check triage (the gateway's model with a key, else the stage's harness) reruns flaky reds with this token:
+  // doctor checks it may (not in a stage).
+  if (local && !job && token) out.push(await probeRerun({ repo, token }));
+  // Which decider answers the decision calls (red-check triage, the drift advisory): where the key is read, a job or local mode.
+  if (job || local) out.push(deciderCheck({ inputs, env }));
 
   // The workflow as the default branch on GitHub has it (what the next run uses), not a local copy that may be behind.
   const repoData = await getRepo(repo, { token });

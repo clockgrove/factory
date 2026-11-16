@@ -43,17 +43,30 @@ Run the proof: `npm ci --ignore-scripts --prefix plugin && node bench/sandbox-co
 
 ## Decision model
 
-Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK). Used by red-check triage (`lib/triage.mjs`) and the drift advisory (`lib/drift.mjs`), each with its own model setting.
+Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decider there: red-check triage (`lib/triage.mjs`), the drift advisory (`lib/drift.mjs`) and each judgement built the same way. Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK) and `harness` (`decider-harness.mjs`, the stage's own harness on its login).
 
 | Operation | Does |
 | --- | --- |
-| `decide(input, question)` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. |
+| `openDecider({inputs, env, model, stage})` → `{name, model, off, decide}` | With an AI Gateway key: `ai-gateway`, asked `model` (the caller's own setting, such as `triage_model`). Without one, with `stage` (`{harness, model, env, record}`: the stage's harness and model, its harness env, and where each call's usage record goes): `harness`. Neither: `off` is the key's code (`no-key`, a key-file code). |
+| `decide(input, question)` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. Each caller keeps its own confidence floor. |
+
+To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it), call `decide`, and act only on a verdict at the caller's floor. No answer is the same as no decider.
+
+The `harness` vendor:
+
+- **One short call per question** on the stage's harness, model and login (`harness.mjs` `runDecision`): Claude Code `-p` with stream JSON, Codex `exec --json`, Copilot `--output-format json`, the question on stdin. No tools (Claude Code `--tools ""`; Codex's shell tool and sub-agents off in a read-only sandbox; Copilot no tool available, shell, write and URL denied), no file writes, no session kept, no MCP server, no user or repository settings or instructions, low reasoning effort.
+- **Bounded:** `DECISION_RUN` sets two turns, $0.30 (Claude Code's budget cap; Copilot's AI-credit cap at its 30-credit minimum) and two minutes of wall clock per call, and a stage runs at most three calls at once (`HARNESS_CALLS`).
+- **The prompt** holds the question, its choices and a strict JSON Schema (`choice` from the choices, `confidence` from 0 to 1, nothing else). The input sits between two lines with a random marker it cannot know, marked untrusted. Only a reply that is exactly that JSON object (one surrounding code fence allowed) is a verdict.
+- **The stage's login:** locally the account the stage runs on, in the harness's outer sandbox, as the stage's passes run; on Actions and in a cloud sandbox as the agent, in a home of its own in the unit's private `/tmp`, with the stage's credential. No worker secret reaches it.
+- **Usage:** each call's spend joins the stage's usage record and its spend line, labelled `decision`, with no session and no refusal.
+- **Usage limit or refused credential:** no answer, and no further call in that stage. It holds no account and Blocks nothing; the stage's own passes meet the limit as they always do.
 
 Rules:
 
 - **No vendor-side state.** Each question is one stateless call.
 - **Errors are codes** from `DECIDER_ERRORS` (`auth`, `rate_limited`, `unavailable`, `invalid`, `refused`, `no_answer`, `vendor`), with no verdict. Callers decide on the verdict and the code, never a message.
 - **The key never leaves Factory's process.** On Actions it is the `ai_gateway_api_key` input; locally only the file `~/.config/factory/ai-gateway-key`. `scrubbedEnv` keeps it out of every child.
+- **Doctor names the decider** (`decision calls`): the gateway's models, or the stage's harness with the key's code; a local key file Factory refuses is a warning.
 
 ## Codex model provider
 

@@ -2,13 +2,12 @@
 // agent is on task, drifting into scope creep, or looping, from the plan's items, its recent activity and the files it
 // has touched. `scope_creep` or `looping` at MIN_CONFIDENCE or more writes one line on the progress comment and in the
 // job log, at most once per harness run. It is advice only: it never stops, pauses, blocks or redirects a run.
-// The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with the same key as
-// red-check triage (triage.mjs triageKey) and its own model setting. This runs in Factory's own process, never in a
-// harness. Only the typed label and its confidence reach code; the activity is read from the harness's own event stream
-// (Claude stream-json, Codex JSONL, Copilot JSON) by structure.
-import { openDecider } from "./adapters/decider.mjs";
-import { log, mask, redactSecrets } from "./inputs.mjs";
-import { triageKey } from "./triage.mjs";
+// The question goes through the one decision interface (decider.mjs, docs/ADAPTERS.md): with an AI Gateway key, the
+// gateway's decision model on its own model setting; without one, the stage's own harness on its login. This runs in
+// Factory's own process, never in a harness. Only the typed label and its confidence reach code; the activity is read
+// from the harness's own event stream (Claude stream-json, Codex JSONL, Copilot JSON) by structure.
+import { openDecider } from "./decider.mjs";
+import { log, redactSecrets } from "./inputs.mjs";
 
 /** The default model: no false flag on 367 on-task checkpoints and 7 of 9 drift checkpoints caught at 0.7 (#2564). */
 export const DRIFT_MODEL = "baseten/elephant-1";
@@ -208,16 +207,15 @@ export const driftLine = ({ stage, model, verdict, confidence, entries }) =>
   `drift advisory (${model}): ${verdict} ${confidence.toFixed(2)} in ${stage} after ${entries} activity entries; advice only, the run goes on`;
 
 /**
- * The drift advisory, or null when there is no key (exactly today's path). `progress` is the run's progressReporter.
+ * The drift advisory, or null when there is no decider (decider.mjs openDecider: no AI Gateway key and no `stage`, the
+ * stage's harness, model, env and usage record). `progress` is the run's progressReporter.
  * watch({stage, goal, root, plan}) per harness run returns {feed(line), stop()}: feed each stdout line; `plan()` is the
  * plan's text as it stands (read at each checkpoint). `now` and `everyMs` set the checkpoint clock.
  */
-export function openDrift({ inputs, env = process.env, progress = null, decider = null, now = () => Date.now(), everyMs = EVERY_MS }) {
-  const key = decider ? null : triageKey({ inputs, env });
-  if (!decider && !key) return null;
-  mask(key);
-  const model = inputs?.driftModel || DRIFT_MODEL;
-  let ask = decider;
+export function openDrift({ inputs, env = process.env, home, progress = null, stage = null, decider = null, now = () => Date.now(), everyMs = EVERY_MS }) {
+  const ask = openDecider({ inputs, env, ...(home ? { home } : {}), model: inputs?.driftModel || DRIFT_MODEL, stage, decider });
+  if (ask.off) return null;
+  const { model } = ask;
   // A key the gateway refuses is refused at every checkpoint: asked no more in this job.
   let off = false;
   const watch = ({ stage, goal, root = null, plan = () => null }) => {
@@ -231,7 +229,6 @@ export function openDrift({ inputs, env = process.env, progress = null, decider 
       const n = acts.entries.length;
       askedAt = n;
       last = now();
-      ask ??= await openDecider({ key, model });
       const input = driftInput({ stage, goal, items: planItems(plan() ?? ""), entries: acts.entries, root });
       const a = await ask.decide(input, DRIFT_QUESTION);
       if (a.error === "auth") off = true;

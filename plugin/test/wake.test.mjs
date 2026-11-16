@@ -283,19 +283,13 @@ test("closedIssueTicks: a closed issue runs the dispatcher only when it was an O
   const { closedIssueTicks } = await import("../scripts/dispatch.mjs");
   const closed = (issue) => ({ action: "closed", issue });
   const opts = { objectiveLabel: "factory:objective" };
-  assert.equal(await closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts), true);
-  assert.equal(await closedIssueTicks("schedule", {}, opts), true);
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts), true);
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts), true);
+  assert.equal(closedIssueTicks("issues", { action: "labeled", issue: { number: 3 } }, opts), true);
+  assert.equal(closedIssueTicks("schedule", {}, opts), true);
+  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [{ name: "factory:objective" }] }), opts), true);
+  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 1, blocked_by: 0 } }), opts), true);
   // GitHub's count of 0 is exact: the dispatcher reads those dependencies, not body lines, so nothing waited on it (#417).
-  let reads = 0;
-  const objectives = async () => {
-    reads += 1;
-    return [{ number: 9, body: "Blocked by #3" }];
-  };
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), { ...opts, objectives }), false, "blocks nothing by GitHub's count: no run");
-  assert.equal(reads, 0, "no listing read");
-  assert.equal(await closedIssueTicks("issues", closed({ number: 3, labels: [] }), opts), true, "no count in the payload rules nothing out");
+  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [], issue_dependencies_summary: { blocking: 0, blocked_by: 0 } }), opts), false, "blocks nothing by GitHub's count: no run");
+  assert.equal(closedIssueTicks("issues", closed({ number: 3, labels: [] }), opts), true, "no count in the payload rules nothing out");
 });
 
 const SINCE = "2026-11-10T11:00:00.000Z";

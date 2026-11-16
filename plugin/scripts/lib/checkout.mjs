@@ -397,7 +397,8 @@ export async function throughOutages(what, run, { deadlineAt = Infinity, env = p
     // failure is that outage's, never a Block of its own.
     if (stoppedWaiting() || met) throw downFor(cut.origin) ?? new NetworkDown(cut);
     log(`${what}: failed while this machine's network was down (${cut.code}); ${cut.ongoing ? "waiting for the network, then running it once more" : "the network is back, running it once more"}`);
-    if (cut.ongoing) await networkBack(cut.origin, cut.code, { deadlineAt, key: machineKey(general), check: (origin) => machineDown(origin, hosts) });
+    // The machine's network, read the same way whichever host the outage was met on: the general check first.
+    if (cut.ongoing) await networkBack(general, cut.code, { deadlineAt, key: machineKey(general), check: () => machineDown(general, hosts) });
     met = { code: cut.code };
     for (const key of pastKeys()) seen.add(key);
   }

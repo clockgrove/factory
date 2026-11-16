@@ -136,7 +136,7 @@ export const OUTAGE = {
   now: () => Date.now(),
   random: Math.random,
   lookup: (host, opts, cb) => dnsLookup(host, opts, cb),
-  check: (origin) => freshProbe(origin),
+  check: (origin) => freshProbe(origin, process.env, { privateOk: true }),
   sleep: (ms, signal) =>
     new Promise((resolve) => {
       const done = () => {
@@ -542,8 +542,14 @@ export const privateAddress = (address) => {
  */
 export const TEMPORARY_DNS = new Set(["EAI_AGAIN"]);
 
-/** The most allowed hosts a set-up step's judgement looks up. */
-export const STEP_HOSTS_MAX = 4;
+/**
+ * The most allowed hosts a set-up step's judgement looks up: enough for every built-in, operator and host-label entry
+ * (all the operator's, and lookups only, never a connection), with a bound all the same.
+ */
+export const STEP_HOSTS_MAX = 64;
+
+/** Whether `host` is one of GitHub's own names (github.com and its subdomains, githubusercontent.com's). */
+const githubHost = (host) => host === "github.com" || host.endsWith(".github.com") || host.endsWith(".githubusercontent.com");
 
 // The proxy settings Node reads when NODE_USE_ENV_PROXY is on, as the stage process's own environment holds them.
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
@@ -553,16 +559,18 @@ const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "N
  * for a network that is gone, and a HEAD to `origin`. It reaches the network as Factory's GitHub client does (Node's
  * fetch): through the proxy the stage process's own environment names (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) when
  * NODE_USE_ENV_PROXY is 1, as local mode's stages run, else directly; never a setting of the checkout's. Directly, it
- * makes its own DNS lookup (OUTAGE.lookup) and connects to no private, loopback or link-local address (privateAddress):
- * such an origin gets null, no claim either way. Through the proxy, the proxy resolves the origin, and a tunnel the
- * proxy could not open (ERR_PROXY_TUNNEL, its 502) is the origin unreached. null on any HTTP answer from the origin,
- * else why not (a connect-level code, or "no answer").
+ * makes its own DNS lookup (OUTAGE.lookup) and, unless `privateOk`, connects to no private, loopback or link-local
+ * address (privateAddress): such an origin gets null, no claim either way. Through the proxy, the proxy resolves the
+ * origin, and the proxy's failure to reach it is the origin unreached: a tunnel it could not open (ERR_PROXY_TUNNEL, its
+ * 502 to CONNECT) or, for an http origin it forwarded (the request sent as an absolute URL), its 502 (ERR_PROXY_502).
+ * null on any other HTTP answer, else why not (a connect-level code, or "no answer"). The general check (OUTAGE.check)
+ * is `privateOk`: its origin is the operator's own (GITHUB_API_URL; a GitHub Enterprise Server on a private network).
  */
-export function freshProbe(origin, env = process.env) {
+export function freshProbe(origin, env = process.env, { privateOk = false } = {}) {
   const u = new URL(origin);
   // An address given as such is never looked up: judged as written.
   const literal = u.hostname.replace(/^\[|\]$/g, "");
-  if (isIP(literal) && privateAddress(literal)) return Promise.resolve(null);
+  if (!privateOk && isIP(literal) && privateAddress(literal)) return Promise.resolve(null);
   const mod = u.protocol === "https:" ? https : http;
   const proxyEnv = env.NODE_USE_ENV_PROXY === "1" ? Object.fromEntries(PROXY_VARS.filter((k) => env[k]).map((k) => [k, env[k]])) : null;
   const agent = new mod.Agent({ keepAlive: false, ...(proxyEnv ? { proxyEnv } : {}) });
@@ -572,7 +580,7 @@ export function freshProbe(origin, env = process.env) {
       OUTAGE.lookup(host, opts, (err, address, family) => {
         if (err) return cb(err);
         const list = Array.isArray(address) ? address : [{ address, family }];
-        if (list.some((a) => privateAddress(a.address))) {
+        if (!privateOk && list.some((a) => privateAddress(a.address))) {
           refused = true;
           return cb(Object.assign(new Error(`${host} resolves to a private address`), { code: "PRIVATE_ADDRESS" }));
         }
@@ -580,7 +588,7 @@ export function freshProbe(origin, env = process.env) {
       });
     const req = mod.request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent, lookup, headers: { "user-agent": "clockgrove-factory" } }, (res) => {
       res.resume();
-      resolve(null);
+      resolve(proxyEnv && /^https?:\/\//.test(req.path) && res.statusCode === 502 ? "ERR_PROXY_502" : null);
     });
     req.setTimeout(OUTAGE.probeTimeoutMs, () => req.destroy(Object.assign(new Error("no answer"), { code: "" })));
     req.on("error", (e) => resolve(refused ? null : causeCode(e) || "no answer"));
@@ -589,9 +597,14 @@ export function freshProbe(origin, env = process.env) {
   });
 }
 
-/** The first of `hosts` (at most STEP_HOSTS_MAX) whose lookup fails with a temporary resolver code, as {host, code}, or null. */
+/**
+ * The first of `hosts` whose lookup fails with a temporary resolver code, as {host, code}, or null. Lookups only, never
+ * a connection; at most STEP_HOSTS_MAX, the hosts that are not GitHub's own first (a resolver can keep GitHub's names
+ * while it fails the rest: the registry's, the operator's).
+ */
 export async function resolverDown(hosts) {
-  const list = [...new Set(hosts)].slice(0, STEP_HOSTS_MAX);
+  const unique = [...new Set(hosts)];
+  const list = [...unique.filter((h) => !githubHost(h)), ...unique.filter(githubHost)].slice(0, STEP_HOSTS_MAX);
   const codes = await Promise.all(list.map((h) => new Promise((done) => OUTAGE.lookup(h, {}, (err) => done(err ? causeCode(err) : "")))));
   const i = codes.findIndex((c) => TEMPORARY_DNS.has(c));
   return i < 0 ? null : { host: list[i], code: codes[i] };

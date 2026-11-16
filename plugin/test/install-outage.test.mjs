@@ -146,13 +146,14 @@ test("install: an outage the stage recorded while the install ran (a GitHub call
   });
 });
 
-test("install: an allowed host whose lookup fails with EAI_AGAIN is this machine's network, though the general check answers", async () => {
+test("install: the registry's lookup failing with EAI_AGAIN is this machine's network, though GitHub's names resolve and the general check answers", async () => {
   const c = checkout();
   let failing = true;
   await stage(
     {
+      // A resolver that still serves GitHub's names (cached) and fails the registry's.
       resolve: (host) => {
-        if (host === LOCAL_DOMAINS[0] && failing) return again(host);
+        if (host === "registry.npmjs.org" && failing) return again(host);
         return null;
       },
       check: (origin, checks) => {
@@ -164,13 +165,36 @@ test("install: an allowed host whose lookup fails with EAI_AGAIN is this machine
         return null;
       },
     },
-    async ({ lines }) => {
+    async ({ lines, lookups }) => {
       const r = await installDeps(c.dir, c.command, { env: process.env });
       assert.equal(r.ok, true, r.reason);
       assert.equal(c.runs(), 2);
       assert.ok(lines.some((l) => /install: failed while this machine's network was down \(EAI_AGAIN\); waiting/.test(l)), lines.join(""));
+      // Every allowed name is looked up (the built-in list here), the ones that are not GitHub's first.
+      const first = lookups.slice(0, LOCAL_DOMAINS.length);
+      assert.deepEqual([...first].sort(), [...LOCAL_DOMAINS].filter((h) => !h.startsWith("*.")).sort());
+      assert.ok(first.indexOf("registry.npmjs.org") < first.indexOf("github.com"));
     },
   );
+});
+
+test("the machine's wait reads the general check, whichever host the outage was met on", async () => {
+  const c = checkout();
+  // A provider's host lost while the step ran, its own probe still out: the step's wait checks GitHub's origin and the
+  // allowed names, never that host.
+  let release;
+  const provider = new Promise((r) => (release = r));
+  await stage({ check: () => (rmSync(c.down, { force: true }), null), fetch: () => provider }, async ({ checks, fetched }) => {
+    const install = installDeps(c.dir, c.command, { env: process.env });
+    const lost = networkBack("https://provider.test", "EAI_AGAIN");
+    const r = await install;
+    release(new Response(null, { status: 200 }));
+    await lost;
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(c.runs(), 2);
+    assert.deepEqual([...new Set(checks)], [GITHUB]);
+    assert.deepEqual([...new Set(fetched)], ["https://provider.test"], "only the provider's own wait probed it");
+  });
 });
 
 test("install: an URL the output names is never probed or looked up, an exfiltration host and a link-local address alike", async () => {
@@ -239,10 +263,32 @@ test("freshProbe connects to no private, loopback or link-local address: an addr
   }
 });
 
+test("the general check reaches the operator's own GitHub on a private address (GitHub Enterprise Server on 10.x): its origin is exempt", async () => {
+  let connections = 0;
+  const srv = createServer((req, res) => res.end());
+  srv.on("connection", () => (connections += 1));
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const saved = OUTAGE.lookup;
+  OUTAGE.lookup = (host, opts, cb) => queueMicrotask(() => (opts?.all ? cb(null, [{ address: "127.0.0.1", family: 4 }]) : cb(null, "127.0.0.1", 4)));
+  try {
+    const { port } = srv.address();
+    assert.equal(await OUTAGE.check(`http://ghes.test:${port}`), null);
+    assert.equal(await OUTAGE.check(`http://127.0.0.1:${port}`), null);
+    assert.equal(connections, 2, "the general check connected; freshProbe alone (above) does not");
+    // A GHES that drops every connection (a port this test holds, so no other test's server can take it): down.
+    srv.on("connection", (sock) => sock.destroy());
+    assert.equal(await OUTAGE.check(`http://127.0.0.1:${port}`), "ECONNRESET");
+  } finally {
+    OUTAGE.lookup = saved;
+    await new Promise((r) => srv.close(r));
+  }
+});
+
 test("freshProbe reaches the network as the GitHub client does: through the stage's own proxy when NODE_USE_ENV_PROXY is on, a fresh connection each time", async () => {
   const seen = [];
   let connections = 0;
-  const proxy = createServer((req, res) => (seen.push(`${req.method} ${req.url}`), res.end()));
+  // The proxy forwards http requests (502 when it cannot reach the origin) and answers CONNECT with a 502.
+  const proxy = createServer((req, res) => (seen.push(`${req.method} ${req.url}`), res.writeHead(/down\.test/.test(req.url) ? 502 : 200).end()));
   proxy.on("connect", (req, sock) => (seen.push(`CONNECT ${req.url}`), sock.end("HTTP/1.1 502 Bad Gateway\r\n\r\n")));
   proxy.on("connection", () => (connections += 1));
   await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
@@ -258,14 +304,16 @@ test("freshProbe reaches the network as the GitHub client does: through the stag
     assert.equal(connections, 2, "no kept-alive socket answers for the next check");
     // A tunnel the proxy could not open (its 502): the origin unreached.
     assert.equal(await freshProbe("https://api.github.test", env), "ERR_PROXY_TUNNEL");
-    assert.deepEqual(seen, ["HEAD http://api.github.test/", "HEAD http://api.github.test/", "CONNECT api.github.test:443"]);
+    // An http origin the proxy forwards: its 502 is the origin unreached.
+    assert.equal(await freshProbe("http://down.test", env), "ERR_PROXY_502");
+    assert.deepEqual(seen, ["HEAD http://api.github.test/", "HEAD http://api.github.test/", "CONNECT api.github.test:443", "HEAD http://down.test/"]);
     assert.deepEqual(lookups, []);
     // NO_PROXY's origin, and any origin with NODE_USE_ENV_PROXY off (Node's fetch ignores HTTPS_PROXY then too): direct,
     // with its own lookup.
     assert.equal(await freshProbe("http://direct.test", env), "EAI_AGAIN");
     assert.equal(await freshProbe("http://api.github.test", { HTTP_PROXY: at, HTTPS_PROXY: at }), "EAI_AGAIN");
     assert.deepEqual(lookups, ["direct.test", "api.github.test"]);
-    assert.equal(seen.length, 3, "the proxy saw neither");
+    assert.equal(seen.length, 4, "the proxy saw neither");
   } finally {
     OUTAGE.lookup = saved;
     await new Promise((r) => proxy.close(r));

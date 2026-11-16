@@ -4,7 +4,7 @@
 // module is the rest of it: the cause read from the issue, the running stage's own stop (its watch on its issue, the
 // abort every harness pass of the stage listens to, its claim on the exit), and the tidy that leaves the Objective
 // stopped (its PR a draft without the review label, its state label off, its card back in Queued).
-import { dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
+import { dequeuePr, findPr, findProject, getIssue, getPr, listComments, mergeQueueEntry, moveCard, relabeledIn, removeLabel, rest, setDraft, setStateLabel, upsertComment } from "./github.mjs";
 import { log } from "./inputs.mjs";
 import { REVIEW_LABEL, marker, restartedAt, trustedAuthor } from "./logic.mjs";
 
@@ -34,6 +34,13 @@ export const RESTART_LABEL = "factory:restart";
 export const DRAFT_LABEL = "factory:draft";
 
 const names = (issue) => (issue?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
+
+/**
+ * Whether a person re-applied the Objective `label` (or started it from a draft) after its last Block, Question or
+ * In review, on the issue's timeline `events`: the go that puts it back to Queued for its work stage (the dispatcher's
+ * recovery). serve reads the same rule, so a Question re-labelled since gets no review for a ready mark beside it.
+ */
+export const requeuedIn = (events, label) => relabeledIn(events, label, ["factory:blocked", "factory:question", "factory:in-review"], [DRAFT_LABEL]);
 
 /** Whether the issue is a draft (DRAFT_LABEL on it). */
 export const isDraft = (issue) => names(issue).includes(DRAFT_LABEL);

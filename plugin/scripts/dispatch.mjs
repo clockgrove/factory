@@ -638,9 +638,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const timeline = async () => (events === undefined ? (events = await timelineOf(repo, issue.number, opts).catch(() => null)) : events);
         let boxRecord = null;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
-        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
+        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own. An
+        // unread record may hold a live lease, so nothing is decided on the Objective this tick (#430).
         if (!sandbox && inputs.sandbox) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          const { record } = read;
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;

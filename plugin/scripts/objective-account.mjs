@@ -20,7 +20,7 @@ import { getIssue, repoOf } from "./lib/github.mjs";
 import { setMaintainers, setSelf } from "./lib/logic.mjs";
 import { MODEL_DEFAULTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { labelsVouched, trustedRoutePin } from "./lib/objective-trust.mjs";
-import { pickRouteAccount, readHolds } from "./lib/route-holds.mjs";
+import { pickRouteAccount, readHolds, routeStarts } from "./lib/route-holds.mjs";
 
 /**
  * The account for the stage of `issue` (or of the factory/<issue> `branch`), from the workflow's `accounts` text:
@@ -69,7 +69,16 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
   // picks for, so every model one of its stages runs weighs (usage.mjs quotaWindowApplies).
   const defaults = given && h === harness ? given : { model: MODEL_DEFAULTS[h]?.model, subagentModel: MODEL_DEFAULTS[h]?.subagent_model, reviewerModel: MODEL_DEFAULTS[h]?.reviewer_model };
   const models = [c.choice.model || defaults.model, c.choice.subagent_model || defaults.subagentModel, c.choice.reviewer_model || defaults.reviewerModel].map((m) => m || null);
-  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null, left: () => null }, issue: n, models, now });
+  // The stages started on each account since its reading, from their progress comments: one read (routeStarts).
+  let starts = null;
+  if (store) {
+    try {
+      starts = await (read.starts ?? routeStarts)(repo, { names, harness: h, store, now }, opts);
+    } catch (e) {
+      log(`automatic account choice could not read the stages started since each account's reading (${String(e?.message || e).slice(0, 120)}), so it weighs none`);
+    }
+  }
+  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null, left: () => null }, issue: n, models, starts, now });
   const left = store ? store.left(pick.name, now, models) : null;
   return { account: pick.name, why: null, auto: { held: held.map((x) => ({ name: x.name, until: new Date(x.until).toISOString() })), ...(pick.until !== null ? { until: new Date(pick.until).toISOString() } : {}), ...(pick.warm ? { warm: true } : {}), ...(left !== null && pick.until === null ? { left } : {}), ...(unread ? { unread } : {}) } };
 }

@@ -37,7 +37,7 @@ const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.ends
  * on it kept), the App's token mint, and its record issues: `issues` (title, creator, locked, comments), made, closed,
  * locked and commented on by the App's writes. Every request is in `reads` (method and path, with the query).
  */
-async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [] } = {}, fn) {
+async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [], progress = [] } = {}, fn) {
   const reads = [];
   const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [], ...i })), labelMade: false };
   let id = 900;
@@ -109,6 +109,11 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/repos/acme/app/issues/9/comments" && method === "GET") return json(state.prComments);
     if (p === "/repos/acme/app/issues/9/comments" && method === "POST") return state.prComments.push({ id: ++id, user: { login: BOT, type: "Bot" }, body: body.body, created_at: iso(Date.now()) }), json(state.prComments.at(-1), 201);
     if (p === "/repos/acme/app/pulls" && method === "GET") return json(openPr ? [openPr] : []);
+    // The repository's issue comments (the stages' progress comments, `progress`), newest first, updated since `since`.
+    if (p === "/repos/acme/app/issues/comments" && method === "GET") {
+      const since = Date.parse(u.searchParams.get("since") || "") || -Infinity;
+      return json(progress.filter((c) => Date.parse(c.updated_at) >= since).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)));
+    }
     if (p.endsWith("/graphql")) return json({ data: { repository: null, viewer: { login: BOT } } });
     return json({ message: "Not Found" }, 404);
   };
@@ -123,7 +128,7 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
 const holdsIssue = (comments = [], extra = {}) => ({ number: 50, title: HOLDS_TITLE, user: { login: BOT, type: "Bot" }, comments, ...extra });
 
 /** The account step as the Action runs it (accountStep: the App's token, then stageAccount), its outputs and log read back. */
-async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {} } = {}) {
+async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {}, progress = [] } = {}) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
   const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_RENDERED_ACCOUNTS: routeAccountsText(accounts), FACTORY_AUTO_ACCOUNT: auto, FACTORY_HARNESS: "claude", FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY, ...env };
@@ -134,7 +139,7 @@ async function runStep({ labels = ["factory:objective"], accounts = THREE, auto 
   let reads;
   let r;
   try {
-    r = await withGitHub({ labels, issues }, (rd) => ((reads = rd), accountStep({ args: { repo: "acme/app", issue, branch: "none" }, env: e })));
+    r = await withGitHub({ labels, issues, progress }, (rd) => ((reads = rd), accountStep({ args: { repo: "acme/app", issue, branch: "none" }, env: e })));
   } finally {
     process.stderr.write = write;
     process.stdout.write = writeOut;
@@ -350,6 +355,31 @@ test("#391: on these routes the account step keeps an Objective on its previous 
   assert.equal(other.outputs.account, "claude");
   const sonnet = await runStep({ issues, issue: "12", labels: ["factory:objective", "factory:model:claude-sonnet-5-5"] });
   assert.equal(sonnet.outputs.account, "claude-2");
+});
+
+test("#391: on these routes the stages started since an account's reading are counted from their progress comments, one read: starts before the next reading spread rather than pile on the one with the most left", async () => {
+  const now = Date.now();
+  const at = now - H;
+  const reading = (id, account, used) => ({ id, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account, at, windows: { seven_day: { used, resetsAt: now + 48 * H } } })} -->`, created_at: iso(at), updated_at: iso(at) });
+  const issues = [holdsIssue([reading(1, "claude", 0.4), reading(2, "claude-2", 0.41), reading(3, "claude-3", 0.7)])];
+  // A stage's progress comment as worker.mjs writes it: its key, then its harness line naming the account (logic.mjs harnessMarker).
+  const progress = (id, objective, account, made, { by = BOT, harness = "claude" } = {}) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:${objective}:progress:work:${id} -->\n- 10:00 started\n<!-- factory:harness ${JSON.stringify({ harness, model: "claude-opus-5-5", account })} -->`, created_at: iso(made), updated_at: iso(now - 60_000) });
+  const { harnessMarker } = await import("../scripts/lib/logic.mjs");
+  assert.match(harnessMarker("claude", "m", { worker: null, labels: [], account: "claude" }), /^<!-- factory:harness \{.*"account":"claude"\} -->$/, "the line the stages write");
+  setSelf(null);
+  // No stage since the readings: claude, the most left.
+  const none = await runStep({ issues, issue: "12" });
+  assert.equal(none.outputs.account, "claude");
+  const reads = none.reads.filter((x) => x.startsWith("GET /repos/acme/app/issues/comments?"));
+  assert.equal(reads.length, 1, "one read");
+  assert.match(reads[0], /since=/);
+  // A stage started on claude since its reading: claude-2, with no start since its own, goes first.
+  assert.equal((await runStep({ issues, issue: "12", progress: [progress(901, 20, "claude", now - 10 * 60_000)] })).outputs.account, "claude-2");
+  // One on each of claude and claude-2: claude-3, though it has least left.
+  assert.equal((await runStep({ issues, issue: "12", progress: [progress(901, 20, "claude", now - 10 * 60_000), progress(902, 21, "claude-2", now - 5 * 60_000)] })).outputs.account, "claude-3");
+  // Not counted: a stage started before the account's reading (it is in it), a person's copy, another harness's line.
+  const ignored = [progress(903, 22, "claude", at - 60_000), progress(904, 23, "claude", now - 60_000, { by: "kirk" }), progress(905, 24, "claude", now - 60_000, { harness: "codex" })];
+  assert.equal((await runStep({ issues, issue: "12", progress: ignored })).outputs.account, "claude");
 });
 
 test("an Objective's turn is a hash of its number, so Objectives of one parity spread over two accounts, and each keeps its own (#268)", () => {

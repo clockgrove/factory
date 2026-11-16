@@ -297,6 +297,7 @@ function replaceFile(dir, account, name, value, uid) {
  * - `started({harness, account, now})`: a stage starts on the account now (automatic account choice's round-robin, #266):
  *   one small file per account, replaced whole, so every serve on the machine takes turns from the same record. It also
  *   counts the starts since the account's newest quota reading (`since`, that reading's `at`; `n`): `startsSince`.
+ * - `readingAt(account, now)`: when the account's newest quota record (a reading or a silent one) was made (ms), or null.
  * - `startsSince(account, now)`: how many stages started on the account after its newest quota reading (or, with none,
  *   since the count began): automatic choice ranks an account that has started more since its reading below one that
  *   has started fewer, since that reading no longer shows what those stages are spending (#391).
@@ -459,6 +460,9 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     startsSince(account, now) {
       const r = this.startRecord(account);
       return r && r.since === newestAt(readingsOf(account), now) ? r.n : 0;
+    },
+    readingAt(account, now) {
+      return newestAt(readingsOf(account), now);
     },
     forgetStarts(keep) {
       if (!dir) return;

@@ -358,6 +358,42 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
  */
 export const routeTurn = (issue, n) => createHash("sha256").update(String(Number(issue) || 0)).digest().readUInt32BE(0) % n;
 
+const PROGRESS = /^<!-- factory:\d+:progress:(?:work|review):[^\n]* -->/;
+const HARNESS_LINE = /^<!-- factory:harness (\{[^\n]*\}) -->$/m;
+
+/**
+ * How many stages started on each of `names` (a `harness`'s accounts) since that account's newest quota record
+ * (`store`'s readingAt; with none, every one the read shows), read from what the stages already write: each stage's
+ * progress comment on its Objective, Factory's own, made at the stage's start, whose harness line (logic.mjs
+ * harnessMarker) names its account. One read, never more: the newest page of the repository's issue comments updated
+ * since the oldest of those records (`GET /issues/comments`, sorted by creation, newest first). A stage's comment names
+ * its account from its first write after the stage resolved its harness, so one still setting up is not seen yet; and
+ * past one page (100 comments) the counts are lower bounds. Returns a Map of name to count; a failed read throws.
+ */
+export async function routeStarts(repo, { names, harness, store, now = Date.now() }, opts) {
+  const since = names.map((n) => store.readingAt?.(n, now) ?? null);
+  const known = since.filter((t) => t !== null);
+  const from = known.length === names.length ? Math.min(...known) : null;
+  const query = `sort=created&direction=desc&per_page=100${from !== null ? `&since=${encodeURIComponent(new Date(from).toISOString())}` : ""}`;
+  const counts = new Map(names.map((n) => [n, 0]));
+  for (const c of (await rest(`repos/${repo.full}/issues/comments?${query}`, opts)) || []) {
+    const body = String(c.body || "");
+    if (!isSelf(c) || !PROGRESS.test(body)) continue;
+    const m = HARNESS_LINE.exec(body);
+    let v = null;
+    try {
+      v = m ? JSON.parse(m[1]) : null;
+    } catch {
+      v = null;
+    }
+    const i = names.indexOf(v?.account);
+    const made = Date.parse(c.created_at || "");
+    if (i < 0 || v.harness !== harness || !Number.isFinite(made) || (since[i] !== null && made <= since[i])) continue;
+    counts.set(v.account, counts.get(v.account) + 1);
+  }
+  return counts;
+}
+
 /**
  * The account automatic choice starts a stage of Objective `issue` on, of a harness's declared `names` (in order), from
  * the holds `store` at `now`: accounts.mjs chooseAccount, an account free when neither a hold nor a guess is ahead
@@ -365,13 +401,13 @@ export const routeTurn = (issue, n) => createHash("sha256").update(String(Number
  * still warm (holds.mjs warmFor: a reading's `recent`), since a move loses the cache; else by the quota readings (#391):
  * one never measured, then the most quota left for `models` (the Objective's models: this step does not know which
  * stage it picks for), then one that reports nothing; then of equal standing the least recently limited, then the
- * Objective's turn, then the first declared; with every one held, the one whose hold ends first. These routes keep no
- * start record (a write at every stage start, by a step whose token only reads): the turn is a hash of the Objective's
- * number (routeTurn), and stages that start before an account's next reading all weigh the same reading. Returns
+ * Objective's turn, then the first declared; within each quota group, the fewest stages started since the account's
+ * reading first (`starts`, routeStarts' counts: these routes write no start record of their own). The turn is a hash of
+ * the Objective's number (routeTurn). Returns
  * {name, until, warm} (`until`: its hold's end when every account is held, else null; `warm`: the warm account's name,
  * when one is).
  */
-export function pickRouteAccount({ names, store, issue, models = [], now = Date.now() }) {
+export function pickRouteAccount({ names, store, issue, models = [], starts = null, now = Date.now() }) {
   const list = names.map((name) => ({ name }));
   const n = list.length;
   const turn = routeTurn(issue, n);
@@ -380,6 +416,7 @@ export function pickRouteAccount({ names, store, issue, models = [], now = Date.
     until: (x) => store.avoidUntil(x.name, now),
     left: (x) => store.left?.(x.name, now, models) ?? null,
     silent: (x) => store.reportsNothing?.(x.name, now) ?? false,
+    startsSince: (x) => starts?.get(x.name) ?? 0,
     limitedAt: (x) => store.limitedAt(x.name, now),
     startedAt: (x) => (list.indexOf(x) - turn + n) % n,
     warm,

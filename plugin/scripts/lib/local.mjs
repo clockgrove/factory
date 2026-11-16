@@ -513,8 +513,8 @@ export async function prepareClone(clone, dirs, run, { clear = false, fresh = fa
   const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? (strict ? "fresh-strict" : "fresh") : "0", JSON.stringify(locks), ...dirs]);
   // `strict` (a fresh work stage, worker.mjs): leftovers that could not all be removed are a failure, code clone-clean.
   // Its output can name a path on this machine (the clone, wherever it is): it goes to the log, never into the error.
-  if (r.code === 4) throw commandFailed("the clone's leftovers could not all be removed", r, { code: "clone-clean" });
-  if (r.code !== 0) throw commandFailed("the clone could not be prepared in its sandbox", r);
+  if (r.code === 4) throw commandFailed("the clone's leftovers could not all be removed", r, { code: "clone-clean", exitCode: 4 });
+  if (r.code !== 0) throw commandFailed("the clone could not be prepared in its sandbox", r, { exitCode: r.code ?? r.signal ?? null });
   try {
     return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };
   } catch {
@@ -683,7 +683,7 @@ export const LOCAL_DOMAINS = ["github.com", "api.github.com", "codeload.github.c
  * Credential stores under the home directory that no sandboxed command and no file tool may read.
  * The harness CLI itself runs outside the sandbox, so its own login keeps working.
  */
-export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/factory"];
+export const CREDENTIAL_PATHS = [".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".docker", ".gnupg", ".netrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml", ".git-credentials", ".config/gh", ".config/hub", ".claude/.credentials.json", ".claude.json", ".codex", ".copilot", ".config/github-copilot", ".vercel", ".local/share/com.vercel.cli", ".config/com.vercel.cli", ".config/factory"];
 
 /** Claude Code's `.claude.json`: in CLAUDE_CONFIG_DIR when that is set, else in the home directory. */
 export const claudeJson = (env = {}, home = homedir()) => join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
@@ -1181,7 +1181,7 @@ export function claudeLocalSettings({ domains = LOCAL_DOMAINS, clone = null, hom
       network: { allowedDomains: [...new Set(domains)] },
       // /proc: no sandboxed command reads another process's environment or command line.
       // writable: the package caches, for shell commands only (no file tool, and no CLAUDE.md read from them).
-      // readable: the stage's node and package manager, read-only (local.mjs stageEnv, #137): its sandbox shows nothing of
+      // readable: the stage's node, package manager and repository tools, read-only (local.mjs stageEnv, #137, #371): its sandbox shows nothing of
       // the home but these, the working and added directories.
       filesystem: { denyRead: [...secrets, "/proc"], ...(readable.length ? { allowRead: readable } : {}), ...(writable.length ? { allowWrite: writable } : {}), denyWrite: [...guards, ...SHARED_TMP, ...factoryCodeDirs(home)] },
       // The model's credential (and any other the harness holds) is not in a command's environment.

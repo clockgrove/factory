@@ -20,26 +20,33 @@
 // Objective that met it moves to a free account as on a known reset (#332). These routes write no served-pass record
 // (a pass's end would cost a read on every stage): a back-off streak or a guess ends when its records are forgotten
 // instead.
+//
+// A person who can push lifts a hold with `factory hold release <account> --repo OWNER/NAME` (#376): a release record,
+// a comment of theirs on the holds issue (RELEASE_LINE), which ends every record of that account made before it, as a
+// local release does (holds.mjs standing). The issue is locked, so only people with write access can comment there; a
+// reader counts a release only from a person who can push (logic.mjs pushAuthor, else their permission read), and only
+// as written. It is kept, and then deleted by a writer, as long as any record it ends could be (holds.mjs forgotten).
 import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
-import { addLabels, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
-import { accountHolds, forgotten as forgottenAt, heldRecord } from "./holds.mjs";
+import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
+import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey } from "./holds.mjs";
 import { log } from "./inputs.mjs";
-import { isSelf, selfLogin } from "./logic.mjs";
+import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
 /** Factory's holds issue: the label is a hint to find it, the exact title and Factory's own login are what count. */
 export const HOLDS_LABEL = "factory:holds";
 export const HOLDS_TITLE = "Factory: account holds";
-const HOLDS_BODY = "Factory keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, which automatic account choice (`FACTORY_AUTO_ACCOUNT`) reads. Factory reads only its own comments. Deleting one lifts that hold. Do not reopen.";
+const HOLDS_BODY = "Factory keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, which automatic account choice (`FACTORY_AUTO_ACCOUNT`) reads. Factory reads only its own comments, and a release by a person who can push (`factory hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
 
 const iso = (ms) => new Date(ms).toISOString();
 const LINE = /^<!-- factory:hold (\{[^\n]*\}) -->(?:\r?\n|$)/;
 /** A hold record's first line (`<` and `>` escaped, as the image record's). */
 export const holdLine = (r) => `<!-- factory:hold ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
-/** The record a comment carries: Factory's own comment's first line, parsed, unchecked; else null. */
-const rawRecord = (c) => {
-  if (!isSelf(c) || (c.updated_at && c.created_at && c.updated_at !== c.created_at)) return null;
+const edited = (c) => !!(c.updated_at && c.created_at && c.updated_at !== c.created_at);
+/** The record a comment carries: Factory's own comment's (`own`) first line, parsed, unchecked; else null. */
+const rawRecord = (c, own = isSelf) => {
+  if (!own(c) || edited(c)) return null;
   const m = LINE.exec(String(c.body || ""));
   if (!m) return null;
   try {
@@ -49,27 +56,70 @@ const rawRecord = (c) => {
   }
 };
 
+/** A release record's first line, a person's (factory hold release): the account's hold key alone. */
+export const RELEASE_LINE = /^<!-- factory:release (\{[^\n]*\}) -->(?:\r?\n|$)/;
+export const releaseLine = (account) => `<!-- factory:release ${JSON.stringify({ account })} -->`;
+const WRITE = new Set(["admin", "maintain", "write"]);
+
+/** Whether a login can push to `repo` (its permission read once per login per `pushCheck`); a failed read is no. */
+const pushCheck = (repo, opts) => {
+  const asked = new Map();
+  return (login) => {
+    if (!asked.has(login)) asked.set(login, collaboratorPermission(repo, login, opts).then((p) => WRITE.has(p), () => false));
+    return asked.get(login);
+  };
+};
+
 /**
- * The holds recorded on issue `number` at `now`: {records (heldRecord's), forgotten (ids of Factory's own record comments
- * a writer deletes: forgotten (holds.mjs), or edited since written, which count for nothing)}.
+ * The release a comment carries, as holds.mjs keeps one (`released`, at the comment's creation by GitHub's clock, held
+ * to the reader's `now` as a hold record is: holds.mjs clamped), when a person who can push wrote it and it was never
+ * edited; else null. `canPush` is pushCheck's.
  */
-async function recordsOn(repo, number, opts, now) {
+async function releaseOf(c, canPush, now) {
+  const m = RELEASE_LINE.exec(String(c.body || ""));
+  if (!m || c.user?.type !== "User" || edited(c)) return null;
+  let v;
+  try {
+    v = JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+  const at = Date.parse(c.created_at || "");
+  if (typeof v?.account !== "string" || !holdKey(v.account) || !Number.isSafeInteger(at)) return null;
+  if (!pushAuthor(c) && !(await canPush(c.user.login))) return null;
+  return clamped({ harness: "release", account: v.account, until: at + HOLD_MAX_MS, streak: 0, at, served: true, released: true }, now);
+}
+
+/**
+ * The holds recorded on issue `number` at `now`: {records (heldRecord's), releases (releaseOf's), forgotten (ids of
+ * record comments a writer deletes: forgotten (holds.mjs), or Factory's own edited since written, which count for
+ * nothing)}. `own`: whose comments are Factory's records (isSelf; a person's view names the issue's author).
+ */
+async function recordsOn(repo, number, opts, now, own = isSelf) {
   const records = [];
+  const releases = [];
   const forgotten = [];
+  const canPush = pushCheck(repo, opts);
   if (number) {
     for (const c of await listComments(repo, number, opts)) {
-      if (isSelf(c) && LINE.test(String(c.body || "")) && c.updated_at && c.created_at && c.updated_at !== c.created_at) {
+      if (own(c) && LINE.test(String(c.body || "")) && edited(c)) {
         forgotten.push(c.id);
         continue;
       }
-      const v = rawRecord(c);
+      const rel = await releaseOf(c, canPush, now);
+      if (rel) {
+        if (forgottenAt(rel, now)) forgotten.push(c.id);
+        else releases.push(rel);
+        continue;
+      }
+      const v = rawRecord(c, own);
       if (!v) continue;
       const r = heldRecord(v, now);
       if (r) records.push(r);
       else if (Number.isSafeInteger(v.until) && forgottenAt(v, now)) forgotten.push(c.id);
     }
   }
-  return { records, forgotten };
+  return { records, releases, forgotten };
 }
 
 const selfKnown = async (opts) => {
@@ -101,8 +151,51 @@ export async function readHolds(repo, opts, { now = Date.now(), actions } = {}) 
   await selfKnown(opts);
   const issues = await labelledIssues(repo, opts, actions);
   const records = [];
-  for (const i of issues) records.push(...(await recordsOn(repo, i.number, opts, now)).records);
+  for (const i of issues) {
+    const r = await recordsOn(repo, i.number, opts, now);
+    records.push(...r.records, ...r.releases);
+  }
   return { issue: issues[0]?.number ?? null, records, store: accountHolds({ seed: records }) };
+}
+
+/**
+ * The holds on GitHub as a person's token reads them (`factory hold list --repo`, #376), which does not know Factory's
+ * App by its login: Factory's holds issues are the labelled ones with the exact title, locked, opened by an App, whose
+ * records are that App's own comments. {issue (the oldest's number, or null), store (holds.mjs accountHolds over them)}.
+ * Issues of two Apps are refused, naming them, since which one is Factory's cannot be told. A failed read throws.
+ */
+export async function personHolds(repo, opts, { now = Date.now() } = {}) {
+  const list = (await rest(`repos/${repo.full}/issues?labels=${encodeURIComponent(HOLDS_LABEL)}&state=all&sort=created&direction=asc&per_page=100`, opts)) || [];
+  const issues = list.filter((i) => !i.pull_request && i.user?.type === "Bot" && i.title === HOLDS_TITLE && i.locked === true).sort((a, b) => a.number - b.number);
+  const apps = [...new Set(issues.map((i) => i.user.login))];
+  if (apps.length > 1) throw new Error(`more than one App opened a holds issue (${issues.map((i) => `#${i.number} by ${i.user.login}`).join(", ")}), so Factory's cannot be told; close and unlock the ones that are not Factory's App's`);
+  const own = (c) => c.user?.login === apps[0];
+  const records = [];
+  for (const i of issues) {
+    const r = await recordsOn(repo, i.number, opts, now, own);
+    records.push(...r.records, ...r.releases);
+  }
+  return { issue: issues[0]?.number ?? null, store: accountHolds({ seed: records }) };
+}
+
+/**
+ * Release `account`'s holds on GitHub (`factory hold release --repo`, #376): a release record, the person's own comment on
+ * the oldest holds issue, which every reader takes as the end of each record of that account made before it. Returns
+ * {released (holds.mjs list's entry for it, or null when nothing of it is held: then nothing is written), known (the
+ * keys of the accounts that are), issue, refused (why readers will not count the comment posted, read back as a reader
+ * reads it: a token that is no person's, or a person who cannot push; else null)}. A failed read or write throws.
+ */
+export async function releaseRouteHold(repo, account, opts, { now = Date.now() } = {}) {
+  const { issue, store } = await personHolds(repo, opts, { now });
+  const known = store.list(now);
+  const released = known.find((x) => x.account === account) ?? null;
+  if (!released) return { released, known: known.map((x) => x.account), issue };
+  const text = `Factory: account \`${account}\` (${HARNESS_NAMES[released.harness] || released.harness}) released by a person; every hold and guess on it recorded before this comment is over, and its back-off count starts again.`;
+  const posted = await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${releaseLine(account)}\n${text}` } });
+  const who = posted?.user?.login || "an unknown login";
+  const counts = !!posted && (await releaseOf(posted, pushCheck(repo, opts), Infinity)) !== null;
+  const refused = counts ? null : posted?.user?.type !== "User" ? `it was posted as ${who}, which is no person (an App's or a workflow's token), and Factory counts a release only from a person who can push` : `${who} cannot push to ${repo.full}, and Factory counts a release only from a person who can push`;
+  return { released, known: known.map((x) => x.account), issue, refused };
 }
 
 /** An issue of Factory's that is no holds record (a stray from a race or a failed lock): retitled, its label off, closed. */
@@ -160,7 +253,7 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   const strays = [];
   for (const n of found.strays) strays.push({ n, ...(await recordsOn(repo, n, opts, now)) });
   let made = null;
-  const store = accountHolds({ seed: [...read.records, ...strays.flatMap((x) => x.records)], onPut: (r) => (made = r) });
+  const store = accountHolds({ seed: [...read.records, ...read.releases, ...strays.flatMap((x) => [...x.records, ...x.releases])], onPut: (r) => (made = r) });
   const until = kind === "spent" ? store.spent({ harness, account, now, window }) : store.limit({ harness, account, reset, now, window });
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =

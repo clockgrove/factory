@@ -242,6 +242,39 @@ function interpreterScript(segment) {
   return words[i] ?? null;
 }
 
+// Shell keywords, skipped to the command they introduce (`if make; then …`), and builtins, which run no executable.
+const SHELL_KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "select", "function", "!", "{", "}", "[[", "]]"]);
+const SHELL_BUILTINS = new Set([".", ":", "[", "alias", "break", "cd", "continue", "declare", "echo", "eval", "exit", "export", "false", "hash", "local", "popd", "printf", "pushd", "read", "readonly", "return", "set", "shift", "source", "test", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias", "unset", "wait"]);
+
+/**
+ * The simple commands of a shell command, as {word, args}: the word each one runs and the words after it. Assignments,
+ * `sudo`/`env`/`exec`-style prefixes (and their flags), keywords and redirections are skipped to it; a builtin, a word
+ * with a variable, glob or `~`, and a relative path (the repository's own file) are no command word. Quotes are dropped.
+ */
+export function simpleCommands(command) {
+  const out = [];
+  for (const segment of String(command || "").split(/[;&|()`\n]+/)) {
+    const words = segment.trim().split(/\s+/).map((w) => w.replace(/^['"]+|['"]+$/g, "")).filter(Boolean);
+    let prefixed = false;
+    for (let i = 0; i < words.length; i += 1) {
+      const w = words[i];
+      if (/^\d*[<>]/.test(w)) {
+        if (/^\d*[<>]+&?$/.test(w)) i += 1;
+        continue;
+      }
+      if (SHELL_KEYWORDS.has(w)) continue;
+      if (PREFIXES.has(w)) {
+        prefixed = true;
+        continue;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || (prefixed && w.startsWith("-"))) continue;
+      if (!SHELL_BUILTINS.has(w) && !/[=$~*?{}\\]/.test(w) && (w.startsWith("/") || !w.includes("/"))) out.push({ word: w, args: words.slice(i + 1) });
+      break;
+    }
+  }
+  return out;
+}
+
 /** The repository paths the `setup` command and an explicit `install` command name (commandPaths): toolchain to a fix pass. */
 export const setupPaths = ({ setup = "", install = "auto" } = {}) => [...new Set([...commandPaths(setup), ...(install && install !== "auto" && install !== "none" ? commandPaths(install) : [])])];
 

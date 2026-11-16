@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { jsonLines, parseUsage, providerBusy, providerRefusal, requestRefused } from "../scripts/lib/usage.mjs";
-import { crashed, outageExit } from "../scripts/lib/session.mjs";
-import { BUSY_PASS_PROMPT, runHarness } from "../scripts/lib/harness.mjs";
+import { crashed, outageExit, usageLimitExit } from "../scripts/lib/session.mjs";
+import { BUSY_PASS_PROMPT, USAGE_LIMIT, runHarness } from "../scripts/lib/harness.mjs";
 import { OUTAGE, resetNetwork, serverDown, unreachable, waitOutages } from "../scripts/lib/network.mjs";
-import { endedNotLost } from "../scripts/lib/relaunch.mjs";
+import { endedNotLost, needsWorkStep, workStepNumber } from "../scripts/lib/relaunch.mjs";
 
 const fixtures = join(import.meta.dirname, "fixtures");
 const LIMIT_RUN = readFileSync(join(fixtures, "claude-2.1.323-usage-limit.jsonl"), "utf8");
@@ -138,6 +138,18 @@ test("runHarness, real, fake codex: past the stage's in-place bound the stage en
   });
 });
 
+test("runHarness, real, fake codex: the stage's time bounds the busy waits, not a count: a long deadline keeps waiting past six", async () => {
+  const { bin, calls } = fakeCodex([...Array(8).fill(codexBody(503)), null]);
+  await inStage(bin, async ({ waits }) => {
+    waitOutages({ until: (since) => since + 12 * 60 * 60_000 });
+    const rec = await runHarness(pass(bin));
+    assert.equal(calls().length, 9, "eight busy answers, then the run that completed");
+    assert.equal(rec.ok, true);
+    assert.equal(rec.busyWaits, 8);
+    assert.equal(sum(waits), (1 + 2 + 4 + 8 + 16 + 30 + 30 + 30) * 60_000, "doubling up to half an hour");
+  });
+});
+
 test("runHarness: outside a process that waits outages out, a busy pass is returned as it is, no death", async () => {
   const { bin, calls } = fakeCodex([codexBody(503)]);
   await inStage(bin, async () => {
@@ -148,11 +160,11 @@ test("runHarness: outside a process that waits outages out, a busy pass is retur
   });
 });
 
-test("runHarness, real, fake claude: the provider's own retry time is waited for, not the doubling", async () => {
+/** A fake claude: its first run answers a plain rate limit (no usage-limit code) whose reset is `resetS`, later ones succeed. */
+function fakeClaudeBusy(resetS) {
   const bin = mkdtempSync(join(tmpdir(), "factory-claude-busy-"));
   const log = join(bin, "calls.jsonl");
-  const start = Date.parse("2026-11-15T10:00:00Z");
-  writeFileSync(join(bin, "busy.jsonl"), claudeBusy().replaceAll(`"resetsAt":${RESET_S}`, `"resetsAt":${start / 1000 + 180}`));
+  writeFileSync(join(bin, "busy.jsonl"), claudeBusy().replaceAll(`"resetsAt":${RESET_S}`, `"resetsAt":${resetS}`));
   const ok = [{ type: "system", subtype: "init", session_id: "00000000-0000-0000-0000-000000000254" }, { type: "result", subtype: "success", is_error: false, num_turns: 2, result: "done", session_id: "00000000-0000-0000-0000-000000000254", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }];
   writeFileSync(join(bin, "ok.jsonl"), ok.map((l) => JSON.stringify(l)).join("\n") + "\n");
   writeFileSync(join(bin, "claude"), `#!${process.execPath}
@@ -164,15 +176,47 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, prompt }) + "\\
 if (n < 1) { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "busy.jsonl"))}, "utf8")); process.exit(1); }
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "ok.jsonl"))}, "utf8"));
 `, { mode: 0o755 });
+  const calls = () => readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  return { bin, calls };
+}
+const START = Date.parse("2026-11-15T10:00:00Z");
+
+test("runHarness, real, fake claude: the provider's own retry time is waited for, not the doubling", async () => {
+  const { bin, calls } = fakeClaudeBusy(START / 1000 + 180);
   await inStage(bin, async ({ waits }) => {
     waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
     const rec = await runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2" });
-    const c = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const c = calls();
     assert.equal(c.length, 2);
     assert.equal(c[1].args[c[1].args.indexOf("--resume") + 1], "00000000-0000-0000-0000-000000000254");
     assert.equal(c[1].prompt, BUSY_PASS_PROMPT);
     assert.equal(sum(waits), 180_000, "the three minutes the provider gave");
     assert.equal(rec.ok, true);
+  });
+});
+
+test("runHarness, real, fake claude: a provider time past the stage's bound is a usage limit's reset: the account is held until it, not the outage doubling", async () => {
+  const reset = START + 3 * 24 * 60 * 60_000;
+  const { bin, calls } = fakeClaudeBusy(reset / 1000);
+  await inStage(bin, async ({ waits }) => {
+    waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+    let thrown = null;
+    await assert.rejects(runHarness({ ...pass(bin), harness: "claude", model: "claude-fable-5-2" }), (e) => ((thrown = e), true));
+    assert.equal(thrown.code, USAGE_LIMIT, String(thrown?.message));
+    assert.equal(thrown.resetAt, reset);
+    assert.equal(calls().length, 1);
+    assert.deepEqual(waits, [], "no wait in place");
+    // Locally: paused on the usage limit with its reset, which serve holds the account until (local.mjs limitPaused).
+    const ends = [];
+    await usageLimitExit(thrown, { local: true, records: [], finish: async (...a) => ends.push(a), block: async () => assert.fail("nothing written") });
+    assert.equal(ends[0][0], "paused");
+    assert.equal(ends[0][2], null, "no outage");
+    assert.deepEqual({ ...ends[0][3], since: undefined }, { harness: "claude", reset: new Date(reset).toISOString(), since: undefined });
+    // On a route with automatic account choice: the holds record is written for that reset (route-holds.mjs limit).
+    const held = [];
+    await usageLimitExit(thrown, { local: false, records: [], finish: async (...a) => ends.push(a), block: async () => {}, goOn: async (e) => (held.push(e.resetAt), { goOn: "another account is free" }) });
+    assert.deepEqual(held, [reset]);
+    assert.equal(ends.at(-1)[0], "waiting");
   });
 });
 
@@ -211,21 +255,30 @@ test("runHarness, real, fake codex: a resumed pass refused 400/413/422 for its r
   });
 });
 
-test("endedNotLost: the work job's conclusion and steps place a vanished stage; a runner that went away is lost", () => {
-  const factory = "Run clockgrove/factory@v0.9";
+test("endedNotLost: the work job's conclusion and steps place a vanished stage, Factory's step read from the workflow file; a runner that went away is lost", () => {
+  // The workflow names its own steps: Factory's work step is found by its `uses` and `mode`, never by a name.
+  const workflow = ["jobs:", "  work:", "    steps:", "      - name: Pick the account", "        uses: clockgrove/factory@v0.9", "        with: { mode: account }", "      - name: Get the code", "        uses: actions/checkout@v7", "      - name: Build it", "        uses: clockgrove/factory@v0.9", "        with: { mode: work }", "      - uses: actions/upload-artifact@v7", ""].join("\n");
+  assert.equal(workStepNumber(workflow, "work (7)"), 4, "Set up job is 1, then the YAML steps in order");
+  assert.equal(workStepNumber(workflow, "review (factory/7)"), null, "another job");
+  assert.equal(workStepNumber("jobs: [", "work (7)"), null, "unparsable");
+  assert.equal(workStepNumber(workflow.replace("mode: work", "mode: review"), "work (7)"), null, "no Factory work step");
   const step = (number, name, conclusion, status = "completed") => ({ number, name, status, conclusion });
   const job = (steps, conclusion = "failure") => ({ name: "work (7)", status: "completed", conclusion, runner_id: 3, runner_name: "r", steps });
-  const before = (failedAt) => job([step(1, "Set up job", failedAt === 1 ? "failure" : "success"), step(2, factory, failedAt === 2 ? "failure" : "skipped"), step(3, "Run actions/checkout@v7", failedAt === 3 ? "failure" : failedAt < 3 ? "skipped" : "success"), step(4, factory, failedAt === 4 ? "failure" : failedAt < 4 ? "skipped" : null), step(5, "Run actions/upload-artifact@v7", "success")]);
-  assert.deepEqual(endedNotLost({ job: before(1) }), { by: "setup", step: "Set up job" });
-  assert.deepEqual(endedNotLost({ job: before(2) }), { by: "setup", step: factory }, "the account step, before Factory's own");
-  assert.deepEqual(endedNotLost({ job: before(3) }), { by: "setup", step: "Run actions/checkout@v7" });
-  assert.equal(endedNotLost({ job: before(4) }), null, "Factory's own step failed with no exit written: its network");
-  assert.equal(endedNotLost({ job: job([step(1, "Set up job", "success"), step(2, "Run actions/checkout@v7", "success"), step(3, factory, null, "in_progress")]) }), null, "a runner that went away: no step of its own failed");
+  const ran = (failedAt) => job([step(1, "Set up job", failedAt === 1 ? "failure" : "success"), step(2, "Pick the account", failedAt === 2 ? "failure" : "skipped"), step(3, "Get the code", failedAt === 3 ? "failure" : failedAt < 3 ? "skipped" : "success"), step(4, "Build it", failedAt === 4 ? "failure" : failedAt < 4 ? "skipped" : null), step(5, "Run actions/upload-artifact@v7", "success")]);
+  assert.deepEqual(endedNotLost({ job: ran(1) }), { by: "setup", step: "Set up job" }, "GitHub's set-up: no workflow needed");
+  assert.equal(needsWorkStep(ran(1)), false);
+  assert.deepEqual(endedNotLost({ job: ran(2), workStep: 4 }), { by: "setup", step: "Pick the account" }, "the account step, before Factory's own");
+  assert.deepEqual(endedNotLost({ job: ran(3), workStep: 4 }), { by: "setup", step: "Get the code" });
+  assert.equal(needsWorkStep(ran(3)), true);
+  assert.equal(endedNotLost({ job: ran(3), workStep: null }), null, "the workflow unread: the step cannot be placed, so lost");
+  assert.equal(endedNotLost({ job: ran(4), workStep: 4 }), null, "Factory's own step failed with no exit written: its network");
+  const gone = job([step(1, "Set up job", "success"), step(2, "Get the code", "success"), step(3, "Build it", null, "in_progress")]);
+  assert.equal(endedNotLost({ job: gone, workStep: 3 }), null, "a runner that went away: no step of its own failed");
+  assert.equal(needsWorkStep(gone), false, "nothing failed: no workflow read");
   assert.deepEqual(endedNotLost({ job: { name: "work (7)", status: "completed", conclusion: "failure", runner_id: null, runner_name: null, steps: [] } }), { by: "setup", step: null }, "GitHub never started it");
-  assert.deepEqual(endedNotLost({ job: job(before(3).steps, "cancelled") }), { by: "cancelled" });
+  assert.deepEqual(endedNotLost({ job: job(ran(3).steps, "cancelled") }), { by: "cancelled" });
+  assert.equal(needsWorkStep(job(ran(3).steps, "cancelled")), false);
   assert.deepEqual(endedNotLost({ job: job([], "timed_out") }), { by: "cancelled" });
   assert.deepEqual(endedNotLost({ record: { state: "ended" } }), { by: "sandbox" });
   assert.equal(endedNotLost({ job: null }), null);
-  // Steps named by the workflow (no `Run clockgrove/factory@…` step): only GitHub's own set-up step is told apart.
-  assert.equal(endedNotLost({ job: job([step(1, "Set up job", "success"), step(2, "checkout", "failure"), step(3, "factory", "skipped")]) }), null);
 });

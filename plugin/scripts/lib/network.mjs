@@ -110,7 +110,7 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * 5xx past the client's retries, or on a model provider busy past runHarness's waits (serverDown), after 1, 2, 4…
  * minutes, doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; six
  * such resumes in a row (an hour in all) and it Blocks (local.mjs). runHarness waits a busy provider out in place on the
- * same doubling, at most `serverResumes` times, within the stage's wait. `now`,
+ * same doubling, within the stage's wait. `now`,
  * `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {

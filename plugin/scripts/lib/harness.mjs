@@ -937,12 +937,15 @@ export class UsageLimitReached extends Error {
  * runHarness's pass with its reruns after its provider answered busy (usage.mjs providerBusy: 408, 425, 429 or a 5xx,
  * with no refusal type or code), which is no death. In a process that waits outages out, the pass waits for the
  * provider's own time to go again when the harness reported one (`retryAt`), else the outage doubling (network.mjs
- * serverWait: 1, 2, 4… minutes), then runs again, from its session when it has one (a reviewer's from its own prompt),
- * on what is left of its budget and wall clock, at most OUTAGE.serverResumes times. A wait that ends past the stage's
- * bound (waitBound, from the first busy answer), or leaves the pass under LIMIT.minRunMs of its wall clock, throws a
- * NetworkDown of the provider's host with the status as its code instead, so the stage ends on it as on GitHub's 5xx
- * (session.mjs outageExit: paused locally, and serve resumes it on the same doubling; an `outage` Block elsewhere, which
- * the dispatcher relaunches). Outside such a process the busy pass is returned as it is.
+ * serverWait: 1, 2, 4… minutes, up to half an hour), then runs again, from its session when it has one (a reviewer's
+ * from its own prompt), on what is left of its budget and wall clock. The stage's own time bounds it, no count: a wait
+ * that ends past the stage's bound (waitBound, from the first busy answer), or leaves the pass under LIMIT.minRunMs of
+ * its wall clock, ends the stage instead. Past it with the provider's own time, that time is a usage limit's reset: it
+ * throws UsageLimitReached, so the stage ends on it as on any usage limit (session.mjs usageLimitExit: the account held
+ * until then, locally and on the route's holds record). Past it on the doubling, it throws a NetworkDown of the
+ * provider's host with the status as its code, so the stage ends as on GitHub's 5xx (session.mjs outageExit: paused
+ * locally, and serve resumes it on the same doubling; an `outage` Block elsewhere, which the dispatcher relaunches).
+ * Outside such a process the busy pass is returned as it is.
  */
 async function runBusy(opts) {
   const startedAt = Date.now();
@@ -963,7 +966,10 @@ async function runBusy(opts) {
     if (!origin) break;
     const bound = waitBound(since);
     const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - waitMs : Infinity;
-    if (busy.length >= OUTAGE.serverResumes || bound === null || now + waitMs > bound || left < LIMIT.minRunMs) throw new NetworkDown({ origin, code: `HTTP ${rec.busy.status}`, since });
+    if (bound === null || now + waitMs > bound || left < LIMIT.minRunMs) {
+      if (Number.isFinite(rec.busy.retryAt)) throw new UsageLimitReached({ ...rec.busy, resetAt: rec.busy.retryAt }, { since: now, label: opts.label || "run" });
+      throw new NetworkDown({ origin, code: `HTTP ${rec.busy.status}`, since });
+    }
     log(`${opts.label || "run"}: ${rec.busy.harness}'s provider was busy (${refusalFields(rec.busy)}); ${Number.isFinite(rec.busy.retryAt) ? "waiting for the time it gave" : "waiting"} (${minutesText(waitMs)}), then running the pass again`);
     const end = now + waitMs;
     while (OUTAGE.now() < end) {

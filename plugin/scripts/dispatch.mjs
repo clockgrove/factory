@@ -29,7 +29,7 @@ import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, notLostBlock, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -733,7 +733,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           else if (capHold(n)) continue;
           else {
             const job = sandbox ? null : await stintWorkJob(repo, n, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), n)) }).catch(() => null);
-            notLost = endedNotLost({ record: boxRecord, job });
+            // A failed step after GitHub's set-up is placed against Factory's own step in the workflow file at the job's commit.
+            const workStep = needsWorkStep(job) ? await stintWorkStep(repo, job, opts) : null;
+            if (needsWorkStep(job) && workStep === null) log(`  #${n}: its work job failed at step "${String(job.steps?.find((x) => x?.conclusion === "failure")?.name ?? "").slice(0, 120)}", but its workflow file at ${String(job.head_sha ?? "its commit").slice(0, 12)} could not be read or names no Factory work step, so that step cannot be placed: taken as lost`);
+            notLost = endedNotLost({ record: boxRecord, job, workStep });
             if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
             else {
               await relaunchLost(issue, d, "vanished");

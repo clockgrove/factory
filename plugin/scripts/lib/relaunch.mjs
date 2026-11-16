@@ -7,7 +7,8 @@
 import { addLabels, moveCard, removeLabel, rest, setStateLabel, upsertComment, workflowFile } from "./github.mjs";
 import { CLOCK_SKEW_MS, blockCauseOf, isSelf, marker, restartedAt, selfLogin, trustedAuthor } from "./logic.mjs";
 import { startTime } from "./objective-trust.mjs";
-import { neverStarted } from "./triage.mjs";
+import { failedStep, neverStarted, reports } from "./triage.mjs";
+import { parseYaml } from "./yaml.mjs";
 
 /** How many times a lost stage is relaunched since a person last started the Objective, before it Blocks. */
 export const RELAUNCH_MAX = 2;
@@ -122,34 +123,65 @@ export function relaunchBody({ tries }, count, { max = RELAUNCH_MAX } = {}) {
 }
 
 /**
- * GitHub's name for a step that runs Factory's own action with no `name:` of its own: `Run <uses>`, with `uses`
- * `clockgrove/factory@<ref>` (the `uses` doctor.mjs and local.mjs read as Factory's).
- */
-const OWN_ACTION_STEP = /^Run clockgrove\/factory@\S+$/;
-
-/**
  * How a vanished stage ended when its runner or network was not what ended it, so it is not relaunched; null when it
  * was lost (relaunch it). Decided on structure only, never a log's words:
  * - `{by: "sandbox"}`: on the sandbox, a record that says its stage ended (stage.mjs writes `ended`, with `endedBy` for
  *   a watchdog's kill: it reached GitHub);
  * - on the Action, its last `work (N)` job (stintWorkJob, GitHub's jobs API with its `conclusion` and `steps[]`):
  *   `{by: "cancelled"}` when the job concluded `cancelled` or `timed_out` (a person, or the job's timeout): a stop;
- *   `{by: "setup", step}` when GitHub never started it (triage.mjs neverStarted: no step, no runner; `step` null) or a
- *   step failed before Factory's own ran: GitHub's Set up job (step 1), or any step before the job's last step that
- *   runs Factory's action (OWN_ACTION_STEP); `step` is that step's name. A set-up failure fails the same way every time.
- * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), or Factory's own step
- * failing with no exit written (its network).
+ *   `{by: "setup", step}` when GitHub never started it (triage.mjs neverStarted: no step, no runner; `step` null), or
+ *   its first failed step came before Factory's own ran: GitHub's Set up job (step 1), or a step numbered below
+ *   `workStep`, Factory's work step's number read from the workflow file (workStepNumber); `step` is the failed step's
+ *   name. A set-up failure fails the same way every time.
+ * Anything else is lost: no job, a job with no failed step of its own (a runner that went away), Factory's own step
+ * failing with no exit written (its network), or a failed step that cannot be placed (`workStep` null: the workflow
+ * file unread; the caller logs that).
  */
-export function endedNotLost({ record = null, job = null }) {
+export function endedNotLost({ record = null, job = null, workStep = null }) {
   if (record?.state === "ended" || record?.endedBy) return { by: "sandbox" };
   if (!job) return null;
   if (job.conclusion === "cancelled" || job.conclusion === "timed_out") return { by: "cancelled" };
   if (neverStarted(job)) return { by: "setup", step: null };
-  const steps = Array.isArray(job.steps) ? job.steps : [];
-  const factory = steps.filter((x) => OWN_ACTION_STEP.test(String(x?.name ?? ""))).at(-1);
-  const failed = steps.find((x) => x?.conclusion === "failure");
-  if (failed && (failed.number === 1 || (factory && failed.number < factory.number))) return { by: "setup", step: String(failed.name ?? "").slice(0, 120) };
+  const failed = failedStep(job);
+  if (failed && (failed.number === 1 || (Number.isInteger(workStep) && failed.number < workStep))) return { by: "setup", step: String(failed.name ?? "").slice(0, 120) };
   return null;
+}
+
+/**
+ * Whether placing a vanished stage's work job needs its workflow file (endedNotLost `workStep`): a job GitHub started,
+ * not cancelled, whose first failed step is after GitHub's Set up job.
+ */
+export const needsWorkStep = (job) => !!job && job.conclusion !== "cancelled" && job.conclusion !== "timed_out" && !neverStarted(job) && (failedStep(job)?.number ?? 1) !== 1;
+
+/**
+ * The number Factory's work step has in GitHub's `steps[]` for the job reporting `jobName`, read from the workflow file's
+ * text: GitHub's Set up job is step 1 and the job's YAML steps follow in order, so the step at index i is i + 2. Factory's
+ * work step is the top-level step that `uses: clockgrove/factory@…` with `mode: work` (Factory renders the workflow;
+ * the account step runs the same action with `mode: account`). Null when the text does not parse or names no such step.
+ */
+export function workStepNumber(text, jobName) {
+  let doc;
+  try {
+    doc = parseYaml(String(text || ""));
+  } catch {
+    return null;
+  }
+  for (const [id, j] of Object.entries(doc?.jobs || {})) {
+    if (!reports(typeof j?.name === "string" ? j.name : id, jobName) || !Array.isArray(j?.steps)) continue;
+    const i = j.steps.findIndex((st) => /^clockgrove\/factory@\S+$/.test(String(st?.uses ?? "").trim()) && st?.with?.mode === "work");
+    if (i >= 0) return i + 2;
+  }
+  return null;
+}
+
+/**
+ * Factory's work step's number for a vanished work job (workStepNumber), from the workflow file at the job's commit
+ * (`head_sha`): this workflow's own file (github.mjs workflowFile), one contents read. Null when it cannot be read.
+ */
+export async function stintWorkStep(repo, job, opts) {
+  if (!job?.head_sha) return null;
+  const text = await rest(`repos/${repo.full}/contents/.github/workflows/${workflowFile()}?ref=${job.head_sha}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => "");
+  return text ? workStepNumber(text, job.name) : null;
 }
 
 /** The dispatcher's Block reason and cause for a vanished stage endedNotLost placed (`end`), after `note`. */

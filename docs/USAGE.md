@@ -2,6 +2,24 @@
 
 How to write an Objective, what you see while it runs, and what to do when Factory hands one back to you Blocked or with a Question. [INSTALL.md](INSTALL.md) covers setup; [PLAN.md](PLAN.md) has the full contracts.
 
+## Glossary
+
+The Factory terms used across the README, this page and [LOCAL.md](LOCAL.md):
+
+- **Objective:** a GitHub issue labelled `factory:objective`. Its text is the whole specification of the work (Write an Objective, below).
+- **Harness:** the coding agent that runs the model: Claude Code, Codex or GitHub Copilot CLI. The workflow's `FACTORY_HARNESS` picks it, and a `factory:harness:<name>` label overrides that for one Objective (Choose the harness and models, below).
+- **Stage:** one job of an Objective's run. The work stage plans, builds and delivers the PR. The review stage runs the reviewer, and the worker answers its comments. Each stage runs in a sandbox, and `max_usd` caps each one.
+- **Route:** where a stage runs: GitHub Actions (the default), local mode on your own machine, or a cloud sandbox. Every route keeps the Objective's state in GitHub.
+- **Dispatcher:** the part of Factory that decides what runs next. It starts ready Objectives in priority order up to `max_concurrent`, follows the running ones, Blocks stale ones and tends merges. On GitHub Actions it is the workflow's `dispatch` job. In local mode, `factory serve` applies the same rules.
+- **Tick:** one pass of the dispatcher over the queue. On GitHub Actions a tick runs on events (a label, an issue closing, Factory's own jobs), with a ten-minute schedule as the backstop. `factory serve` ticks every 30 seconds.
+- **Local loop:** `factory serve` running in your clone. It takes the Objectives labelled `factory:local` (or every one with `--all`), runs their stages in sandboxes on your machine, and resumes its own paused work first ([LOCAL.md](LOCAL.md)).
+- **Task card:** the short brief Factory gives the worker at the start of its session: the issue to complete, the budget, the skills to follow in order, the validation commands and the protected paths.
+- **Decider (decision check):** a model Factory asks one structured question, such as whether a red check is flaky or whether your comment answers a Question. Factory acts only on a verdict at its confidence floor. `decision_route` picks who answers: the Vercel AI Gateway, the stage's own harness, or no one ([ADAPTERS.md](ADAPTERS.md), Decision model).
+- **Blocked (a Block):** Factory could not finish and hands the Objective back to you. One comment on the issue gives the reason, the issue carries `factory:blocked`, and the PR, if any, becomes a draft (Blocked and Question, below).
+- **Question:** the work depends on a decision that should be yours. The worker finishes the rest and asks in the draft PR, or on the issue before any code. The issue carries `factory:question` (Blocked and Question, below).
+- **Hand-over:** a change under `.github/workflows/` that Factory never pushes. Factory posts the exact change on the issue and labels it `factory:handover`, and you apply it with `factory handover <issue>` (Workflow changes, below).
+- **Walk-away:** an Objective that merged with no human input after its label: no push, comment, review, edit or draft/ready toggle by a person on the branch or the issue. It is the scorecard's first number ([bench/README.md](../bench/README.md)).
+
 ## Write an Objective
 
 An Objective is a GitHub issue with the `factory:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Clockgrove Factory Objective: ...", the factory-file skill), which starts it or saves it as a draft to refine and start later (An Objective's lifecycle, below), or write the issue yourself:

@@ -225,8 +225,8 @@ test("fix-pass scope: an unresolved setup or install makes every file out of sco
 
 test("setupFilesNote: each entry bounded and in a code span, nothing that breaks out of one; scripts apart from paths", () => {
   const note = setupFilesNote({ files: ["a.sh", "x`y\n{{slot}}<!--c-->", "z".repeat(200)], scripts: [{ pkg: "package.json", name: "b" }], unresolved: [] });
-  assert.doesNotMatch(note, /\n|\{\{|\}\}|<!--/);
-  assert.match(note, /`x y \{ \{slot\} \}--c--`/);
+  assert.doesNotMatch(note, /\n|\{\{|\}\}|[<>]/);
+  assert.match(note, /`x y \{ \{slot\} \} !--c-- `/);
   assert.match(note, /`z{77}\.\.\.`/, "an entry is cut at 80 characters");
   assert.match(note, /don't change them or anything under them: `a\.sh`, .*\. Setup's package\.json scripts, don't change them: `package\.json scripts\.b`\./, "scripts are not paths");
   assert.equal(setupFilesNote({ files: [], scripts: [], unresolved: ["$X"] }), "Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");

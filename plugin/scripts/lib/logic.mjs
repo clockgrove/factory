@@ -49,12 +49,12 @@ export function renderTaskCard(template, values) {
  * The task card's and the fix pass's line on what the setup command runs (setupGuard's `files` and `scripts`), so a
  * worker leaves it alone rather than meet a refused push: at most `max` entries, then how many more, each at most
  * `width` characters and in a code span, with what could break out of one (a backtick, a line break) or read as a
- * template slot or a comment replaced. "" with none.
+ * template slot or an HTML comment (any angle bracket) replaced. "" with none.
  */
 export function setupFilesNote(guard, max = 25, width = 80) {
   if (!guard || (!guard.files?.length && !guard.scripts?.length && !guard.unresolved?.length)) return "";
   const plain = (x) => {
-    const t = String(x).replace(/[\r\n\t`]/g, " ").replace(/\{(?=\{)/g, "{ ").replace(/\}(?=\})/g, "} ").replace(/<!--|-->/g, "--");
+    const t = String(x).replace(/[\r\n\t`]/g, " ").replace(/\{(?=\{)/g, "{ ").replace(/\}(?=\})/g, "} ").replace(/[<>]/g, " ");
     return `\`${t.length > width ? `${t.slice(0, width - 3)}...` : t}\``;
   };
   const files = [...guard.files].sort().map(plain);

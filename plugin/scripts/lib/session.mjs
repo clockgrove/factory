@@ -57,7 +57,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -67,6 +67,8 @@ import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, wai
 import { accountWaitOf } from "./account-wait.mjs";
 import { rebaseWaitOf, reviewWaitOf } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
+import { versionKey } from "./answer-check.mjs";
+import { judgeUnread } from "./comment-check.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
@@ -1038,10 +1040,16 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /**
    * Record which maintainer decisions this run fed to a model (logic.mjs decisionsRead), so a later pass knows what
-   * has not reached the code yet. Written now; a failed write leaves them unread, which costs an answer pass, not a merge.
+   * has not reached the code yet. Written now, with `phase`'s line in the same write when given, so the record never
+   * lands without the line that explains it; a failed write leaves them unread, which costs an answer pass, not a merge.
    */
-  progress.decisionsRead = async (r) => {
+  progress.decisionsRead = async (r, phase = null) => {
     read = mergeRead(read, r);
+    if (phase) {
+      lines.push(`- ${clock(Date.now())} ${sanitize(phase, { max: 2000 })}`);
+      status = "";
+    }
+    await writing;
     await write();
   };
   /**
@@ -3390,6 +3398,32 @@ async function conversationsGate(repo, ctx, report, opts) {
 const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, opts, { stage: "merge", soFar: null })(line);
 
 /**
+ * Whether the unread writer comments (`unread`) let the merge go on: the comment check (comment-check.mjs judgeUnread,
+ * on `check`) reads them as asking nothing, and a fresh read after its call finds nothing it did not judge (a comment
+ * posted or edited during the call) and the Objective not stopped (stop.mjs stopCause). Then they are recorded as read on
+ * a progress comment of the merge pass's own (stage `merge`, keyed by the newest comment's version, so no other write of
+ * the merge pass replaces it), written once with the line that says so; a record that is not written leaves them
+ * unread, which costs one more question, never a merge. Returns "clear", "unread" (the caller holds the merge for the
+ * review stage's answer pass), "stopped", or "pending" (the issue could not be read again: the caller tries again).
+ * Throws when the comments cannot be read again, as unreadNow does: the caller never merges.
+ */
+async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, check, objectiveLabel, self }, opts) {
+  const r = await judgeUnread({ check, repo, issue, issueData, pr, unread });
+  const held = (why) => (log(`#${issue}: ${unread.length} maintainer decision(s) no pass has read (${why}); the review runs again to apply them`), "unread");
+  if (!r.clear) return held(`${r.why}${r.limited ? `; ${r.limited}` : ""}`);
+  // The call took a while: a comment posted or edited meanwhile was never judged, and a stop may have come.
+  const judged = decisionsRead(unread);
+  const fresh = (await unreadNow(repo, { issue, prNumber, self }, opts)).unread.filter((d) => judged[d.key] !== (d.seen ?? d.at));
+  if (fresh.length) return held(`${fresh.length} arrived or changed while the comment check ran`);
+  const issueNow = await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read after the comment check (${errCode(e)}); next try`), null));
+  if (!issueNow) return "pending";
+  if (stopCause(issueNow, objectiveLabel)) return "stopped";
+  const progress = progressReporter(repo, issue, opts, { stage: "merge", runId: `${progressRunId()}-${versionKey(unread.at(-1))}`, soFar: null });
+  await progress.decisionsRead(judged, r.line);
+  return "clear";
+}
+
+/**
  * An edit since the plan that the merge pass could not judge (objective-trust.mjs editedSincePlan "unjudged"): the
  * review label goes back on, so a review stage, whose start judges the edit with its own decider (planGate), decides
  * whether the PR still merges. Returns "text-edit".
@@ -3403,9 +3437,12 @@ async function textEdit(repo, issue, prNumber, opts) {
 
 /**
  * Merge the PR when, and only when, its head is the one recorded as mergeable (or GitHub's signed update-branch merge
- * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
+ * of it), its required checks are green on that head, the review is done and no maintainer decision is unread, or the
+ * unread ones ask for nothing (unreadCleared). Returns
  * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
- * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
+ * head: the review label goes back on), "unread" (a maintainer's comment no pass has read that `commentCheck`, the
+ * comment check this process can ask (comment-check.mjs openCommentCheck), did not read as asking nothing: the review
+ * runs again to apply it),
  * "code-scanning" (code scanning commented after the answer pass: the review runs again to answer it), "threads" (an
  * unresolved review conversation the base's rules require resolved, read before the merge or after GitHub refused it:
  * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
@@ -3430,7 +3467,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3510,12 +3547,15 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const state = await checksOn(repo, sha, names, opts);
   if (state.failed.length) return "red";
   if (!state.green) return "pending";
-  const { unread } = await unreadNow(repo, { issue, prNumber, self: selfLogin() || (await primeSelf(opts)) }, opts);
-  if (unread.length) {
+  const self = selfLogin() || (await primeSelf(opts));
+  const { unread } = await unreadNow(repo, { issue, prNumber, self }, opts);
+  const cleared = unread.length ? await unreadCleared(repo, { issue, prNumber, pr, issueData: issueNow, unread, check: commentCheck, objectiveLabel, self }, opts) : "clear";
+  if (cleared === "unread") {
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
     return "unread";
   }
+  if (cleared !== "clear") return cleared;
   // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
   // earlier text does not merge; the caller Blocks. An edit no decider here could judge goes to the review stage.
   const text = await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) });

@@ -636,3 +636,75 @@ test("#337: only GitHub's core REST quota spent is an outage of a write: a spent
     },
   );
 });
+
+// --- #353: GitHub answering 5xx past the client's retries is an outage of GitHub, not a crash. ---
+
+test("#353: a label write GitHub answers 500 on every try ends the stage on GitHub's outage (paused locally, an outage Block elsewhere); a 422 stays a factory Block", async () => {
+  await offline(
+    (req) => (req.probe ? assert.fail("no probe: GitHub answered") : req.path.endsWith("/issues/70/labels") ? json({ message: "Server Error" }, 500) : json({ message: "Validation Failed" }, 422)),
+    async ({ seen, now }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const first = now();
+      const decision = { exit: "delivered", reason: "" };
+      await sessionLib.exitStep(decision, "the review label could not be applied", () => rest("repos/o/r/issues/70/labels", { method: "POST", body: { labels: ["factory:in-review"] }, token: "t" }));
+      assert.equal(seen.length, RETRY.tries, "every try sent");
+      assert.equal(decision.exit, "blocked");
+      const end = thrown(() => sessionLib.outageFirst(decision));
+      assert.ok(end && unreachable(end), String(end));
+      assert.deepEqual({ status: end.status, origin: end.origin, code: end.code, since: end.since, endpoint: end.endpoint }, { status: 500, origin: "https://api.github.test", code: "HTTP 500", since: first, endpoint: "POST repos/o/r/issues/70/labels" });
+      const ends = [];
+      const blocks = [];
+      await outageExit(end, { local: true, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
+      assert.equal(ends[0][0], "paused");
+      assert.match(ends[0][1], /^api\.github\.test answered HTTP 500 to every try of POST repos\/o\/r\/issues\/70\/labels from 2026-11-14T08:47:00\.000Z/);
+      assert.deepEqual(ends[0][2], { host: "api.github.test", code: "HTTP 500", since: new Date(first).toISOString(), origin: "https://api.github.test", endpoint: "POST repos/o/r/issues/70/labels" });
+      assert.deepEqual(blocks, [], "nothing written to GitHub");
+      await outageExit(end, { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
+      assert.equal(ends[1][0], "blocked");
+      assert.equal(blocks[0][1], "outage", "an External outage Block, which the dispatcher relaunches");
+      assert.match(blocks[0][0], /answered HTTP 500 to every try .*; the stage ended on it\. /);
+      // A refusal is GitHub's answer to the request itself: no retry, no outage, the Block stands.
+      const refused = { exit: "delivered", reason: "" };
+      await sessionLib.exitStep(refused, "the review label could not be applied", () => rest("repos/o/r/issues/71/labels", { method: "POST", body: { labels: ["x"] }, token: "t" }));
+      assert.equal(refused.exit, "blocked");
+      assert.equal(refused.outage, null);
+      assert.equal(thrown(() => sessionLib.outageFirst(refused)), null);
+    },
+  );
+});
+
+/**
+ * Run worker.mjs as its own process, local mode, against a GitHub API that answers `status` to every request, the
+ * client's backoff cut to milliseconds (a preload sets RETRY). Returns {code, out, result}.
+ */
+async function stageAgainstStatus(script, args, status, extraEnv = {}) {
+  const root = mkdtempSync(join(tmpdir(), "outage-5xx-"));
+  mkdirSync(join(root, "co"));
+  const srv = createServer((req, res) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ message: "Server Error" })));
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const origin = `http://127.0.0.1:${srv.address().port}`;
+  const pre = join(root, "pre.mjs");
+  writeFileSync(pre, `import { RETRY } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "..", "scripts", "lib", "github.mjs")).href)};\nRETRY.baseMs = 5;\n`);
+  const r = await new Promise((done) => {
+    const child = spawn(process.execPath, ["--import", pathToFileURL(pre).href, join(import.meta.dirname, "..", "scripts", script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u")], {
+      env: { PATH: process.env.PATH, HOME: root, TMPDIR: process.env.TMPDIR, FACTORY_LOCAL: "1", GITHUB_API_URL: origin, GITHUB_GRAPHQL_URL: `${origin}/graphql`, ...extraEnv },
+    });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.on("close", (code) => (clearTimeout(timer), done({ code, out })));
+  }).finally(() => new Promise((r) => srv.close(r)));
+  const file = join(root, "u", "result.json");
+  return { code: r.code, out: r.out, result: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, origin };
+}
+
+test("#353, worker.mjs run for real: GitHub answering 500 past the retries ends the stage paused on it, naming the status, not a crash Block", async () => {
+  const { code, out, result, origin } = await stageAgainstStatus("worker.mjs", ["--issue", "7"], 500, { FACTORY_APP_TOKEN: "t" });
+  assert.equal(code, 0, out);
+  assert.equal(result?.exit, "paused", out);
+  assert.equal(result.outage.origin, origin);
+  assert.equal(result.outage.code, "HTTP 500");
+  assert.match(result.reason, /answered HTTP 500 to every try/);
+  assert.ok(!/crashed/.test(out), out);
+});

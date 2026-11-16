@@ -768,6 +768,47 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
   }
 });
 
+test("#353 review: a stage paused on GitHub's 5xx is resumed after a doubling wait, not on a probe; the count holds across resumes however far apart, and the seventh pause Blocks naming the request and status", async () => {
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    const first = Date.parse("2026-11-14T08:47:00Z");
+    let t = first;
+    loop.clock = () => t;
+    const endpoint = "POST repos/acme/app/issues/7/labels";
+    // GitHub's host answers a probe (github.test answers every request) while that one request keeps failing.
+    const paused = (at) => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at).toISOString(), endpoint } });
+    for (let i = 1; i <= OUTAGE.serverResumes; i++) {
+      await loop.withClaim(7, paused(t));
+      const off = loop.offline.get(7);
+      assert.deepEqual({ since: off.since, pauses: off.server.pauses }, { since: first, pauses: i });
+      t += 30_000;
+      assert.deepEqual(await loop.pausedHere(new Map()), [], `pause ${i}: not resumed on the probe`);
+      t = off.server.at + Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** (i - 1));
+      assert.deepEqual(await loop.pausedHere(new Map()), [7], `pause ${i}: resumed after its wait`);
+      off.resumedAt = t;
+      // The resumed stage runs longer than a network outage's carry-over before it meets the 5xx again.
+      t += OUTAGE.stageWaitMs + 60_000;
+    }
+    await loop.withClaim(7, paused(t));
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "past the resumes: taken up at once");
+    assert.equal((await loop.resume(7)).exit, "blocked");
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes('"cause":"outage"'));
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 7 pauses/);
+    assert.ok(!loop.offline.has(7));
+    // A stage that ends any other way starts the count again.
+    gh.labels.delete("factory:blocked");
+    gh.labels.add("factory:running");
+    await loop.withClaim(7, paused(t));
+    await loop.withClaim(7, async () => ({ exit: "delivered" }));
+    assert.ok(!loop.offline.has(7));
+    await loop.withClaim(7, paused(t));
+    assert.equal(loop.offline.get(7).server.pauses, 1);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("pausedHere: an Objective paused on a provider that never answers again is taken up past the bound, so resume Blocks it; a stopped one's pause is forgotten (#228)", async () => {
   const gh = claimGitHub();
   const inner = globalThis.fetch;

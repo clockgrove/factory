@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
+import { setSelf } from "../scripts/lib/logic.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 
@@ -104,8 +105,8 @@ test("rest: a create is never sent twice when it may have landed; it goes again 
     (req, n) => {
       const path = req.path;
       if (req.method === "GET") return json(created);
-      // A 502 after the comment was made: it landed, the answer was lost.
-      if (path.endsWith("/issues/1/comments")) return created.push(req.body.body), json({ message: "Bad Gateway" }, 502);
+      // A 502 after the review was made: it landed, the answer was lost.
+      if (path.endsWith("/pulls/1/reviews")) return created.push(req.body.body), json({ message: "Bad Gateway" }, 502);
       // Refused before connecting, then made.
       if (path.endsWith("/issues/2/comments")) {
         if (n === 1) throw refused();
@@ -125,8 +126,8 @@ test("rest: a create is never sent twice when it may have landed; it goes again 
       return json({ message: "Bad Gateway" }, 502);
     },
     async ({ seen, waits }) => {
-      await assert.rejects(rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: "one" } }), (e) => e.status === 502);
-      assert.deepEqual(created, ["one"], "a 502 on a create is not retried: it may have landed");
+      await assert.rejects(rest("repos/o/r/pulls/1/reviews", { method: "POST", body: { body: "one" } }), (e) => e.status === 502);
+      assert.deepEqual(created, ["one"], "a 502 on a create with no check for it is not retried: it may have landed");
       assert.deepEqual(await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "two" } }), { id: 2 });
       assert.deepEqual(await rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "three" } }), { id: 3 });
       assert.deepEqual(waits, [2000, 8050], "Retry-After honoured, spread only upward");
@@ -143,14 +144,14 @@ test("rest: a create is never sent twice when it may have landed; it goes again 
 test("rest: a 5xx or a 422 is no rate limit whatever its headers, so a create that may have landed is not sent again", async () => {
   const reset = String(Math.floor(1_000_000 / 1000) + 30);
   const firsts = {
-    "/repos/o/r/issues/1/comments": () => json({ message: "Service Unavailable" }, 503, { "retry-after": "1" }),
-    "/repos/o/r/issues/2/comments": () => json({ message: "Bad Gateway" }, 502, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
-    "/repos/o/r/issues/3/comments": () => json({ message: "Validation Failed" }, 422, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
+    "/repos/o/r/pulls/1/reviews": () => json({ message: "Service Unavailable" }, 503, { "retry-after": "1" }),
+    "/repos/o/r/pulls/2/reviews": () => json({ message: "Bad Gateway" }, 502, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
+    "/repos/o/r/pulls/3/reviews": () => json({ message: "Validation Failed" }, 422, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset }),
   };
   await withFetch(
     (req, n) => (n === 1 ? firsts[req.path]() : json({ id: 1 }, 201)),
     async ({ seen }) => {
-      for (const [path, status] of [["repos/o/r/issues/1/comments", 503], ["repos/o/r/issues/2/comments", 502], ["repos/o/r/issues/3/comments", 422]]) {
+      for (const [path, status] of [["repos/o/r/pulls/1/reviews", 503], ["repos/o/r/pulls/2/reviews", 502], ["repos/o/r/pulls/3/reviews", 422]]) {
         await assert.rejects(rest(path, { method: "POST", body: { body: "x" } }), (e) => e.status === status && e.rateLimited === false);
       }
       assert.equal(seen.length, 3, "each create sent once");
@@ -245,6 +246,84 @@ test("graphql: a query is retried; a mutation is not resent after a 502, but is 
       assert.equal(mutations, 3);
     },
   );
+});
+
+// #353: a 5xx on a state write is retried like a network error, and a write that is no create is safe to send again.
+
+test("#353: a label write GitHub answers 500 is sent again and lands; one it refuses (422) is sent once and thrown as it is", async () => {
+  await withFetch(
+    (req, n) => {
+      if (req.path === "/repos/o/r/issues/7/labels") return n === 1 ? json({ message: "Server Error" }, 500) : json([{ name: "factory:in-review" }]);
+      return json({ message: "Validation Failed" }, 422);
+    },
+    async ({ seen, waits, lines }) => {
+      assert.deepEqual(await rest("repos/o/r/issues/7/labels", { method: "POST", body: { labels: ["factory:in-review"] } }), [{ name: "factory:in-review" }]);
+      assert.deepEqual(waits, [2000]);
+      assert.match(lines.find((l) => /GitHub POST/.test(l)) || "", /POST repos\/o\/r\/issues\/7\/labels: HTTP 500; try 2 of 4/);
+      await assert.rejects(rest("repos/o/r/issues/8/labels", { method: "POST", body: { labels: ["x"] } }), (e) => e.status === 422 && e.offline === undefined);
+      assert.deepEqual(seen, ["POST /repos/o/r/issues/7/labels", "POST /repos/o/r/issues/7/labels", "POST /repos/o/r/issues/8/labels"]);
+    },
+  );
+});
+
+test("#353: a comment GitHub answers 500 is looked for before it is sent again: found, it is not posted twice; absent, it is posted once more", async () => {
+  const comments = { 1: [], 2: [] };
+  let id = 100;
+  await withFetch(
+    (req, n) => {
+      const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
+      if (req.method === "GET") return json(comments[issue]);
+      // #1: GitHub made the comment, then answered 500. #2: the 500 made nothing; the second try is made.
+      if (issue === 1 || n > 1) comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "factory[bot]" } });
+      return n === 1 ? json({ message: "Server Error" }, 500) : json(comments[issue].at(-1), 201);
+    },
+    async ({ seen }) => {
+      assert.deepEqual(await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: "handed to review" } }), { id: 101, body: "handed to review", user: { login: "factory[bot]" } });
+      assert.equal(comments[1].length, 1, "posted once");
+      assert.deepEqual(await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "handed to review" } }), { id: 102, body: "handed to review", user: { login: "factory[bot]" } });
+      assert.equal(comments[2].length, 1, "posted once");
+      assert.deepEqual(seen, ["POST /repos/o/r/issues/1/comments", "GET /repos/o/r/issues/1/comments", "POST /repos/o/r/issues/2/comments", "GET /repos/o/r/issues/2/comments", "POST /repos/o/r/issues/2/comments"]);
+    },
+  );
+});
+
+test("#353 review: a comment's check finds a notice the App posted (its marker, not Factory's login), whatever its line ends; a bare body by someone else is no find; 502 waits for GitHub first; reads keep the deadline", async () => {
+  const comments = { 1: [], 2: [], 3: [] };
+  let id = 200;
+  const notice = "<!-- factory:1:blocked:x -->\nBlocked: the review label   \nRe-apply it.";
+  const gets = [];
+  setSelf("kirk");
+  try {
+    await withFetch(
+      (req, n) => {
+        const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
+        if (req.method === "GET") return gets.push(issue), json(comments[issue]);
+        // #1: the notice App's comment landed, stored with CRLF line ends and its trailing blanks gone, before a 502.
+        if (issue === 1 && n === 1) return comments[1].push({ id: (id += 1), body: req.body.body.replace(/[ \t]+$/gm, "").replace(/\n/g, "\r\n"), user: { login: "factory-notices[bot]" } }), json({ message: "Bad Gateway" }, 502);
+        // #2: someone else wrote the same words (no marker) just before; Factory's 500 made nothing.
+        if (issue === 2 && n === 1) return comments[2].push({ id: (id += 1), body: "ok", user: { login: "someone" } }), json({ message: "Server Error" }, 500);
+        // #3: answered 502 every time; the check's read keeps the call's deadline.
+        if (issue === 3) return json({ message: "Bad Gateway" }, 502);
+        comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "kirk" } });
+        return json(comments[issue].at(-1), 201);
+      },
+      async ({ seen, waits, now }) => {
+        assert.equal((await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: notice } })).user.login, "factory-notices[bot]");
+        assert.equal(comments[1].length, 1, "the notice is not posted twice");
+        assert.deepEqual(waits, [RETRY.gatewayMs], "a gateway's 502: the check waits for GitHub to finish first");
+        assert.equal((await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "ok" } })).user.login, "kirk");
+        assert.equal(comments[2].length, 2, "someone else's words are not Factory's comment: posted once");
+        waits.length = 0;
+        const deadlineAt = now() + RETRY.gatewayMs + 1000;
+        await assert.rejects(rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "late" }, deadlineAt }), (e) => e.status === 502);
+        assert.deepEqual(waits, [RETRY.gatewayMs], "no wait past the deadline");
+        assert.equal(seen.filter((x) => x === "POST /repos/o/r/issues/3/comments").length, 2);
+        assert.deepEqual(gets, [1, 2, 3]);
+      },
+    );
+  } finally {
+    setSelf(null);
+  }
 });
 
 // ------------------------------------------------------------------ git

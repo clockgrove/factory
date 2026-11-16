@@ -463,7 +463,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
    * a head that does not contain `onto` (the conflict pass gave up); or the branch's change not kept in it (keptLeft,
-   * on content; with no `judge`, a key-less stage, commitsLeft first). Read on git's exit codes and fields only.
+   * on content; with no `judge`, a stage with no decider, commitsLeft first). Read on git's exit codes and fields only.
    * `box.rebaseNote`: a path the branch's commits changed and undid, which the head changes anyway (unsettled `undone`),
    * said for the progress comment, never a Block; "" when none.
    */
@@ -493,7 +493,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     try {
       const left = await keptLeft({ ...open, from, judge });
       // No decision model (no AI Gateway key) and a path not exactly the branch's: the commits are matched as before,
-      // so no key-less stage Blocks a rebase the commit match passes.
+      // so no stage without a decider Blocks a rebase the commit match passes.
       return left ?? (await commitsLeft({ from, onto, head }));
     } catch (e) {
       log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
@@ -683,7 +683,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The key-less check: each of the branch's commits matched in the head by its author, author time and subject (only
+   * The check with no decider: each of the branch's commits matched in the head by its author, author time and subject (only
    * a commit that changes something counts). One missing (a `rebase --skip`) is lost unless its patch is already in the
    * head (it reverse-applies there), as git rebase drops a commit whose change the base already has.
    */

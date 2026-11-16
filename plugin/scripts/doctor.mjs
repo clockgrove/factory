@@ -31,7 +31,9 @@ import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
-import { triageKey, triageKeyState } from "./lib/triage.mjs";
+import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
+import { DRIFT_MODEL } from "./lib/drift.mjs";
+import { deciderKind } from "./lib/decider.mjs";
 import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
@@ -446,8 +448,9 @@ export function appPermissionChecks(app) {
  * Local red-check triage reruns a flaky red's failed jobs, which needs the token's Actions write (LOCAL.md). A
  * fine-grained token's permissions cannot be listed, so doctor makes a dry rerun: it asks GitHub to rerun the failed
  * jobs of workflow run 0, which no repository has, so nothing can rerun. A 403 is the token lacking Actions write: a
- * warning with the fix. Any other answer (a 404 included, which a token with or without the permission may get)
- * leaves it not verified, never a pass.
+ * warning with the fix. A 404, GitHub's usual answer for that run, passes, saying what it saw (it does not prove the
+ * permission: a token without it may get one too, and then the first flaky red's rerun is refused, said in its triage
+ * line, and goes to the fix pass). Any other answer leaves it not verified, a warning.
  */
 export async function rerunProbeCheck({ repo, token }) {
   const name = "triage rerun";
@@ -459,6 +462,7 @@ export async function rerunProbeCheck({ repo, token }) {
     if (e.status === 403 && !e.rateLimited) return WARN(name, "red-check triage is on, but the token cannot rerun CI jobs: GitHub refused a dry rerun (403)", grant);
     status = e.status || "no answer";
   }
+  if (status === 404) return PASS(name, "GitHub did not refuse a dry rerun (404); a refusal at a real rerun is named in its triage line");
   return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
 }
 
@@ -506,13 +510,31 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
 }
 
 /**
- * The finding check (lib/finding-check.mjs) as doctor says it: on with a decision model's key; without one a WARN, since
- * Factory's reply then answers a reviewer finding unjudged. Read from triage's key (triage.mjs triageKeyState).
+ * Which decider this repository's stages use (lib/decider.mjs): the AI Gateway's decision models with a usable key, else
+ * the stage's own harness on its login (decision_route auto), else none. A PASS each way; a local key file Factory
+ * refuses (any code but no-key) is a WARN, since the gateway was meant.
+ */
+export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
+  const kind = deciderKind({ inputs, env, home });
+  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, a reply resolves its finding unjudged, and a send-back's conflict pass is checked by matching commits";
+  if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
+  if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
+  const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check): no AI Gateway key (${kind.code})`;
+  if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
+  return PASS("decision calls", text);
+}
+
+/**
+ * The finding check (lib/finding-check.mjs) as doctor says it: on wherever a decision call runs (deciderKind: the
+ * gateway's model, or the stage's harness); with none (decision_route off, or gateway with no key) a WARN, since
+ * Factory's reply then answers a reviewer finding unjudged.
  */
 export function findingCheckRow({ inputs, env = process.env, home } = {}) {
-  const { key, code } = triageKeyState({ inputs, env, ...(home ? { home } : {}) });
-  if (key) return PASS("finding check", "an AI Gateway key: the decision model judges each answer to a reviewer finding before its thread is resolved");
-  return WARN("finding check", `off (${code}): reviewer findings are not judged; Factory's reply answers each one`, env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4)");
+  const kind = deciderKind({ inputs, env, ...(home ? { home } : {}) });
+  if (kind.name === "ai-gateway") return PASS("finding check", "an AI Gateway key: the decision model judges each answer to a reviewer finding before its thread is resolved");
+  if (kind.name === "harness") return PASS("finding check", "the stage's own harness judges each answer to a reviewer finding before its thread is resolved");
+  return WARN("finding check", `off (${kind.code}): reviewer findings are not judged; Factory's reply answers each one`, kind.route === "off" ? "set decision_route to auto (INSTALL.md)" : env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key, or set decision_route to auto (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4), or set decision_route to auto");
 }
 
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
@@ -527,9 +549,11 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   else if (app?.appSlug) {
     out.push(...appPermissionChecks(app));
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
-  // Local red-check triage (a usable gateway key) reruns flaky reds with this token: doctor checks it may (not in a stage).
-  if (local && !job && token && triageKey({ inputs, env })) out.push(await probeRerun({ repo, token }));
-  if (local && !job) out.push(decisionKeyCheck({ inputs, env }));
+  // Local red-check triage (the gateway's model with a key, else the stage's harness) reruns flaky reds with this token:
+  // doctor checks it may (not in a stage), unless no decision call runs (decision_route off, or gateway with no key).
+  if (local && !job && token && deciderKind({ inputs, env }).name !== "off") out.push(await probeRerun({ repo, token }));
+  // Which decider answers the decision calls (red-check triage, the drift advisory): where the key is read, a job or local mode.
+  if (job || local) out.push(deciderCheck({ inputs, env }));
   // Where the key is in reach (local mode's file, the job's input): whether reviewer findings are judged.
   if (local || job) out.push(findingCheckRow({ inputs, env }));
 
@@ -1374,19 +1398,7 @@ export function gitCheck(present, version) {
   if (!version) return WARN("git", "present; its version could not be read", `use git ${min} or later`);
   const v = version.join(".");
   if (gitAtLeast(version, MERGE_BASE_GIT)) return PASS("git", v);
-  return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with an AI Gateway key every send-back's conflict pass Blocks (without one its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
-}
-
-/**
- * The decision model's key, said by local mode's doctor (not in a stage): what it turns on, and what runs without it.
- * Off (no key file) passes, as the key is optional; a key file Factory refuses warns with its code (LOCAL.md).
- */
-export function decisionKeyCheck({ inputs, env = process.env }) {
-  const { key, code } = triageKeyState({ inputs, env });
-  if (key) return PASS("decision model", "an AI Gateway key: red-check triage, the drift advisory, and a content check of each send-back's conflict pass are on");
-  const without = "a red goes to the fix pass untriaged, and a send-back's conflict pass is checked by matching commits where a file is not exactly the branch's: a squashed or reworded rebase Blocks, and a change lost through a rename or a merge, or a commit kept by author, time and subject whose conflict was resolved to the default branch's side, can pass";
-  if (code === "no-key") return PASS("decision model", `off (no key): ${without}; a key in ~/.config/factory/ai-gateway-key turns the content check on (LOCAL.md)`);
-  return WARN("decision model", `the AI Gateway key is not used (${code}): ${without}`, "fix the key file as LOCAL.md says (step 4)");
+  return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with a decider (the AI Gateway's model, or the stage's harness) every send-back's conflict pass Blocks (with decision_route off its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
 }
 
 /** Per harness with a sandbox on a runner: its name in the checks, and the binaries it needs where the job runs. */

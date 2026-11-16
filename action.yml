@@ -186,7 +186,7 @@ inputs:
     description: The longest a hand-off to review, or a conflicting PR's rebase, waits for a sibling ahead of it that it conflicts with (sibling_hold), counted from its first wait; then it goes on beside the sibling. 6 when empty. A number above 0, at most 168 (7 days). Scheduling only.
     required: false
   max_parts:
-    description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend: each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top. 6 when empty. A whole number from 1 to 50.
+    description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend; each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top. 6 when empty. A whole number from 1 to 50.
     required: false
   step_stall_factor:
     description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Factory then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.

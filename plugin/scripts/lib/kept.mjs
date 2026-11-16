@@ -41,7 +41,7 @@ export function keptInput({ path, conflicted = false, branch, base, head }, tag 
  * `stage`, or `decision_route` off; rebaseLeft then matches commits instead). judge(item) resolves {kept, why}: `why`
  * says, when not kept, what the model answered; it never throws.
  */
-export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = confidenceFloor(inputs).min }) {
+export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = null }) {
   // The one decision interface (decider.mjs): the AI Gateway's `triage_model` with a key, else the stage's own harness.
   const ask = openDecider({ inputs, env, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   if (ask.off) return null;
@@ -57,8 +57,10 @@ export function openKeptCheck({ inputs, env = process.env, stage = null, decider
     const sure = typeof a.confidence === "number";
     const conf = sure ? a.confidence.toFixed(2) : "";
     log(`rebase check (${model}): ${item.path}: ${a.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a.error || "?"})`}`);
-    if (a.verdict === "kept" && sure && a.confidence >= min) return { kept: true, why: "" };
-    if (a.verdict === "kept") return { kept: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${min}` };
+    // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
+    const floor = min ?? confidenceFloor(inputs, ask).min;
+    if (a.verdict === "kept" && sure && a.confidence >= floor) return { kept: true, why: "" };
+    if (a.verdict === "kept") return { kept: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${floor}` };
     if (a.verdict === "lost") return { kept: false, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
     return { kept: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
   };

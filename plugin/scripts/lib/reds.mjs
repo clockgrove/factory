@@ -45,7 +45,8 @@ export const sameBySignature = async (a, b) => {
  * they cannot tell; sameBySignature by default), or [{run, sig}]. A run that passed is not asked about, nor any run
  * once the answer is settled. Resolves {base, said, exact, undecided}: `said` how the base's newest run was judged and
  * `exact` whether without the decision model; `undecided` the first judgement with no answer that could have made it a
- * base failure (its `cause`, `said`, `limited`), else null.
+ * base failure (its `cause`, `said`, `limited`; one the stage harness's usage limit stopped ends the questions and is
+ * always returned), else null.
  */
 export async function baseMatch(job, runs, same = sameBySignature) {
   const newest = (runs || []).slice(0, BASE_RUNS);
@@ -72,10 +73,12 @@ export async function baseMatch(job, runs, same = sameBySignature) {
     else if (j.undecided) {
       open += 1;
       undecided ??= j;
+      // The stage harness's usage limit stopped it: no later question gets an answer either.
+      if (j.limited) break;
     } else if (i === 0) break;
   }
   const base = newestSame && matches >= BASE_MATCHES;
-  return { base, said, exact, undecided: !base && undecided && matches + open >= BASE_MATCHES ? undecided : null };
+  return { base, said, exact, undecided: !base && undecided && (undecided.limited || matches + open >= BASE_MATCHES) ? undecided : null };
 }
 
 /**
@@ -107,7 +110,8 @@ export function evidenceText({ branch, job, evidence, lines }) {
 /**
  * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence}],
  * truncated, branch, green, diff, diffError}. `base` is {sha, said} when the job fails the same way, steadily, on the
- * default branch (baseMatch, with `same`: triage.mjs openTriage `same`, else the signature alone), else null;
+ * default branch (baseMatch, with `same`: triage.mjs openTriage `same`, which the caller passes only when nothing on the
+ * head points at the change, session.mjs baseJudge; else the signature alone), else null;
  * `baseUndecided` ({cause, said, limited?}) when a judgement that could have made it so got no answer; `evidence` is
  * what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the
  * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Factory's own mirror) or, when the red head descends from

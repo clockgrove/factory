@@ -152,7 +152,7 @@ export function answerInput({ repo, issue, question, comments }, tag = randomByt
  */
 export function openAnswerCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
-  const floor = confidenceFloor(inputs);
+  const floor = () => confidenceFloor(inputs, ask);
   if (ask.off) return { model: ask.model, off: ask.off, floor, judge: null, asked: () => ask.asked() };
   const judge = async (input) => {
     const a = await Promise.resolve(ask.decide(input, ANSWER_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
@@ -190,7 +190,7 @@ export async function judgeAnswer({ check, repo, issue, comments, decisions, sin
   if (!asked) return { resume: true, why: "no Factory notice of the Question to judge the comments against: a writer's comment resumes it" };
   if (prepare && (await prepare()) === false) return { resume: true, why: "the stage's decider could not be readied: a writer's comment resumes the Question" };
   const v = await check.judge(answerInput({ repo, issue, question: asked.text, comments: fresh }));
-  const floor = check.floor ?? confidenceFloor();
+  const floor = check.floor?.() ?? confidenceFloor();
   log(`answer check (${check.model}, ${floor.text}): #${issue}, ${fresh.length} comment(s) since the Question, the newest by ${newest.author}: ${said(v)}`);
   const named = { issue, key, author: newest.author, at: newest.at, root: asked.root, form: asked.form, model: check.model, confidence: v.confidence };
   if (keepsOpen(v, floor.min)) return { resume: false, open: named };

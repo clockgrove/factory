@@ -1361,7 +1361,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   };
   const redOf = async (v) => {
     const failed = v.failed;
-    const detail = v.fromChecks && v.failedRuns?.length && !failed.timedOut ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null, same: triage?.same ?? null }).catch((e) => {
+    const read = v.fromChecks && v.failedRuns?.length && !failed.timedOut;
+    const same = read ? await baseJudge(triage, { sha: v.sha, failedRuns: v.failedRuns }) : null;
+    const detail = read ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null, same }).catch((e) => {
       log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
       return null;
     }) : null;
@@ -2847,6 +2849,20 @@ export const queueJobs = (jobs) =>
 export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job:${job?.name}`);
 
 /**
+ * The same-failure judge redDetail may judge a red on `sha` the default branch's with (triage.mjs openTriage `same`),
+ * or null for the failure signature alone: only when triage's `modelBase` says nothing points at the change (no
+ * failing job read as the change's at the floor on this head, no failure naming a file or test the PR changes). A
+ * triage with no such check, or one that fails, is the signature alone.
+ */
+export async function baseJudge(triage, { sha, failedRuns }) {
+  if (!triage?.same || !triage.modelBase || !failedRuns?.length) return null;
+  const m = await Promise.resolve(triage.modelBase({ sha, failedRuns })).catch((e) => ({ ok: false, why: `its check failed (${String(e?.message || e).slice(0, 80)})` }));
+  if (m?.ok) return triage.same;
+  log(`base-failure check on ${String(sha).slice(0, 7)}: by failure signature only, as ${m?.why || "nothing was said"}`);
+  return null;
+}
+
+/**
  * What a red queue drop the merge pass handed to the review stage is, decided as a red PR check is (validationLoop): the
  * PR's merge-group run of this drop (github.mjs mergeGroupRuns, any status, read with `actionsToken`): the newest
  * created after `after` (the removal before the drop; at most QUEUE_RED_LOOKBACK_MS back) and by the drop. None listed yet
@@ -2857,8 +2873,9 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
  * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
  * (`none`), triage is off and no failure names a file or test the PR changes (`unclassified`, triage.mjs
  * namesChange), or every failing job fails the same way on the default branch or got no answer on whether it does
- * (`unjudged`, reds.mjs undecidedOnBase; the stage harness's usage limit that stopped the question throws
- * UsageLimitReached). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
+ * (`unjudged`, or `unjudged-outage` when the decider's vendor was out: reds.mjs undecidedOnBase; the stage harness's usage
+ * limit that stopped the question throws UsageLimitReached). Triage's verdicts come first: the decision model may judge
+ * the red the default branch's only when they and the failures point at nothing the PR changes (baseJudge). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
  * detail, tail, lead, command, queue: true}), `sigs` (its classes, queueRedClass), `jobs` (queueJobs: what the
  * progress check compares) and `passed` (the check runs that concluded success on the queue's commit).
  */
@@ -2886,23 +2903,24 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
   if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
-  const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false, same: triage?.same ?? null }).catch((e) => {
+  // Triage first: its verdicts on this commit say whether the decision model may judge the red the default branch's.
+  const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
+    log(`triage failed: ${String(e?.message || e).slice(0, 160)}`);
+    return { flaky: false, off: true, named: false };
+  });
+  const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false, same: await baseJudge(triage, { sha, failedRuns }) }).catch((e) => {
     log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
     return null;
   });
   // No failed job's log could be read: nothing says what failed, so no fix pass is spent on it.
   if (!detail?.jobs?.some((j) => String(j.log || "").trim())) return { kind: "none", sha, reason: `the failed jobs' logs on the queue's commit ${sha.slice(0, 7)} could not be read` };
-  const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
-    log(`triage failed: ${String(e?.message || e).slice(0, 160)}`);
-    return { flaky: false, off: true, named: false };
-  });
   if (verdict?.flaky) return { kind: "flaky", sha, reason: "triage reads every failing job as a flake" };
   if (allOnBase(detail)) return { kind: "base", sha, reason: baseFailureReason(detail) };
   // All the default branch's but for a same-failure judgement that got no answer: not known to be the PR's. The drop
   // stays handed when the stage harness's usage limit stopped the question; the stage ends on it.
   const unjudged = undecidedOnBase(detail);
   if (unjudged?.limited) throw new UsageLimitReached(unjudged.limited, { since: Date.now(), label: "same-failure check" });
-  if (unjudged) return { kind: "unjudged", sha, reason: unjudged.why };
+  if (unjudged) return { kind: unjudged.cause === "outage" ? "unjudged-outage" : "unjudged", sha, reason: unjudged.why };
   const command = `required checks ${names.join(", ")} on the merge queue's commit ${sha.slice(0, 7)}`;
   const { failures, lead, tail } = redOfDetail(detail, { failed: { command, ok: false, code: 1, output: "" } });
   const first = String(lead || "").split("\n")[0].replace(/^--- /, "") || command;
@@ -3040,7 +3058,7 @@ export async function queueFailureLines(repo, { prNumber, base, since, actionsTo
  * The Block's words and cause for drops that reached the queue's bound, from what the review stage recorded of the red
  * ones (queueRedRecords `kind`, the newest counted one): GitHub's side (`infra`, `not-started`) is an outage, the default
  * branch's own failure (`base`) and a flake read twice (`flaky`) are named as such, a base failure the decision model
- * could not judge (`unjudged`) is Factory's, and anything else, with the failed jobs' first lines (`lines`,
+ * could not judge (`unjudged`) is Factory's, or the outage's (`unjudged-outage`), and anything else, with the failed jobs' first lines (`lines`,
  * queueFailureLines), is the work's. Null when nothing was recorded and no line was read.
  */
 export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
@@ -3049,7 +3067,7 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   const kind = kinds.at(-1) ?? null;
   if (kind === "infra" || kind === "not-started") return { cause: "outage", reason: `${head}${failed}. Triage read the failure as GitHub's side (${kind}); rerun the queue's jobs or wait for GitHub, then re-apply the label` };
   if (kind === "base") return { cause: "work", reason: `${head}${failed}. The default branch fails the same way: fix it there, then re-apply the label` };
-  if (kind === "unjudged") return { cause: "factory", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer); check the default branch's runs of the failing jobs, then re-apply the label` };
+  if (kind === "unjudged" || kind === "unjudged-outage") return { cause: kind === "unjudged-outage" ? "outage" : "factory", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer${kind === "unjudged-outage" ? ": its vendor's outage" : ""}); check the default branch's runs of the failing jobs, then re-apply the label` };
   if (kind === "flaky") return { cause: "work", reason: `${head}${failed}. Triage read the failure as a flake each time: fix or steady that test on the branch or the default branch, then re-apply the label` };
   if (!lines) return null;
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };

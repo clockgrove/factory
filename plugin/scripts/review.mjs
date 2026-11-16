@@ -487,7 +487,7 @@ const BINARY_DIFF = /^(?:Binary files .* differ|GIT binary patch)$/m;
  */
 export function answerDecider({ inputs, env = process.env, home = homedir(), stage = null, decider = null }) {
   const d = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
-  return { model: d.model, off: d.off, floor: confidenceFloor(inputs), decider: d.off ? null : d };
+  return { model: d.model, off: d.off, floor: () => confidenceFloor(inputs, d), decider: d.off ? null : d };
 }
 
 /**
@@ -513,7 +513,7 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
   }
   const verdict = ANSWER_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
   const confidence = typeof a?.confidence === "number" ? a.confidence : null;
-  const floor = ask.floor ?? confidenceFloor();
+  const floor = ask.floor?.() ?? confidenceFloor();
   if (verdict === "only_asked" && confidence !== null && confidence >= floor.min) return { review: false, why: "", verdict, confidence, error: null };
   if (verdict === "only_asked") return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as only what was asked, at ${confidence === null ? "no stated confidence" : `confidence ${confidence.toFixed(2)}`}, under the ${floor.text}`, { verdict, confidence });
   if (verdict) return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as more than the findings and failing checks asked`, { verdict, confidence });

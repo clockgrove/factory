@@ -1216,7 +1216,7 @@ function recordingCodex({ outputTokens = [] } = {}) {
  * at 0.55 (below the bar, so a fix pass runs).
  */
 let freshId = 900;
-async function freshRun({ before = testFailed, after = before, logBefore = failingLog, logAfter = logBefore, logMain = logAfter, key = true, decider = asking({ verdict: "flaky_or_infra", confidence: 0.55 }), commits = false, nextRed = false, outputTokens = [], maxUsd = 0, windowMs = 10 * 60_000, onMain = false } = {}) {
+async function freshRun({ before = testFailed, after = before, logBefore = failingLog, logAfter = logBefore, logMain = logAfter, key = true, decider = asking({ verdict: "flaky_or_infra", confidence: 0.55 }), triageWith = (t) => t, commits = false, nextRed = false, outputTokens = [], maxUsd = 0, windowMs = 10 * 60_000, onMain = false } = {}) {
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const sha = "9".repeat(40);
   const next = "b".repeat(40);
@@ -1249,7 +1249,7 @@ async function freshRun({ before = testFailed, after = before, logBefore = faili
         checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
         // The checkout's HEAD as the agent's git reads it: the fresh pass's commit once it ran, with `commits`.
         outbox: { push: async () => true, expected: () => (commits && codex.calls().length >= 2 ? next : sha), fence: async (f) => fences.push(f), agentGit: async () => ({ code: 0, stdout: `${commits && codex.calls().length >= 2 ? next : sha}\n` }) },
-        triage: openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 4, prNumber: 5, token: "t", ...(key ? { decider } : {}) }),
+        triage: triageWith(openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 4, prNumber: 5, token: "t", ...(key ? { decider } : {}) })),
         onPhase: async (l) => phases.push(l),
       }).then((r) => ({ ...r, reruns: seen.reruns })),
     );
@@ -1569,15 +1569,17 @@ test("#413: sameExact: equal signatures are the same failure; another job or ano
   assert.match(input, /\nThe second failure:\n<<<BEGIN f{16}>>>\nJob: quality\nRun: job 2\nFailed step: \(not known\)\n\nx\n<<<END f{16}>>>\n/);
 });
 
-test("#413: a flaky verdict acts only at the floor set beside the model (triage_min_confidence); the line records the verdict, its confidence and the floor", async () => {
-  for (const [env, rerun, floorText] of [[{}, true, "default floor 0\\.7"], [{ FACTORY_TRIAGE_MIN_CONFIDENCE: "0.9" }, false, "floor 0\\.9"]]) {
+test("#413: a flaky verdict acts only at the floor set beside the model (triage_min_confidence) while the gateway's model answers; the line records the verdict, its confidence and the floor", async () => {
+  const floor = { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.9" };
+  // The stage's harness answering is another model: the setting is not its floor.
+  for (const [env, who, rerun, floorText] of [[{}, "ai-gateway", true, "default floor 0\\.7"], [floor, "ai-gateway", false, "floor 0\\.9"], [floor, "harness", true, "default floor 0\\.7"]]) {
     const [id] = fresh413(1);
-    const decider = asking(flaky(0.8));
+    const decider = { ...asking(flaky(0.8)), name: who };
     const lines = [];
     await withHead({ runs: [], jobs: { [id]: { ...testFailed, id } }, logs: { [id]: failingLog } }, async (seen) => {
       const t = openTriage({ inputs: resolveInputs({ env }), env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
       const r = await t.red({ sha: "d".repeat(40), failedRuns: [quality(id)], required: ["quality"] });
-      assert.equal(r.rerun, rerun, JSON.stringify(env));
+      assert.equal(r.rerun, rerun, `${JSON.stringify(env)} ${who}`);
       assert.equal(seen.reruns, rerun ? 1 : 0);
       assert.match(lines[0], new RegExp(`^triage of the red on ddddddd \\(${TRIAGE_MODEL}, ${floorText}\\): quality: flaky_or_infra 0\\.80 \\[`));
       assert.match(lines[0], rerun ? /→ failed jobs rerun$/ : /→ fix pass$/);
@@ -1665,8 +1667,8 @@ test("#413: a red the default branch shows with another signature in the same fa
       if (unjudged) assert.match(undecidedOnBase(detail).why, /^whether main fails quality the same way could not be judged: the same-failure check got no verdict/);
     });
   }
-  // A floor set beside the model: the same 0.9 is under 0.95.
-  const decider = byQuestion({ same_failure: { verdict: "same_failure", confidence: 0.9 } });
+  // A floor set beside the model, while the gateway's model answers: the same 0.9 is under 0.95.
+  const decider = { ...byQuestion({ same_failure: { verdict: "same_failure", confidence: 0.9 } }), name: "ai-gateway" };
   const m = onMain(movedLog);
   await withHead({ runs: [], ...m }, async () => {
     const t = openTriage({ inputs: { triageMinConfidence: 0.95 }, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
@@ -1707,19 +1709,152 @@ test("#413: every decision call on the triage model reads its verdict at the flo
   const { keepsOpen, openAnswerCheck } = await import("../scripts/lib/answer-check.mjs");
   const { answerDecider, answerGate } = await import("../scripts/review.mjs");
   const inputs = { triageModel: "t/m", triageMinConfidence: 0.9 };
-  const at = (verdict) => ({ decide: async () => ({ verdict, confidence: 0.8 }) });
+  const at = (verdict) => ({ name: "ai-gateway", decide: async () => ({ verdict, confidence: 0.8 }) });
   assert.deepEqual(await openKeptCheck({ inputs, decider: at("kept") }).judge({ path: "a.txt", branch: "", base: "", head: "" }), { kept: false, why: "the decision model (t/m) said kept at 0.80, under 0.9" });
   const sig = (id) => ({ id, line: `${id} failed` });
   const p = await openProgressCheck({ inputs, decider: at("closer") }).judge({ before: { jobs: [{ name: "a", sig: sig("aaaaaaaaaaaa") }] }, after: { jobs: [{ name: "b", sig: sig("bbbbbbbbbbbb") }] } });
   assert.equal(p.progress, false);
   assert.match(p.why, /under 0\.9$/);
   const finding = openFindingCheck({ inputs, decider: at("rebutted") });
-  assert.equal(finding.floor.min, 0.9);
-  assert.equal(resolves({ verdict: "rebutted", confidence: 0.8 }, finding.floor.min), false);
+  assert.equal(finding.floor().min, 0.9);
+  assert.equal(resolves({ verdict: "rebutted", confidence: 0.8 }, finding.floor().min), false);
   assert.equal(resolves({ verdict: "rebutted", confidence: 0.8 }), true, "0.8 clears the default floor");
-  assert.equal(openAnswerCheck({ inputs, decider: at("no_decision") }).floor.min, 0.9);
+  assert.equal(openAnswerCheck({ inputs, decider: at("no_decision") }).floor().min, 0.9);
+  const { openEditCheck } = await import("../scripts/lib/edit-check.mjs");
+  assert.equal((await openEditCheck({ inputs, decider: { ...at("wording"), name: "ai-gateway" } }).judge({ title: "a", body: "b" }, { title: "a", body: "b." })).verdict, "requirement", "0.8 is under the set floor");
+  // The stage's harness is another model: the default floor reads its verdict, whatever the setting.
+  const harness = (verdict) => ({ name: "harness", decide: async () => ({ verdict, confidence: 0.8 }) });
+  assert.equal((await openKeptCheck({ inputs, decider: harness("kept") }).judge({ path: "a.txt", branch: "", base: "", head: "" })).kept, true);
+  assert.equal(openFindingCheck({ inputs, decider: harness("rebutted") }).floor().text, "default floor 0.7");
+  assert.equal((await openEditCheck({ inputs, decider: harness("wording") }).judge({ title: "a", body: "b" }, { title: "a", body: "b." })).verdict, "wording");
   assert.equal(keepsOpen({ verdict: "no_decision", confidence: 0.8 }, 0.9), false);
   const gate = await answerGate({ diff: "diff --git a/x b/x\n+1\n", ask: answerDecider({ inputs, decider: at("only_asked") }) });
   assert.equal(gate.review, true);
   assert.match(gate.why, /confidence 0\.80, under the floor 0\.9$/);
+});
+
+test("#413 review: the same-failure question shows each side's own failure lines and says a failure only one side has is another failure", async () => {
+  const { SAME_QUESTION, linesOnlyIn, sameInput } = await import("../scripts/lib/triage.mjs");
+  assert.match(SAME_QUESTION.instructions, /A failure only one run shows \(a test, an assertion or an error the other run did not print\) means different_failure/);
+  const a = ["not ok 1 - adds", "AssertionError: 2 == 3 at 0.84ms", "not ok 2 - totals"];
+  const b = ["not ok 1 - adds", "AssertionError: 5 == 7 at 12ms"];
+  assert.deepEqual(linesOnlyIn(a, b), ["not ok 2 - totals"], "folded: numbers and durations alone are no difference");
+  assert.deepEqual(linesOnlyIn(b, a), []);
+  const input = sameInput({ first: { name: "q", label: "job 1", step: "Run npm test", window: "w1", lines: a }, second: { name: "q", label: "job 2", step: "Run npm test", window: "w2", lines: b } }, "a".repeat(16));
+  assert.match(input, /Failure lines only the first run printed:\n<<<BEGIN a{16}>>>\nnot ok 2 - totals\n<<<END a{16}>>>/);
+  assert.match(input, /Failure lines only the second run printed:\n<<<BEGIN a{16}>>>\n\(none: every failure line it printed, folded, the other printed too\)\n<<<END a{16}>>>/);
+});
+
+test("#413 review: a failure window is cut hard; a question still too large is not the same failure, never undecided, and is not asked", async () => {
+  const { FAILURE_WINDOW, SAME_INPUT_CAP, failureWindow } = await import("../scripts/lib/triage.mjs");
+  const huge = ["##[group]Run npm test", "##[error]first", ...Array.from({ length: 50_000 }, (_, i) => `noise line ${i} between the errors`), "##[error]last"].join("\n");
+  const w = failureWindow(huge);
+  assert.ok(w.length < FAILURE_WINDOW + 100, `${w.length}`);
+  assert.match(w, /\n\[\d+ characters cut\]\n/);
+  assert.ok(w.includes("##[error]first") && w.endsWith("##[error]last"), "the head and the tail are kept");
+  // A step name past the cap on both sides (the jobs API's text): no question, neither the same nor surely another.
+  const decider = byQuestion({ same_failure: { verdict: "same_failure", confidence: 0.99 } });
+  const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+  const step = "s".repeat(SAME_INPUT_CAP);
+  const side = (id, log) => ({ id, name: "quality", sig: failureSignature("quality", log), step, window: failureWindow(log), label: `job ${id}` });
+  const j = await t.same(side(1, failingLog), side(2, movedLog));
+  assert.deepEqual({ same: j.same, different: j.different, undecided: !!j.undecided }, { same: false, different: false, undecided: false });
+  assert.equal(decider.asked.length, 0);
+});
+
+test("#413 review: baseMatch over mixed verdicts: the newest run must be judged the same, two of three in all; an unanswered one counts only where it could make the match", async () => {
+  const { baseMatch } = await import("../scripts/lib/reds.mjs");
+  const said = { same: { same: true, different: false, exact: false, said: "same" }, diff: { same: false, different: true, exact: false, said: "diff" }, none: { same: false, different: false, exact: false, undecided: true, cause: "outage", said: "none" } };
+  for (const [verdicts, base, undecided, asked] of [
+    [["same", "diff", "same"], true, false, 3],
+    [["same", "same", "diff"], true, false, 2],
+    [["diff", "same", "same"], false, false, 1],
+    [["none", "same", "same"], false, true, 3],
+    [["same", "none", "diff"], false, true, 3],
+    [["same", "diff", "diff"], false, false, 3],
+    [["same", "none", "none"], false, true, 3],
+  ]) {
+    const calls = [];
+    const runs = verdicts.map((v, i) => ({ run: { conclusion: "failure" }, sha: `${i}`.repeat(40), side: { label: v } }));
+    const m = await baseMatch({ name: "quality" }, runs, async (_, b) => (calls.push(b.label), said[b.label]));
+    assert.equal(m.base, base, verdicts.join(","));
+    assert.equal(!!m.undecided, undecided, verdicts.join(","));
+    assert.equal(calls.length, asked, verdicts.join(","));
+    assert.equal(m.exact, false);
+  }
+});
+
+test("#413 review: an earlier rerun whose log cannot be read is no proof of another failure: not `different` (so no rerun), and no question", async () => {
+  const { failureWindow } = await import("../scripts/lib/triage.mjs");
+  const decider = byQuestion({ same_failure: { verdict: "different_failure", confidence: 0.99 } });
+  const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+  const now = { id: 1, name: "quality", sig: failureSignature("quality", movedLog), step: "Run npm test", window: failureWindow(movedLog), label: "job 1" };
+  for (const [id, text] of [[2, async () => ""], [3, async () => { throw new Error("410 Gone"); }]]) {
+    const j = await t.same(now, { id, name: "quality", sig: { id: failureSignature("quality", failingLog).id }, step: "Run npm test", text, label: `job ${id}, rerun earlier` });
+    assert.deepEqual({ same: j.same, different: j.different, undecided: !!j.undecided }, { same: false, different: false, undecided: false });
+  }
+  assert.equal(decider.asked.length, 0);
+});
+
+test("#413 review: again() does not rerun a head a fix pass left unchanged when its failure is judged the one rerun before", async () => {
+  for (const [answer, skipped] of [[{ verdict: "same_failure", confidence: 0.9 }, /^the failure of quality was already rerun once on this Objective \(rerun before as job \d+: same_failure 0\.90 /], [{ verdict: "different_failure", confidence: 0.9 }, /^quality has no triage verdict and did not fail on GitHub's side$/]]) {
+    const [first, second] = fresh413(2);
+    const decider = byQuestion({ red_cause: flaky(0.95), same_failure: answer });
+    await withHead({ runs: [], jobs: { [first]: { ...testFailed, id: first }, [second]: { ...testFailed, id: second } }, logs: { [first]: failingLog, [second]: movedLog } }, async (seen) => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+      assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: [quality(first)], required: ["quality"] })).rerun, true);
+      const r = await t.again({ sha: "e".repeat(40), failedRuns: [quality(second)] });
+      assert.equal(r.rerun, false);
+      assert.match(r.skipped, skipped);
+      assert.equal(seen.reruns, 1);
+    });
+  }
+});
+
+test("#413 review: a red whose head the change is named in, or that triage read as the change's, is never judged the default branch's by the model", async () => {
+  const { baseJudge } = await import("../scripts/lib/session.mjs");
+  const framed = ["##[group]Run npm test", "not ok 1 - sums", "  TypeError: sum is not a function", "      at run (/home/runner/work/app/app/src/sum.js:3:4)", "##[error]Process completed with exit code 1."].join("\n");
+  for (const [log, prFiles, answer, judged] of [
+    [failingLog, [], flaky(0.5), true],
+    [failingLog, [], change(0.9), false],
+    [failingLog, [], change(0.5), true],
+    [framed, ["src/sum.js"], flaky(0.5), false],
+  ]) {
+    const [id] = fresh413(1);
+    const decider = byQuestion({ red_cause: answer });
+    await withHead({ runs: [], jobs: { [id]: { ...testFailed, id } }, logs: { [id]: log }, prFiles }, async () => {
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider });
+      await t.red({ sha: "d".repeat(40), failedRuns: [quality(id)], required: ["quality"] });
+      const same = await baseJudge(t, { sha: "d".repeat(40), failedRuns: [quality(id)] });
+      assert.equal(same === t.same, judged, `${JSON.stringify(answer)} ${prFiles}`);
+    });
+  }
+  // In the validation loop: read as the change's, the default branch's same-step red is not asked about, and the fix pass runs.
+  const decider = byQuestion({ red_cause: change(0.9), same_failure: { verdict: "same_failure", confidence: 0.95 } });
+  const run = await freshRun({ onMain: true, logMain: movedLog, decider });
+  assert.ok(run.calls.length >= 1, "the fix pass ran");
+  assert.equal(run.result.baseFailure, undefined);
+  assert.equal(decider.asked.filter((a) => a.q === "same_failure").length, 0);
+});
+
+test("#413 review: the stage harness's usage limit that stopped a same-failure question ends the stage, on the red and on the red after a rerun", async () => {
+  const { sameExact } = await import("../scripts/lib/triage.mjs");
+  const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
+  // The real triage, but its same-failure question meets the harness's usage limit where the exact part cannot tell.
+  const limited = (labels) => (t) => ({
+    ...t,
+    same: async (a, b) => {
+      const step = async (x) => (typeof x.step === "function" ? await x.step() : x.step) || "";
+      if (sameExact({ ...a, step: await step(a) }, { ...b, step: await step(b) }) === "different") return { same: false, different: true, exact: true, said: "another failed step" };
+      labels.push(a.label);
+      return { same: false, different: false, exact: false, undecided: true, cause: "factory", said: "no verdict (rate_limited)", limited: { harness: "codex", resetAt: Date.now() + 3600_000 } };
+    },
+  });
+  const first = [];
+  await assert.rejects(freshRun({ onMain: true, logMain: movedLog, triageWith: limited(first) }), (e) => e.code === USAGE_LIMIT);
+  assert.equal(first.length, 1, "no further question after the limit");
+  // The first red failed in its checkout (another step than the default branch's): no question; the red after its rerun is asked.
+  const afterRerun = [];
+  await assert.rejects(freshRun({ ...movedRed, onMain: true, logMain: movedLog, triageWith: limited(afterRerun) }), (e) => e.code === USAGE_LIMIT);
+  assert.equal(afterRerun.length, 1);
 });

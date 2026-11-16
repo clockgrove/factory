@@ -145,7 +145,7 @@ export function progressInput({ before, after, diff }, tag = randomBytes(8).toSt
  * stage harness's usage limit that stopped the question is `limited` too: the caller ends the stage on it
  * (harness.mjs UsageLimitReached).
  */
-export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = confidenceFloor(inputs).min } = {}) {
+export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
   const judge = async ({ before, after, seen = [], diff = null }) => {
@@ -156,8 +156,10 @@ export function openProgressCheck({ inputs = {}, env = process.env, home = homed
     const sure = typeof a?.confidence === "number";
     const conf = sure ? a.confidence.toFixed(2) : "";
     log(`fix progress (${model}): ${a?.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a?.error || "no_answer"})`}`);
-    if (a?.verdict === "closer" && sure && a.confidence >= min) return { progress: true, why: `the decision model (${model}) judged it closer to green at ${conf}` };
-    if (a?.verdict === "closer") return { progress: false, why: `the decision model (${model}) judged it closer to green at ${conf || "no stated confidence"}, under ${min}` };
+    // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
+    const floor = min ?? confidenceFloor(inputs, ask).min;
+    if (a?.verdict === "closer" && sure && a.confidence >= floor) return { progress: true, why: `the decision model (${model}) judged it closer to green at ${conf}` };
+    if (a?.verdict === "closer") return { progress: false, why: `the decision model (${model}) judged it closer to green at ${conf || "no stated confidence"}, under ${floor}` };
     if (a?.verdict === "not_closer") return { progress: false, why: `the decision model (${model}) judged it no closer to green${conf ? ` at ${conf}` : ""}` };
     const limited = ask.limited?.() ?? null;
     const error = a?.error || "no_answer";

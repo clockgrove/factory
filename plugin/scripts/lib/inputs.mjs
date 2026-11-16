@@ -84,7 +84,7 @@ export const DEFAULTS = {
   decision_route: "auto", // auto | gateway | off: who answers the decision calls (decider.mjs DECISION_ROUTES)
   worker_secrets: "", // the secrets the worker's shell gets, `NAME` or `NAME=SOURCE` each (lib/worker-secrets.mjs); empty: none
   worker_secret_values: "", // their values on Actions and in a cloud sandbox, `SOURCE=value` lines (a secret input)
-  triage_model: "", // empty: triage.mjs TRIAGE_MODEL
+  triage_model: "", // empty: TRIAGE_MODEL_DEFAULT (triage.mjs TRIAGE_MODEL)
   triage_min_confidence: "", // empty: triage.mjs MIN_CONFIDENCE, measured on TRIAGE_MODEL; goes with triage_model (settingLayers, resolveInputs)
   drift_model: "", // empty: drift.mjs DRIFT_MODEL (the drift advisory, on with ai_gateway_api_key)
   github_token: "",
@@ -283,6 +283,8 @@ export function machineSettings(env = process.env) {
   return own;
 }
 
+/** The default decision model of red-check triage and the calls on its decider (triage.mjs TRIAGE_MODEL). */
+export const TRIAGE_MODEL_DEFAULT = "perplexity/pplx-decider-v1.2";
 /** The triage model's confidence floor (`triage_min_confidence`), which goes with `triage_model`. */
 const TRIAGE_FLOOR_OF = "FACTORY_TRIAGE_MIN_CONFIDENCE";
 
@@ -310,7 +312,7 @@ export function settingLayers({ workflow = {}, variables = {}, machine = {} } = 
       for (const k of MODEL_SETTINGS) if (!(k in set)) drop(k);
     }
     // The confidence floor is the triage model's own: a layer that names another model drops the floor below it.
-    if ("FACTORY_TRIAGE_MODEL" in set && !(TRIAGE_FLOOR_OF in set) && String(set.FACTORY_TRIAGE_MODEL).trim() !== String(values.FACTORY_TRIAGE_MODEL ?? "").trim()) drop(TRIAGE_FLOOR_OF);
+    if ("FACTORY_TRIAGE_MODEL" in set && !(TRIAGE_FLOOR_OF in set) && triageModelOf(set.FACTORY_TRIAGE_MODEL) !== triageModelOf(values.FACTORY_TRIAGE_MODEL)) drop(TRIAGE_FLOOR_OF);
     for (const [k, v] of Object.entries(set)) {
       values[k] = v;
       from[k] = layer;
@@ -596,22 +598,28 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
   };
 }
 
+/** Input `name`'s value at each precedence tier above, highest first: a flag, the Action's `with:`, the settings. */
+const inputTiers = (name, { args, env }) => [args[name], env[`FACTORY_INPUT_${upper(name)}`], env[`FACTORY_${upper(name)}`]];
+const isSet = (v) => v !== undefined && v !== "";
 /** Where input `name` comes from by the precedence above: 0 a flag, 1 the Action's `with:`, 2 the settings, 3 the default. */
-const inputTier = (name, { args, env }) => {
-  const set = (v) => v !== undefined && v !== "";
-  return set(args[name]) ? 0 : set(env[`FACTORY_INPUT_${upper(name)}`]) ? 1 : set(env[`FACTORY_${upper(name)}`]) ? 2 : 3;
+const inputTier = (name, ctx) => {
+  const i = inputTiers(name, ctx).findIndex(isSet);
+  return i < 0 ? 3 : i;
 };
+/** The triage model a value names, the default resolved: an empty one is TRIAGE_MODEL_DEFAULT. */
+export const triageModelOf = (v) => String(v ?? "").trim() || TRIAGE_MODEL_DEFAULT;
 
 /**
  * `triage_min_confidence` as a number from 0 to 1, or null for triage.mjs's default floor. A floor belongs to the model
- * it was set for: one set where a model is named below it (a setting under a flag or `with:` naming `triage_model`) is
- * not that model's, so it is not taken. A value that is no number from 0 to 1 is refused with a line and reads as null.
+ * it was set for: one set under a flag or `with:` that names another `triage_model` (the default resolved, so naming the
+ * default model is no other model) is not that model's, so it is not taken. A value that is no number from 0 to 1 is refused with a line and reads as null.
  */
 export function triageFloorSetting({ args = {}, env = process.env } = {}) {
   const tier = inputTier("triage_min_confidence", { args, env });
   if (tier === 3) return null;
-  const model = inputTier("triage_model", { args, env });
-  if (model < tier) {
+  // The model the floor's own tier and those below name, against the model that answers.
+  const beside = triageModelOf(inputTiers("triage_model", { args, env }).slice(tier).find(isSet));
+  if (beside !== triageModelOf(input("triage_model", { args, env }))) {
     log(`triage_min_confidence is set below the triage_model it would go with (a flag or the Action's input names the model): the default floor applies`);
     return null;
   }

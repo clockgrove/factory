@@ -103,7 +103,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
 export function openFindingCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
-  const floor = confidenceFloor(inputs);
+  const floor = () => confidenceFloor(inputs, ask);
   if (ask.off) return { model, off: ask.off, floor };
   const state = { refused: null };
   const one = async (it, ctx) => {
@@ -156,7 +156,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     for (const from of new Set(answered.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
     const items = answered.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), reply: replies.get(String(f.id)), diff: diffs.get(f.raisedOn || since) ?? null }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules });
-    const floor = check.floor ?? confidenceFloor();
+    const floor = check.floor?.() ?? confidenceFloor();
     const byId = new Map(verdicts.map((v) => [String(v.id), v]));
     yes = new Set();
     for (const it of items) {

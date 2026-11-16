@@ -304,3 +304,39 @@ test("serve's start on a refused token (401): named, with where to replace it, e
     await new Promise((ok) => server.close(ok));
   }
 });
+
+test("#413: triage_min_confidence is a setting from 0 to 1 that goes with the triage_model it was set beside, in every layer", async () => {
+  const { MACHINE_SETTINGS } = await import("../scripts/lib/inputs.mjs");
+  const { confidenceFloor } = await import("../scripts/lib/triage.mjs");
+  const floor = (env) => resolveInputs({ env }).triageMinConfidence;
+  assert.equal(floor({}), null);
+  assert.deepEqual(confidenceFloor(resolveInputs({ env: {} })), { min: 0.7, set: false, text: "default floor 0.7" });
+  const gateway = { asked: () => ({ name: "ai-gateway", model: "perplexity/pplx-decider-v1.2" }) };
+  assert.deepEqual(confidenceFloor(resolveInputs({ env: { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85" } }), gateway), { min: 0.85, set: true, text: "floor 0.85" });
+  // Only while the gateway's triage model answers: the stage's harness (also after the gateway refused) is another model.
+  assert.deepEqual(confidenceFloor(resolveInputs({ env: { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85" } }), { asked: () => ({ name: "harness", model: "claude claude-opus-5-5" }) }), { min: 0.7, set: false, text: "default floor 0.7" });
+  for (const [v, want] of [["0", 0], ["1", 1], [" 0.5 ", 0.5], ["1.5", null], ["-0.1", null], ["high", null]]) assert.equal(floor({ FACTORY_TRIAGE_MIN_CONFIDENCE: v }), want, v);
+  // A model named above the floor's own layer (the Action's input, a flag) is not the model the floor was set for.
+  assert.equal(floor({ FACTORY_TRIAGE_MODEL: "a/x", FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85", FACTORY_INPUT_TRIAGE_MODEL: "b/y" }), null);
+  assert.equal(resolveInputs({ args: { triage_model: "b/y" }, env: { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85" } }).triageMinConfidence, null);
+  assert.equal(floor({ FACTORY_INPUT_TRIAGE_MODEL: "b/y", FACTORY_INPUT_TRIAGE_MIN_CONFIDENCE: "0.6" }), 0.6);
+  assert.equal(floor({ FACTORY_INPUT_TRIAGE_MODEL: "b/y", FACTORY_TRIAGE_MODEL: "b/y", FACTORY_INPUT_TRIAGE_MIN_CONFIDENCE: "0.6" }), 0.6);
+  // The default resolved: naming the default model above a floor set beside no model (the default) keeps the floor.
+  assert.equal(floor({ FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85", FACTORY_INPUT_TRIAGE_MODEL: "perplexity/pplx-decider-v1.2" }), 0.85);
+  assert.equal(floor({ FACTORY_TRIAGE_MODEL: "b/y", FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85", FACTORY_INPUT_TRIAGE_MODEL: "b/y" }), 0.85, "the same model named again");
+  // A repository variable out of range is refused by name.
+  assert.equal(valueProblem("FACTORY_TRIAGE_MIN_CONFIDENCE", "2"), "not a number from 0 to 1");
+  assert.equal(valueProblem("FACTORY_TRIAGE_MIN_CONFIDENCE", "0.8"), null);
+  assert.deepEqual(variableSettings({ FACTORY_TRIAGE_MIN_CONFIDENCE: "2" }).invalid.map((x) => x.name), ["FACTORY_TRIAGE_MIN_CONFIDENCE"]);
+  // A layer that names another triage model drops the floor of the layers below it, unless it sets its own.
+  const workflow = { FACTORY_TRIAGE_MODEL: "a/x", FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85" };
+  const at = (layers) => settingLayers({ workflow, ...layers }).values.FACTORY_TRIAGE_MIN_CONFIDENCE;
+  assert.equal(at({ variables: { FACTORY_TRIAGE_MODEL: "b/y" } }), undefined, "another model: the floor below goes");
+  assert.equal(at({ variables: { FACTORY_TRIAGE_MODEL: "a/x" } }), "0.85", "the same model keeps it");
+  assert.equal(settingLayers({ workflow: { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.85" }, variables: { FACTORY_TRIAGE_MODEL: "perplexity/pplx-decider-v1.2" } }).values.FACTORY_TRIAGE_MIN_CONFIDENCE, "0.85", "the default model named is no other model");
+  assert.equal(at({ variables: { FACTORY_TRIAGE_MODEL: "b/y", FACTORY_TRIAGE_MIN_CONFIDENCE: "0.6" } }), "0.6");
+  assert.equal(at({ variables: { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.6" } }), "0.6", "a floor alone is for the model below it");
+  assert.equal(at({ machine: { FACTORY_TRIAGE_MODEL: "c/z" } }), undefined, "this machine's model too");
+  assert.ok(MACHINE_SETTINGS.includes("FACTORY_TRIAGE_MIN_CONFIDENCE"), "a machine sets it beside its triage model");
+  assert.ok(WORKFLOW_SETTINGS.has("FACTORY_TRIAGE_MIN_CONFIDENCE") && VARIABLE_SETTINGS.has("FACTORY_TRIAGE_MIN_CONFIDENCE"));
+});

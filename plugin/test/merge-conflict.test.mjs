@@ -595,7 +595,7 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     // The plan comment records the text it was made from; the body since edited by kirk, who can push.
     const kirk = { __typename: "User", login: "kirk", databaseId: 4 };
-    const issue = { title: "Objective", body: "Save two, fixed a typo.", lastEditedAt: new Date().toISOString(), author: kirk, editor: kirk, labels: { nodes: [] } };
+    const issue = { title: "Objective", body: "Save two, fixed a typo.", lastEditedAt: new Date().toISOString(), author: kirk, editor: kirk, labels: { nodes: [] }, renames: { nodes: [] } };
     (gh.comments[2] ||= []).push({ id: 900, user: { login: SELF }, body: `${marker(2, "plan")}${planTextMarker({ sha256: objectiveSha("Objective", "Save two."), label: null, text: recordText({ title: "Objective", body: "Save two." }) })}\n## Plan`, created_at: new Date().toISOString() });
     const real = gh.fetch;
     globalThis.fetch = async (url, init = {}) => {

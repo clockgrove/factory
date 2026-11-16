@@ -26,7 +26,7 @@ Show the whole new title and body, and say what changed. Write nothing to GitHub
 On a yes:
 
 1. Read the issue again. When its title or body changed on GitHub since you loaded it, show that change and ask which text to keep.
-2. Check that `gh api repos/OWNER/NAME --jq .permissions.push` prints `true`: whoever saves the body becomes its last editor, and Factory acts on an issue only when its last editor can push. Otherwise say a maintainer has to save it.
+2. Check that `gh api repos/OWNER/NAME --jq .permissions.push` prints `true`: whoever saves the body becomes its last editor, and whoever changes the title its latest renamer, and Factory acts on an issue only when both can push. Otherwise say a maintainer has to save it.
 3. Write the body to a temporary file, run `gh issue edit <issue> --repo OWNER/NAME --title "<title>" --body-file <file>`, and delete the file.
 
 Then offer the next step: keep working on it, leave it as a draft, or start it ("Start Clockgrove Factory Objective <issue>", the factory-start skill).

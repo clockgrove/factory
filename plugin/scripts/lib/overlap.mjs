@@ -1,26 +1,33 @@
-// Sibling Objectives that change the same files (#277, #340). Every Objective with work to write starts: a work stage
-// started beside a sibling costs at most one rebase later, while holding it holds the whole stage. What waits is the
-// hand-off to review: a work stage delivering a head no review has seen, while a sibling it overlaps heavily is ahead
-// of it (aheadOf), leaves its PR ready but unlabelled, with a record on the PR and a note on its issue (reviewHold).
-// The dispatcher releases waiting hand-offs one at a time, in the order they began waiting (reviewWaitResume): the
-// review label goes on, or a PR that conflicts by then goes back for its rebase first, and that rebase goes to review
-// without waiting again. So two PRs that overlap heavily are never reviewed or queued at once, and each waiting PR
-// rebases once, onto every merge before it. A start beside a sibling that shares files says so on the issue. Files
-// come only from structure Factory already has: an open PR's changed files (GitHub's list) and the plan comment's
-// `Files:` lines (factory-objective-plan). An Objective with neither (a first run before its plan) has unknown files:
-// it overlaps nothing.
+// Sibling Objectives that change the same files (#277, #340, #365, #366). Every Objective with work to write starts: a
+// work stage started beside a sibling costs at most one rebase later, while holding it holds the whole stage. What waits
+// is the hand-off to review: a work stage delivering a head no review has seen, while a sibling whose head it conflicts
+// with is ahead of it (aheadOf), leaves its PR ready but unlabelled, with a record on the PR and a note on its issue
+// (reviewHold). Whether two heads conflict is a trial merge of the two (git merge-tree in a scratch mirror,
+// siblingTrials), never a count of shared files. The dispatcher releases waiting hand-offs one at a time, in the order
+// they began waiting (reviewWaitResume): the review label goes on, or a PR that conflicts by then goes back for its
+// rebase first, and that rebase goes to review without waiting again. So two PRs that conflict are never reviewed or
+// queued at once, and each waiting PR rebases once, onto every merge before it. The send-backs of conflicting In-review
+// PRs go in the release order too (sendBackOrder): one is sent back only when no sibling ahead of it, which merges first,
+// would make it conflict again. A start beside a sibling that shares files says so on the issue. Files come only from
+// structure Factory already has: an open PR's changed files (GitHub's list) and the plan comment's `Files:` lines
+// (factory-objective-plan). An Objective with neither (a first run before its plan) has unknown files: it overlaps
+// nothing at its start.
 import { addLabels, getIssue, listComments, listIssuesByLabel, objectiveLabeledAt, removeLabel, rest, upsertComment } from "./github.mjs";
 import { planOf } from "./handoff.mjs";
 import { REVIEW_LABEL, isSelf, marker, priorityOf, selfLogin, stateOf, trustedAuthor } from "./logic.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
+import { trialMerges } from "./outbox.mjs";
 import { waitOf } from "./third-party-review.mjs";
 
 /** The plan line that names a checklist item's files (factory-objective-plan): `Files: a/b.mjs, c.md`. */
 export const PLAN_FILES_KEY = "Files";
 /** At most this many paths are kept per Objective: a plan line or a PR past it is read as its first ones. */
 export const FILES_MAX = 200;
-/** A heavy overlap: at least this many shared files, or half of the smaller Objective's files. */
-export const HEAVY_SHARED = 3;
+/**
+ * The trial merges one dispatcher tick, or one hand-off, computes at most; a pair of heads already merged in this
+ * process is read from its cache and counts nothing. A bound on the git work, not a judgement: past it, a pair is unread.
+ */
+export const TRIALS_MAX = 50;
 /** The longest a hand-off to review waits for siblings (from its record's start): then the review goes on beside them. */
 export const WAIT_MAX_MS = 6 * 3600_000;
 
@@ -69,20 +76,13 @@ export function sharedFiles(a, b) {
   return [...new Set(a || [])].filter((p) => other.has(p)).sort();
 }
 
-/** Whether `shared` paths between lists of `a` and `b` files is a heavy overlap (HEAVY_SHARED, or half the smaller). */
-export function heavyOverlap(shared, a, b) {
-  const n = shared.length;
-  if (!n) return false;
-  return n >= HEAVY_SHARED || n * 2 >= Math.min(new Set(a).size, new Set(b).size);
-}
-
 /**
  * The notes (pure): `candidates` are the Objectives that may start, in pick order, each `{number, files}` (null:
  * unknown); `siblings` the active ones, each `{number, files, state}`; `slots` how many start. Every candidate starts
  * while slots last, overlap or not: an Objective with known files has a plan, so its work stage has work of its own to
  * write, and waiting holds that whole stage where starting costs at most one rebase (the hand-off waits instead,
- * reviewHold). One that shares files with a sibling, or an earlier starter of this tick, gets a note naming them, with
- * `heavy` the numbers it overlaps heavily. Returns `{ready, notes: [{number, with: [{number, shared}], heavy}]}`.
+ * reviewHold). One that shares files with a sibling, or an earlier starter of this tick, gets a note naming them.
+ * Returns `{ready, notes: [{number, with: [{number, shared}]}]}`.
  */
 export function siblingOrder({ candidates, siblings, slots }) {
   const ready = [];
@@ -94,8 +94,8 @@ export function siblingOrder({ candidates, siblings, slots }) {
     if (!c.files?.length) continue;
     const others = [...siblings, ...started].filter((s) => s.number !== c.number && s.files?.length);
     started.push({ number: c.number, files: c.files, state: "Running" });
-    const overlaps = others.map((s) => ({ number: s.number, shared: sharedFiles(c.files, s.files), heavy: heavyOverlap(sharedFiles(c.files, s.files), c.files, s.files) })).filter((o) => o.shared.length);
-    if (overlaps.length) notes.push({ number: c.number, with: overlaps.map(({ number, shared }) => ({ number, shared })), heavy: overlaps.filter((o) => o.heavy).map((o) => o.number) });
+    const overlaps = others.map((s) => ({ number: s.number, shared: sharedFiles(c.files, s.files) })).filter((o) => o.shared.length);
+    if (overlaps.length) notes.push({ number: c.number, with: overlaps });
   }
   return { ready, notes };
 }
@@ -103,23 +103,26 @@ export function siblingOrder({ candidates, siblings, slots }) {
 const list = (paths, max = 5) => `${paths.slice(0, max).map((p) => `\`${p.replace(/`/g, "")}\``).join(", ")}${paths.length > max ? ` and ${paths.length - max} more` : ""}`;
 const hours = Math.round(WAIT_MAX_MS / 3600_000);
 
-/** Why a hand-off waits (the dispatcher's log line and the stage's exit reason): `w` is `{on, shared, cause?}`. */
-export const waitReason = (w) => `its review waits for #${w.on} to merge${w.cause ? ` (${w.cause})` : ""}: both change ${w.shared.length} file(s) (${list(w.shared, 3)})`;
+/** Why a hand-off waits (the dispatcher's log line and the stage's exit reason): `w` is `{on, files, cause?}`. */
+export const waitReason = (w) => `its review waits for #${w.on} to merge${w.cause ? ` (${w.cause})` : ""}: a trial merge of the two heads conflicts in ${w.files.length} file(s) (${list(w.files, 3)})`;
 
 /** The overlap comment's text on an Objective whose hand-off to review waits (its marker added by the caller). */
 export function waitNote(w, prNumber) {
-  return `Factory: PR #${prNumber} is ready, and its review waits for #${w.on} to merge${w.cause ? ` (${w.cause})` : ""}: both change ${list(w.shared)}, ${w.shared.length} of this Objective's ${w.of} known file(s). Reviewed together, the one that merges second would rebase over the other after its review. Once #${w.on} merges or stops (Blocked, a Question, its label removed), and no sibling that waited longer is still ahead of it, or after ${hours} h of waiting at most since its first wait, the dispatcher's next tick puts \`${REVIEW_LABEL}\` on the PR, or first sends it back for its rebase when it conflicts. Putting \`${REVIEW_LABEL}\` on the PR yourself starts its review now.`;
+  return `Factory: PR #${prNumber} is ready, and its review waits for #${w.on} to merge${w.cause ? ` (${w.cause})` : ""}: a trial merge of the two PRs' heads conflicts in ${list(w.files)}. Reviewed together, the one that merges second would rebase over the other after its review. Once #${w.on} merges or stops (Blocked, a Question, its label removed), and no sibling that waited longer is still ahead of it, or after ${hours} h of waiting at most since its first wait, the dispatcher's next tick puts \`${REVIEW_LABEL}\` on the PR, or first sends it back for its rebase when it conflicts. Putting \`${REVIEW_LABEL}\` on the PR yourself starts its review now.`;
 }
 
-/** The overlap comment's text on an Objective that starts beside siblings it shares files with. */
-export function besideNote(n) {
+/**
+ * The overlap comment's text on an Objective that starts beside siblings it shares files with; `hold` when a hand-off
+ * waits for a sibling it conflicts with (Factory merges, sibling_hold on).
+ */
+export function besideNote(n, hold = false) {
   const each = n.with.map((o) => `#${o.number} (${list(o.shared, 3)})`).join("; ");
-  const heavy = n.heavy?.length ? ` With ${n.heavy.map((x) => `#${x}`).join(", ")} it shares many: whichever is handed to review second waits until the other merges, then rebases once before its review.` : "";
-  return `Factory: this Objective starts beside ${each}, which change some of the same files. Whichever merges second rebases onto the other; each rebase and its cost show in that stage's progress comment.${heavy}`;
+  const wait = hold ? " Where their changes conflict, whichever is handed to review second waits until the other merges, then rebases once before its review." : "";
+  return `Factory: this Objective starts beside ${each}, which change some of the same files. Whichever merges second rebases onto the other when they conflict; each rebase and its cost show in that stage's progress comment.${wait}`;
 }
 
 /** The overlap comment's text once a waiting Objective's wait is over. */
-export const clearedNote = (on, gaveUp = false) => (gaveUp ? `Factory: this Objective stopped waiting for #${on} after ${hours} h, the longest Factory holds a review for a sibling; its review goes on beside it.` : `Factory: this Objective no longer waits for #${on}: no sibling In review shares its files now.`);
+export const clearedNote = (on, gaveUp = false) => (gaveUp ? `Factory: this Objective stopped waiting for #${on} after ${hours} h, the longest Factory holds a review for a sibling; its review goes on beside it.` : `Factory: this Objective no longer waits for #${on}: no sibling ahead of it conflicts with it now.`);
 
 // What was read, across ticks of one process (a local loop's serve keeps its process; an Actions tick starts empty):
 // an issue's comments while its `updated_at` and comment count stay, a PR's files while its head stays.
@@ -131,10 +134,40 @@ const remember = (map, key, value) => {
   map.set(key, value);
   return value;
 };
-/** Empty both caches (tests: a new fake GitHub). */
+/** Empty the caches (tests: a new fake GitHub). */
 export function forgetFiles() {
   commentCache.clear();
   prFileCache.clear();
+  trialCache.clear();
+}
+
+// The paths each pair of heads conflicts in, across ticks of one process: a commit never changes, so neither does that.
+const trialCache = new Map();
+
+/** The git URL of `repo` on the GitHub server the run belongs to (GITHUB_SERVER_URL, else github.com). */
+export const gitRemote = (repo) => `${(process.env.GITHUB_SERVER_URL || "https://github.com").replace(/\/+$/, "")}/${repo.full}.git`;
+
+/**
+ * Trial merges of PR heads for one dispatcher tick or one hand-off (outbox.mjs trialMerges, one scratch mirror):
+ * `conflicts(a, b)` resolves to the paths a merge of the two heads conflicts in (none: they merge cleanly), from this
+ * process's cache when the pair was merged before, and rejects when the pair cannot be merged or past TRIALS_MAX new
+ * merges. The caller closes it.
+ */
+export function siblingTrials(repo, opts, { max = TRIALS_MAX } = {}) {
+  const token = typeof opts?.token === "function" ? opts.token : () => opts?.token ?? null;
+  const box = trialMerges({ remote: gitRemote(repo), token });
+  let left = max;
+  return {
+    async conflicts(a, b) {
+      const [x, y] = [a, b].sort();
+      const key = `${repo.full}|${x}|${y}`;
+      if (trialCache.has(key)) return trialCache.get(key);
+      if (left <= 0) throw new Error(`past the ${max} trial merges a tick computes`);
+      left -= 1;
+      return remember(trialCache, key, await box.conflicts(x, y));
+    },
+    close: () => box.close(),
+  };
 }
 
 /** The issue's comments, from the cache while its `updated_at` and comment count are what they were. */
@@ -241,7 +274,8 @@ export async function orderSiblings(repo, { issues, statuses = {}, ready, prs = 
   // Siblings are read only when some candidate's files are known: nothing can overlap an unknown one.
   const siblings = [];
   if (candidates.some((c) => c.files?.length)) for (const issue of active) siblings.push({ number: issue.number, state: stateOf(issue, statuses[issue.number] ?? null), files: (await read(issue)).files });
-  return { ...siblingOrder({ candidates, siblings, slots: pool.length }), seen };
+  const { notes, ...order } = siblingOrder({ candidates, siblings, slots: pool.length });
+  return { ...order, notes: notes.map((n) => ({ ...n, hold: autoMerge })), seen };
 }
 
 /** knownFiles, with a failed read taken as unknown files (and said in the log). */
@@ -300,31 +334,77 @@ function siblingState(repo, n, opts, prOf, memo) {
   return memo.get(n);
 }
 
+/** The release order of siblings (aheadOf, sendBackOrder): priority, then number. */
+const byRelease = (a, b) => priorityOf(a) - priorityOf(b) || a.number - b.number;
+
 /**
- * The first sibling, by priority then number, that `issue` (its listing) overlaps heavily and that is ahead of it:
- * `{on, shared, of, cause}`, or null. `others` are the other Objectives In review or Running, `stateOf(s)` the state of
- * one, `key` this Objective's place in the release order (keyOf), `stuck(s)` whether one can run no stage now (two
- * account labels, as Blocked). Ahead is: In review with no record (in review or in the merge queue); Running the
- * send-back rebase of an open ready PR it handed to review before; a record whose wait is over, on an open ready PR (In
- * review, or Running its rebase after the wait); a record still waiting, In review, earlier in the release order. A
- * Running sibling that has not handed off is not ahead: the first to hand off goes first. Files come from knownFiles;
- * unknown files overlap nothing.
+ * The first sibling, by priority then number, whose PR head a trial merge with `head` (this Objective's PR head) shows
+ * conflicting, and that is ahead of it: `{on, files, cause}` (`files` the paths the merge conflicts in), or null.
+ * `others` are the other Objectives In review or Running, `stateOf(s)` the state of one, `key` this Objective's place in
+ * the release order (keyOf), `stuck(s)` whether one can run no stage now (two account labels, as Blocked), `trials` a
+ * siblingTrials. Ahead is: In review with no record (in review or in the merge queue); Running the send-back rebase of
+ * an open ready PR it handed to review before; a record whose wait is over, on an open ready PR (In review, or Running
+ * its rebase after the wait); a record still waiting, In review, earlier in the release order. A Running sibling that
+ * has not handed off is not ahead: the first to hand off goes first. A sibling with no open ready PR has no head to
+ * merge: it is not ahead. A pair that cannot be merged throws.
  */
-async function aheadOf(repo, { issue, key, others, state, stuck = () => false }, opts, prOf, memo, log) {
-  const mine = (await readFiles(repo, issue, opts, prOf, log)).files;
-  if (!mine) return null;
-  const order = [...others].filter((s) => s.number !== issue.number).sort((a, b) => priorityOf(a) - priorityOf(b) || a.number - b.number);
-  for (const s of order) {
-    const theirs = (await readFiles(repo, s, opts, prOf, log)).files;
-    const shared = sharedFiles(mine, theirs);
-    if (!theirs || !heavyOverlap(shared, mine, theirs) || stuck(s)) continue;
-    const { pr, record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
+async function aheadOf(repo, { issue, head, key, others, state, stuck = () => false }, opts, prOf, memo, trials) {
+  if (!head) return null;
+  for (const s of [...others].filter((x) => x.number !== issue.number).sort(byRelease)) {
+    if (stuck(s)) continue;
+    const theirs = await prOf(s.number);
+    if (!theirs?.head?.sha || theirs.draft) continue;
+    const files = await trials.conflicts(head, theirs.head.sha);
+    if (!files.length) continue;
+    const { record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
     const st = state(s);
-    const open = !!pr && !pr.draft;
-    const ahead = record?.released ? open : record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review" || (st === "Running" && open && sentBack);
-    if (ahead) return { on: s.number, shared, of: new Set(mine).size, cause: record && !record.released ? `it waits for #${record.on} itself` : cause };
+    const ahead = record?.released || (record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review" || (st === "Running" && sentBack));
+    if (ahead) return { on: s.number, files, cause: record && !record.released ? `it waits for #${record.on} itself` : cause };
   }
   return null;
+}
+
+/**
+ * The dispatcher's send-backs (dispatch.mjs, #366): `dirty` the In-review PRs this tick sends back for a rebase (each
+ * `{issue, pr}`, staleDecision "rebase"); `issues`, `statuses` and `landed` the tick's; `held` and `released` the
+ * Objectives whose hand-off this tick found still waiting, or released (reviewWaitResume), the others' waits read from
+ * their records (reviewHold); `stuck(s)` whether a sibling can merge nothing soon (two account labels, or a person
+ * took it out of the merge queue). Each dirty PR, in the release order (priority, then number), is sent back unless a sibling ahead of it would make it conflict again once that sibling merges: one earlier
+ * in the release order that is In review (not waiting) or Running the rebase of a PR that went to review (sent back,
+ * or through its wait), whose head a trial merge with this PR's head shows conflicting. Such a PR waits: rebased now, it
+ * would be rebased again after that merge. So the first dirty PR in the order goes back unless a sibling ahead conflicts
+ * with it, the order is fixed (no two wait on each other), and each rebases onto every merge it conflicts with, once. A
+ * pair that cannot be merged (git, or past TRIALS_MAX) sends the PR back, as with no siblings. Returns the dirty PRs in
+ * the release order, each with `wait` (`{on, files}`, or null: sent back).
+ */
+export async function sendBackOrder(repo, { dirty, issues, statuses = {}, landed = [], held = new Set(), released = new Set(), stuck = () => false, prOf, memo = new Map(), trials }, opts, { log = () => {} } = {}) {
+  const sorted = [...dirty].sort((a, b) => byRelease(a.issue, b.issue));
+  const out = [];
+  for (const d of sorted) {
+    const head = d.pr?.head?.sha;
+    let wait = null;
+    const earlier = issues.filter((s) => s.number !== d.issue.number && byRelease(s, d.issue) < 0 && !landed.includes(s.number) && !stuck(s) && !held.has(s.number) && ["In review", "Running"].includes(stateOf(s, statuses[s.number] ?? null))).sort(byRelease);
+    try {
+      for (const s of head ? earlier : []) {
+        const theirs = await prOf(s.number);
+        if (!theirs?.head?.sha || theirs.draft) continue;
+        const files = await trials.conflicts(head, theirs.head.sha);
+        if (!files.length) continue;
+        const { record, sentBack } = await siblingState(repo, s.number, opts, prOf, memo);
+        // Its hand-off waits (it waits for others; it would not merge first), unless this tick released it.
+        if (record && !record.released && !released.has(s.number)) continue;
+        // Running: ahead only while it rebases a PR that went to review (its send-back, or the rebase after its wait).
+        if (stateOf(s, statuses[s.number] ?? null) === "Running" && !sentBack && !record?.released) continue;
+        wait = { on: s.number, files };
+        break;
+      }
+    } catch (e) {
+      log(`  #${d.issue.number}: its trial merges with the siblings ahead are unread (${String(e?.message || e).slice(0, 120)}); sent back`);
+      wait = null;
+    }
+    out.push({ ...d, wait });
+  }
+  return out;
 }
 
 /** Issue `n`'s note on its waiting hand-off (`wait`, from `since`), written only when its text changed. */
@@ -335,17 +415,18 @@ export async function sayWaiting(repo, issue, prNumber, wait, since, opts, { log
 
 /**
  * The work stage's hand-off of a head no review has seen (worker.mjs, its PR `pr` delivered and ready, the review label
- * off). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on the PR first, keeping the
+ * off, `head` the commit Factory pushed). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on the PR first, keeping the
  * Objective's first wait start when it waited before, then the note on the issue, and the review label stays off; the
- * stage ends delivered and the Objective In review, its slot free. Returns the wait (`{on, shared, of, cause}`) or null:
+ * stage ends delivered and the Objective In review, its slot free. Returns the wait (`{on, files, cause}`) or null:
  * the caller puts the review label on. With `hold` off (sibling_hold) nothing waits. Nothing holds a reviewed head
  * Factory rebased (`rebaseMode` and `reviewed`), nor the rebase of a PR that was ahead already (its wait over, or handed
  * to review before and sent back): it goes next. A hold within WAIT_MAX_MS of the Objective's last one keeps that one's
- * start (one episode); a later one starts its own. A read that fails holds nothing (the
- * review goes on, as without siblings); a record that cannot be written holds nothing either.
+ * start (one episode); a later one starts its own. A read or a trial merge that fails holds nothing (the review goes
+ * on, as without siblings); a record that cannot be written holds nothing either.
  */
-export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false }, opts, { log = () => {}, now = Date.now() } = {}) {
-  if (!autoMerge || !hold || !pr || (rebaseMode && reviewed)) return null;
+export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMerge, hold = true, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false }, opts, { log = () => {}, now = Date.now() } = {}) {
+  if (!autoMerge || !hold || !pr || !head || (rebaseMode && reviewed)) return null;
+  const trials = siblingTrials(repo, opts);
   try {
     const has = (i, name) => (i.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
     const others = new Map();
@@ -359,7 +440,7 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
     // One hold episode keeps its first start; held again past the bound, a new episode starts.
     const since = own && now - own.since < WAIT_MAX_MS ? own.since : now;
     const prOf = prFinder(repo, opts, { [issue]: pr });
-    const wait = await aheadOf(repo, { issue: self, key: keyOf(since, self), others: [...others.values()], state: (s) => (has(s, "factory:in-review") ? "In review" : "Running") }, opts, prOf, new Map(), log);
+    const wait = await aheadOf(repo, { issue: self, head, key: keyOf(since, self), others: [...others.values()], state: (s) => (has(s, "factory:in-review") ? "In review" : "Running") }, opts, prOf, new Map(), trials);
     if (!wait) return null;
     await writeWait(repo, issue, pr.number, { on: wait.on, since }, `Factory: ${waitReason(wait)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
     await sayWaiting(repo, self, pr.number, wait, since, opts, { log });
@@ -367,13 +448,16 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
   } catch (e) {
     log(`#${issue}: siblings on the same files unread (${String(e?.message || e).slice(0, 120)}); handed to review`);
     return null;
+  } finally {
+    trials.close();
   }
 }
 
 /**
  * The dispatcher's half (dispatch.mjs, an In-review Objective `issue` whose PR `pr` is unlabelled with a waiting record
  * `wait`): `issues` and `statuses` the tick's Objectives, `landed` those whose PR the tick merged, `memo` the siblings
- * this tick read (siblingState), `stuck(s)` whether a sibling can run no stage now (aheadOf). Returns, writing nothing
+ * this tick read (siblingState), `stuck(s)` whether a sibling can run no stage now (aheadOf), `trials` the tick's
+ * siblingTrials. Returns, writing nothing
  * when `dryRun`:
  * - "draft": the PR went back to a draft (a stop, a Block); the record goes and no label goes on;
  * - "stale": the review label went on after the record (a person, or a review resumed): the record is released and the
@@ -385,7 +469,7 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
  * Without `autoMerge`, or with `hold` off (sibling_hold), nothing waits, so a record found then is released at once. The issue's
  * note says when the wait is over. A failed read or write throws (the next tick tries again).
  */
-export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, hold = true, stuck = () => false, prOf, memo = new Map() }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
+export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, hold = true, stuck = () => false, prOf, memo = new Map(), trials }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
   if (pr.draft) {
     if (!dryRun) await rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" });
     return "draft";
@@ -396,7 +480,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   const gaveUp = now - wait.since >= WAIT_MAX_MS;
   if (autoMerge && hold && !gaveUp) {
     const others = issues.filter((i) => i.number !== issue.number && !landed.includes(i.number) && ["In review", "Running"].includes(stateOf(i, statuses[i.number] ?? null)));
-    const on = await aheadOf(repo, { issue, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null), stuck }, opts, prOf, memo, log);
+    const on = await aheadOf(repo, { issue, head: pr.head?.sha, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null), stuck }, opts, prOf, memo, trials);
     if (on) return { waiting: on };
   }
   if (!pr.mergeable_state || pr.mergeable_state === "unknown") return "unsettled";
@@ -439,7 +523,7 @@ export async function announceStarts(repo, { started, issues, order = null }, op
     const comments = order?.seen?.[n]?.comments ?? (await commentsOf(repo, issue, opts).catch(() => null));
     const old = overlapOf(comments, n);
     const note = order?.notes?.find((x) => x.number === n);
-    if (note) await say(repo, n, old, "beside", besideNote(note), opts, log);
+    if (note) await say(repo, n, old, "beside", besideNote(note, note.hold), opts, log);
     else if (old?.kind === "waits") await say(repo, n, old, "cleared", clearedNote(old.on), opts, log);
   }
 }

@@ -36,7 +36,7 @@ inputs:
     description: The worker session's effort level (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`; the levels each model supports); the harness default when empty. Pinned so a CLI default change cannot move cost silently.
     required: false
   sibling_hold:
-    description: Whether a hand-off to review waits for a sibling Objective that changes many of the same files. `on` (default) holds a head no review has seen while such a sibling is ahead of it, then releases waiting PRs one at a time, each rebasing once; `off` holds nothing, and overlapping PRs rebase when they conflict. Scheduling only.
+    description: Whether a hand-off to review waits for a sibling Objective whose PR it conflicts with (a trial merge of the two heads). `on` (default) holds a head no review has seen while such a sibling is ahead of it, then releases waiting PRs one at a time, each rebasing once; `off` holds no hand-off, and overlapping PRs rebase when they conflict. Scheduling only.
     required: false
   resume_policy:
     description: Which re-entries resume the worker's saved session instead of starting fresh, on every harness. `fresh` (default) resumes none; `fix-passes` resumes the review job's fix and answer passes and a rebase send-back that conflicts. An answered Question always starts fresh.

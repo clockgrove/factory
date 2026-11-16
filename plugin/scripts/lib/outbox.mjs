@@ -1126,6 +1126,53 @@ export async function mergeTree({ remote, token = () => null, ours, theirs, base
 }
 
 /**
+ * Trial merges of two commits, in one scratch mirror kept for its caller's lifetime (git merge-tree, no worktree, no
+ * hooks): commits are fetched by id from `remote` once each, blobs as the merges need them. `conflicts(ours, theirs)`
+ * resolves to the paths a merge of the two would conflict in, sorted (none: they merge cleanly), and rejects when a
+ * commit cannot be had or git cannot merge them (no common history). `close()` removes the mirror.
+ */
+export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
+  let dir = null;
+  let ready = null;
+  const fetched = new Set();
+  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
+  const git = (args) => exec("git", ["-C", dir, ...args], { env: env() });
+  const must = async (args, what) => {
+    const r = await git(args);
+    if (r.code !== 0) throw new Error(`${what} (git exit ${r.code})`);
+    return r;
+  };
+  const open = () =>
+    (ready ??= (async () => {
+      dir = mkdtempSync(join(base, "trial-merge-"));
+      await must(["init", "-q", "--bare"], "the trial-merge mirror could not be made");
+      await must(["config", "remote.origin.url", remote], "the trial-merge mirror could not be made");
+    })());
+  const have = async (shas) => {
+    const missing = shas.filter((s) => !fetched.has(s));
+    if (!missing.length) return;
+    await must(["fetch", "-q", "--no-tags", "--filter=blob:none", "origin", ...missing], `${missing.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`);
+    for (const s of missing) fetched.add(s);
+  };
+  return {
+    async conflicts(ours, theirs) {
+      await open();
+      await have([ours, theirs]);
+      const r = await git(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", ours, theirs]);
+      if (r.code === 0) return [];
+      if (r.code !== 1) throw new Error(`git merge-tree could not merge ${ours.slice(0, 7)} and ${theirs.slice(0, 7)} (exit ${r.code})`);
+      return [...new Set(r.stdout.split("\0").slice(1).filter(Boolean))].sort();
+    },
+    close() {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      dir = null;
+      ready = null;
+      fetched.clear();
+    },
+  };
+}
+
+/**
  * A scratch bare repository for a diff Factory makes outside a stage's mirror (local mode's post-review): it reads the
  * object store `objects` (a clone's, as an alternate: none of that clone's config, hooks or refs is used, and no git
  * runs there) and fetches a commit it lacks from `remote` by id, as the mirror does. Returns {git, close}.

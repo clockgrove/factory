@@ -446,9 +446,9 @@ export function appPermissionChecks(app) {
  * Local red-check triage reruns a flaky red's failed jobs, which needs the token's Actions write (LOCAL.md). A
  * fine-grained token's permissions cannot be listed, so doctor makes a dry rerun: it asks GitHub to rerun the failed
  * jobs of workflow run 0, which no repository has, so nothing can rerun. A 403 is the token lacking Actions write: a
- * warning with the fix. Any other answer is a pass that says what it saw: GitHub did not refuse the token. (A 404,
- * the usual answer, does not prove the permission either: a token without it may get one too, and then the first
- * flaky red's rerun is refused, said in its triage line, and goes to the fix pass.)
+ * warning with the fix. A 404, GitHub's usual answer for that run, passes, saying what it saw (it does not prove the
+ * permission: a token without it may get one too, and then the first flaky red's rerun is refused, said in its triage
+ * line, and goes to the fix pass). Any other answer leaves it not verified, a warning.
  */
 export async function rerunProbeCheck({ repo, token }) {
   const name = "triage rerun";
@@ -460,7 +460,8 @@ export async function rerunProbeCheck({ repo, token }) {
     if (e.status === 403 && !e.rateLimited) return WARN(name, "red-check triage is on, but the token cannot rerun CI jobs: GitHub refused a dry rerun (403)", grant);
     status = e.status || "no answer";
   }
-  return PASS(name, `GitHub did not refuse a dry rerun (${status}); a refusal at a real rerun is named in its triage line`);
+  if (status === 404) return PASS(name, "GitHub did not refuse a dry rerun (404); a refusal at a real rerun is named in its triage line");
+  return WARN(name, `not verified: GitHub answered a dry rerun with ${status}`, `red-check triage's rerun needs the token's Actions read and write; ${grant}`);
 }
 
 /**
@@ -513,10 +514,11 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
  */
 export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   const kind = deciderKind({ inputs, env, home });
-  if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? "off (decision_route off): every red goes to the fix pass, and no drift check runs" : `off: decision_route gateway and no AI Gateway key (${kind.code}), so every red goes to the fix pass, and no drift check runs`);
+  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, and a reply resolves its finding unjudged";
+  if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
-  const text = `${harness} on its login, one short call with no tools per question: no AI Gateway key (${kind.code})`;
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check): no AI Gateway key (${kind.code})`;
   if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
   return PASS("decision calls", text);
 }

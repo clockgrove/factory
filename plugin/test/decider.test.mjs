@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { deciderKind, openDecider } from "../scripts/lib/decider.mjs";
 import { decisionPrompt, parseAnswer } from "../scripts/lib/adapters/decider-harness.mjs";
-import { DECISION_RUN, DECISION_SH, decisionLaunch, runDecision, stagePasses } from "../scripts/lib/harness.mjs";
+import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, openPasses, runDecision, stagePasses } from "../scripts/lib/harness.mjs";
+import { cacheSummary } from "../scripts/lib/usage.mjs";
 import { TRIAGE_QUESTION, openTriage } from "../scripts/lib/triage.mjs";
 import { DRIFT_QUESTION, GOALS, WINDOW, openDrift } from "../scripts/lib/drift.mjs";
 import { deciderCheck } from "../scripts/doctor.mjs";
@@ -89,6 +90,15 @@ const stageOf = (bin, harness, extra = {}) => {
   return { kept, stage: { harness, model: "m-1", env: { HOME: homedir(), PATH: `${bin}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", ...extra }, record: (r) => kept.push(r) } };
 };
 
+/** Wait until `ok()` holds (polled every 20 ms, up to 10 s). */
+const until = async (ok) => {
+  const end = Date.now() + 10_000;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
+
 const INPUT = "Failing CI job: test\nLog of the failing job (key lines):\nError: connect ECONNRESET";
 
 test("#379: with no AI Gateway key the stage's Claude Code answers the typed question in one call with no tools, and its spend joins the stage's usage", async () => {
@@ -155,10 +165,14 @@ test("#379: a fence marker the input happens to hold cannot close the fence", ()
 test("#379: Codex and Copilot are asked the same way: no shell, no write, no session; the answer is the harness's own last message, never the prompt it echoes", async () => {
   // Off a runner Codex keeps its thread's rollout for the call (a usage limit is read there), and Factory removes it.
   const codexHome = mkdtempSync(join(tmpdir(), "factory-decider-codexhome-"));
+  // A thread of the stage's own, in the same folder: never touched.
+  const day = join(codexHome, "sessions", "2026", "11", "16");
+  mkdirSync(day, { recursive: true });
+  writeFileSync(join(day, "rollout-2026-11-16T00-00-00-01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0111.jsonl"), "{}\n");
   const codex = fakeHarness("codex", codexSays('{"choice":"looping","confidence":0.77}'), { rollout: '{"timestamp":"__NOW__","type":"session_meta"}\n', thread: "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0999" });
   const a = await openDecider({ inputs: {}, env: {}, stage: stageOf(codex.bin, "codex", { CODEX_HOME: codexHome }).stage }).decide("activity", DRIFT_QUESTION);
   assert.deepEqual(a, { verdict: "looping", confidence: 0.77 });
-  assert.deepEqual(readdirSync(join(codexHome, "sessions", "2026", "11", "16")), [], "the decision's rollout is removed");
+  assert.deepEqual(readdirSync(day), ["rollout-2026-11-16T00-00-00-01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0111.jsonl"], "the decision's rollout is removed, another thread's kept");
   const cx = codex.calls()[0].args;
   assert.equal(cx[0], "exec");
   for (const f of ["--ignore-user-config", "--ignore-rules", "--json"]) assert.ok(cx.includes(f), f);
@@ -264,6 +278,8 @@ test("#379: red-check triage and the drift advisory ask the stage's harness when
   const w = drift.watch({ stage: "work-1", goal: GOALS.work, plan: () => "- [ ] add the parser" });
   now = 10 * 60_000;
   for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${i}`, exit_code: 0 } }));
+  // The pass goes on while the checkpoint is asked; its answer lands before the pass ends.
+  await until(() => lines.length === 1);
   await w.stop();
   assert.equal(calls().length, 1);
   assert.ok(calls()[0].prompt.includes("Plan items:\n1. add the parser"));
@@ -317,6 +333,10 @@ test("#379: a model that refuses the low reasoning effort is asked once more wit
   assert.ok(c[0].args.includes('model_reasoning_effort="low"'));
   assert.ok(!c[1].args.some((a) => a.includes("model_reasoning_effort")));
   assert.equal(kept[0].calls, 2);
+  // Remembered for the stage: the next call asks with the model's own effort at once, one run.
+  assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, TRIAGE_QUESTION), { verdict: "base_failure", confidence: 0.75 });
+  assert.equal(calls().length, 3);
+  assert.ok(!calls()[2].args.some((a) => a.includes("model_reasoning_effort")));
 });
 
 test("#379: the two production launches: locally in the stage's outer sandbox, on a runner as the agent in a home of its own; no worker secret by name or value, no Copilot trust variable", () => {
@@ -394,23 +414,89 @@ test("#379: the decision_route setting: auto by default, gateway only, or off", 
   assert.match(off.detail, /^off \(decision_route off\)/);
 });
 
-test("#379: after a usage limit the drift advisory asks no more in the stage, as after a refused key", async () => {
-  let asked = 0;
-  const decider = { decide: async () => (asked++, { verdict: null, confidence: null, error: "rate_limited" }) };
-  let now = 0;
-  const drift = openDrift({ inputs: {}, env: {}, decider, now: () => now });
-  const w = drift.watch({ stage: "work-1", goal: GOALS.work });
-  const feed = (n) => {
-    for (let i = 0; i < n; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${now}-${i}`, exit_code: 0 } }));
-  };
-  now = 10 * 60_000;
-  feed(WINDOW);
+/**
+ * A drift watcher's checkpoint: WINDOW command entries at a time `now` minutes in, then, once `done()` holds (its
+ * question answered, while the pass goes on), the watcher stopped.
+ */
+async function checkpoint(drift, at, minutes, done = () => true) {
+  const w = drift.watch({ stage: `work-${minutes}`, goal: GOALS.work });
+  at.now = minutes * 60_000;
+  for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${minutes}-${i}`, exit_code: 0 } }));
+  await until(done);
+  await new Promise((r) => setTimeout(r, 50));
   await w.stop();
-  const w2 = drift.watch({ stage: "work-2", goal: GOALS.work });
-  now = 20 * 60_000;
-  for (let i = 0; i < WINDOW; i += 1) w2.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls b${i}`, exit_code: 0 } }));
-  await w2.stop();
-  assert.equal(asked, 1);
+}
+
+test("#379: after the stage harness's usage limit the drift advisory asks no more in the stage; a gateway's 429 does not silence it", async () => {
+  const { bin, calls } = fakeHarness("claude", LIMIT_RUN, { code: 1 });
+  const at = { now: 0 };
+  const { stage, kept } = stageOf(bin, "claude");
+  const drift = openDrift({ inputs: {}, env: {}, stage, now: () => at.now });
+  await checkpoint(drift, at, 10, () => kept.length === 1);
+  await checkpoint(drift, at, 20);
+  assert.equal(calls().length, 1);
+
+  const realFetch = globalThis.fetch;
+  let gateway = 0;
+  globalThis.fetch = async () => (gateway++, new Response('{"error":{"type":"rate_limit_exceeded"}}', { status: 429 }));
+  try {
+    const at2 = { now: 0 };
+    const gw = openDrift({ inputs: { aiGatewayApiKey: "vck_dummy_key_123" }, env: { GITHUB_ACTIONS: "true" }, now: () => at2.now });
+    await checkpoint(gw, at2, 10, () => gateway === 2);
+    await checkpoint(gw, at2, 20, () => gateway === 4);
+    assert.equal(gateway, 4, "asked at both checkpoints (each with the gateway's one retry)");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("#379: a pass's end ends the drift check in flight at once: no answer, its spend still kept, and while it runs it is the stage's decision, not a pass", async () => {
+  const { bin, lines } = fakeHarness("claude", claudeSays('{"choice":"scope_creep","confidence":0.95}'), { sleepMs: 8_000 });
+  const { stage } = stageOf(bin, "claude");
+  const progress = [];
+  const at = { now: 0 };
+  const drift = openDrift({ inputs: {}, env: {}, stage, progress: async (l) => progress.push(l), now: () => at.now });
+  const w = drift.watch({ stage: "work-1", goal: GOALS.work });
+  at.now = 10 * 60_000;
+  for (let i = 0; i < WINDOW; i += 1) w.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls ${i}`, exit_code: 0 } }));
+  while (!lines().length) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(openPasses().some((p) => p.decision === true && p.label === "decision"), "in flight at a stop: the decision record, not a pass");
+  const t = Date.now();
+  await w.stop();
+  assert.ok(Date.now() - t < 4_000, "not the call's full time");
+  assert.deepEqual(progress, [], "no answer, no drift line");
+});
+
+test("#379: decision spend is counted for the validation loop's budget, and the stage's cache summary leaves the decision record out", async () => {
+  const { bin } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.9}', 0.04));
+  const before = decisionSpend();
+  await openDecider({ inputs: {}, env: {}, stage: stageOf(bin, "claude").stage }).decide("x", TRIAGE_QUESTION);
+  assert.ok(Math.abs(decisionSpend() - before - 0.04) < 1e-9);
+  const pass = { harness: "claude", label: "validation-fix-1", usd: 1, tokens: { input: 100, output: 5, cached: 50, written: 10 }, started: "2026-11-16T00:10:00Z", ended: "2026-11-16T00:20:00Z" };
+  const work = { harness: "claude", label: "work-1", usd: 1, tokens: { input: 100, output: 5, cached: 50, written: 10 }, started: "2026-11-16T00:00:00Z", ended: "2026-11-16T00:05:00Z" };
+  const decision = { harness: "claude", label: "decision", decision: true, usd: 0.04, tokens: { input: 9000, output: 20, cached: 0, written: 9000 }, started: "2026-11-16T00:06:00Z", ended: "2026-11-16T00:07:00Z" };
+  assert.deepEqual(cacheSummary([work, decision, pass]), cacheSummary([work, pass]));
+});
+
+test("#379: the review stage's decision calls run on the reviewer's model, the independent one", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  assert.match(src, /const decisionStage = \{ harness: inputs\.harness, model: inputs\.reviewerModel \|\| inputs\.model, env: harnessEnv,/);
+});
+
+test("#379: a gateway that answers 402 (its credits) hands the stage to its harness, as a refused key does", async () => {
+  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"flaky_or_infra","confidence":0.8}'));
+  const realFetch = globalThis.fetch;
+  let gateway = 0;
+  globalThis.fetch = async () => (gateway++, new Response('{"error":{"type":"insufficient_funds"}}', { status: 402 }));
+  try {
+    const d = openDecider({ inputs: { aiGatewayApiKey: "vck_dummy_key_123" }, env: { GITHUB_ACTIONS: "true" }, model: "perplexity/pplx-decider-v1.2", stage: stageOf(bin, "claude").stage });
+    assert.deepEqual(await d.decide(INPUT, TRIAGE_QUESTION), { verdict: "flaky_or_infra", confidence: 0.8 });
+    assert.deepEqual(d.asked(), { name: "harness", model: "claude m-1" });
+    assert.equal(gateway, 1);
+    assert.equal(calls().length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("#379: the answer gate and the finding check ask the stage's harness without a key, on the stage's one adapter", async () => {

@@ -80,18 +80,20 @@ let harnessSaid = false;
  */
 const STAGES = new WeakMap();
 const shared = (stage) => {
-  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, gatewayRefused: null });
+  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null });
   return STAGES.get(stage);
 };
 const harnessOf = (stage) => {
   const s = shared(stage);
-  s.harness ??= openVendor({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null });
+  s.harness ??= openVendor({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null }).then((a) => (s.opened = a));
   return s.harness;
 };
 
 /**
- * The decider for one kind of decision call: `{name, model, off, decide(input, question)}`, decide as in
- * adapters/decider.mjs (never throws; no answer is `error` with no verdict, which callers treat as they always have).
+ * The decider for one kind of decision call: `{name, model, off, asked(), limited(), decide(input, question, {signal})}`,
+ * decide as in adapters/decider.mjs (never throws; no answer is `error` with no verdict). `asked()`: who answers now,
+ * {name, model} (`ai-gateway`, or `harness` once the gateway refused); `limited()`: the stage harness's refusal that
+ * stopped its decision calls (a usage limit or quota), else null.
  * The route is `inputs.decisionRoute` (DECISION_ROUTES, `auto` by default):
  * - With an AI Gateway key (deciderKeyState), on `auto` or `gateway`: the gateway, asked `model` (the caller's own
  *   model setting). On `auto` with a stage, a gateway that refuses the key or its credits (GATEWAY_REFUSED) hands this
@@ -103,31 +105,38 @@ const harnessOf = (stage) => {
  * `decider` stands in for the vendor (tests). The vendor module opens at the first question.
  */
 export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null } = {}) {
-  if (decider) return { name: decider.name ?? "given", model, off: null, decide: (input, question) => decider.decide(input, question) };
+  const fixed = (name, label) => () => ({ name, model: label });
+  if (decider) return { name: decider.name ?? "given", model, off: null, asked: fixed(decider.name ?? "given", model), limited: () => null, decide: (input, question, opts) => decider.decide(input, question, opts) };
   const route = DECISION_ROUTES.includes(inputs?.decisionRoute) ? inputs.decisionRoute : "auto";
-  const none = (code) => ({ name: null, model, off: code, decide: async () => ({ verdict: null, confidence: null, error: "no_answer" }) });
+  const none = (code) => ({ name: null, model, off: code, asked: fixed(null, model), limited: () => null, decide: async () => ({ verdict: null, confidence: null, error: "no_answer" }) });
   if (route === "off") return none("route-off");
   const { key, code } = deciderKeyState({ inputs, env, home });
   const withHarness = route === "auto" && !!stage?.harness;
-  const harnessDecide = async (input, question) => (await harnessOf(stage)).decide(input, question);
+  const harnessLabel = withHarness ? `${stage.harness}${stage.model ? ` ${stage.model}` : ""}` : null;
+  const harnessDecide = async (input, question, opts) => (await harnessOf(stage)).decide(input, question, opts);
+  // The stage's harness refusal that stopped its decision calls (a usage limit), once its adapter is open.
+  const limited = () => (withHarness && shared(stage).opened ? shared(stage).opened.limited() : null);
   if (key) {
     mask(key);
     // One vendor per decider, opened at the first question: concurrent first questions share it.
     let opened = null;
-    const gateway = async (input, question) => (await (opened ??= openVendor({ vendor: "ai-gateway", key, model }))).decide(input, question);
-    if (!withHarness) return { name: "ai-gateway", model, off: null, decide: gateway };
+    const gateway = async (input, question, opts) => (await (opened ??= openVendor({ vendor: "ai-gateway", key, model }))).decide(input, question, opts);
+    if (!withHarness) return { name: "ai-gateway", model, off: null, asked: fixed("ai-gateway", model), limited: () => null, decide: gateway };
     const state = shared(stage);
     return {
       name: "ai-gateway",
       model,
       off: null,
-      decide: async (input, question) => {
-        if (state.gatewayRefused) return harnessDecide(input, question);
-        const a = await gateway(input, question);
+      // Who answers now: the gateway, or after it refused Factory's key or credits, the stage's harness.
+      asked: () => (state.gatewayRefused ? { name: "harness", model: harnessLabel } : { name: "ai-gateway", model }),
+      limited,
+      decide: async (input, question, opts) => {
+        if (state.gatewayRefused) return harnessDecide(input, question, opts);
+        const a = await gateway(input, question, opts);
         if (!GATEWAY_REFUSED.has(a.error)) return a;
         if (!state.gatewayRefused) log(`decision calls: the AI Gateway refused Factory's key (${a.error}); the stage's own harness (${stage.harness}) answers them for the rest of this stage`);
         state.gatewayRefused = a.error;
-        return harnessDecide(input, question);
+        return harnessDecide(input, question, opts);
       },
     };
   }
@@ -136,5 +145,5 @@ export function openDecider({ inputs = {}, env = process.env, home = homedir(), 
     harnessSaid = true;
     log(`decision calls: no AI Gateway key (${code}); the stage's own harness (${stage.harness}) answers them on its login`);
   }
-  return { name: "harness", model: `${stage.harness}${stage.model ? ` ${stage.model}` : ""}`, off: null, keyCode: code, decide: harnessDecide };
+  return { name: "harness", model: harnessLabel, off: null, keyCode: code, asked: fixed("harness", harnessLabel), limited, decide: harnessDecide };
 }

@@ -216,13 +216,16 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
   const ask = openDecider({ inputs, env, ...(home ? { home } : {}), model: inputs?.driftModel || DRIFT_MODEL, stage, decider });
   if (ask.off) return null;
   const { model } = ask;
-  // A refused key or credits, or a usage limit, answers every later checkpoint the same: asked no more in this job.
+  // A refused key or credits, or the stage harness's usage limit, answers every later checkpoint the same: asked no
+  // more in this job.
   let off = false;
   const watch = ({ stage, goal, root = null, plan = () => null }) => {
     const acts = activityLog();
     let last = now();
     let askedAt = 0;
     let busy = null;
+    // The checkpoint in flight's own end: the pass's end aborts it rather than wait for it (stop).
+    let inFlight = null;
     let flagged = false;
     let stopped = false;
     const check = async () => {
@@ -230,8 +233,12 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
       askedAt = n;
       last = now();
       const input = driftInput({ stage, goal, items: planItems(plan() ?? ""), entries: acts.entries, root });
-      const a = await ask.decide(input, DRIFT_QUESTION);
-      if (a.error === "auth" || a.error === "billing" || a.error === "rate_limited") off = true;
+      inFlight = new AbortController();
+      const a = await ask.decide(input, DRIFT_QUESTION, { signal: inFlight.signal });
+      inFlight = null;
+      // A refused key or credits ends the checks; a rate limit only on the stage's harness (its usage limit), never the
+      // gateway's 429, which the next checkpoint may pass.
+      if (a.error === "auth" || a.error === "billing" || (a.error === "rate_limited" && ask.asked?.().name === "harness")) off = true;
       log(`drift check (${model}) in ${stage} after ${n} activity entries: ${a.verdict ? `${a.verdict}${typeof a.confidence === "number" ? ` ${a.confidence.toFixed(2)}` : ""}` : `no verdict (${a.error || "?"})`}`);
       if (flagged || !isDrift(a)) return;
       flagged = true;
@@ -250,9 +257,10 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
           busy = null;
         });
     };
-    // The run is over: no further checkpoint; one in flight still lands.
+    // The run is over: no further checkpoint, and the one in flight is ended now (no answer), its spend still recorded.
     const stop = () => {
       stopped = true;
+      inFlight?.abort();
       return busy ?? Promise.resolve();
     };
     return { feed, stop, entries: acts.entries };

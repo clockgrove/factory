@@ -10,7 +10,8 @@
  * @typedef {object} DeciderAdapter
  * @property {string} name  The vendor.
  * @property {string} model  The decision model asked.
- * @property {(input: string, question: Question) => Promise<Answer>} decide  Never throws: a failure is `error` with no verdict.
+ * @property {(input: string, question: Question, options?: { signal?: AbortSignal }) => Promise<Answer>} decide  Never
+ *   throws: a failure is `error` with no verdict. `signal` ends the call early.
  */
 
 /** The error codes an answer carries. Callers decide on the code, never on a message. */

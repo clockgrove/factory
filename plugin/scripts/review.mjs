@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
@@ -1098,9 +1098,9 @@ async function main() {
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   io.set({ decisions, prNumber: pr.number });
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login (the
-  // reviewer's env: no worker secret), each call's spend in the stage's usage.
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, on
+  // the reviewer's model (the independent one) and env (no worker secret), each call's spend in the stage's usage.
+  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: harnessEnv, record: (r) => records.push(r) };
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
   // The answer gate's decision model (answerDecider): triage's model, through the stage's decider; with none, every
@@ -1779,7 +1779,10 @@ async function main() {
   await dropLabel();
   // Findings still open after the answer pass (no answer, or one the finding check did not read as resolving them), with
   // the rest of the exit delivered: another answer round within the bound, else the Block names them (session.mjs).
-  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged }, token);
+  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged, decider: findingCheck.asked?.() ?? null, limit: findingCheck.limited?.() ?? null }, token);
+  // The finding check met the stage harness's usage limit with nothing else to answer: the stage ends as a pass meeting
+  // it does (paused locally until the reset, held or Blocked `provider-quota` elsewhere), never the check's own Block.
+  if (decision.usageLimit) throw new UsageLimitReached(decision.usageLimit, { since: Date.now(), label: "finding check" });
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally the Question stands: logic.mjs answerDuring). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
   // applies the answer (or, with nothing new since the Question, makes it a Question again). Either alone, or

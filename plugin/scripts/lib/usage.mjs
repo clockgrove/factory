@@ -444,7 +444,8 @@ const writeShare = (t) => (t?.written === null || t?.written === undefined || !t
  * reports a request, a turn, or nothing finer than the run). The setting is kept only if these writes drop.
  */
 export function cacheSummary(records) {
-  const live = records.filter(Boolean);
+  // The stage's decision record (harness.mjs keepDecision) is no pass: no cache split, no wait, no write share of its own.
+  const live = records.filter((r) => r && !r.decision);
   const tokens = mergeUsage(live)?.tokens ?? null;
   const afterWait = [];
   live.forEach((r, i) => {

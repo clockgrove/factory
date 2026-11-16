@@ -439,7 +439,7 @@ const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 // This process's stage spend as Factory has read it: each finished pass's own dollars, and each running pass's live meter
 // (live-spend.mjs) with the session it resumed. What the progress comment's spend line carries until the stage records its
 // final figure. `dir` and `harness`: the stage's usage directory and harness, from its first pass.
-const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, harness: null };
+const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, harness: null, decisions: 0 };
 
 /**
  * The file in a stage's usage directory that holds each session's running total as the stage's progress comment last
@@ -526,8 +526,8 @@ function stageSpendOf(base, reads) {
  * A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are
  * none). `session`: the session it resumes, null for a fresh one.
  */
-export function meterPass(meter, { session = null, label = "run", harness = null, model = null } = {}) {
-  STAGE_SPEND.open.set(meter, { session, label, harness, model });
+export function meterPass(meter, { session = null, label = "run", harness = null, model = null, decision = false } = {}) {
+  STAGE_SPEND.open.set(meter, { session, label, harness, model, decision });
   return {
     end: async (usd) => {
       if (!STAGE_SPEND.open.delete(meter)) return;
@@ -1064,14 +1064,14 @@ async function runOnce(opts) {
  */
 export function openPasses() {
   const out = [];
-  for (const [m, { label = "run", harness = null, model = null }] of STAGE_SPEND.open) {
+  for (const [m, { label = "run", harness = null, model = null, decision = false }] of STAGE_SPEND.open) {
     let usd = 0;
     try {
       usd = Math.max(0, Number(m.now?.()?.usd) || 0);
     } catch {
       usd = 0;
     }
-    out.push({ harness, model, label, usd, usdLowerBound: true, ok: false, stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
+    out.push({ harness, model, label, usd, usdLowerBound: true, ...(decision ? { decision: true, ok: true } : { ok: false }), stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
   }
   return out;
 }
@@ -1135,7 +1135,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
       relay.probed = { ...relay.probed, codex: true };
     }
   }
-  if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+  // On the PATH the harness launches with (its env's, the stage's), not this process's.
+  if (!(await onPath(cmd, { ...env, ...extraEnv }))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });
     appendOwn(eventsFile, `${JSON.stringify({ type: "factory.run", label, harness, model: model || null, effort: effort || null, started: new Date().toISOString(), resume: !!resume })}\n`);
@@ -1586,25 +1587,27 @@ export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reas
  * `prompt` on stdin, under DECISION_RUN's bounds. Locally in a temp directory of its own. Never resumed, never waited
  * out: a usage limit is a refusal like any other. A Codex thread off a runner keeps its rollout only for this read: a
  * failed run's usage limit is there alone (usage.mjs codexLimit), and the thread's rollout files are removed after it.
- * A model that refuses the low effort is asked once more with none. Its spend counts in the stage's spend so far; the
- * adapter keeps its record (keepDecision). Returns the usage record with `answer` (answerText).
+ * A model that refuses the low effort is asked once more with none (`effortRefused`). `signal` ends it early. Its spend
+ * counts in the stage's spend so far (and decisionSpend); the adapter keeps its record (keepDecision). Returns the usage
+ * record with `answer` (answerText).
  */
-export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low" }) {
+export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null }) {
   const at = () => new Date().toISOString();
   const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
   if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
   const creditUsd = copilotCreditUsd();
   const agent = agentUser();
   const local = backend(given).name === "local";
-  if (!agent && !(await onPath(CLI[harness].bin))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+  if (!agent && !(await onPath(CLI[harness].bin, given))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   const dir = agent ? null : local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "factory-decision-"));
   const launch = decisionLaunch({ harness, model, prompt, env: given, maxUsd, creditUsd, effort, agent, outer: local && !agent ? backend(given).sandbox.outer(given) : null, dir });
   const live = liveSpend(harness, model || null, { creditUsd });
-  const metered = meterPass(live, { label, harness, model: model || null });
+  const metered = meterPass(live, { label, harness, model: model || null, decision: true });
   const started = at();
   let r;
   try {
-    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, onLine: live.line, group: local, signal: stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
+    // The stage's stop ends it, and so does the caller's own `signal` (the drift advisory's stop at a pass's end).
+    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, onLine: live.line, group: local, signal: signal ? AbortSignal.any([signal, stageStopSignal()]) : stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
   } catch (e) {
     await metered.end(0);
     return { ...none(`${CLI[harness].bin} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
@@ -1615,19 +1618,22 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   if (harness === "codex" && !agent) {
     const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
     if (thread && r.code !== 0) rollout = await codexPassRollout(thread, null, launch.env, { label });
-    if (thread) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
+    // Only this call's own thread: an id that is no plain thread id names no file (as codexPassRollout reads it).
+    if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
   }
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
   await metered.end(rec.usd);
+  if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
   else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Factory" });
   else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${CLI[harness].bin} exited ${r.code ?? r.signal}` });
   if (effort && effortRefused(rec.refusal)) {
     log(`${label}: ${harness} refused the ${effort} reasoning effort for ${model || "its default model"}; asking once more with the model's own`);
-    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null });
-    // The refused run's own spend stays with it (`earlier`), for the adapter to keep beside the second's.
-    return { ...again, earlier: keepDecision(rec) };
+    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null, signal });
+    // The refused run's own spend stays with it (`earlier`), for the adapter to keep beside the second's; `effortRefused`
+    // tells the adapter to ask no later call with that effort.
+    return { ...again, earlier: keepDecision(rec), effortRefused: true };
   }
   return rec;
 }
@@ -1648,6 +1654,9 @@ export function foldDecision(kept, one) {
   const calls = (kept.calls ?? 1) + (one.calls ?? 1);
   return Object.assign(kept, mergeUsage([kept, one]), { label: "decision", ok: true, decision: true, calls, started: kept.started, basis: kept.basis });
 }
+
+/** The dollars this stage's decision calls have reported so far: what the validation loop's budget takes off (session.mjs). */
+export const decisionSpend = () => STAGE_SPEND.decisions;
 
 /** The stage's decision record among its passes (stagePasses), once: what a stopped stage's usage counts. */
 export const keepDecisionPass = (rec) => {

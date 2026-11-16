@@ -48,15 +48,16 @@ Interface: `plugin/scripts/lib/decider.mjs`. Every decision call opens its decid
 | Operation | Does |
 | --- | --- |
 | `openDecider({inputs, env, model, stage})` → `{name, model, off, decide}` | Picks by the `decision_route` setting (`inputs.decisionRoute`). `auto` (default): with an AI Gateway key, `ai-gateway`, asked `model` (the caller's own setting, such as `triage_model`); without one, with `stage` (`{harness, model, env, record}`: the stage's harness and model, its harness env, and where the stage's decision record goes), `harness`. `gateway`: `ai-gateway` only. `off`: none. With none, `off` is why (`route-off`, `no-key`, a key-file code). |
-| `decide(input, question)` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. Each caller keeps its own confidence floor. |
+| `decide(input, question, {signal})` → `{verdict, confidence, error?}` | One `choice` question about `input`. `verdict` is one of the question's values or null; `confidence` is the model's, or null. Never throws. Each caller keeps its own confidence floor. `signal` ends the call early, with no answer: the drift advisory ends its check in flight when a pass ends, rather than hold the stage for it. |
+| `asked()`, `limited()` | Who answers now (`{name, model}`: the gateway, or the stage's harness once the gateway refused); the stage harness's refusal that stopped its decision calls, or null. A Block names the first; the finding check ends its stage on the second. |
 
-To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it, the same object for every decider of the stage), call `decide`, and act only on a verdict at the caller's floor. No answer is the same as no decider.
+To add a decision call: define the question (`type: "choice"`, `name`, `instructions`, `choices`), open a decider with the stage (`stage` as worker.mjs and review.mjs build it, the same object for every decider of the stage), call `decide`, and act only on a verdict at the caller's floor. For triage, drift and the answer gate, no answer is the same as no decider. The finding check does not take it that way. An answer it got no verdict on is judged again by the next stage, with no worker pass. After two stages without a verdict the Objective Blocks, naming the decider asked. A stage harness's usage limit stops it as a pass's does (below).
 
 One stage, one harness adapter: every decider opened with the same `stage` asks through one shared `harness` adapter. Its cap on calls at once, its stop after a usage limit and its usage record are the stage's, whichever caller asks. On `auto`, a gateway that refuses Factory's key or its credits (`auth`, `billing`) hands that question and the rest of the stage to the stage's harness, said once in the log.
 
 The `harness` vendor:
 
-- **One short call per question** on the stage's harness, model and login (`harness.mjs` `runDecision`), the question on stdin, with no tools, no file writes, no session kept, no MCP server and no user or repository settings or instructions:
+- **One short call per question** on the stage's harness, model and login (`harness.mjs` `runDecision`; the work stage's worker model, the review stage's reviewer model), the question on stdin, with no tools, no file writes, no session kept, no MCP server and no user or repository settings or instructions:
   - Claude Code: `-p` with stream JSON, `--tools ""`, no setting sources, MCP, slash commands, CLAUDE.md or session.
   - Codex: `exec --json`, with its shell tool and sub-agents off in a read-only sandbox, and no web search, user config, rules or AGENTS.md.
   - Copilot: `--output-format json`, with an empty available-tool list and every built-in tool excluded by name, shell, write and URL permissions denied, no temp directory, and Copilot's trust variables (`COPILOT_ALLOW_ALL`, `GITHUB_COPILOT_PROMPT_MODE_*`) removed from its env.
@@ -75,15 +76,17 @@ The `harness` vendor:
 - **Usage:**
   - A stage's calls fold into one usage record, labelled `decision` (its `calls` counted), with no session and no refusal. It is in the stage's spend line, its total and its max_usd, and kept with its passes for a stopped stage.
   - It is no pass: writeUsage's `runs`, the exit line's cost by phase and the passes a rebase counts leave it out, and `mergeUsage` never takes it as the base.
-- **Usage limit or refused credential:** no answer, and no further call in that stage. It holds no account and Blocks nothing; the stage's own passes meet the limit as they always do. The drift advisory stops asking on the same answers.
+- **Usage limit or refused credential:** no answer, and no further call in that stage. For triage, drift and the answer gate that is all: it holds no account and Blocks nothing, and the stage's own passes meet the limit as they always do. The drift advisory and the finding check stop asking on the same answers; a gateway's 429 stops neither. When the finding check's questions meet the stage harness's usage limit and nothing else is left to answer, the review stage ends as a pass meeting the limit does. It pauses locally until the reset, and elsewhere it is held or Blocked `provider-quota` (`session.mjs` `usageLimitExit`). That stage counts as none of the finding check's two tries.
 - **A runner's reap ends it:** on a runner, every pass that ends reaps the agent uid's units and processes (`reapAgent`), a decision call running beside it included (the reviewer's overlap). That call is lost as `vendor`: no verdict, so the red goes to a fix pass. That loss is the safe side.
 - **The agent can reach it:** on a runner the call runs as the same agent uid as the worker it judges, in the same PID namespace under the systemd launcher. A process the worker left could end the call, or plant a fake CLI on a world-writable PATH entry that prints a verdict. The most that buys is one CI rerun or one drift line not written; no secret the agent lacks is exposed.
-- **What it costs:** by default (`decision_route` `auto` with no key), every decision call spends the stage's own subscription or key on the stage's model:
+- **What it costs:** by default (`decision_route` `auto` with no key), every decision call spends the stage's own subscription or key, on the stage's model (the review stage's: the reviewer's):
   - Red-check triage asks one question per failing CI job.
   - The drift advisory asks every two minutes while a worker runs.
+  - The answer gate asks once per review stage whose answer and fix passes committed.
+  - The finding check asks once per reviewer finding the answer pass replied to.
   - On Copilot each call is a premium request.
-  - All of it counts toward max_usd.
-  - `decision_route` `gateway` or `off` stops it.
+  - All of it counts toward max_usd, the validation loop's budget included.
+  - `decision_route` `gateway` uses the gateway only. `off` runs no decision call: every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass (the answer gate), and a reply resolves its reviewer finding unjudged (the finding check).
 
 Rules:
 

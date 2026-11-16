@@ -169,12 +169,16 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     assert.match(no.detail, /cannot rerun CI jobs: GitHub refused a dry rerun \(403\)/);
     assert.match(no.fix, /Actions read and write/);
     assert.deepEqual(asked, ["POST /repos/o/r/actions/runs/0/rerun-failed-jobs"], "run 0, which no repository has: nothing can rerun");
-    // #379: any answer but a 403 is a pass that says what GitHub answered, so a set-up machine gets a clean doctor.
-    for (status of [404, 500]) {
-      const r = await rerunProbeCheck({ repo, token: "t" });
-      assert.equal(r.status, "PASS", String(status));
-      assert.match(r.detail, new RegExp(`did not refuse a dry rerun \\(${status}\\)`));
-    }
+    // #379: GitHub's usual 404 for run 0 is a pass that says what it saw, so a set-up machine gets a clean doctor; any
+    // other answer leaves it not verified.
+    status = 404;
+    const r404 = await rerunProbeCheck({ repo, token: "t" });
+    assert.equal(r404.status, "PASS");
+    assert.match(r404.detail, /did not refuse a dry rerun \(404\)/);
+    status = 500;
+    const r500 = await rerunProbeCheck({ repo, token: "t" });
+    assert.equal(r500.status, "WARN");
+    assert.equal(r500.detail, "not verified: GitHub answered a dry rerun with 500");
     // Only a local doctor run probes, with a gateway key or without (#379: the stage's harness triages then); a stage's
     // own checks never do. (Each run stops at its next read.)
     const probed = [];

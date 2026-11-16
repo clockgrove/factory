@@ -89,10 +89,15 @@ export function runError(rec) {
  * (foldDecision), so the stage's usage and max_usd count it and its passes are never more for it. After a refused
  * credential or a usage limit no further call is made in the stage: each later question is that error at once, so an
  * account at its limit is not asked again, and it holds nothing (the stage's own passes meet the limit as they do). At
- * most HARNESS_CALLS run at once; the rest wait their turn, each slot handed straight to the next in line.
+ * most HARNESS_CALLS run at once; the rest wait their turn, each slot handed straight to the next in line. A model that
+ * refused the low reasoning effort is asked with its own from then on. `limited()`: the provider's refusal that stopped
+ * the adapter (usage.mjs providerRefusal's), for a caller that ends its stage on it (review.mjs, the finding check).
+ * `decide(input, question, {signal})`: `signal` ends the call early (no answer: `unavailable`).
  */
 export function harnessDecider({ harness, model = null, env = process.env, record = null }) {
   let quiet = null;
+  let limit = null;
+  let effort = "low";
   let kept = null;
   let running = 0;
   const waiting = [];
@@ -117,18 +122,20 @@ export function harnessDecider({ harness, model = null, env = process.env, recor
       record?.(kept);
     } else h.foldDecision(kept, one);
   };
-  const ask = async (input, question) => {
+  const ask = async (input, question, signal) => {
     if (quiet) return no(quiet);
     let rec;
     try {
       const h = await import("../harness.mjs");
-      rec = await h.runDecision({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env });
+      rec = await h.runDecision({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env, effort, signal });
+      if (rec?.effortRefused) effort = null;
       if (rec?.earlier) keep(h, rec.earlier);
       if (rec && !rec.noRun) keep(h, rec);
     } catch {
       return no("vendor");
     }
     const error = runError(rec);
+    if (error === "rate_limited") limit ??= rec.refusal;
     if (error === "auth" || error === "rate_limited") quiet = error;
     if (error) return no(DECIDER_ERRORS.includes(error) ? error : "vendor");
     return parseAnswer(rec.answer, question);
@@ -136,11 +143,13 @@ export function harnessDecider({ harness, model = null, env = process.env, recor
   return {
     name: "harness",
     model: `${harness}${model ? ` ${model}` : ""}`,
-    async decide(input, question) {
+    limited: () => limit,
+    async decide(input, question, { signal = null } = {}) {
       if (quiet) return no(quiet);
       await slot();
       try {
-        return await ask(input, question);
+        if (signal?.aborted) return no("unavailable");
+        return await ask(input, question, signal);
       } finally {
         free();
       }

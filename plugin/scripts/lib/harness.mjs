@@ -19,7 +19,7 @@ import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passC
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
-import { CODEX_GATEWAY_ENV, FACTORY_CONTROL_KEYS, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, log, maskable } from "./inputs.mjs";
+import { CODEX_GATEWAY_ENV, FACTORY_CONTROL_KEYS, FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, localLimits, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
@@ -900,8 +900,8 @@ export const passesRunning = () => RUNNING;
  * A pass that ended on its subscription's usage limit (usage.mjs usageLimited) is no death, and no other model runs it,
  * since every model of the subscription draws on the same limit. In a stage (a process that waits outages out) whose
  * harness reported the reset, the pass waits for it in place when the reset (plus LIMIT.slackMs) falls within the stage's
- * in-place bound (network.mjs waitBound: fifteen minutes locally, the deadline elsewhere) with LIMIT.minRunMs of its wall
- * clock left after it, then runs again, from its session when it has one, at most LIMIT.waits times. Otherwise it throws
+ * in-place bound (network.mjs waitBound: FACTORY_LOCAL_WAIT_MINUTES locally, the deadline elsewhere) with LIMIT.minRunMs of its wall
+ * clock left after it, then runs again, from its session when it has one, at most LIMIT.waits times (stageLimits). Otherwise it throws
  * UsageLimitReached and the stage ends on it (session.mjs usageLimitExit: paused locally until the reset, a
  * `provider-quota` Block elsewhere). A usage limit or quota with no reset reported (usage.mjs noResetLimit) ends the
  * stage the same way, at once, when LIMIT.moves (automatic account choice picked the stage's account, #332); else, or
@@ -1019,6 +1019,19 @@ async function runLimited(opts) {
  * Objective starts on that account meanwhile.
  */
 export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, hold: null, movePastMs: 60 * 60_000, moves: false };
+
+/**
+ * A stage's waits from the repository's settings (inputs.mjs resolveInputs), set once when the stage starts: LIMIT.waits
+ * (usage_limit_waits) and LIMIT.movePastMs (usage_limit_move_minutes), and, on the local route (`local`), how long the
+ * stage waits in place before it ends paused for serve to resume (FACTORY_LOCAL_WAIT_MINUTES from `env`, network.mjs
+ * OUTAGE.stageWaitMs), which bounds a usage limit's wait there too (waitBound). A value the settings or inputs built by
+ * hand leave out keeps its default.
+ */
+export function stageLimits(inputs, { local = false, env = process.env } = {}) {
+  if (Number.isInteger(inputs?.usageLimitWaits)) LIMIT.waits = inputs.usageLimitWaits;
+  if (Number.isFinite(inputs?.usageLimitMoveMs)) LIMIT.movePastMs = inputs.usageLimitMoveMs;
+  if (local && env.FACTORY_LOCAL_WAIT_MINUTES) OUTAGE.stageWaitMs = localLimits(env).waitMs;
+}
 
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";

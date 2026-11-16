@@ -15,15 +15,15 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
-import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
+import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { WAIT_MAX_MS, announceStarts, clearRebaseWait, orderSiblings, prFinder, rebaseWaitReason, reviewWaitResume, sayRebaseWait, sayWaiting, sendBackOrder, siblingTrials, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeAutoAccounts, routeTwoLine } from "./lib/accounts.mjs";
@@ -61,7 +61,7 @@ const UNCLAIMED_MS = 5 * 60_000;
 /** A long-lived loop's memory of what its sweep last said of an issue it left alone (said once while it stays so). */
 const UNCLAIMED_SAID = new Map();
 
-/** What a person does about a factory:local Objective no loop came back to for a day. */
+/** What a person does about a factory:local Objective no loop came back to for the claim pause (claim_pause_hours). */
 const SERVE_FIX = "start `factory serve` on the machine that runs it, then re-apply the label";
 
 /**
@@ -113,6 +113,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // (stageHolds), so it neither restarts nor Blocks a stage the sandbox still runs. The repository's spend is read as
   // the sandbox setting says either way (todaysSpend), since that is where the Action's stages record it.
   const sandbox = !!inputs.sandbox && backend().trigger.sandboxRoute === true;
+  // How long a local loop's Objective may stay paused while the loop is away before it Blocks (claim_pause_hours).
+  const claimPause = inputs.claimPauseMs ?? CLAIM_PAUSE_MS;
+  const pauseText = claimPause === 24 * 3600_000 ? "a day" : `${Number((claimPause / 3600_000).toFixed(2))} h`;
+  // The longest a hand-off or a rebase waits for a sibling ahead of it (sibling_hold, sibling_wait_hours).
+  const siblingWait = inputs.siblingWaitMs ?? WAIT_MAX_MS;
   // notice: local mode's App for Blocked notices (session.mjs applyExit); null on Actions, where the App posts everything.
   const opts = { token, notice };
   // Conditional reads (rest's `cache`): a local loop keeps the Map across its ticks, so an unchanged page costs no quota.
@@ -127,16 +132,115 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (Number.isFinite(ms)) deadlines.push({ issue, kind, at: new Date(ms).toISOString() });
   };
   // A read this run could not make: read again soon, once (nextWake arms no retry from a retry's own run).
-  // The stage each relaunch names, for its starting marker; the Objectives whose last start the vendor failed (a
-  // transient error), which hold this route's new picks.
+  // The stage each relaunch names, for its starting marker; the Objectives whose last start the vendor refused
+  // (`{n, at, flight}`, at its streak's first refusal, `flight` its own retry still in flight), which hold this route's new picks unless another Objective's record
+  // shows the vendor serving it since (logic.mjs vendorEvidence); every sandbox record read this tick, by Objective.
   const relaunchStage = {};
   const vendorHeld = [];
+  const boxRecords = new Map();
+  // The dispatcher runs' jobs, and the runs themselves where needed, read once a run this tick: where each starting
+  // marker's launch job stands (launchJobState). Each read settles to `{value}` or `{error}`.
+  const markerReads = new Map();
+  const readOnce = (key, read) => {
+    if (!markerReads.has(key)) markerReads.set(key, read().then((value) => ({ value }), (error) => (log(`  ${key} could not be read (${error?.status || String(error?.message || error).slice(0, 120)})`), { error })));
+    return markerReads.get(key);
+  };
+  let markerBase;
+  /**
+   * The record with each starting marker since `since` settled by its launch job as GitHub lists it: a job that ended
+   * with the marker still there is stored as a `lost` start (under the record lock, with the marker read again there:
+   * a launcher's outcome written meanwhile settles it instead, and this tick goes on from the record read there; a dry
+   * run only reads), one queued or running is in flight. A marker that names no run names no launch job: none is in
+   * flight. A run GitHub no longer holds (a 404 or 410: deleted, expired) runs no launch job either: lost at the
+   * marker's time. Returns `{record, flight}`: `flight` null when none is in flight, else when to look again: the started
+   * job's own limit, or Infinity while it waits for a runner or its group (its end ticks the dispatcher; the cron is the
+   * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry, up to the
+   * unread-claim bound (claim_pause_hours from the marker, claimPause). Past it, a
+   * read that still fails (not rate limited) returns `unread` too, `{run, read, code}`, the read named: the caller Blocks
+   * the Objective with cause `factory`, its notice naming that read.
+   */
+  const settleMarkers = async (n, record, since) => {
+    let rec = record;
+    let flight = null;
+    let unread = null;
+    const look = (t) => (flight = flight === null ? t : Math.min(flight, t));
+    for (const m of pendingMarkers(record, since)) {
+      if (m.run && m.run === process.env.GITHUB_RUN_ID) {
+        look(Infinity);
+        continue;
+      }
+      let state = { ended: m.at };
+      if (m.run) {
+        let failed = `run ${m.run}'s jobs`;
+        const jobs = await readOnce(failed, () => runJobs(repo, m.run, readToken));
+        state = jobs.error ? null : launchJobState(jobs.value, n);
+        let error = jobs.error;
+        if (state?.unlisted) {
+          failed = `run ${m.run}`;
+          const run = await readOnce(failed, () => actionsRun(repo, m.run, readToken));
+          if (run.error) error = run.error;
+          else state = launchJobState(jobs.value, n, run.value);
+        }
+        if (error && runGone(error)) state = { ended: m.at };
+        else if (error && !error.rateLimited && Date.now() - Date.parse(m.at) > claimPause) {
+          unread ??= { run: m.run, read: failed, code: Number.isInteger(error.status) && error.status > 0 ? `HTTP ${error.status}` : error.transport ? "network" : "error" };
+          continue;
+        } else if (error) {
+          retry(`#${n}'s launch job`);
+          look(Infinity);
+          continue;
+        }
+      }
+      if (state.running) {
+        look(state.until === null ? Infinity : state.until + 1000);
+        continue;
+      }
+      const lost = { run: m.run, stage: m.stage, at: state.ended ?? new Date().toISOString() };
+      if (!dryRun) {
+        markerBase ??= recordWrites?.base ?? (await lockBase(repo, opts).catch(() => null));
+        const w = markerBase ? await writeSandboxRecord(repo, n, opts, (cur) => lostLaunch(cur, lost), { base: markerBase, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
+        if (!w?.ok && !w?.refused) {
+          log(`  #${n}: its lost launch (run ${m.run || "none"}) was not stored; next tick`);
+          retry(`#${n}'s lost launch`);
+          look(Infinity);
+          continue;
+        }
+        // Refused: the marker was gone under the lock (its launcher's outcome landed after this tick's read): the record
+        // read there is GitHub's, not this tick's copy with a lost start the record does not hold.
+        if (w.refused) {
+          rec = w.record ? { ...rec, ...w.record } : rec;
+          continue;
+        }
+      }
+      rec = lostLaunch(rec, lost) ?? rec;
+    }
+    return { record: rec, flight, unread };
+  };
+  // The Block for a launch whose dispatcher run stayed unreadable past the bound (settleMarkers `unread`): Factory
+  // cannot tell whether it started, so the Objective stops with one notice naming the read, never a silent wait.
+  const blockUnreadLaunch = async (issue, { run, read, code }, stage) => {
+    const n = issue.number;
+    vanished.push(n);
+    statuses[n] = "Blocked";
+    const from = stage === "review" ? "factory:in-review" : "factory:running";
+    issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "factory:blocked" }];
+    log(`  #${n}: its ${stage} launch (dispatcher run ${run}) unread for over a day (${read}: ${code}); Blocked`);
+    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Factory cannot tell whether it started; re-apply the label once GitHub answers that read`, "factory");
+  };
   // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
   // its own, not a wait for the cron, since that launch will not come.
   const graceDue = (n, kind, ms) => due(n, n === failedLaunch ? "start-retry" : kind, ms);
   const retry = (what) => {
     if (!deadlines.some((d) => d.kind === "retry")) due(null, "retry", now.getTime() + RETRY_WAKE_MS);
     log(`${what} unread this tick; a retry is due`);
+  };
+  // The sandbox record of Objective n, as `{ record }` (null: none written), or null when its comments could not be
+  // read: a failed read is no absent record, so the caller decides nothing on that Objective this tick (#430).
+  const recordRead = async (n) => {
+    const comments = await listComments(repo, n, opts).catch(() => null);
+    if (comments) return { record: sandboxRecord(comments, n) };
+    retry(`#${n}'s sandbox record`);
+    return null;
   };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
@@ -220,7 +324,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const comments = await listComments(repo, n, opts).catch(() => null);
         if (!comments || stageHolds(sandboxRecord(comments, n), Date.now(), inputs.timeoutMinutes * 60_000)) return true;
       }
-      const hold = await backend().trigger.localHold(repo, n, opts).catch(() => ({ state: "unread" }));
+      const hold = await backend().trigger.localHold(repo, n, opts, Date.now(), claimPause).catch(() => ({ state: "unread" }));
       return hold?.state === "alive" || hold?.state === "unread";
     };
     // Who may restart: a writer the repository lists, a pinned maintainer, else one whose permission reads write or more.
@@ -426,7 +530,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // claim could not be read or checked (backend.mjs localHold). A claim from before `entered` (left on a Blocked one
   // that a human re-labelled) says nothing now.
   const localWait = async (issue, entered) => {
-    const hold = await backend().trigger.localHold(repo, issue.number, opts);
+    const hold = await backend().trigger.localHold(repo, issue.number, opts, Date.now(), claimPause);
     if (hold) claimed.add(issue.number);
     return hold && hold.state !== "unread" && entered && Date.parse(hold.heartbeat) < Date.parse(entered) ? null : hold;
   };
@@ -434,7 +538,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // next stint starts clean.
   const blockLocalWait = async (n, hold, noClaim, cause) => {
     const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
-    const reason = hold ? `the local loop holding it (${hold.holder}) has been away over a day; ${SERVE_FIX}` : noClaim;
+    const reason = hold ? `the local loop holding it (${hold.holder}) has been away over ${pauseText}; ${SERVE_FIX}` : noClaim;
     // A Block that cannot be written (the reads behind an unread claim failing too) is tried again next tick.
     const written = await applyExit(repo, { issue: n, pr, exit: "blocked", reason, cause, notify: inputs.notify, stage: "dispatch" }, opts).then(
       () => true,
@@ -442,8 +546,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     );
     if (written && hold?.commentId) await rest(`repos/${repo.full}/issues/comments/${hold.commentId}`, { ...opts, method: "DELETE" }).catch(() => {});
   };
-  // An unread claim has a deadline too: past a day from `since` (when the Objective began waiting), and with the newest
-  // marked comment read (its author unchecked) also over a day old, no loop can be holding it. Only a read that keeps
+  // An unread claim has a deadline too: past the claim pause (claim_pause_hours) from `since` (when the Objective began waiting), and with the newest
+  // marked comment read (its author unchecked) also older than that, no loop can be holding it. Only a read that keeps
   // failing gets here, and its Block names that read (cause `factory`), never a machine.
   // A live local stage keeps writing as Factory (its claim's heartbeat, its progress comment), so a Block also needs the
   // issue to show none of that for the day: no comment created or updated by Factory's login, or carrying a Factory
@@ -451,15 +555,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // and no label event by Factory's login. Taken from the issue's timeline; a timeline or a login Factory cannot read is
   // no evidence, so it waits.
   const unreadLapsed = async (n, hold, since) => {
-    if (!since || Date.now() - Date.parse(since) <= CLAIM_PAUSE_MS) return false;
-    if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= CLAIM_PAUSE_MS) return false;
+    if (!since || Date.now() - Date.parse(since) <= claimPause) return false;
+    if (hold.updatedAt && Date.now() - Date.parse(hold.updatedAt) <= claimPause) return false;
     return factoryQuiet(n);
   };
   const factoryQuiet = async (n) => {
     if (!selfLogin()) return false;
     const events = await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true }).catch(() => null);
     if (!Array.isArray(events)) return false;
-    const after = Date.now() - CLAIM_PAUSE_MS;
+    const after = Date.now() - claimPause;
     const recent = (...ts) => ts.some((t) => Date.parse(t) > after);
     return !events.some((e) =>
       e.event === "commented"
@@ -467,7 +571,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         : (e.event === "labeled" || e.event === "unlabeled") && isSelf({ user: e.actor }) && recent(e.created_at),
     );
   };
-  const unreadReason = (hold, what) => `${what} for over a day and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
+  const unreadReason = (hold, what) => `${what} for over ${pauseText} and its local claim cannot be read or checked (${hold.reason}); re-apply the label once GitHub answers that read`;
   // In review with its review owed (an open PR, not a draft, labelled factory:review, or unlabelled with a third-party
   // wait record no review has taken up since: third-party-review.mjs): only a local loop runs that review, so it waits
   // as a Running one does, counted from the later of its entering In review and the PR's last factory:review label (a
@@ -482,15 +586,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       return false;
     }
     if (!entered.at) return false;
-    if (Date.now() - Date.parse(entered.at) < CLAIM_PAUSE_MS) {
-      due(n, "local-pause", Date.parse(entered.at) + CLAIM_PAUSE_MS);
+    if (Date.now() - Date.parse(entered.at) < claimPause) {
+      due(n, "local-pause", Date.parse(entered.at) + claimPause);
       return false;
     }
     const hold = await localWait(issue, entered.at);
     if (hold?.state === "alive") return false;
     if (hold?.state === "paused") {
       paused.push(n);
-      due(n, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
+      due(n, "local-pause", Date.parse(hold.heartbeat) + claimPause);
       return false;
     }
     if (hold?.state === "unread" && !(await unreadLapsed(n, hold, entered.at))) {
@@ -520,15 +624,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (waited && owed.at && Date.parse(owed.at) >= waited.updatedAt) return false;
     const from = waited ? new Date(waited.updatedAt).toISOString() : owed.at;
     const since = from && Date.parse(from) > Date.parse(entered.at) ? from : entered.at;
-    if (Date.now() - Date.parse(since) < CLAIM_PAUSE_MS || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
-      due(n, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+    if (Date.now() - Date.parse(since) < claimPause || (hold?.state === "unread" && !(await unreadLapsed(n, hold, since)))) {
+      due(n, "local-pause", Date.parse(since) + claimPause);
       return false;
     }
     vanished.push(n);
     statuses[n] = "Blocked";
     if (dryRun) return true;
     if (hold?.state === "unread") await blockLocalWait(n, null, unreadReason(hold, "In review"), "factory");
-    else await blockLocalWait(n, hold, `in review with no local loop running its review for over a day (no claim); ${SERVE_FIX}`, "setup");
+    else await blockLocalWait(n, hold, `in review with no local loop running its review for over ${pauseText} (no claim); ${SERVE_FIX}`, "setup");
     return true;
   };
   // A stage lost to a network failure on the Action's runners or the cloud sandbox (lib/relaunch.mjs): one that ended on
@@ -631,17 +735,23 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const timeline = async () => (events === undefined ? (events = await timelineOf(repo, issue.number, opts).catch(() => null)) : events);
         let boxRecord = null;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
-        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
+        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own. An
+        // unread record may hold a live lease, so nothing is decided on the Objective this tick (#430).
         if (!sandbox && inputs.sandbox) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          const { record } = read;
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;
           }
         }
         if (sandbox && backend().trigger.routes(issue)) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          const { record } = read;
           boxRecord = record;
+          boxRecords.set(issue.number, record);
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;
@@ -659,11 +769,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (since && !launchedSince(record, "work", since)) {
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
             // launcher); one that never ran gets the grace for its own launch first.
-            const again = startRetryAt(record, since);
-            const flight = inFlightUntil(record, since);
-            if (transientHold(record, since)) vendorHeld.push(issue.number);
+            const settled = await settleMarkers(issue.number, record, since);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "work");
+              continue;
+            }
+            const again = startRetryAt(settled.record, since);
+            const flight = settled.flight;
+            boxRecords.set(issue.number, settled.record);
+            if (transientHold(settled.record, since)) vendorHeld.push({ n: issue.number, at: refusalStreakAt(settled.record, since), flight: flight !== null });
             relaunchStage[issue.number] = "work";
-            // A launch named less than START_LOST_MS ago is still in flight (its job may wait for a runner, or threw
+            // A launch whose job GitHub still lists queued or running is in flight (it may wait for a runner, or threw
             // before it could record anything): it is not named again before its marker turns into an outcome.
             if (flight !== null) due(issue.number, "start-retry", flight);
             else if (again !== null) {
@@ -675,7 +791,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
         }
         // A local loop (factory run / serve) holds it: alive while its heartbeat is fresh, paused while the machine
-        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for a day. A read that
+        // is away (asleep, off, serve stopped) for its serve to resume, Blocked once away for the claim pause. A read that
         // failed (the timeline, the claim or its author's check) is no answer: nothing rests on it, the next tick reads again.
         const read = (await timeline()) ? { at: lastRunningAt(events) } : null;
         const hold = read && (await localWait(issue, read.at));
@@ -698,7 +814,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (hold?.state === "alive") continue;
         if (hold?.state === "paused") {
           paused.push(issue.number);
-          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + CLAIM_PAUSE_MS);
+          due(issue.number, "local-pause", Date.parse(hold.heartbeat) + claimPause);
           continue;
         }
         const local = hasLocalLabel(issue);
@@ -740,8 +856,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // No claim: a runner job gets 15 minutes to show up. Any other factory:local Objective waits for a loop on its
         // machine, so it gets the day a claim gets.
-        if (!hold && since && Date.now() - Date.parse(since) < (local ? CLAIM_PAUSE_MS : 15 * 60_000)) {
-          if (local) due(issue.number, "local-pause", Date.parse(since) + CLAIM_PAUSE_MS);
+        if (!hold && since && Date.now() - Date.parse(since) < (local ? claimPause : 15 * 60_000)) {
+          if (local) due(issue.number, "local-pause", Date.parse(since) + claimPause);
           continue;
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
@@ -781,7 +897,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
         const lostEnd = notLostBlock(notLost, note);
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over ${pauseText} (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
       }
     }
   }
@@ -849,6 +965,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Each In-review Objective's merge pass answer this tick (session.mjs mergeReadyOne): one that cannot merge soon (red
   // checks, a person took it out of the queue) is no sibling a send-back waits for.
   const mergeHow = {};
+  // A PR whose hand-off waits for a sibling (overlap.mjs reviewHold) is settled after every other In-review PR's merge
+  // pass, which says which siblings a person holds out of the merge queue (personHeld): none of those is ahead of it.
+  // Its reads are kept from its first turn, by issue, with the count of PRs merged by then: when one merged since, its
+  // PR is read again, as that merge can have made it conflict with the default branch.
+  const waitsLast = new Map();
   const dirty = [];
   const rebaseHeld = [];
   try {
@@ -856,25 +977,29 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     // The fallback bound and the step history, read once for this tick's merge pass (as the queue watch reads them once
     // for its watch). Actions are read with the job token (actions: read), which the App has not.
     let hungMs = null;
+    // The queue's own check timeout (minutes, null when unread), read once per tick with the bound it sets.
+    let queueTimeout;
     const cache = {};
-    for (const issue of issues) {
+    const pass = [...issues];
+    for (const issue of pass) {
       // One Objective whose read or decision throws is said and read again next tick; the rest of the tick goes on.
       try {
+        const kept = waitsLast.get(issue.number);
         // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
-        if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
+        if (!kept && hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
         // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
         if (!backend().trigger.routes(issue)) continue;
         // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
         if (restarting[issue.number]) continue;
         if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
         let prRead = true;
-        const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+        const open = kept ? kept.open : await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
         // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
         if (prRead) prsSeen[issue.number] = open;
         if (!open) {
           // A split part merged and the issue stays open: its branch goes and the next part is queued, from the default branch.
           if (dryRun) continue;
-          const next = await nextPart(repo, issue.number, opts).catch((e) => {
+          const next = await nextPart(repo, issue.number, opts, { maxParts: inputs.maxParts }).catch((e) => {
             log(`  #${issue.number}: next part: ${String(e.message).slice(0, 120)}`);
             return null;
           });
@@ -887,16 +1012,22 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             log(`  #${issue.number}: a split part merged; the next part is queued`);
           } else if (next === "cap") {
             statuses[issue.number] = "Blocked";
-            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${MAX_PARTS} PRs and work still remains; finish it by hand or narrow the issue, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
+            await applyExit(repo, { issue: issue.number, pr: null, exit: "blocked", cause: "work", reason: `split into ${inputs.maxParts ?? MAX_PARTS} PRs and work still remains (max_parts); finish it by hand, narrow the issue or raise max_parts, then re-apply the label`, notify: inputs.notify, stage: "dispatch" }, opts);
           }
           continue;
         }
-        const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
+        const pr = kept && kept.landed === landed.length ? kept.pr : await getPrSettled(repo, open.number, opts).catch(() => null);
         // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
         // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
         // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-        const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+        const marks = kept ? kept.marks : await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+        const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = marks;
         const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
+        if (!kept && !reviewing && reviewWait && !reviewWait.released && pr) {
+          waitsLast.set(issue.number, { open, pr, marks, landed: landed.length });
+          pass.push(issue);
+          continue;
+        }
         // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
         // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
         // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
@@ -956,7 +1087,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (!reviewing && reviewWait && !reviewWait.released && pr) {
           let how;
           try {
-            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { dryRun, log });
+            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: (s) => twoAccounts(s) || personHeld.has(s.number), prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { dryRun, log });
           } catch (e) {
             log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
             retry(`#${issue.number}'s review wait`);
@@ -966,12 +1097,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (["released", "rebase", "stale", "draft"].includes(how)) holdReleased.add(issue.number);
           if (how.waiting) {
             reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
-            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            due(issue.number, "sibling-wait", reviewWait.since + siblingWait + WAKE_SLACK_MS);
             continue;
           }
           if (how === "deferred") {
             holdDeferred.add(issue.number);
-            due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+            due(issue.number, "sibling-wait", reviewWait.since + siblingWait + WAKE_SLACK_MS);
             retry(`#${issue.number}'s trial merges`);
             continue;
           }
@@ -982,23 +1113,37 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           if (how === "released") {
             reviewResumed.push(issue.number);
-            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+            log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= siblingWait ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
             continue;
           }
           if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
           // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
         }
+        // The sandbox route's record of this Objective, read once for the two passes below.
+        let boxRecord = null;
+        if (sandbox) {
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          boxRecord = read.record;
+        }
         // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
         if (sandbox && reviewing && !pr.draft) {
           const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const record = boxRecord;
+          boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
           if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
           if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
-            const again = startRetryAt(record, labelledAt);
-            const flight = inFlightUntil(record, labelledAt);
-            if (transientHold(record, labelledAt)) vendorHeld.push(issue.number);
+            const settled = await settleMarkers(issue.number, record, labelledAt);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "review");
+              continue;
+            }
+            const again = startRetryAt(settled.record, labelledAt);
+            const flight = settled.flight;
+            boxRecords.set(issue.number, settled.record);
+            if (transientHold(settled.record, labelledAt)) vendorHeld.push({ n: issue.number, at: refusalStreakAt(settled.record, labelledAt), flight: flight !== null });
             if (flight !== null) due(issue.number, "start-retry", flight);
             else if (again !== null) {
               if (Date.now() >= again) relaunch.push(issue.number);
@@ -1010,7 +1155,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
         if (sandbox && !relaunch.includes(issue.number)) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const record = boxRecord;
+          boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
           if (record?.waiting === "checks" && !holds && (await checksFinished(issue.number, record))) {
@@ -1084,8 +1230,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
           // green, with no unread maintainer decision. Nothing is armed between ticks.
           const report = {};
-          if (queue) hungMs ??= await queueBoundMs(repo, opts);
-          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
+          if (queue && queueTimeout === undefined) {
+            queueTimeout = await queueTimeoutMin(repo, opts);
+            hungMs = queueHungMs(queueTimeout);
+          }
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
             log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
             return null;
           });
@@ -1095,6 +1244,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (how === "merged") landed.push(issue.number);
           if (how === "held") personHeld.add(issue.number);
           if (report.watch) queueWatch.push(open.number);
+          if (report.retry) retry(`#${issue.number}'s hung queue step`);
           if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
           const why = mergeBlockReason(how, report);
           if (why) {
@@ -1108,7 +1258,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
     }
     // The conflicting In-review PRs (#366): each goes back in the release order unless a sibling ahead of it, which
-    // merges first, conflicts with it too; that one waits (at most WAIT_MAX_MS, with a note and a wake), since its
+    // merges first, conflicts with it too; that one waits (at most sibling_wait_hours, with a note and a wake), since its
     // rebase now would be undone by that merge. With one conflicting PR and no sibling ahead, nothing is merged on trial.
     const cannotMerge = new Set(["red", "queue-red", "held", "threads", "edited", "dropped", "stopped"]);
     // A usage-limit hold slows a sibling only while it still needs a stage: Running, its review label on, or a merge-pass
@@ -1116,32 +1266,31 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const backToReview = new Set(["re-review", "unread", "code-scanning", "queue-red", "text-edit"]);
     const needsStage = async (s) => stateOf(s, statuses[s.number] ?? null) === "Running" || backToReview.has(mergeHow[s.number]) || ((await (prOfTick ??= prFinder(repo, opts, prsSeen))(s.number))?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
     const mergesLate = async (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || ((!!localHold?.(s) || (await routeHeld(s))) && (await needsStage(s)));
-    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { log }) : [];
+    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { log }) : [];
     for (const { issue, pr, open, recent, already, rebaseWait, wait, since } of sendOrder) {
       if (wait) {
         rebaseHeld.push(issue.number);
         log(`  #${issue.number}: PR #${open.number} conflicts; ${rebaseWaitReason(wait)}`);
-        due(issue.number, "sibling-wait", since + WAIT_MAX_MS + WAKE_SLACK_MS);
+        due(issue.number, "sibling-wait", since + siblingWait + WAKE_SLACK_MS);
         if (!dryRun)
-          await sayRebaseWait(repo, { issue, prNumber: open.number, wait, record: rebaseWait }, opts, { log }).catch((e) => {
+          await sayRebaseWait(repo, { issue, prNumber: open.number, wait, record: rebaseWait }, opts, { log, waitMaxMs: siblingWait }).catch((e) => {
             log(`  #${issue.number}: its rebase wait could not be recorded (${String(e.message).slice(0, 120)}); the next tick tries again`);
             retry(`#${issue.number}'s rebase wait`);
           });
         continue;
       }
       sentBack.push(issue.number);
-      if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= WAIT_MAX_MS ? "gaveUp" : "sent" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
+      if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= siblingWait ? "gaveUp" : "sent" }, opts, { log, waitMaxMs: siblingWait }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
       if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
     }
   } finally {
     trialsTick?.close();
   }
 
-  // The waiting hand-offs' notes, once the merge pass has said which siblings a person holds out of the merge queue.
+  // The waiting hand-offs' notes.
   for (const h of reviewHeld) {
-    if (!h.wait.cause && personHeld.has(h.wait.on)) h.wait.cause = "a person took it out of the merge queue";
     log(`  #${h.issue.number}: PR #${h.pr}: ${waitReason(h.wait)}`);
-    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log });
+    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log, waitMaxMs: siblingWait });
   }
   watch.mark("review");
   // max_concurrent caps the repository as a whole (LOCAL.md): the Running count is every route's Objectives (a local
@@ -1188,7 +1337,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (sandbox && !inputs.issue) {
     await pooled(wanted, RELATION_READS, async (issue) => {
       if (NOT_READY_STATUSES.has(stateOf(issue, statuses[issue.number] ?? null))) return;
-      const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+      const read = await recordRead(issue.number);
+      // Unread: whether the vendor's quota still holds it is unknown, so it is not picked this tick.
+      if (!read) deferred[issue.number] = "its sandbox record could not be read; read again next tick";
+      const record = read?.record ?? null;
       if (quotaWaiting(record, now.getTime())) {
         deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
         due(issue.number, "quota", Date.parse(record.quota.retryAt));
@@ -1220,13 +1372,25 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const slots = Math.max(0, inputs.maxConcurrent - running);
     picked.ready = [...sentBack, ...picked.ready.filter((n) => !sentBack.includes(n))].slice(0, slots);
   }
-  // The sandbox vendor failing starts (a transient error, its retry pending): nothing new starts on this route until a
-  // retry gets through, so the queue is not drained into the outage. The retries themselves still go.
-  if (sandbox && vendorHeld.length && !inputs.issue && picked.ready.length) {
-    const why = `the ${inputs.sandbox} sandbox is failing starts (#${vendorHeld.join(", #")} waits to retry); new Objectives wait`;
-    picked.skipped = [...picked.skipped, ...picked.ready.map((n) => ({ number: n, reason: why }))];
-    picked.ready = [];
-    picked.reason = why;
+  // The sandbox vendor refusing starts (its retry pending): the queue is not drained into an outage. The retries
+  // themselves still go. Whether it refuses everyone is read from the other Objectives' sandbox records since each
+  // refusal streak began (logic.mjs vendorEvidence): one that started since says the vendor serves others, and that
+  // refusal holds nothing. Otherwise at most one start goes into the suspected outage at a time: while one is in flight
+  // (another Objective's launch since, a held one's own retry in flight or named this tick), every new pick waits for its
+  // answer; with none in flight (another was refused too, or none tried), one new pick goes as the next try, and the
+  // rest wait. So two Objectives each refused for reasons of their own never hold the route for good: each try that
+  // starts frees it.
+  const evidence = (h) => vendorEvidence(h.at, [...boxRecords].filter(([n]) => n !== h.n).map(([, r]) => r));
+  const vendorDown = vendorHeld.filter((h) => evidence(h) !== "up");
+  if (sandbox && vendorDown.length && !inputs.issue && picked.ready.length) {
+    const trying = vendorDown.some((h) => h.flight || relaunch.includes(h.n) || evidence(h) === "trying");
+    const held = trying ? picked.ready : picked.ready.slice(1);
+    const why = `the ${inputs.sandbox} sandbox is refusing starts (#${vendorDown.map((h) => h.n).join(", #")} waits to retry); ${trying ? "a start into it is in flight, and new Objectives wait for its answer" : `#${picked.ready[0]} starts as the one try into it, and the other new ones wait`}`;
+    if (held.length) {
+      picked.skipped = [...picked.skipped, ...held.map((n) => ({ number: n, reason: why }))];
+      picked.ready = picked.ready.filter((n) => !held.includes(n));
+      picked.reason = why;
+    } else log(why);
   }
   // GitHub's REST quota for this token spent (a read above met it and went on without its answer): nothing new starts
   // until its reset, since the new stages' first reads would meet it too. Said once. Its GraphQL quota alone holds nothing.
@@ -1349,8 +1513,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   }
   // A starting marker for each stage this run names on the sandbox route, written under the record lock: a launch that
   // never runs its course (its job never starts, fails before it writes, or is cut off) leaves it with no outcome, and
-  // past START_LOST_MS it counts as a failed start (logic.mjs startFailures), so the next try waits its pause and three
-  // Block, whatever happened to the job.
+  // once GitHub lists its launch job as ended it is stored as a failed start (settleMarkers), so the next try waits its
+  // pause and three Block, whatever happened to the job.
   const named = [...picked.ready.map((n) => [n, "work"]), ...relaunch.filter((n) => !picked.ready.includes(n)).map((n) => [n, relaunchStage[n] || "work"])];
   if (sandbox && !dryRun && named.length) {
     // `recordWrites`: the record writes' {api, base} (tests); else GitHub's, with the lock's base read once.
@@ -1359,9 +1523,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const markedAt = new Date().toISOString();
       const w = base ? await writeSandboxRecord(repo, n, opts, (cur) => startingRecord(cur, { vendor: inputs.sandbox, stage, at: markedAt, run: process.env.GITHUB_RUN_ID || "" }), { base, ...(recordWrites?.api ? { api: recordWrites.api, pauseMs: 0, readBackPauseMs: 0 } : {}) }).catch(() => null) : null;
       if (!w?.ok) log(`  #${n}: no starting marker (${w?.refused ? "a launcher's live claim holds the record" : "not written"}); the wake below and the launch grace catch a lost launch`);
-      // This run owns the launch it named: a launcher that exits without a tick, or never runs, is looked at again when
-      // its marker turns into an outcome, by a wake of this run's, not the cron.
-      due(n, "start-retry", Date.parse(markedAt) + START_LOST_MS + 1000);
+      // This run owns the launch it named: a launcher that exits without a tick is looked at again, by a wake of this
+      // run's, not the cron, at the earliest its job could have ended (its own limit from now); then its job's state says.
+      due(n, "start-retry", Date.parse(markedAt) + LAUNCH_JOB_MS + 1000);
     }
   }
   watch.mark("mark");
@@ -1394,14 +1558,14 @@ export const watchOutput = (list) => (list?.length ? JSON.stringify([...new Set(
  * WATCH_POLL_MS for as long as each stays there. Returns `{tick: true, pr, left: true}` as soon as one leaves the queue,
  * merged or dropped (the dispatcher's merge pass then re-enqueues a drop once, or Blocks, #2683), and
  * `{tick: true, pr, stalled: true}` as soon as one's entry is stalled: no CI began on its queue commit in
- * QUEUE_STALL_MS, or a required check made no progress (session.mjs hangsOn, logic.mjs queueHangs; the
+ * `stall.queueMs` (queue_stall_minutes), or a required check made no progress (session.mjs hangsOn, logic.mjs queueHangs; the
  * merge pass takes it out and puts it back once, or Blocks). The tick is the job's own workflow_dispatch, which GitHub
  * never holds for approval, unlike the `dequeued` event's run when the queue's bot counts as an outside contributor;
  * that run stays a faster path where it runs. A failed read keeps the PR watched. Past `maxMs` with a PR
  * still in the queue it ticks anyway (`pr: null`): the merge pass reads every PR again and has it watched again.
  * Returns `{tick: false}` only with nothing to watch.
  */
-export async function watchQueue(repo, prs, opts, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), pollMs = WATCH_POLL_MS, maxMs = WATCH_MAX_MS, actionsToken = null } = {}) {
+export async function watchQueue(repo, prs, opts, { now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), pollMs = WATCH_POLL_MS, maxMs = WATCH_MAX_MS, actionsToken = null, stall = undefined } = {}) {
   const watched = new Set(prs.map(Number).filter((n) => Number.isInteger(n) && n > 0));
   if (!watched.size) return { tick: false };
   // The required checks and their integration: code scanning's runs on the queue's commit are not the gate starting.
@@ -1415,7 +1579,7 @@ export async function watchQueue(repo, prs, opts, { now = () => Date.now(), slee
   for (;;) {
     let wait = pollMs;
     for (const pr of watched) {
-      const st = await queueEntryState(repo, pr, opts, now(), gate, { hungMs, actionsToken, cache }).catch((e) => {
+      const st = await queueEntryState(repo, pr, opts, now(), gate, { hungMs, actionsToken, cache, stall }).catch((e) => {
         log(`queue watch: PR #${pr}: unreadable (${Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : "error"}); read again`);
         return { unread: true };
       });
@@ -1571,7 +1735,7 @@ async function main() {
     } catch {
       prs = [];
     }
-    const r = await watchQueue(repoOf(inputs.repo), Array.isArray(prs) ? prs : [], { token }, { actionsToken: inputs.githubToken || null });
+    const r = await watchQueue(repoOf(inputs.repo), Array.isArray(prs) ? prs : [], { token }, { actionsToken: inputs.githubToken || null, stall: inputs.stall });
     setOutput("tick", r.tick ? "true" : "false");
     return;
   }

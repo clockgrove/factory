@@ -817,7 +817,10 @@ export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
 
 // ------------------------------------------------------------------ split parts
 
-/** At most this many sequential PRs per Objective; a split that needs more Blocks. */
+/**
+ * At most this many sequential PRs per Objective by default; a split that needs more Blocks. The repository's max_parts
+ * (inputs.mjs resolveInputs `maxParts`): a count of PRs, not a spend bound (each part's jobs have their own max_usd).
+ */
 export const MAX_PARTS = 6;
 const PARTS = (issue) => `<!-- factory:${issue}:parts `;
 
@@ -866,10 +869,10 @@ export async function mergedParts(repo, issue, opts) {
 
 /**
  * After a split part merged and the issue stays open: the next part is due. Returns "next" (the branch is deleted and
- * the Objective goes back to the queue), "cap" (MAX_PARTS reached with work left: the caller Blocks), or null when the
+ * the Objective goes back to the queue), "cap" (`maxParts` reached with work left: the caller Blocks), or null when the
  * Objective is not a split waiting on its next part.
  */
-export async function nextPart(repo, issue, opts) {
+export async function nextPart(repo, issue, opts, { maxParts = MAX_PARTS } = {}) {
   if (await findPr(repo, `factory/${issue}`, opts)) return null;
   const rec = await partsRecord(repo, issue, opts);
   if (!rec?.remaining || !rec.prs.length) return null;
@@ -877,7 +880,7 @@ export async function nextPart(repo, issue, opts) {
   if (!last?.merged_at) return null;
   const merged = (await closedPrsFor(repo, `factory/${issue}`, opts)).filter((p) => p.merged_at);
   if (merged[0] && merged[0].number !== last.number) return null;
-  if (rec.prs.length >= MAX_PARTS) return "cap";
+  if (rec.prs.length >= maxParts) return "cap";
   await rest(`repos/${repo.full}/git/refs/heads/${encodeURIComponent(`factory/${issue}`).replace(/%2F/g, "/")}`, { ...opts, method: "DELETE" }).catch((e) => {
     if (![404, 422].includes(e.status)) throw e;
   });

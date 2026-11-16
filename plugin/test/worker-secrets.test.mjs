@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { SHELL_SECRET_KEYS, claudeRunner, harnessCommand, hiddenFromShell, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { SHELL_SECRETS_ENV, harnessShell, localSecretValues, missingSecretsFix, openWorkerSecrets, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
+import { SHELL_SECRETS_ENV, harnessShell, localSecretValues, missingSecretsFix, nameLabel, openWorkerSecrets, packShellSecrets, parseSecretValues, parseWorkerSecrets, sameSecret, shellNameRefusal, takeShellSecrets, workerSecrets } from "../scripts/lib/worker-secrets.mjs";
 import { decideExit, parseExitRecord } from "../scripts/lib/logic.mjs";
 import { shellSecretsNote } from "../scripts/lib/session.mjs";
 import { stageEnvironment } from "../scripts/launch.mjs";
@@ -464,4 +464,20 @@ fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cli: ${JSON.stringif
     dropHeldSecrets();
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test("a name is refused as a pasted key only when the whole string has a vendor's key shape, case and length exact", () => {
+  // Variable names that merely start like a key's prefix in another case are names: they reach the shell and are shown.
+  for (const n of ["NPM_TOKEN", "SK_REGION", "AKIA_ROLE", "VCK_MODE", "GHP_HOST", "AIZA_PROJECT"]) {
+    assert.equal(shellNameRefusal(n), null, `${n} is a name`);
+    assert.equal(nameLabel(n), n, `${n} is shown`);
+  }
+  // Each vendor's own shape is a key, whatever else the entry says.
+  const b62 = (k) => "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6a7B8c9D0e1F2g3H4i5J6k7L8m9".slice(0, k);
+  for (const k of [`npm_${b62(36)}`, `ghs_${b62(36)}`, `github_pat_${b62(22)}_${b62(59)}`, "AKIAIOSFODNN7EXAMPLE", `AIza${b62(35)}`, `vck_${b62(24)}`, `sk_live_${b62(24)}`]) {
+    assert.equal(shellNameRefusal(k), "looks-like-key", `${k.slice(0, 6)}… is a key`);
+    assert.equal(nameLabel(k), "a secret");
+  }
+  // One character short of npm's shape is a name like any other.
+  assert.equal(shellNameRefusal(`npm_${b62(35)}`), null);
 });

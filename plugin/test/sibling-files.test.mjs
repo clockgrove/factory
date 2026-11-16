@@ -133,14 +133,22 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     const p = u.pathname.replace(`/repos/${REPO}`, "");
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : null;
-    if (u.pathname === "/graphql") return json({ data: {} });
+    // The merge queue's reads (github.mjs inMergeQueue, mergeQueueRemovals, mergeQueueEntry), from `state.queue` by PR.
+    if (u.pathname === "/graphql") {
+      const q = state.queue?.[body?.variables?.n];
+      if (!q) return json({ data: {} });
+      const pullRequest = body.query.includes("isInMergeQueue") ? { isInMergeQueue: !!q.entry } : body.query.includes("timelineItems") ? { timelineItems: { nodes: q.removals || [] } } : { mergeQueueEntry: q.entry ?? null };
+      return json({ data: { repository: { pullRequest } } });
+    }
     let m;
     if (method === "GET") state.reads.push(`${p}${u.search}`);
     else state.writes.push(`${method} ${p}${body?.body ? ` ${body.body}` : ""}`);
     if (method === "GET" && u.pathname === "/user") return json({ login: SELF, type: "Bot" });
     if (method === "GET" && p === "/issues") return json(u.searchParams.get("state") === "closed" ? [] : state.issues.filter((i) => i.labels.some((l) => l.name === u.searchParams.get("labels"))));
     if (method === "GET" && p === "") return json({ default_branch: "main" });
-    if (method === "GET" && p === "/rulesets") return json([]);
+    // `state.queue` set: a ruleset with a merge queue on the default branch.
+    if (method === "GET" && p === "/rulesets") return json(state.queue ? [{ id: 1, target: "branch", enforcement: "active" }] : []);
+    if (method === "GET" && p === "/rulesets/1" && state.queue) return json({ conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue", parameters: {} }] });
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(state.comments[m[1]] || []);
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
@@ -184,7 +192,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     // The merge pass's reads and its merge (session.mjs mergeReadyOne): the Objective, the PR's review, green CI.
     if (method === "GET" && (m = /^\/issues\/(\d+)$/.exec(p))) return json(state.issues.find((i) => i.number === Number(m[1])) ?? { message: "Not Found" }, state.issues.some((i) => i.number === Number(m[1])) ? 200 : 404);
     if (method === "GET" && /^\/pulls\/\d+\/comments$/.test(p)) return json([]);
-    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return json([{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, submitted_at: new Date().toISOString() }]);
+    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return json([{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, submitted_at: state.reviewedAt ?? new Date().toISOString() }]);
     if (method === "GET" && /\/check-runs$/.test(p)) return json({ total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success", app: { id: 15368 } }] });
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(p)) return json({ statuses: [] });
     if (method === "GET" && (m = /^\/commits\/([0-9a-f]+)$/.exec(p))) return json({ sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
@@ -192,6 +200,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
       const x = Object.values(state.prs).find((y) => y.pr.number === Number(m[1]));
       Object.assign(x.pr, { state: "closed", merged: true });
       state.mergedPrs = [...(state.mergedPrs || []), x.pr.number];
+      state.onMerge?.(x.pr.number);
       return json({ merged: true });
     }
     if (method !== "GET") return json({}, 200);
@@ -379,7 +388,7 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
 
   // The worker hands off through reviewHold with its rebase state, and labels only what it does not hold.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
-  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, head: outbox\?\.expected\(\) \|\| pr\.head\?\.sha, autoMerge: inputs\.autoMerge, hold: inputs\.siblingHold, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
+  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, head: outbox\?\.expected\(\) \|\| pr\.head\?\.sha, autoMerge: inputs\.autoMerge, hold: inputs\.siblingHold, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed, waitMaxMs: inputs\.siblingWaitMs \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
 });
 
 /**
@@ -677,6 +686,11 @@ test("#366: a send-back that waits says so on its PR and issue and arms a wake; 
   const tp = setup({ 31: [validated(21, h21), thirdParty] });
   const p = await tick(tp, { maxConcurrent: 6 });
   assert.deepEqual([p.sentBack, p.rebaseHeld], [[22], []]);
+  // One left behind on an older head is no wait: #21 still merges first, and #22's rebase waits for it (#423).
+  forgetFiles();
+  const stale = setup({ 31: [validated(21, h21), { ...thirdParty, body: thirdParty.body.replace(h21, "a".repeat(40)) }] });
+  const st = await tick(stale, { maxConcurrent: 6 });
+  assert.deepEqual([st.sentBack, st.rebaseHeld], [[], [22]]);
 });
 
 test("#366: trial merges that cannot be computed fall back to the release order (the first conflicting PR goes back, the later ones wait) and keep a waiting hand-off waiting without an error", async () => {
@@ -994,7 +1008,25 @@ test("#340: a hand-off waits 6 h at most from its first wait, then its review go
   assert.deepEqual([again.reviewHeld, again.reviewResumed], [[7], []]);
 });
 
-test("#340: a sibling on the other route counts by its own record: the Action's tick releases its hand-off ahead of a local Objective that waited later, and holds it behind one that waited first; the note names a third-party wait that holds a sibling", async () => {
+test("#423: sibling_wait_hours is the bound: a hand-off waiting three hours still waits at the default six, and its review goes on at two, the note saying so", async () => {
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const three = Date.now() - 3 * 3600_000;
+  const waiting = () => world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, three)], 13: [holdRecord(8, 7, three)] }, prs: { ...PR7(), 8: PR8() } });
+  forgetFiles();
+  const w = waiting();
+  const r = await tick(w);
+  assert.deepEqual([r.reviewHeld, r.reviewResumed], [[8], []]);
+  const wake = r.deadlines.find((d) => d.issue === 8 && d.kind === "sibling-wait");
+  assert.ok(Math.abs(Date.parse(wake.at) - (three + 6 * 3600_000)) < 5 * 60_000, "the wake at the default bound");
+  forgetFiles();
+  const v = waiting();
+  const t = await tick(v, { siblingWaitMs: resolveInputs({ env: { FACTORY_SIBLING_WAIT_HOURS: "2" } }).siblingWaitMs });
+  assert.deepEqual(t.reviewResumed, [8]);
+  assert.deepEqual(prLabels(v, 8), ["factory:review"]);
+  assert.match(overlap(v, 8)[0].body, /stopped waiting for #7 after 2 h, the longest Factory holds a review for a sibling/);
+});
+
+test("#340: a sibling on the other route counts by its own record: the Action's tick releases its hand-off ahead of a local Objective that waited later, and holds it behind one that waited first; a sibling whose own review waits for a third-party reviewer is not ahead (#423)", async () => {
   const since = Date.now() - 3600_000;
   const prs = () => {
     const p = { ...PR7(), 8: PR8() };
@@ -1012,13 +1044,95 @@ test("#340: a sibling on the other route counts by its own record: the Action's 
   const t = await tick(v);
   assert.deepEqual(t.reviewHeld, [8], "#7 waited first: it goes first, on its own route");
 
-  // #7 In review, its review waiting for a third-party reviewer (its record on its PR): the note says so.
-  forgetFiles();
-  const thirdParty = { id: 940, user: { login: SELF, type: "Bot" }, body: `${marker(7, "third-party").replace(/ -->$/, "")} {"sha":"${"a".repeat(40)}","logins":["greptile-apps[bot]"],"at":"${new Date().toISOString()}"} -->\nFactory: waiting.`, created_at: new Date().toISOString() };
-  const p = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [thirdParty], 13: [holdRecord(8, 7, since)] }, prs: prs() });
+  // #7 In review, its review waiting for a third-party reviewer on its head (its record on its PR): it will not merge
+  // soon, so it is not ahead, as a send-back already reads it, and #8's review goes on.
+  const thirdPartyOn = (sha, createdAt = new Date().toISOString(), minutes = 20) => ({ id: 940, user: { login: SELF, type: "Bot" }, body: `${marker(7, "third-party").replace(/ -->$/, "")} {"sha":"${sha}","logins":["greptile-apps[bot]"],"minutes":${minutes}} -->\nFactory: waiting.`, created_at: createdAt });
+  const waitingOn7 = (record, timeline = []) => {
+    forgetFiles();
+    const x = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [record], 13: [holdRecord(8, 7, since)] }, prs: prs() });
+    x.state.timelines[12] = timeline;
+    return x;
+  };
+  const p = waitingOn7(thirdPartyOn(H7));
   const q = await tick(p);
-  assert.deepEqual(q.reviewHeld, [8]);
-  assert.match(overlap(p, 8)[0].body, /its review waits for #7 to merge \(its review waits for a third-party reviewer\)/);
+  assert.deepEqual([q.reviewHeld, q.reviewResumed], [[], [8]]);
+  assert.deepEqual(prLabels(p, 8), ["factory:review"]);
+
+  // A record that is no longer current says nothing about when #7 merges: it is still ahead, and #8 waits. A third-party
+  // record on an older head, one past its bound, and an account-wait record older than #7's latest review label.
+  const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+  const account = (at) => ({ id: 941, user: { login: SELF, type: "Bot" }, body: `${marker(7, "account-wait")}\nFactory: the review waits.`, created_at: at, updated_at: at });
+  const labelled = [{ event: "labeled", label: { name: "factory:review" }, created_at: new Date(Date.now() - 3600_000).toISOString() }];
+  for (const [why, x] of [
+    ["an older head", waitingOn7(thirdPartyOn("a".repeat(40)))],
+    ["past its bound", waitingOn7(thirdPartyOn(H7, old))],
+    ["the review label went on since", waitingOn7(thirdPartyOn(H7, old, 240), labelled)],
+    ["an account wait the label came back over", waitingOn7(account(old), labelled)],
+  ]) {
+    const held = await tick(x);
+    assert.deepEqual([held.reviewHeld, held.reviewResumed], [[8], []], why);
+  }
+});
+
+test("#439: a hand-off, and the rebase of one that conflicts by then, do not wait for a sibling a person took out of the merge queue: both go on the tick that sees it, whichever PR it reads first; put back, the sibling is ahead again", async () => {
+  const since = Date.now() - 3600_000;
+  // #7 is reviewed (its head recorded mergeable, its checks green, no review label) and a person took PR #12 out of the
+  // merge queue after its review; #8's hand-off waits for #7 (their heads conflict).
+  const setup = (order, { pr8 = {}, entry = null } = {}) => {
+    forgetFiles();
+    const prs = { ...PR7(), 8: PR8(pr8) };
+    prs[7].pr.labels = [];
+    const mergeable = { id: 970, user: { login: SELF, type: "Bot" }, body: `${marker(7, "mergeable", H7)}\nFactory: mergeable.`, created_at: new Date(since - 3600_000).toISOString() };
+    const w = world(
+      order.map((n) => (n === 7 ? issue(7, ["factory:in-review"]) : issue(8, ["factory:in-review"], 2))),
+      { comments: { 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 12: [mergeable], 13: [holdRecord(8, 7, since)] }, prs },
+    );
+    w.state.reviewedAt = new Date(since - 3600_000).toISOString();
+    w.state.queue = { 12: { removals: [{ createdAt: new Date(since + 60_000).toISOString(), reason: "dequeued", actor: { login: "maintainer", __typename: "User" } }], entry } };
+    return w;
+  };
+  for (const order of [
+    [7, 8],
+    [8, 7],
+  ]) {
+    const w = setup(order);
+    const r = await tick(w);
+    assert.deepEqual([r.reviewHeld, r.reviewResumed], [[], [8]], `#${order[0]} read first`);
+    assert.deepEqual(prLabels(w, 8), ["factory:review"]);
+    assert.equal(reviewWaitOf(w.state.comments[13], 8)?.released, true);
+    assert.match(overlap(w, 8)[0].body, /no longer waits for #7/);
+  }
+  // #8 conflicts by then: it goes back for its rebase the same tick, with no rebase wait for #7.
+  const d = setup([8, 7], { pr8: { mergeable_state: "dirty" } });
+  const s = await tick(d);
+  assert.deepEqual([s.reviewHeld, s.sentBack, s.rebaseHeld], [[], [8], []]);
+  assert.equal(reviewWaitOf(d.state.comments[13], 8)?.released, true);
+  // The person put PR #12 back in the merge queue: #7 is ahead again and #8 still waits.
+  const b = setup([8, 7], { entry: { state: "QUEUED", enqueuedAt: new Date().toISOString(), headCommit: null } });
+  const q = await tick(b);
+  assert.deepEqual([q.reviewHeld, q.reviewResumed], [[8], []]);
+  assert.deepEqual(prLabels(b, 8), []);
+});
+
+test("#439: a waiting hand-off whose sibling merges in the same tick is decided on its PR as read after that merge: one that conflicts by then goes back for its rebase, not to review", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  // No merge queue: #7 is reviewed (its head recorded mergeable, its checks green, no review label), so the merge pass
+  // merges PR #12 this tick; #8's hand-off waits for #7, and its PR #13 conflicts with the default branch once #12 merged.
+  const prs = { ...PR7(), 8: PR8() };
+  prs[7].pr.labels = [];
+  const mergeable = { id: 970, user: { login: SELF, type: "Bot" }, body: `${marker(7, "mergeable", H7)}\nFactory: mergeable.`, created_at: new Date(since - 3600_000).toISOString() };
+  // GitHub lists the newest first: #8 is read before #7.
+  const w = world([issue(8, ["factory:in-review"], 2), issue(7, ["factory:in-review"])], { comments: { 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 12: [mergeable], 13: [holdRecord(8, 7, since)] }, prs });
+  w.state.reviewedAt = new Date(since - 3600_000).toISOString();
+  w.state.onMerge = (n) => {
+    if (n === 12) w.state.prs[8].pr.mergeable_state = "dirty";
+  };
+  const r = await tick(w, { ciChecks: ["ci"] });
+  assert.deepEqual(w.state.mergedPrs, [12]);
+  assert.deepEqual([r.reviewHeld, r.reviewResumed, r.sentBack], [[], [], [8]]);
+  assert.deepEqual(prLabels(w, 8), [], "no review of a head that conflicts with the default branch");
+  assert.equal(reviewWaitOf(w.state.comments[13], 8)?.released, true);
 });
 
 test("#340: `factory run` on an Objective whose hand-off waits reviews it now: the label goes on, the record is released", async () => {

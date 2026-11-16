@@ -821,7 +821,9 @@ export const persistDirs = (runner) => [runner.agentHome, runner.probeHome, runn
  * commands must have, for the result and the temp rule, by its path (local mode: where $TMPDIR is not it, as without
  * Factory's bwrap, the probe still writes its result and names the rule that broke); else $TMPDIR. `toolchain`: the
  * stage's node and npm (stageNode), which a command must find on its PATH, the same node, and run (#105), and locally
- * the repository's package manager (`pm`, #137), which must run; null: no rule.
+ * the repository's package manager (`pm`, #137), which must run; null: no rule. `systemTmp`: the system temp
+ * directory, where Copilot's rules would be had it ignored its TMPDIR (/tmp; a test gives one of its own, as the host's
+ * /tmp holds the rules of any Copilot running there).
  */
 /**
  * The toolchain rule's shell lines, for a probe driver with an `out <code> <line>` function (probeDriver, Claude Code's
@@ -836,14 +838,14 @@ export const toolchainRules = (toolchain) => [
   ...(Array.isArray(toolchain?.tools) ? toolchain.tools.filter((t) => typeof t === "string" && t.startsWith("/")).map((t) => `if ! command -v ${sq(basename(t))} >/dev/null || ! [ -x ${sq(t)} ]; then out 4 ${sq(TOOLCHAIN_RULE)}; fi`) : []),
 ];
 
-export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null, relay = null }) => {
+export const probeDriver = ({ gitConfig, host, marker, persist = [], logs = "", copilotTmp = COPILOT_TMP, tmp = "", toolchain = null, relay = null, systemTmp = "/tmp" }) => {
   const T = tmp ? sq(tmp) : '"$TMPDIR"';
   return [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > ${T}/${PROBE_RESULT}; exit 0; }`,
     `[ -n "$FACTORY_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
     `[ -n "$FACTORY_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
-    // Where Copilot's TMPDIR is, where it would be had it the default /tmp, and the commands' own (had it theirs).
-    `for p in ${sq(copilotTmp)}/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-* ${T}/mxc-bwrap-proxy-* /tmp/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
+    // Where Copilot's TMPDIR is, where it would be had it the system's (systemTmp), and the commands' own (had it theirs).
+    `for p in ${sq(copilotTmp)}/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-* ${T}/mxc-bwrap-proxy-* ${sq(systemTmp)}/mxc-bwrap-proxy-*; do if [ -e "$p" ]; then out 4 "Copilot's network rules are visible to commands"; fi; done`,
     `if true >> ${sq(`${copilotTmp}/${PROBE_PERSIST}`)} 2>/dev/null; then out 4 "Copilot's temp directory is writable"; fi`,
     // The logs directory by its path (the probe's COPILOT_HOME's), never by a variable a command may not have.
     ...(logs ? [`if [ -n "$(find ${sq(logs)} -type f -size +0 2>/dev/null | head -n 1)" ]; then out 4 "Copilot's logs are readable by commands"; fi`] : []),
@@ -922,7 +924,7 @@ export async function probeModel() {
 /**
  * The probe's environment beside the provider's: a fresh COPILOT_HOME of its own (the run's settings), Factory's
  * release, the marker Copilot and the decoy hold (as Copilot holds the token), and the scripts; `toolchain` for its
- * toolchain rule (probeDriver).
+ * toolchain rule, and `runner.systemTmp` for the system temp directory it checks (probeDriver).
  */
 /** The probe's rule for the gateway relay: a command in Copilot's sandbox does not reach it. */
 export const RELAY_RULE = "the gateway relay is out of the commands' reach";
@@ -933,7 +935,7 @@ export function probeEnv(runner, marker, host, toolchain = null, relay = null) {
     COPILOT_CACHE_HOME: runner.cacheHome,
     [PROBE_MARKER]: marker,
     FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE,
-    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, relay, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}) }),
+    FACTORY_COPILOT_PROBE: probeDriver({ gitConfig: join(runner.clone, ".git", "config"), host, marker, persist: persistDirs(runner), logs: join(runner.probeHome, "logs"), toolchain, relay, ...(runner.copilotTmp ? { copilotTmp: runner.copilotTmp, tmp: runner.agentTmp } : {}), ...(runner.systemTmp ? { systemTmp: runner.systemTmp } : {}) }),
   };
 }
 

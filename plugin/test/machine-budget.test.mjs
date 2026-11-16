@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
+import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -329,26 +330,35 @@ async function fakeGitHub(issues, { onList = () => {} } = {}) {
   return { url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((ok) => server.close(ok)) };
 }
 
-/** A loop (fixtures/budget-loop.mjs) for `repo` in its own process: its output lines, and `until(fn)` to wait on them. */
-function loopProcess({ repo, homeDir, procDir, api, cap = "" }) {
+/**
+ * A loop (fixtures/budget-loop.mjs) for `repo` in its own process: its output lines, whole, and `until(fn)` to wait on
+ * them. A wait ends when its lines show what it waits for, or fails when the loop exits (it never does by itself) or
+ * the test's `signal` ends the test; never on a clock of its own: a loaded machine only makes the loop slower (#411).
+ */
+function loopProcess({ repo, homeDir, procDir, api, cap = "", signal }) {
   const child = spawn(process.execPath, [join(here, "fixtures", "budget-loop.mjs")], { env: { ...process.env, HOME: homeDir, LOOP_REPO: repo, LOOP_PROC: procDir, GITHUB_API_URL: api, FACTORY_LOCAL_MAX_CONCURRENT: cap }, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
   const waiters = new Set();
-  const onData = (c) => {
-    lines.push(...String(c).split("\n").filter(Boolean));
+  const wake = () => {
     for (const w of waiters) w();
   };
-  child.stdout.on("data", onData);
-  child.stderr.on("data", onData);
+  const onLine = (l) => {
+    if (l) lines.push(l);
+    wake();
+  };
+  for (const stream of [child.stdout, child.stderr]) createInterface({ input: stream }).on("line", onLine);
+  child.on("exit", wake);
+  signal?.addEventListener("abort", wake, { once: true });
+  const ended = () => (child.exitCode !== null || child.signalCode !== null ? `the loop exited (${child.exitCode ?? child.signalCode})` : signal?.aborted ? "the test ended" : null);
   const started = () => lines.filter((l) => l.startsWith(`started ${repo}#`)).length;
-  const until = (fn, what, ms = 20_000) =>
+  const until = (fn, what) =>
     new Promise((ok, fail) => {
-      const t = setTimeout(() => (waiters.delete(check), fail(new Error(`${repo}: timed out waiting for ${what}\n${lines.slice(-15).join("\n")}`))), ms);
       const check = () => {
-        if (!fn()) return;
-        clearTimeout(t);
+        const why = fn() ? "" : ended();
+        if (why === null) return;
         waiters.delete(check);
-        ok();
+        if (why) fail(new Error(`${repo}: ${why} while waiting for ${what}\n${lines.slice(-15).join("\n")}`));
+        else ok();
       };
       waiters.add(check);
       check();
@@ -357,17 +367,18 @@ function loopProcess({ repo, homeDir, procDir, api, cap = "" }) {
   return { child, lines, started, until, ticks, stop: () => (child.exitCode === null && child.signalCode === null ? killed(child) : Promise.resolve()) };
 }
 
-test("serve: two loops of two repositories share one machine budget; a killed loop's slots free for the other (#309)", async () => {
+// The serve tests' timeout only ends a hung test (its loops then stop): each wait in it is on the loops' own lines.
+test("serve: two loops of two repositories share one machine budget; a killed loop's slots free for the other (#309)", { timeout: 300_000 }, async (t) => {
   const homeDir = home(3);
   const procDir = proc({});
   const gh = await fakeGitHub({ "o/a": [1, 2], "o/b": [1, 2, 3] });
   // o/a's own cap (8) is above the budget: its start line names the cap it runs at, the budget's.
-  const a = loopProcess({ repo: "o/a", homeDir, procDir, api: gh.url, cap: "8" });
+  const a = loopProcess({ repo: "o/a", homeDir, procDir, api: gh.url, cap: "8", signal: t.signal });
   let b = null;
   try {
     await a.until(() => a.started() === 2, "o/a to start both its Objectives");
     assert.ok(a.lines.some((l) => /this loop: at most 3, the budget \(FACTORY_LOCAL_MAX_CONCURRENT 8 is above it\)/.test(l)), "the start line states the cap the loop runs at");
-    b = loopProcess({ repo: "o/b", homeDir, procDir, api: gh.url });
+    b = loopProcess({ repo: "o/b", homeDir, procDir, api: gh.url, signal: t.signal });
     await b.until(() => b.started() === 1, "o/b to start one");
     const from = b.ticks();
     await b.until(() => b.ticks() >= from + 3, "three more o/b ticks");
@@ -384,11 +395,11 @@ test("serve: two loops of two repositories share one machine budget; a killed lo
   }
 });
 
-test("serve: a saturated machine holds new starts, said in the tick line, but a loop holding none starts one (#309)", async () => {
+test("serve: a saturated machine holds new starts, said in the tick line, but a loop holding none starts one (#309)", { timeout: 300_000 }, async (t) => {
   const homeDir = home(5);
   const procDir = proc({ cpu: 50 });
   const gh = await fakeGitHub({ "o/c": [1, 2, 3] });
-  const c = loopProcess({ repo: "o/c", homeDir, procDir, api: gh.url });
+  const c = loopProcess({ repo: "o/c", homeDir, procDir, api: gh.url, signal: t.signal });
   try {
     await c.until(() => c.started() === 1, "the one stage a loop holding none starts");
     const from = c.ticks();

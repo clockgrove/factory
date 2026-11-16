@@ -122,8 +122,11 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   const home = join(root, "h");
   mkdirSync(tmp);
   mkdirSync(home);
-  // Copilot's TMPDIR: a path that is not there (this machine's own /tmp/factory-copilot is no business of the test's).
-  const driver = probeDriver({ gitConfig: "", host: "", marker: "m5", persist: [home], copilotTmp: join(root, "no-copilot-tmp") });
+  // Copilot's TMPDIR and the system temp directory: paths of the test's own. The host's /tmp/factory-copilot is no
+  // business of the test's, and its /tmp holds the network rules of any Copilot running on this machine (#411).
+  const systemTmp = join(root, "system-tmp");
+  mkdirSync(systemTmp);
+  const driver = probeDriver({ gitConfig: "", host: "", marker: "m5", persist: [home], copilotTmp: join(root, "no-copilot-tmp"), systemTmp });
   const drive = (extra) => {
     execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m5", ...extra } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
@@ -133,7 +136,9 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   assert.equal(drive({ FACTORY_PROBE_SCRIPT: "" }), "4\nthe probe script is missing\n", "an empty script would exit 0 and pass");
   assert.equal(drive({ FACTORY_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n", "and an empty decoy would skip its rule");
   assert.equal(drive({ FACTORY_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
-  assert.match(driver, /mxc-bwrap-proxy-\*/, "Copilot's network rules must not be listable");
+  mkdirSync(join(systemTmp, "mxc-bwrap-proxy-1"));
+  assert.equal(drive({}), "4\nCopilot's network rules are visible to commands\n", "rules in the system temp directory, where Copilot would keep them had it ignored its TMPDIR");
+  assert.ok(probeDriver({ gitConfig: "", host: "", marker: "m" }).includes(`'/tmp'/mxc-bwrap-proxy-*`), "which is /tmp");
   assert.ok(probeDriver({ gitConfig: "", host: "", marker: "m" }).includes(`true >> '${COPILOT_TMP}/`), "nor its TMPDIR writable");
   const withLogs = probeDriver({ gitConfig: "", host: "", marker: "m", logs: "/p/logs" });
   assert.ok(withLogs.includes("find '/p/logs'") && !withLogs.includes("$COPILOT_HOME"), "the logs by their path, never a variable a command may lack");
@@ -237,7 +242,7 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   // The driver as local mode gives it (every path under this test's own directory, never the host's /tmp/factory-copilot):
   // without Factory's bwrap the commands' $TMPDIR is Copilot's own, denied, so the result goes to the stage's by its path
   // and names the broken rule (here, unconfined: Copilot's TMPDIR absent, the marker in this shell's parent).
-  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp") }, "m6", "").FACTORY_COPILOT_PROBE;
+  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp"), systemTmp: join(root, "system-tmp") }, "m6", "").FACTORY_COPILOT_PROBE;
   assert.ok(!driver.includes("/tmp/factory-copilot"));
   execFileSync("/bin/sh", ["-c", driver], { stdio: "ignore", env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(root, "denied"), FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "1", [PROBE_MARKER]: "m6" } });
   assert.equal(readFileSync(join(tmp, PROBE_RESULT), "utf8"), "4\nthe credential stand-in is readable in a process environment\n");
@@ -272,10 +277,9 @@ test("a session file that never ends is not read on: the archive stops at its ca
   mkdirSync(join(runner.sessions, "s1", "files"), { recursive: true });
   // What a sandboxed command can leave in Copilot's session-state/<id>/files: a sparse file of 1 TB (16 TB is past ext4's limit).
   execFileSync("truncate", ["-s", "1T", join(runner.sessions, "s1", "files", "big")]);
-  const t0 = Date.now();
+  // Stopped at the cap, not read to the end: a truncated archive is the cap's; one cut by its deadline is none.
   const a = await archiveSession(runner, "s1", process.env, { timeoutMs: 60_000, maxBytes: 1024 * 1024 });
-  assert.equal(a.truncated, true);
-  assert.ok(Date.now() - t0 < 30_000, "stopped at the cap, not read to the end");
+  assert.equal(a?.truncated, true);
 });
 
 test("the probe's last line: a pass line after every rule held; the first process's command line is Copilot's rule only", () => {
@@ -345,7 +349,7 @@ test("Copilot's probe proves the stage's toolchain runs in a command; a toolchai
   writeFileSync(node, "#!/bin/sh\necho v0\n", { mode: 0o755 });
   writeFileSync(join(bin, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   const drive = (toolchain) => {
-    const driver = probeDriver({ gitConfig: "", host: "", marker: "m7", toolchain, copilotTmp: join(root, "no-copilot-tmp") });
+    const driver = probeDriver({ gitConfig: "", host: "", marker: "m7", toolchain, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
     execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
@@ -468,7 +472,7 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   mkdirSync(bin);
   const drive = (ok) => {
     writeFileSync(join(bin, "pnpm"), `#!/bin/sh\nexit ${ok ? 0 : 1}\n`, { mode: 0o755 });
-    const driver = probeDriver({ gitConfig: "", host: "", marker: "m8", toolchain: { pm: "pnpm" }, copilotTmp: join(root, "no-copilot-tmp") });
+    const driver = probeDriver({ gitConfig: "", host: "", marker: "m8", toolchain: { pm: "pnpm" }, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
     execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };

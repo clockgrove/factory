@@ -650,7 +650,7 @@ test("#391: on, a stage starts on the free account with the most quota left by t
       // Every account read: beta has the most left (0.7, against alpha's 0.2 and gamma's 0.4), though alpha's turn is next.
       for (const loop of [two, one]) {
         t += 1000;
-        loop.result = delivered;
+        loop.result = reading(0.3);
         assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "in either serve");
       }
       // A pinned stage on gamma leaves its reading too: gamma now has the most left.
@@ -660,11 +660,49 @@ test("#391: on, a stage starts on the free account with the most quota left by t
       assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "gamma");
       gh.remove("factory:account:gamma");
       t += 1000;
-      two.result = delivered;
+      two.result = reading(0.05);
       assert.equal((await two.stage(8, "work", "worker.mjs", [])).account, "gamma");
-      // Past every window's reset the readings are stale: the accounts fall back to the turn (alpha, started longest ago).
+      // Past every window's reset the readings are stale, so no account is measured: the turn (alpha, started longest ago).
       t += 49 * 60 * MIN;
       assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, an account whose served stage reported no quota reading (an API key) is recorded so, and comes after every account with a reading, however little that one has left; one never measured comes first; a paused Objective resumes on its own account first", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } } });
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      const order = [];
+      for (const r of [delivered, reading(0.95)]) {
+        t += 1000;
+        loop.result = r;
+        order.push((await loop.stage(8, "work", "worker.mjs", [])).account);
+      }
+      assert.deepEqual(order, ["alpha", "beta"]);
+      assert.equal(loop.holds.reportsNothing("alpha", t), true, "alpha ran a stage and reported nothing: kept as a fact");
+      assert.equal(loop.holds.reportsNothing("gamma", t), false, "gamma never ran: not measured, which is not the same");
+      // gamma, never measured, first; then beta's 5% left beats alpha's silence, though alpha's turn is next.
+      t += 1000;
+      loop.result = reading(0.99);
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      for (let i = 0; i < 2; i++) {
+        t += 1000;
+        loop.result = reading(0.95);
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
+      }
+      // An Objective paused on alpha resumes there when it is free: its session lives there.
+      assert.equal(loop.autoAccount("claude", { prefer: "alpha" }).account.name, "alpha");
+      // Held, it is passed over: quota decides among the rest.
+      loop.holds.limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
+      assert.equal(loop.autoAccount("claude", { prefer: "alpha" }).account.name, "beta");
       assert.equal(gh.blocked().length, 0);
     });
   } finally {

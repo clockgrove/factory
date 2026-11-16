@@ -57,6 +57,7 @@ import {
   exitStep,
   outageExit,
   outageFirst,
+  servedSilent,
   usageLimitExit,
   restoreTranscript,
   saveTranscript,
@@ -640,7 +641,7 @@ async function main() {
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
     // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
-    if (limits && usage.quota) await limits.reading(usage.quota).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
+    if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {

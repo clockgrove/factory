@@ -1661,6 +1661,12 @@ function lineageTotal(id, records) {
 }
 
 /**
+ * Whether a stage's record (writeUsage's) shows its provider served it, no usage limit or refusal ending it, and no quota
+ * reading reported: the account's harness or credential reports none (holds.mjs silent).
+ */
+export const servedSilent = (r) => !!r && !r.quota && !r.usageLimit && !r.limitRefused && [r.tokens?.output, r.aiCredits, r.premiumRequests].some((v) => Number(v) > 0);
+
+/**
  * The stage's quota reading: each window as the last pass that reported it read it (usage.mjs quotaReading, harness.mjs
  * runHarness `quota`), {harness, windows}; null when no pass reported one.
  */

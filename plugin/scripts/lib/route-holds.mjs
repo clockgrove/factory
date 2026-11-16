@@ -25,7 +25,8 @@
 // comment of its own (QUOTA_LINE) with how much of each usage window the provider reported used and when each resets
 // (usage.mjs quotaReading), which replaces the account's earlier reading (the writer deletes those), and which automatic
 // choice ranks the free accounts by. That is a read of the holds issue and a write at each such stage's end. A stage
-// whose harness reported none (Copilot, an API key) writes nothing.
+// whose provider served it and reported none (Copilot, an API key) writes that as a fact, which ranks the account
+// after every one that reports a reading.
 //
 // A person who can push lifts a hold with `factory hold release <account> --repo OWNER/NAME` (#376): a release record,
 // a comment of theirs on the holds issue (RELEASE_LINE), which ends every record of that account made before it, as a
@@ -115,7 +116,8 @@ async function releaseOf(c, canPush, now) {
 /**
  * The holds recorded on issue `number` at `now`: {records (heldRecord's), releases (releaseOf's), readings (quotaOf's,
  * each with its comment's `id`), forgotten (ids of record comments a writer deletes: forgotten (holds.mjs), a quota
- * reading every window of which has reset, or Factory's own edited since written, which count for nothing)}. `own`:
+ * reading every window of which has reset and that is no `silent` one, or Factory's own edited since written, which
+ * count for nothing)}. `own`:
  * whose comments are Factory's records (isSelf; a person's view names the issue's author).
  */
 async function recordsOn(repo, number, opts, now, own = isSelf) {
@@ -132,7 +134,7 @@ async function recordsOn(repo, number, opts, now, own = isSelf) {
       }
       const q = quotaOf(c, own);
       if (q) {
-        if (Object.keys(liveWindows([q], now)).length) readings.push({ ...q, id: c.id });
+        if (q.silentAt !== undefined || Object.keys(liveWindows([q], now)).length) readings.push({ ...q, id: c.id });
         else forgotten.push(c.id);
         continue;
       }
@@ -279,19 +281,21 @@ async function recordIssue(repo, opts, { actions, now }) {
 }
 
 /**
- * Record the quota reading of a stage on `account` (#391): its provider's `windows` (usage.mjs quotaReading), merged with
- * the account's reading on the record issue as holds.mjs reading merges them, written as a new comment there, after which
- * the account's earlier readings on it, and every reading on it that has gone stale, are deleted. Returns the reading
- * written, or null when `windows` holds none. A failed read or write throws.
+ * Record the quota reading of a stage on `account` (#391): its provider's `windows` (usage.mjs quotaReading), or with
+ * `silent` that a stage the provider served reported none (holds.mjs silent), merged with the account's reading on the
+ * record issue as holds.mjs reading merges them, written as a new comment there, after which the account's earlier
+ * readings on it, and every reading on it that has gone stale, are deleted. Returns the reading written, or null when
+ * `windows` holds none and it is no `silent` one. A failed read or write throws.
  */
-export async function writeReading(repo, { harness, account, windows, now = Date.now() }, opts, { actions } = {}) {
+export async function writeReading(repo, { harness, account, windows = {}, silent = false, now = Date.now() }, opts, { actions } = {}) {
   const found = await recordIssue(repo, opts, { actions, now });
   const issue = found.record;
   const read = await recordsOn(repo, issue, opts, now);
-  const r = accountHolds({ readings: read.readings.filter((x) => x.account === account) }).reading({ harness, account, now, windows });
+  const r = accountHolds({ readings: read.readings.filter((x) => x.account === account) }).reading({ harness, account, now, windows, silent });
   if (!r) return null;
   const pct = (w) => `${Math.round(w.used * 100)}%`;
-  const text = `Factory: account \`${account}\` (${HARNESS_NAMES[harness] || harness}) has used ${Object.entries(r.windows).map(([name, w]) => `${pct(w)} of ${name} until ${iso(w.resetsAt)}`).join(", ")}, as its provider last reported.`;
+  const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
+  const text = silent ? `Factory: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Factory: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${iso(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
   await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
   if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
   for (const id of [...read.readings.filter((x) => x.account === account).map((x) => x.id), ...read.forgotten]) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
@@ -347,8 +351,8 @@ export const routeTurn = (issue, n) => createHash("sha256").update(String(Number
 /**
  * The account automatic choice starts a stage of Objective `issue` on, of a harness's declared `names` (in order), from
  * the holds `store` at `now`: accounts.mjs chooseAccount, an account free when neither a hold nor a guess is ahead
- * (avoidUntil); of the free ones the one with the most quota left by its last reading (one with none first: #391), then
- * of equal shares the least recently limited, then the Objective's turn, then the first declared; with
+ * (avoidUntil); of the free ones by the quota readings (#391): one never measured, then the most quota left, then one
+ * that reports nothing; then of equal standing the least recently limited, then the Objective's turn, then the first declared; with
  * every one held, the one whose hold ends first. These routes keep no round-robin record (a write at every stage start):
  * the turn is a hash of the Objective's number (routeTurn), so Objectives spread across the accounts with no state, and
  * each keeps its account while that one is free. Returns {name, until} (`until`: its hold's end when every account is
@@ -361,6 +365,7 @@ export function pickRouteAccount({ names, store, issue, now = Date.now() }) {
   const a = chooseAccount(list, {
     until: (x) => store.avoidUntil(x.name, now),
     left: (x) => store.left?.(x.name, now) ?? null,
+    silent: (x) => store.reportsNothing?.(x.name, now) ?? false,
     limitedAt: (x) => store.limitedAt(x.name, now),
     startedAt: (x) => (list.indexOf(x) - turn + n) % n,
   });
@@ -391,8 +396,9 @@ const heldText = (store, name, t) => {
  *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
  *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
- * - `reading(quota)`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), pinned or not:
- *   kept on the holds issue (writeReading) for automatic choice; one of another harness, or none, writes nothing.
+ * - `reading(quota)`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), or `{harness,
+ *   silent: true}` when its provider served it and reported none (session.mjs servedSilent), pinned or not: kept on the
+ *   holds issue (writeReading) for automatic choice; one of another harness, or none, writes nothing.
  */
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
@@ -434,8 +440,8 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
       log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}`);
     },
     async reading(quota) {
-      if (!quota?.windows || quota.harness !== harness) return null;
-      return writeReading(repo, { harness, account, windows: quota.windows, now: now() }, opts);
+      if (!quota || quota.harness !== harness || (!quota.windows && quota.silent !== true)) return null;
+      return writeReading(repo, { harness, account, ...(quota.silent === true ? { silent: true } : { windows: quota.windows }), now: now() }, opts);
     },
   };
 }

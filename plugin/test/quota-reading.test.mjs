@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { quotaReading } from "../scripts/lib/usage.mjs";
 import { runHarness } from "../scripts/lib/harness.mjs";
-import { stageQuota, writeUsage } from "../scripts/lib/session.mjs";
+import { servedSilent, stageQuota, writeUsage } from "../scripts/lib/session.mjs";
 import { accountHolds } from "../scripts/lib/holds.mjs";
 import { chooseAccount } from "../scripts/lib/accounts.mjs";
 
@@ -148,15 +148,50 @@ test("#391 holds: an account's quota reading is kept for every serve on the mach
   assert.equal(accountHolds({ dir }).left("alpha", t), null);
 });
 
-test("#391 chooseAccount: of the free accounts, the most quota left; one with no reading first; equal shares, and a harness that reports nothing, fall to the earlier order", () => {
+test("#391 chooseAccount: the paused-on account first when free; then never measured, then the most quota left, then the ones that report nothing; within a group and for equal shares, the earlier order", () => {
   const list = ["a", "b", "c"].map((name) => ({ name }));
   const of = (m) => (x) => m[x.name] ?? null;
   const pick = (o) => chooseAccount(list, { until: () => null, ...o }).name;
   assert.equal(pick({ left: of({ a: 0.2, b: 0.7, c: 0.5 }) }), "b", "the most left, ahead of the first declared");
-  assert.equal(pick({ left: of({ a: 0.2, b: 0.7, c: 0.5 }), prefer: "a", limitedAt: of({ b: 100 }), startedAt: of({ b: 9, c: 1 }) }), "b", "ahead of the paused-on account, an older limit and the turn");
-  assert.equal(pick({ left: of({ a: 0.2, b: 0.7 }) }), "c", "an account with no reading is measured first");
+  assert.equal(pick({ left: of({ a: 0.2, b: 0.7, c: 0.5 }), limitedAt: of({ b: 100 }), startedAt: of({ b: 9, c: 1 }) }), "b", "ahead of an older limit and the turn");
+  assert.equal(pick({ left: of({ a: 0.2, b: 0.7, c: 0.5 }), prefer: "a" }), "a", "the paused-on account, where its thread lives, whatever it has left");
+  assert.equal(pick({ left: of({ a: 0.2, b: 0.7, c: 0.5 }), prefer: "b", until: of({ b: 5 }) }), "c", "held, the paused-on account is passed over and quota decides among the rest");
+  assert.equal(pick({ left: of({ a: 0.2, b: 0.7 }) }), "c", "an account never measured is measured first");
+  const silent = (names) => (x) => names.includes(x.name);
+  assert.equal(pick({ left: of({ c: 0.05 }), silent: silent(["a", "b"]) }), "c", "a reporting account with little left beats ones that ran and reported nothing");
+  assert.equal(pick({ left: of({ c: 0.05 }), silent: silent(["a"]) }), "b", "a never-measured one comes before both");
+  assert.equal(pick({ silent: silent(["a", "b", "c"]), startedAt: of({ a: 3, b: 1, c: 2 }) }), "b", "all report nothing (Copilot): the turn, as before");
+  assert.equal(pick({ silent: silent(["a", "b", "c"]), limitedAt: of({ a: 5, b: 9 }) }), "c", "all report nothing: the least recently limited, as before");
   assert.equal(pick({ left: of({ a: 0.5, b: 0.5, c: 0.1 }), startedAt: of({ a: 5, b: 1 }) }), "b", "equal shares: the turn decides");
-  assert.equal(pick({ left: of({ a: 0.5, b: 0.5, c: 0.1 }), prefer: "b" }), "b", "equal shares: the paused-on account");
   assert.equal(pick({ left: of({ a: 0.9, b: 0.1, c: 0.2 }), until: of({ a: 5 }) }), "c", "a held account is no candidate, however much it has left");
-  assert.equal(pick({ startedAt: of({ a: 3, b: 1, c: 2 }) }), "b", "no readings at all (Copilot): the turn, as before");
+  assert.equal(pick({ startedAt: of({ a: 3, b: 1, c: 2 }) }), "b", "nothing known at all: the turn, as before");
+});
+
+test("#391 holds: a served stage with no reading is recorded as such; the account reports nothing until a reading stands again; never measured is not that; servedSilent reads it from a stage's result", () => {
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), "holds");
+  const t = Date.now() - 10 * 60_000;
+  const one = accountHolds({ dir });
+  assert.equal(one.reportsNothing("key", t), false, "never measured");
+  one.silent({ harness: "claude", account: "key", now: t });
+  assert.equal(accountHolds({ dir }).reportsNothing("key", t + 1), true, "another serve reads the fact");
+  assert.equal(accountHolds({ dir }).left("key", t + 1), null);
+  // The same account later reports a reading (a login in place of the key): it is measured again.
+  one.reading({ harness: "claude", account: "key", now: t + 2, windows: { seven_day: { used: 0.4, resetsAt: t + H } } });
+  assert.equal(one.reportsNothing("key", t + 3), false);
+  assert.equal(one.left("key", t + 3), 0.6);
+  // A served stage with no reading while a window still stands: the window stands, and the account is no silent one.
+  one.silent({ harness: "claude", account: "key", now: t + 4 });
+  assert.equal(one.reportsNothing("key", t + 5), false);
+  assert.equal(one.left("key", t + 5), 0.6);
+  assert.equal(one.reportsNothing("key", t + 2 * H), true, "once that window resets, the newest record says it reports nothing");
+  // From the route's records (no folder): the newest record decides.
+  const mem = accountHolds({ readings: [{ harness: "claude", account: "k", at: t, windows: {}, silentAt: t }, { harness: "claude", account: "k", at: t + 1, windows: { five_hour: { used: 0.1, resetsAt: t + H } } }] });
+  assert.equal(mem.reportsNothing("k", t + 2), false);
+  assert.equal(mem.reportsNothing("k", t + 2 * H), false, "its newest record was a reading, now stale: never measured again");
+  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 10 } }), true);
+  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 10 }, quota: { harness: "claude", windows: {} } }), false, "a reading reported");
+  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 0 } }), false, "nothing served");
+  assert.equal(servedSilent({ exit: "paused", tokens: { output: 10 }, usageLimit: { harness: "claude" } }), false, "a limit is no served stage");
+  assert.equal(servedSilent({ exit: "blocked", tokens: { output: 10 }, limitRefused: { harness: "copilot" } }), false);
+  assert.equal(servedSilent({ exit: "delivered", tokens: { output: null }, aiCredits: 2 }), true, "Copilot's credits");
 });

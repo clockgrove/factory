@@ -287,7 +287,31 @@ test("#391: a stage's quota reading is kept on the holds issue, replacing its ac
   assert.equal((await runStep({ issues: edited })).outputs.account, "claude-2");
   assert.equal((await runStep({ issues: issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT)] })) })).outputs.account, "claude-3", "Factory's own, as written: counted");
   // The stages wire it: a stage's quota reading goes through routeLimits at its end.
-  for (const script of ["worker.mjs", "review.mjs"]) assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8"), /if \(limits && usage\.quota\) await limits\.reading\(usage\.quota\)/, script);
+  for (const script of ["worker.mjs", "review.mjs"]) assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8"), /if \(limits && \(usage\.quota \|\| servedSilent\(usage\)\)\) await limits\.reading\(usage\.quota \?\? \{ harness: inputs\.harness, silent: true \}\)/, script);
+});
+
+test("#391: a stage its provider served with no quota reading records so on the holds issue; the account step puts that account after every one with a reading, and one never measured first", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const now = Date.now();
+  let issues;
+  await withGitHub({}, async (_reads, st) => {
+    const at = (account) => routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account, env, opts: { token: "t" } });
+    const r = await at("claude").reading({ harness: "claude", silent: true });
+    assert.equal(r.silentAt !== undefined, true);
+    await at("claude-2").reading({ harness: "claude", windows: { seven_day: { used: 0.97, resetsAt: now + 48 * H } } });
+    assert.equal(await at("claude").reading({ harness: "codex", silent: true }), null, "another harness's: nothing");
+    const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
+    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"silentAt":\d+.*\} -->\nFactory: account `claude` \(Claude Code\) ran a stage and its provider reported no quota reading/);
+    const store = (await readHolds(REPO, { token: "t" }, { now: now + 72 * H, actions: true })).store;
+    assert.equal(store.reportsNothing("claude", now + 72 * H), true, "kept past any window: it is no reading that goes stale");
+    issues = st.issues;
+  });
+  setSelf(null);
+  // claude-3, never measured, first; with it read, claude-2's 3% left beats claude's silence, though #8's turn is claude.
+  assert.equal((await runStep({ issues })).outputs.account, "claude-3");
+  const read3 = issues.map((i) => ({ ...i, comments: [...i.comments, { id: 77, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 1, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now) }] }));
+  assert.equal((await runStep({ issues: read3 })).outputs.account, "claude-2");
 });
 
 test("an Objective's turn is a hash of its number, so Objectives of one parity spread over two accounts, and each keeps its own (#268)", () => {

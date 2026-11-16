@@ -40,7 +40,7 @@ import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProc
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -788,9 +788,9 @@ export class Local {
 
   /**
    * The account a `harness` stage with no account label runs on with automatic choice on (#266; lib/accounts.mjs
-   * chooseAccount): a free one (no hold, limitUntil), the one with the most quota left by its last reading kept with the
-   * holds (#391: holds.mjs left; one with none first); of equal shares, `prefer` first when it is free, else the one
-   * limited least recently, then the one started on least recently (the machine's round-robin, kept with the holds, and
+   * chooseAccount): a free one (no hold, limitUntil), `prefer` first when it is free, else by the readings kept with the
+   * holds (#391): one never measured, then the most quota left (holds.mjs left), then one that reports nothing
+   * (holds.mjs reportsNothing); of equal standing, the one limited least recently, then the one started on least recently (the machine's round-robin, kept with the holds, and
    * this loop's picks of the last PICK_MS, whose stages are still starting); with every one held, the one whose hold ends first. Held includes a
    * no-reset limit's guess (holds.mjs spent). Of those, the first that is ready here (accountReady); one that is not is
    * passed over. `pick`: a stage starts on it, so this loop counts it as just started meanwhile. {account, unready:
@@ -804,6 +804,7 @@ export class Local {
     const opts = {
       until: (a) => this.limitUntil(holds.get(a), { guess: true }),
       left: (a) => this.holdStore(holds.get(a)).left(holds.get(a).key, now),
+      silent: (a) => this.holdStore(holds.get(a)).reportsNothing(holds.get(a).key, now),
       limitedAt: (a) => this.holdStore(holds.get(a)).limitedAt(holds.get(a).key, now),
       startedAt: (a) => Math.max(this.holdStore(holds.get(a)).startedAt(holds.get(a).key, now) ?? -Infinity, picked(holds.get(a).key)),
       prefer,
@@ -1463,6 +1464,8 @@ export class Local {
           // The provider's quota reading for the account (session.mjs writeUsage `quota`): kept with the machine's holds,
           // for every serve's automatic account choice (#391); only the stage's own harness's.
           if (runs.account && result?.quota?.windows && result.quota.harness === runs.harness) this.holdStore(hold).reading({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), windows: result.quota.windows });
+          // A served stage that reported none: the account reports nothing (an API key, Copilot), kept as a fact.
+          else if (runs.account && servedSilent(result)) this.holdStore(hold).silent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)() });
           // Blocked on its usage limit with no reset reported (session.mjs writeUsage `limitRefused`): automatic account
           // choice, in this serve and any other here that has it on, passes the account over for a while (holds.mjs spent);
           // nothing else holds on it, and a serve with it off writes no guess.

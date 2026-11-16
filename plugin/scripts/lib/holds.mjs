@@ -78,8 +78,9 @@ function recordOf(v, account) {
 const QUOTA_WINDOWS_MAX = 8;
 
 /**
- * A quota reading (accountHolds.reading), checked: {harness, account, at, windows: {<window>: {used, resetsAt}}} with
- * only the windows whose name, fraction used (a number, 0 or more) and reset (ms) are well formed, or null.
+ * A quota reading (accountHolds.reading), checked: {harness, account, at, windows: {<window>: {used, resetsAt}},
+ * silentAt?} with only the windows whose name, fraction used (a number, 0 or more) and reset (ms) are well formed, or
+ * null. `silentAt` (ms): a stage the provider served on the account reported no reading then (accountHolds.silent).
  */
 export function readingOf(v, account = v?.account) {
   if (!v || typeof v !== "object" || typeof account !== "string" || !KEY.test(account) || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness) || !Number.isSafeInteger(v.at)) return null;
@@ -88,7 +89,7 @@ export function readingOf(v, account = v?.account) {
   for (const [name, w] of Object.entries(v.windows).slice(0, QUOTA_WINDOWS_MAX)) {
     if (windowOf(name) && typeof w?.used === "number" && Number.isFinite(w.used) && w.used >= 0 && Number.isSafeInteger(w.resetsAt)) windows[name] = { used: w.used, resetsAt: w.resetsAt };
   }
-  return { harness: v.harness, account, at: v.at, windows };
+  return { harness: v.harness, account, at: v.at, windows, ...(Number.isSafeInteger(v.silentAt) ? { silentAt: v.silentAt } : {}) };
 }
 
 /**
@@ -108,6 +109,17 @@ export function liveWindows(readings, now) {
     }
   }
   return out;
+}
+
+/**
+ * Whether an account's newest reading (by `at`; another clock's, after now, the oldest) says a stage the provider served
+ * on it reported nothing (accountHolds.silent), and none of its windows still stands: its harness or credential reports
+ * no quota (an API key, Copilot), as a fact recorded, never guessed.
+ */
+export function readsNothing(readings, now) {
+  if (Object.keys(liveWindows(readings, now)).length) return false;
+  const newest = readings.reduce((a, r) => (!a || (r.at > now ? 0 : r.at) >= (a.at > now ? 0 : a.at) ? r : a), null);
+  return Number.isSafeInteger(newest?.silentAt);
 }
 
 /** The share of its quota an account has left by `windows` (liveWindows): its tightest window's, 0 to 1; null with none. */
@@ -270,8 +282,12 @@ function replaceFile(dir, account, name, value, uid) {
  *   ({<window>: {used, resetsAt}}: usage.mjs quotaReading). Each replaces the account's last reading of that window; the
  *   reading's other windows that still stand are kept. One small file per account, replaced whole (the last writer
  *   wins). Returns the reading kept (readingOf's), or null when `windows` holds none well formed.
+ * - `silent({harness, account, now})`: a stage the provider served on the account (no limit, no refusal) reported no
+ *   reading: kept in the same file, with the windows that still stand. A later reading ends it.
  * - `left(account, now)`: the share of its quota the account has left (0 to 1: its tightest window's), from the windows
  *   of its readings still ahead of their reset (liveWindows); null when none is (no reading, or every one is stale).
+ * - `reportsNothing(account, now)`: no window stands and its newest record is a `silent` one (readsNothing): automatic
+ *   choice puts it after every account with a reading. False for an account never measured, or measured long ago.
  * - `startedAt(account, now)`: when a stage last started on the account (ms), or null; a time after `now` (another clock's,
  *   or a hand-made file) counts as long ago, as a hold record's does.
  * - `list(now)`: every account the records remember a hold or a guess of, by key: {account, harness, until (the hold's
@@ -412,9 +428,9 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
         onError(e);
       }
     },
-    reading({ harness, account, now, windows }) {
-      const fresh = readingOf({ harness, account, at: now, windows });
-      if (!fresh || !Object.keys(fresh.windows).length) return null;
+    reading({ harness, account, now, windows, silent = false }) {
+      const fresh = readingOf({ harness, account, at: now, windows, ...(silent ? { silentAt: now } : {}) });
+      if (!fresh || (!silent && !Object.keys(fresh.windows).length)) return null;
       const r = { ...fresh, windows: { ...liveWindows(readingsOf(account), now), ...fresh.windows } };
       const keep = () => {
         for (let i = quotas.length - 1; i >= 0; i--) if (quotas[i].account === account) quotas.splice(i, 1);
@@ -434,8 +450,14 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       }
       return r;
     },
+    silent({ harness, account, now }) {
+      return this.reading({ harness, account, now, windows: {}, silent: true });
+    },
     left(account, now) {
       return quotaLeft(liveWindows(readingsOf(account), now));
+    },
+    reportsNothing(account, now) {
+      return readsNothing(readingsOf(account), now);
     },
     startedAt(account, now = Date.now()) {
       const mine = starts.get(account) ?? null;

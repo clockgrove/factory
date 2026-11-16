@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { RETRY, transientError } from "../scripts/lib/github.mjs";
 import { planTextMarker } from "../scripts/lib/handoff.mjs";
 import { EDITED_REASON, objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
 import { openEditCheck } from "../scripts/lib/edit-check.mjs";
+import { logTo } from "../scripts/lib/inputs.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
 RETRY.sleep = async () => {};
@@ -53,7 +54,9 @@ function fakeGitHub(g) {
   // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `mainAt`: main's commit time.
   // `threads`: the PR's review threads (GraphQL's shape); `protection`: branch protection requires resolved conversations;
   // `rules`: the active rules GitHub lists for main; `labelled`: labels added; `resolved`: threads Factory resolved.
-  const state = { race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
+  // `checkRuns`: the check runs on any head; `queueTimeout`: the merge queue ruleset's check timeout (minutes), with which
+  // the repository and its rulesets are read, else they are unread.
+  const state = { checkRuns: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }], queueTimeout: null, race: null, removals: [], waiting: null, mainAt: "2026-01-01T00:00:00Z", threads: [], protection: false, rules: [], labelled: [], resolved: [], timeline: [], refuseOnce: false };
   // GitHub's own rule: an unresolved conversation refuses the merge when protection or a ruleset requires them resolved.
   const conversationsHeld = () => state.threads.some((t) => !t.isResolved) && (state.protection || state.rules.some((r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution));
   let id = 1;
@@ -138,7 +141,10 @@ function fakeGitHub(g) {
     }
     if (method === "GET" && /\/repos\/o\/r\/rules\/branches\/main/.test(u)) return json(200, state.rules);
     if (method === "DELETE" && /\/repos\/o\/r\/issues\/\d+\/labels\//.test(u)) return json(404, { message: "Label does not exist" });
-    if (method === "GET" && /\/check-runs/.test(u)) return json(200, { total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success" }] });
+    if (method === "GET" && /\/check-runs/.test(u)) return json(200, { total_count: state.checkRuns.length, check_runs: state.checkRuns });
+    if (state.queueTimeout && method === "GET" && /\/repos\/o\/r$/.test(u)) return json(200, { full_name: "o/r", default_branch: "main" });
+    if (state.queueTimeout && method === "GET" && /\/repos\/o\/r\/rulesets\?/.test(u)) return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
+    if (state.queueTimeout && method === "GET" && /\/repos\/o\/r\/rulesets\/1$/.test(u)) return json(200, { id: 1, conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue", parameters: { check_response_timeout_minutes: state.queueTimeout } }] });
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(u)) return json(200, { statuses: [] });
     if (method === "GET" && (m = /\/repos\/o\/r\/commits\/([0-9a-f]+)$/.exec(u))) return json(200, { sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
     if (method === "GET" && /\/timeline/.test(u)) return json(200, state.timeline);
@@ -449,7 +455,7 @@ test("#2647: --wait follows a merge-time conflict into the send-back, and polls 
     const answers = ["retry", true];
     const sent = [];
     const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({}), sendBack: async (issue, prNumber) => (sent.push([issue, prNumber]), answers.shift()) });
-    assert.equal(await loop.followMerge(2, 12, { timeoutMs: 5_000, pollMs: 1 }), true);
+    assert.equal(await loop.followMerge(2, 12, { pollMs: 1 }), true);
     assert.deepEqual(sent, [[2, 12], [2, 12]], "a conflict goes to the send-back; its retry is read again on the next poll");
     assert.deepEqual(gh.attempts, [], "nothing is enqueued");
   });
@@ -683,10 +689,10 @@ test("#331: local --wait takes code scanning's comment to the review stage, and 
     gh.state.rules = [RULESET];
     const reviewed = [];
     const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ FACTORY_CI_CHECKS: "ci" }), review: async (issue, prNumber) => (reviewed.push([issue, prNumber]), { exit: "delivered" }) });
-    assert.equal(await loop.followMerge(2, 12, { timeoutMs: 5_000, pollMs: 1 }), true);
+    assert.equal(await loop.followMerge(2, 12, { pollMs: 1 }), true);
     assert.deepEqual(reviewed, [[2, 12]], "the review stage answers it");
     gh.state.threads = [structuredClone(personThread)];
-    assert.equal(await loop.followMerge(2, 12, { timeoutMs: 5_000, pollMs: 1 }), false);
+    assert.equal(await loop.followMerge(2, 12, { pollMs: 1 }), false);
     const notice = (gh.comments[2] || []).find((c) => c.body.includes(marker(2, "blocked").replace(/ -->$/, "")));
     assert.match(notice?.body ?? "", /Blocked \(merge\): PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src\/store\.ts:41/);
     assert.match(notice.body, /"cause":"work"/);
@@ -764,5 +770,65 @@ test("#331: a named reviewer's comment posted after the answer pass Blocks under
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report, thirdParty: ["greptile-apps[bot]"] }, { token: "t" }), "threads");
     assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: greptile-apps[bot] on src/a.ts:3 (posted after the answer pass). Answer or resolve each on the PR, then re-apply `factory:objective` to resume");
     assert.deepEqual(gh.state.labelled, []);
+  });
+});
+
+/**
+ * A local --wait follow of PR #12 on a mocked clock: each poll's pause moves it on by `pollMs` and calls `step` with the
+ * minutes since the start. Returns the follow's answer, the minutes it ran and the loop's lines.
+ */
+async function followOnClock(pollMs, step) {
+  const lines = [];
+  mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-16T00:00:00Z") });
+  logTo({ write: (s) => lines.push(s) });
+  const start = Date.now();
+  try {
+    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ FACTORY_CI_CHECKS: "ci" }), pause: async (ms) => (mock.timers.tick(ms), step((Date.now() - start) / 60_000)) });
+    const answer = await loop.followMerge(2, 12, { pollMs });
+    return { answer, minutes: (Date.now() - start) / 60_000, lines: lines.join("") };
+  } finally {
+    logTo(null);
+    mock.timers.reset();
+  }
+}
+
+test("#438: local --wait follows a PR the merge pass keeps in the queue for as long as it is there, past any fixed bound", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const pr = gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    gh.state.queueTimeout = 60;
+    gh.queued.add(12);
+    // Four hours in the queue, every pass reading it as healthy, then it merges.
+    const r = await followOnClock(30 * 60_000, (min) => {
+      if (min >= 240) Object.assign(pr, { merged: true, merged_at: new Date().toISOString(), state: "closed" }), gh.queued.delete(12);
+    });
+    assert.equal(r.answer, true, r.lines);
+    assert.ok(r.minutes >= 240, "followed past 120 minutes and past the hung bound, while it stayed in the queue");
+  });
+});
+
+test("#438: local --wait out of the merge queue stops on the bound from the queue's check timeout, naming it and the pending checks", async () => {
+  await withGitHub(async (g, gh) => {
+    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    gh.open(12, 2, two);
+    await recordMergeable(repo, 12, 2, two, { token: "t" });
+    gh.state.checkRuns = [{ id: 1, name: "ci", status: "in_progress", conclusion: null, started_at: new Date().toISOString() }];
+    // A 30-minute queue check timeout: a running required check is hung past 20 minutes.
+    gh.state.queueTimeout = 30;
+    let r = await followOnClock(5 * 60_000, () => {});
+    assert.equal(r.answer, false);
+    assert.equal(r.minutes, 20, "stopped at the repository's bound, not 120 minutes");
+    assert.match(r.lines, /stopped following PR #12 after 20 min out of the merge queue, the bound for a hung required check \(from the merge queue's check timeout\); still pending: its required checks on [0-9a-f]{7} \(ci running\)/);
+    assert.deepEqual(gh.enqueued, []);
+
+    // A 4-hour timeout: checks green after 150 minutes are still followed, enqueued and merged.
+    gh.state.queueTimeout = 240;
+    r = await followOnClock(10 * 60_000, (min) => {
+      if (min >= 150) gh.state.checkRuns = [{ id: 1, name: "ci", status: "completed", conclusion: "success" }];
+      if (gh.queued.size || gh.enqueued.length) Object.assign(gh.prs[12], { merged: true, merged_at: new Date().toISOString(), state: "closed" });
+    });
+    assert.equal(r.answer, true, r.lines);
+    assert.deepEqual(gh.enqueued.map((e) => e.pr), [12]);
   });
 });

@@ -2860,16 +2860,27 @@ export class Local {
     return out;
   }
 
-  /** --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. */
-  async followMerge(issue, prNumber, { timeoutMs = 120 * 60_000, pollMs = 60_000 } = {}) {
-    const until = Date.now() + timeoutMs;
+  /**
+   * --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. The follow's
+   * bound is the repository's own: while the merge pass has the PR in the queue (or waiting for the queue ahead of it),
+   * the pass's hung and drop rules end it, and the follow has none of its own. Out of the queue (its own checks, a
+   * person's merge with auto_merge off), it stops once it has waited `hungMs` there, counted from its start or from when
+   * it last saw the PR in the queue: the bound past which the queue calls a running required check hung (queueBoundMs,
+   * from the queue's check timeout), naming that bound and what is still pending.
+   */
+  async followMerge(issue, prNumber, { pollMs = 60_000 } = {}) {
+    const now = () => (this.clock ?? Date.now)();
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const queue = await hasMergeQueue(this.repo, this.opts).catch(() => true);
     // The hung-check bound, read once for this follow rather than every poll; with no Actions token here (the local
     // App has no Actions permission), the merge pass judges a queue check by that time bound only (session.mjs hangsOn).
-    const hungMs = queue ? await queueBoundMs(this.repo, this.opts) : null;
+    const hungMs = await queueBoundMs(this.repo, this.opts);
     const cache = {};
-    while (Date.now() < until && !this.stopping) {
+    // When this wait outside the merge queue began (null while the merge pass has the PR in it), and what it waits on.
+    let outSince = now();
+    let pending = "";
+    while (!this.stopping) {
+      pending = inputs.autoMerge ? "the merge pass" : "a person's merge (auto_merge is off)";
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
@@ -2892,6 +2903,11 @@ export class Local {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
         }
+        // In the queue, or out of it waiting for the queue ahead to move: the merge pass bounds that wait.
+        if (how === "queued" || how === "in-queue" || how === "queue-wait") outSince = null;
+        else outSince ??= now();
+        const checks = report.checks;
+        pending = checks ? `its required checks on ${checks.sha.slice(0, 7)} (${[...checks.pending.map((n) => `${n} running`), ...checks.missing.map((n) => `${n} not reported`)].join(", ")})` : `the merge pass (${how ?? "unread"})`;
       }
       const pr = await getPr(this.repo, prNumber, this.opts).catch(() => null);
       if (pr?.merged_at) {
@@ -2907,10 +2923,11 @@ export class Local {
         log(`#${issue}: PR #${prNumber} closed without a merge`);
         return false;
       }
+      if (outSince !== null && now() - outSince >= hungMs) break;
       await this.pause(pollMs);
     }
     if (this.stopping) return false;
-    log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(timeoutMs / 60000)} min`);
+    log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(hungMs / 60000)} min ${queue ? "out of the merge queue" : "waiting for its merge"}, the bound for a hung required check (from the merge queue's check timeout); still pending: ${pending}`);
     log((await this.pendingMergeLine(issue)) || `#${issue}: PR #${prNumber} is merged or closed`);
     return false;
   }

@@ -3398,7 +3398,8 @@ async function textEdit(repo, issue, prNumber, opts) {
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
  * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
  * as a drop. A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
- * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason), and
+ * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason),
+ * `checks` (`{sha, pending, missing}`: the required checks not done on the recorded head) with a "pending" for them, and
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
@@ -3481,7 +3482,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const names = checkNames?.length ? checkNames : await requiredChecks(repo, opts);
   const state = await checksOn(repo, sha, names, opts);
   if (state.failed.length) return "red";
-  if (!state.green) return "pending";
+  if (!state.green) {
+    report.checks = { sha, pending: state.pending, missing: state.missing };
+    return "pending";
+  }
   const { unread } = await unreadNow(repo, { issue, prNumber, self: selfLogin() || (await primeSelf(opts)) }, opts);
   if (unread.length) {
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});

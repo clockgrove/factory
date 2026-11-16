@@ -17,6 +17,8 @@ import { writeUsage } from "../scripts/lib/session.mjs";
 import { costByPhase, sumSpend } from "../scripts/lib/logic.mjs";
 import { holdSecrets, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
+import { answerDecider } from "../scripts/review.mjs";
+import { FINDING_QUESTION, openFindingCheck } from "../scripts/lib/finding-check.mjs";
 
 const fixture = (name) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf8");
 const LIMIT_RUN = fixture("claude-2.1.323-usage-limit.jsonl");
@@ -409,4 +411,20 @@ test("#379: after a usage limit the drift advisory asks no more in the stage, as
   for (let i = 0; i < WINDOW; i += 1) w2.feed(JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: `ls b${i}`, exit_code: 0 } }));
   await w2.stop();
   assert.equal(asked, 1);
+});
+
+test("#379: the answer gate and the finding check ask the stage's harness without a key, on the stage's one adapter", async () => {
+  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"fixed","confidence":0.9}'));
+  const { stage, kept } = stageOf(bin, "claude");
+  const gate = answerDecider({ inputs: {}, env: {}, stage });
+  assert.equal(gate.off, null);
+  assert.equal(gate.model, "claude m-1");
+  assert.equal(answerDecider({ inputs: {}, env: {} }).off, "no-key", "no stage, no key: off as before");
+  const check = openFindingCheck({ inputs: {}, env: {}, stage });
+  assert.equal(check.off, null);
+  const [r] = await check.judge([{ id: 1, path: "a.js", line: 3, body: "null check missing", reply: "Fixed.", diff: "+if (x == null) return;" }], { repo: "o/r", prNumber: 2 });
+  assert.deepEqual(r, { id: 1, verdict: "fixed", confidence: 0.9, error: null });
+  assert.ok(calls()[0].prompt.includes('"enum":["fixed","rebutted","unresolved"]'));
+  assert.equal(FINDING_QUESTION.choices.length, 3);
+  assert.equal(kept.length, 1);
 });

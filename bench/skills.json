@@ -7,9 +7,9 @@
       "words": 657,
       "files": {
         "reference.md": {
-          "sha256": "65db61be12a59400c1e59315a481f15c5e7c4b658ad4aa587cb90dd2d3c2f0ab",
+          "sha256": "d284f416064eb648a78c293a9cfd5a8f50b9024d6aeea53d3c102c8e7d7cc73b",
           "lines": 24,
-          "words": 612
+          "words": 656
         }
       }
     },
@@ -105,9 +105,9 @@
       }
     },
     "factory-serve": {
-      "sha256": "8b29032430db11fe3c66d65d9265ab8c37ea6a52a9e7e1005098b90e6beb18b1",
-      "lines": 33,
-      "words": 651
+      "sha256": "a87c16e753e62f266e994cee638d71efd9532167bf0d6ba859c74616b8ff9c5a",
+      "lines": 34,
+      "words": 700
     },
     "factory-setup": {
       "sha256": "06f8f9f9e02ac9d08a827d8fc1f0461b9a30c1b0fc569f09a06be333a4d805f4",

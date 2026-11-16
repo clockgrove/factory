@@ -683,9 +683,9 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
   throw new GitRefusal("sandbox", `Copilot's sandbox could not start here: ${why}`, { harness: "copilot" });
 }
 
-/** The refusal's detail (for the log) when the probe's toolchain rule broke: the node and npm a command did not run. */
+/** The refusal's detail (for the log) when the probe's toolchain rule broke: the node, npm, package manager and tools a command did not find or run. */
 const toolchainRefused = (t, who = "Copilot") => {
-  const what = [t?.node, t?.npm, t?.pm].filter(Boolean);
+  const what = [t?.node, t?.npm, t?.pm, ...(Array.isArray(t?.tools) ? t.tools : [])].filter(Boolean);
   return `${who}'s sandbox does not give commands the stage's toolchain: ${what.length ? `${what.join(", ")} not found or not run in a command` : TOOLCHAIN_RULE}`;
 };
 

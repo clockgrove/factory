@@ -405,7 +405,7 @@ test("review diff: a diff that only deletes still gets every finding posted and 
   }
 });
 
-test("review diff: findings a 422 put in the review body count as unaddressed, reach the answer pass and are answered once", async () => {
+test("review diff: findings a 422 put in the review body count as unaddressed, reach the answer pass, are answered once and count as answered once the finding check resolves them", async () => {
   const realFetch = globalThis.fetch;
   setSelf("factory[bot]");
   try {
@@ -430,6 +430,12 @@ test("review diff: findings a 422 put in the review body count as unaddressed, r
     assert.deepEqual(parseReplies(text, allowed), [{ id: "r2-1", body: "fixed in abc" }, { id: 11, body: "ok" }]);
     assert.equal(await postReplies(repo7, 7, 7, JSON.stringify([{ id: "r2-1", body: "fixed in abc" }]), allowed, { token: "t" }), 1);
     assert.match(issueComments.at(-1).body, /^<!-- factory:7:reply:r2-1 -->\n/);
+    // The reply alone leaves it open, with that answer (#368); the finding check's resolved marker answers it, a stranger's never.
+    const before = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) });
+    assert.deepEqual(before.map((c) => [c.id, c.earlier ?? null]), [["r2-1", "fixed in abc"], ["r2-2", null]]);
+    issueComments.push({ id: 51, user: { login: "mallory" }, author_association: "NONE", body: "<!-- factory:7:resolved:r2-1 -->\nresolved" });
+    assert.deepEqual((await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) })).map((c) => c.id), ["r2-1", "r2-2"]);
+    issueComments.push({ id: 52, user: { login: "factory[bot]" }, author_association: "NONE", body: "<!-- factory:7:resolved:r2-1 -->\nFactory: the answer to review finding r2-1 (in the review body) resolves it." });
     const open = await unaddressedReviewComments(repo7, 7, null, { token: "t", reviewIds: new Set([2]) });
     assert.deepEqual(open.map((c) => c.id), ["r2-2"]);
     // A PR with no finding in a body makes no extra call for the PR's comments.

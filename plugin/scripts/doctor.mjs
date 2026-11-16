@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
-import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, pinnedVersion, prepareCopilotHome } from "./lib/copilot-runner.mjs";
+import { TOOLCHAIN_RULE, claudeEnvText, localPackageManager, localToolchain, localTools, packageManagerOf, pinnedVersion, prepareCopilotHome, repositoryTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./lib/untar.mjs";
 import { prepareFactoryHome, realRoots, runnerLaunch } from "./lib/claude-runner.mjs";
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
@@ -521,6 +521,18 @@ export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   return PASS("decision calls", text);
 }
 
+/**
+ * The finding check (lib/finding-check.mjs) as doctor says it: on wherever a decision call runs (deciderKind: the
+ * gateway's model, or the stage's harness); with none (decision_route off, or gateway with no key) a WARN, since
+ * Factory's reply then answers a reviewer finding unjudged.
+ */
+export function findingCheckRow({ inputs, env = process.env, home } = {}) {
+  const kind = deciderKind({ inputs, env, ...(home ? { home } : {}) });
+  if (kind.name === "ai-gateway") return PASS("finding check", "an AI Gateway key: the decision model judges each answer to a reviewer finding before its thread is resolved");
+  if (kind.name === "harness") return PASS("finding check", "the stage's own harness judges each answer to a reviewer finding before its thread is resolved");
+  return WARN("finding check", `off (${kind.code}): reviewer findings are not judged; Factory's reply answers each one`, kind.route === "off" ? "set decision_route to auto (INSTALL.md)" : env.GITHUB_ACTIONS ? "pass an AI_GATEWAY_API_KEY secret as the workflow's ai_gateway_api_key, or set decision_route to auto (PLAN.md, Red-check triage)" : "save an AI Gateway key in ~/.config/factory/ai-gateway-key (LOCAL.md, step 4), or set decision_route to auto");
+}
+
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.FACTORY_ACCOUNTS }) {
   const out = [];
   if (!token && env.GITHUB_ACTIONS) {
@@ -538,6 +550,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   if (local && !job && token && deciderKind({ inputs, env }).name !== "off") out.push(await probeRerun({ repo, token }));
   // Which decider answers the decision calls (red-check triage, the drift advisory): where the key is read, a job or local mode.
   if (job || local) out.push(deciderCheck({ inputs, env }));
+  // Where the key is in reach (local mode's file, the job's input): whether reviewer findings are judged.
+  if (local || job) out.push(findingCheckRow({ inputs, env }));
 
   // The workflow as the default branch on GitHub has it (what the next run uses), not a local copy that may be behind.
   const repoData = await getRepo(repo, { token });
@@ -1456,15 +1470,23 @@ export function workflowEnvChecks(wf = {}) {
   return [WARN("workflow env", `.github/workflows/factory.yml sets ${dropped.join(", ")}, which ${dropped.length === 1 ? "is" : "are"} no Factory setting: local mode ignores ${dropped.length === 1 ? "it" : "them"}`, "remove them from the workflow's env block; the settings are the Action's inputs as FACTORY_<INPUT> and the FACTORY_LOCAL_* ones in docs/LOCAL.md")];
 }
 
+/** The commands a local stage runs for the repository in `checkout` (copilot-runner.mjs stageCommands), install resolved. */
+const localCommands = (checkout, env) => {
+  const c = stageCommands(env);
+  return { ...c, install: checkout ? installCommand(checkout, c.install) : null };
+};
+
 /**
- * Local mode: the stage's node and the repository's package manager as local mode resolves them for its sandboxed
- * commands (copilot-runner.mjs localToolchain, localPackageManager; #111, #137), one row each, so a developer can see
- * the resolution before a run. node's version is asked of the resolved binary itself, from `/` (no repository in reach);
+ * Local mode: the stage's node, the repository's package manager and the tools its own commands run as local mode
+ * resolves them for its sandboxed commands (copilot-runner.mjs localToolchain, localPackageManager, repositoryTools;
+ * #111, #137, #371), one row each, so a developer can see the resolution before a run. On Linux a command word of the
+ * repository's commands that Claude Code's and Copilot's commands would not find is a WARN naming each (`commands`: the
+ * settings' commands, localCommands). node's version is asked of the resolved binary itself, from `/` (no repository in reach);
  * the package manager's is the one `packageManager` pins (nothing is run). A pinned package manager not resolved is a
  * FAIL (the pre-start probe would Block); one resolved but kept out of the sandboxes (it sits in or above what a sandbox
  * may write, or a credential store) a WARN. `os`: on Linux Claude Code's and Copilot's sandboxes bind them read-only.
  */
-export function localToolchainRows({ checkout, env = process.env, os = platform(), run = (bin) => execFileSync(bin, ["--version"], { cwd: "/", env: { PATH: SAFE_PATH }, encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] }) }) {
+export function localToolchainRows({ checkout, env = process.env, commands = localCommands(checkout, env), os = platform(), run = (bin) => execFileSync(bin, ["--version"], { cwd: "/", env: { PATH: SAFE_PATH }, encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] }) }) {
   const out = [];
   const off = [join(checkout, ".factory"), stageTmpBase()];
   const node = localToolchain({ path: env.PATH || "", off });
@@ -1486,6 +1508,13 @@ export function localToolchainRows({ checkout, env = process.env, os = platform(
     else if (os === "linux" && !pm.dirs.length) out.push(WARN("package manager", `${what} (${pm.via}) → ${pm.real}, but it sits in or above a directory a sandbox may write, the home or a credential store, so Claude Code's and Copilot's commands cannot read it`, `install ${pm.name} elsewhere (corepack in a Node.js install, or a version manager)`));
     else out.push(PASS("package manager", `${what} (${pm.via}) → ${pm.real}`));
   }
+  if (os === "linux") {
+    const pmName = packageManagerOf(checkout);
+    const { tools, unresolved } = repositoryTools({ clone: checkout, commands, path: env.PATH || "", off, skip: pmName ? [pmName] : [] });
+    const seen = tools.map((t) => `${t.word} → ${t.real}`).join(", ");
+    if (unresolved.length) out.push(WARN("repository tools", `${unresolved.map((u) => `${u.word} (${u.from}): ${u.why}`).join("; ")}; Claude Code's and Copilot's commands cannot run ${unresolved.length === 1 ? "it" : "them"}${seen ? `. Visible: ${seen}` : ""}`, "put each on PATH in the shell that starts serve, or pin its version (.tool-versions, mise.toml) where a version manager has several"));
+    else if (tools.length) out.push(PASS("repository tools", `${seen} (read-only in Claude Code's and Copilot's sandboxes)`));
+  }
   return out;
 }
 
@@ -1494,7 +1523,7 @@ export function localToolchainRows({ checkout, env = process.env, os = platform(
  * local Claude Code stage runs first (harness.mjs claudeLocalCheck), around a throwaway clone (this checkout's package.json
  * only) in a directory of Factory's own, with the stage's toolchain and outer sandbox as a stage gets them.
  */
-export async function claudeLocalStart({ checkout, env = process.env, check = claudeLocalCheck }) {
+export async function claudeLocalStart({ checkout, env = process.env, commands = localCommands(checkout, env), check = claudeLocalCheck }) {
   const ws = mkdtempSync(join(dirname(stageTmpBase()), "doctor-"));
   const tmp = stageTemp("doctor-");
   try {
@@ -1503,8 +1532,9 @@ export async function claudeLocalStart({ checkout, env = process.env, check = cl
     const corepack = join(ws, "corepack");
     for (const d of [join(usage, "harness"), corepack]) mkdirSync(d, { recursive: true });
     await exec("git", ["init", "-q", clone], { env: { PATH: env.PATH || SAFE_PATH } });
-    if (existsSync(join(checkout, "package.json"))) copyFileSync(join(checkout, "package.json"), join(clone, "package.json"));
-    const tools = localTools({ harness: "claude", clone, path: env.PATH || "", off: [ws, join(checkout, ".factory"), dirname(tmp)], usageDir: usage });
+    // What resolves the stage's tools (package.json's packageManager and scripts, the version pins), nothing else.
+    for (const f of ["package.json", ".tool-versions", "mise.toml", ".mise.toml", ".python-version", ".ruby-version"]) if (existsSync(join(checkout, f))) copyFileSync(join(checkout, f), join(clone, f));
+    const tools = localTools({ harness: "claude", clone, commands, path: env.PATH || "", off: [ws, join(checkout, ".factory"), dirname(tmp)], usageDir: usage });
     const gitBin = join(usage, "gitbin");
     mkdirSync(gitBin);
     writeFileSync(join(gitBin, "git"), gitGuardScript(realpathSync(whichSync("git"))), { mode: 0o755 });
@@ -1800,8 +1830,8 @@ async function main() {
   results.push(...machineChecks({ env, local }));
   if (committed) results.push(...workflowSourceChecks(readWorkflowEnv(checkout), committed));
   if (local) results.push(...workflowEnvChecks(wf));
-  if (local) results.push(...localToolchainRows({ checkout, env: process.env }));
-  if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout }));
+  if (local) results.push(...localToolchainRows({ checkout, env: process.env, commands: localCommands(checkout, env) }));
+  if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout, commands: localCommands(checkout, env) }));
   if (app?.error) results.push(FAIL("app token", app.error, "check FACTORY_APP_ID, the private key, and that the App is installed on this repository"));
   // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
   const accounts = process.env.GITHUB_ACTIONS ? process.env.FACTORY_ACCOUNTS : wf.FACTORY_ACCOUNTS;

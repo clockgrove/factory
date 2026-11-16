@@ -7,6 +7,8 @@ description: How Clockgrove Factory scores an Objective. Use to read the four jo
 
 Job one: file an Objective, walk away, come back to correct, merged work at a reasonable cost. Four numbers per Objective say whether that happened. One scorecard row holds all four, plus the unit and basis of each, so rows from different harnesses are never compared as if they measured the same thing.
 
+The scorecard script and judge (`<factory clone>/bench/`) are not in the plugin; they need a clone of Factory's repository. Without one, score by hand.
+
 ## 1. Walk-away (binary)
 
 Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit, relabel, un-block, review, or hand-started or re-run Factory workflow run by a human (anyone but the Factory App and the harness) breaks it, an answered Question breaks it even when the answer is not on the issue or PR, and a card that reached Blocked is a miss. A workflow hand-over is an owner step, not input: reference.md, "Workflow hand-over". Report `yes` or `no` with the first human action, and the bucket: walk-away, External or miss. External: every stop was a Block whose notice records an external cause, with no Question and no input but the answers those Blocks asked for; the 1.0 streak skips it. Load [reference.md](reference.md), "Block causes", for the codes.
@@ -29,8 +31,4 @@ Per harness, from the usage artifact the worker job uploads, plus the reviewer c
 
 Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
 
-Name the harness and models that ran beside the dollars, so rows compare model to model: reference.md, "Harness and models".
-
-## Reading the artifacts
-
-Which of the four sources gives which input: reference.md, "Reading the artifacts". `/factory:factory-score` reads all four and writes the row; a row with a missing input says which, rather than guessing.
+Name the harness and models that ran beside the dollars, so rows compare model to model: reference.md, "Harness and models". Each input's source: reference.md, "Reading the artifacts"; a row names a missing input, never guesses.

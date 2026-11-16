@@ -42,6 +42,7 @@ import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/wo
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
+import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
@@ -520,7 +521,7 @@ async function main() {
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
   let outbox;
   try {
-    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
+    outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), toolchainPaths: inputs.toolchainPaths, setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
     // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
     outbox.beforePush = () => beforeExit?.();
   } catch (e) {
@@ -708,6 +709,8 @@ async function main() {
   decisionEnv = harnessEnv;
   // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
+  // The fence check (lib/fence-check.mjs): a fix pass's toolchain change outside its scope goes only on its yes.
+  if (outbox) outbox.fenceCheck = openFenceCheck({ inputs, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
@@ -1034,6 +1037,7 @@ async function main() {
     recordBasis: asked.basis,
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed && outbox.error !== unresolved ? outbox.error : "",
+    pushCause: outbox.failed && outbox.error !== unresolved ? outbox.errorCause : null,
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     planNeeds,

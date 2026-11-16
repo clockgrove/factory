@@ -58,12 +58,21 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
 /**
  * Before a send-back's conflict pass is pushed, whatever ended it (a cap, a death, a refusal included): why what it left
  * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
- * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a commit the conflict
- * reshaped (kept.mjs openKeptCheck), null without a key.
+ * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a file not exactly the
+ * branch's (kept.mjs openKeptCheck), null without a key; `progress`: where the check's note goes (outbox rebaseNote).
  */
-export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null }) {
+export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null }) {
   if (!onto) return "";
   const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
+  // A change the branch undid that the head carries anyway: said on the progress comment, never a Block.
+  if (outbox.rebaseNote) {
+    log(`rebase check: ${outbox.rebaseNote}`);
+    try {
+      await progress?.(`rebase check: ${outbox.rebaseNote}`);
+    } catch (e) {
+      log(`rebase note: ${String(e?.message || e).slice(0, 120)}`);
+    }
+  }
   if (!left) return "";
   const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed`;
   outbox.block(why);
@@ -776,7 +785,7 @@ async function main() {
   // stays the reason (decideExit puts those first).
   // A commit the conflict reshaped is judged by the decision model when there is a key (kept.mjs).
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs }) : null;
-  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null });
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a

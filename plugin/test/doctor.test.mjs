@@ -457,5 +457,5 @@ test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decis
   assert.match(on.detail, /content check of each send-back's conflict pass/);
   const off = decisionKeyCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } });
   assert.equal(off.status, "PASS");
-  assert.match(off.detail, /^off \(no key\): .*matching commits/);
+  assert.match(off.detail, /^off \(no key\): .*matching commits.*a change lost through a rename or a merge can pass/);
 });

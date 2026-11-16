@@ -934,12 +934,16 @@ export function costByPhase(records) {
  * time. Pure: feed(line) per stdout line, snapshot() at any time. The one line this renders is
  * the progress comment's status while the harness runs, so a reader needs no log. Claude and Codex
  * report a resumed session's running total: since(session, prior) names the total it had already
- * reported, so the line shows the pass's own share (as runHarness counts it).
+ * reported, so the line shows the pass's own share (as runHarness counts it). open() counts the command items the
+ * stream shows started and not yet ended (a Claude tool call or background task, a Codex command or MCP call, a Copilot
+ * tool execution): what a silent harness has in flight.
  */
 export function harnessActivity(now = () => Date.now()) {
   const s = { startedAt: now(), lastEventAt: null, events: 0, turns: 0, toolCalls: 0, lastTool: null, subagents: new Map(), tokens: { input: 0, output: 0, written: 0 }, usd: null, ended: false, lastText: "" };
   // Each resumed session's prior total; for Codex, the one the current pass's first turn.completed is counted from.
   const priors = new Map();
+  // The command items started and not yet ended, by id.
+  const open = new Set();
   let base = null;
   const brief = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
   const feed = (line) => {
@@ -959,6 +963,7 @@ export function harnessActivity(now = () => Date.now()) {
       for (const c of e.message.content || []) {
         if (c.type === "tool_use") {
           s.toolCalls += 1;
+          if (c.id) open.add(c.id);
           s.lastTool = c.name === "Bash" && c.input?.command ? `Bash: ${brief(c.input.command)}` : c.input?.description ? `${c.name}: ${brief(c.input.description)}` : c.name;
         } else if (c.type === "text" && c.text) s.lastText = brief(c.text);
       }
@@ -968,6 +973,8 @@ export function harnessActivity(now = () => Date.now()) {
         s.tokens.output += u.output_tokens || 0;
         s.tokens.written += u.cache_creation_input_tokens || 0;
       }
+    } else if (e.type === "user" && Array.isArray(e.message?.content)) {
+      for (const c of e.message.content) if (c?.type === "tool_result") open.delete(c.tool_use_id);
     } else if (e.type === "system" && e.subtype === "task_started" && e.task_id) {
       s.subagents.set(e.task_id, { description: brief(e.description), type: e.subagent_type || e.task_type || "agent", kind: e.task_type === "local_bash" ? "command" : "agent", startedAt: now(), done: false });
     } else if (e.type === "system" && e.subtype === "task_notification" && e.task_id) {
@@ -979,6 +986,7 @@ export function harnessActivity(now = () => Date.now()) {
       }
     } else if (e.type === "result") {
       s.ended = true;
+      open.clear();
       // A total below the prior one is not a running total (usage.mjs sinceSession): as reported.
       const prior = priors.get(e.session_id)?.usd;
       if (typeof e.total_cost_usd === "number") s.usd = typeof prior === "number" && e.total_cost_usd >= prior ? e.total_cost_usd - prior : e.total_cost_usd;
@@ -994,7 +1002,14 @@ export function harnessActivity(now = () => Date.now()) {
     } else if (e.type === "item.started" && e.item) {
       s.toolCalls += 1;
       s.lastTool = e.item.type === "command_execution" && e.item.command ? `command: ${brief(e.item.command)}` : e.item.type || "item";
-    } else if (e.type === "item.completed" && e.item?.type === "agent_message" && e.item.text) s.lastText = brief(e.item.text);
+      if (e.item.id && (e.item.type === "command_execution" || e.item.type === "mcp_tool_call")) open.add(e.item.id);
+    } else if (e.type === "item.completed" && e.item) {
+      open.delete(e.item.id);
+      if (e.item.type === "agent_message" && e.item.text) s.lastText = brief(e.item.text);
+    }
+    // Copilot
+    else if (e.type === "tool.execution_start" && e.data?.toolCallId) open.add(e.data.toolCallId);
+    else if (e.type === "tool.execution_complete" && e.data) open.delete(e.data.toolCallId);
   };
   const snapshot = () => {
     const t = now();
@@ -1007,7 +1022,8 @@ export function harnessActivity(now = () => Date.now()) {
   const since = (thread, prior) => {
     if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
   };
-  return { feed, snapshot, since };
+  // A background shell's tool call ends at its launch, so its task counts; a sub-agent's task is its open tool call already.
+  return { feed, snapshot, since, open: () => open.size + [...s.subagents.values()].filter((a) => !a.done && a.kind === "command").length };
 }
 
 /** The status line for a running or finished harness, from a snapshot. */

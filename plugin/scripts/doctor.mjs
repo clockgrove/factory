@@ -880,7 +880,7 @@ export function runnerMatchCheck(factoryText, ci, hints = {}) {
 
 /**
  * Find a workflow (other than factory.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
- * that name, or with `checks` (the required checks' names), the workflows whose jobs make them (checkWorkflows). Each
+ * that name, or with `checks` (the required checks' names), each check's makers by event (checkWorkflows). Each
  * workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
  * `unread`: the workflows that could not be read or parsed here, whose triggers are unknown (each with its reason).
  */
@@ -925,56 +925,108 @@ export async function ciWorkflowTriggers(repo, opts, { name = "", checks = [] } 
 /** Whether a workflow job (workflowJobs) makes the check `name`: its own name, a matrix leg's, or a called workflow's job. */
 const makesCheck = (job, name) => name === job.check || name.startsWith(`${job.check} (`) || name.startsWith(`${job.check} / `);
 
+/** The events on which a check a workflow makes reaches a pull request (its own head) or the merge queue's commit. */
+const PR_EVENTS = ["pull_request", "pull_request_target"];
+
 /**
- * ciWorkflowTriggers with the required checks known: the CI workflow is every workflow (other than factory.yml) with a
- * job that makes one of `checks`, whatever else is listed. `mergeGroup` holds when each of them runs on merge_group;
- * `name` and `path` name the ones that do not (else all of them); `jobs` is all their jobs. None found: `found` false
- * with `checks`, since a check may come from an App and not a workflow, or from a workflow doctor could not read.
+ * ciWorkflowTriggers with the required checks known, decided per check: `byCheck` holds, for each of `checks`, the
+ * workflows (other than factory.yml) with a job that makes it (makesCheck), split by the events they run on: `pr` (on
+ * pull_request or pull_request_target), `mg` (on merge_group) and `other` (neither: a release, a schedule), each a list
+ * of {name, path}. A workflow on other events never counts as making a check a pull request or the queue gets. `unread`:
+ * the workflows that could not be read or parsed, any of which could make any check. `found`, `name`, `path` and `jobs`
+ * are the pull_request makers' (ciRunner's). The reading stops once every check has a maker on pull_request and one on
+ * merge_group: no later workflow can change the row.
  */
 async function checkWorkflows(repo, opts, list, checks) {
   const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
   const factoryParses = factory ? factory.name !== factory.path : null;
   const unread = [];
-  const makers = [];
+  const byCheck = checks.map((check) => ({ check, pr: [], mg: [], other: [] }));
+  const prMakers = [];
   for (const w of list) {
+    if (byCheck.every((c) => c.pr.length && c.mg.length)) break;
     if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     let doc;
     try {
       doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
     } catch (e) {
+      // Listed but not on the default branch (it ran from a branch once): nothing runs from it on the default branch.
       if (e.status !== 404) unread.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
       continue;
     }
+    // Listed by its path though it sets a name: GitHub could not parse it and runs nothing from it.
     if (w.name === w.path && typeof doc?.name === "string" && doc.name !== w.path) continue;
     const jobs = jobsOf(doc);
-    if (jobs.some((j) => checks.some((c) => makesCheck(j, c)))) makers.push({ name: w.name, path: w.path, mergeGroup: workflowEvents(doc).includes("merge_group"), jobs });
+    const events = workflowEvents(doc);
+    const onPr = events.some((e) => PR_EVENTS.includes(e));
+    const onMg = events.includes("merge_group");
+    const me = { name: w.name, path: w.path };
+    let makes = false;
+    for (const c of byCheck) {
+      if (!jobs.some((j) => makesCheck(j, c.check))) continue;
+      makes = true;
+      if (onPr) c.pr.push(me);
+      if (onMg) c.mg.push(me);
+      if (!onPr && !onMg) c.other.push({ ...me, events });
+    }
+    if (makes && onPr) prMakers.push({ ...me, jobs });
   }
-  if (!makers.length) return { found: false, factoryParses, unread, checks };
-  const without = makers.filter((w) => !w.mergeGroup);
-  const shown = without.length ? without : makers;
-  return { found: true, name: shown.map((w) => w.name).join(", "), path: shown.map((w) => w.path).join(", "), mergeGroup: !without.length, jobs: makers.flatMap((w) => w.jobs), factoryParses, unread, checks };
+  return { found: prMakers.length > 0, name: prMakers.map((w) => w.name).join(", "), path: prMakers.map((w) => w.path).join(", "), paths: prMakers.map((w) => w.path), jobs: prMakers.flatMap((w) => w.jobs), factoryParses, unread, checks, byCheck };
 }
 
 /**
  * The ci workflow row, from ciWorkflowTriggers's result: a workflow on pull_request and merge_group, the second needed
- * only with a merge queue (`queue`). With the required checks known, the workflows that make them, each on merge_group;
- * none of them found is a WARN, since an App's check or a workflow doctor could not read may make them. Without them, a
- * workflow doctor could not read or parse may be the one listening: its triggers are unknown, so no FAIL rests on it and
- * the WARN names it.
+ * only with a merge queue (`queue`). With the required checks known (`byCheck`), each check on its own: a workflow on
+ * pull_request must make it, else a pull request never gets it; with a queue, one on merge_group too, else the queue's
+ * commit never does. A check no workflow doctor read makes at all is a WARN naming it, since an App's check or a
+ * workflow doctor could not read may make it; and with any workflow unread, no FAIL rests on the rest either. Without
+ * required checks, a workflow doctor could not read or parse may be the one listening: its triggers are unknown, so no
+ * FAIL rests on it and the WARN names it.
  */
 export function ciWorkflowCheck(ci, { queue = false } = {}) {
   const unread = ci.unread?.length ? `; could not read the triggers of ${ci.unread.join(", ")}` : "";
   const readFix = "make each workflow named readable to the token (contents: read) and valid YAML, then run doctor again";
   if (ci.error) return WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions");
-  if (ci.checks?.length) {
-    const made = `the required checks (${ci.checks.join(", ")})`;
-    if (!ci.found) return WARN("ci workflow", `no workflow doctor read has a job that makes ${made}, so doctor cannot tell what runs them${queue ? " or whether it runs on merge_group" : ""}${unread}`, `name each required check after a CI job (its name, else its id), or make sure what makes them (an App's check) runs on${queue ? " pull_request and merge_group" : " pull_request"}${unread ? `; ${readFix}` : ""}`);
-    if (!ci.mergeGroup) return (queue ? FAIL : WARN)("ci workflow", `${ci.name} makes required checks but does not run on merge_group${queue ? ", so the queue's commit never gets them" : " (needed only with a merge queue)"}`, `add "merge_group:" under on: in ${ci.path}`);
-    return PASS("ci workflow", `${ci.name}, which makes ${made}, runs on merge_group`);
-  }
+  if (ci.byCheck?.length) return requiredCheckRow(ci.byCheck, { queue, unread: ci.unread || [], readFix });
   if (!ci.found) return unread ? WARN("ci workflow", `no workflow doctor read listens on pull_request${unread}`, readFix) : FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit");
   if (!ci.mergeGroup) return (queue && !unread ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}${unread}`, `add "merge_group:" under on: in ${ci.path}${unread ? `, or ${readFix}` : ""}`);
   return PASS("ci workflow", `${ci.name} on pull_request and merge_group`);
+}
+
+const names = (ws) => [...new Set(ws.map((w) => w.name))].join(", ");
+const paths = (ws) => [...new Set(ws.map((w) => w.path))].join(", ");
+
+/** ciWorkflowCheck's row with the required checks known: each check's makers on pull_request and on merge_group. */
+function requiredCheckRow(byCheck, { queue, unread, readFix }) {
+  const fails = [];
+  const warns = [];
+  const fixes = [];
+  // A check no workflow doctor read makes on any event: an App's, or an unread workflow's.
+  const unknown = byCheck.filter((c) => !c.pr.length && !c.mg.length && !c.other.length);
+  // Made by a workflow, but by none on pull_request: a pull request never gets it, so it is never enqueued.
+  const noPr = byCheck.filter((c) => !c.pr.length && (c.mg.length || c.other.length));
+  // Made on pull_request, but by no workflow on merge_group: the queue's commit never gets it.
+  const noMg = byCheck.filter((c) => c.pr.length && !c.mg.length);
+  const sure = unread.length ? warns : fails;
+  for (const c of noPr) {
+    const by = [...c.mg.map((w) => ({ ...w, events: ["merge_group"] })), ...c.other];
+    sure.push(`${c.check} is made only by ${by.map((w) => `${w.name} (on ${w.events.join(", ")})`).join(", ")}, so a pull request never gets it`);
+    fixes.push(c.mg.length ? `add "pull_request:" under on: in ${paths(c.mg)}` : `make ${c.check} in a workflow on pull_request (only ${paths(c.other)} makes it now, on other events)`);
+  }
+  for (const c of noMg) {
+    (queue ? sure : warns).push(`${c.check} is made on pull_request by ${names(c.pr)} but by no workflow on merge_group${queue ? ", so the queue's commit never gets it" : " (needed only with a merge queue)"}`);
+    fixes.push(`add "merge_group:" under on: in ${paths(c.pr)}`);
+  }
+  if (unknown.length) {
+    warns.push(`no workflow doctor read makes ${unknown.map((c) => c.check).join(", ")}, so doctor cannot tell what runs ${unknown.length === 1 ? "it" : "them"} (an App's check, or a workflow doctor could not read)`);
+    fixes.push(`name each required check after a CI job (its name, else its id), or make sure what makes it (an App's check) runs on${queue ? " pull_request and merge_group" : " pull_request"}`);
+  }
+  const unreadText = unread.length ? `; could not read the triggers of ${unread.join(", ")}` : "";
+  if (unread.length && (warns.length || fails.length)) fixes.push(readFix);
+  const made = byCheck.filter((c) => c.pr.length && c.mg.length);
+  if (fails.length) return FAIL("ci workflow", [...fails, ...warns].join("; ") + unreadText, fixes.join("; "));
+  if (warns.length) return WARN("ci workflow", warns.join("; ") + unreadText, fixes.join("; "));
+  return PASS("ci workflow", `the required checks run on pull_request and merge_group: ${made.map((c) => `${c.check} (${names([...c.pr, ...c.mg])})`).join(", ")}`);
 }
 
 /**

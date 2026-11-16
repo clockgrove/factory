@@ -650,7 +650,7 @@ test("doctor never starts a bash, or any program, the repository ships, whatever
  * githubChecks against a fake GitHub (#418): factory.yml as `flow`, the other workflows as `files` (listed in that
  * order), and an active ruleset on the default branch with a merge queue and `required` as its required checks.
  */
-async function rowsWith({ flow, files = {}, required = [] }) {
+async function rowsWith({ flow, files = {}, required = [], refused = {}, fetched = [] }) {
   const { githubChecks } = await import("../scripts/doctor.mjs");
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
@@ -664,6 +664,8 @@ async function rowsWith({ flow, files = {}, required = [] }) {
     if (path === "/repos/o/r/rulesets") return json(200, [{ id: 1, target: "branch", enforcement: "active" }]);
     if (path === "/repos/o/r/rulesets/1") return json(200, { conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue" }, { type: "required_status_checks", parameters: { required_status_checks: required.map((context) => ({ context })) } }] });
     const file = decodeURIComponent(path.replace("/repos/o/r/contents/", ""));
+    if (path.startsWith("/repos/o/r/contents/")) fetched.push(file);
+    if (refused[file]) return json(refused[file], { message: "Resource not accessible by integration" });
     if (all[file] !== undefined) return new Response(all[file], { status: 200 });
     if (path === "/graphql") return json(200, { data: {} });
     return json(404, { message: "Not Found" });
@@ -699,23 +701,51 @@ test("doctor's job token row reads factory.yml's parsed permissions, each job's 
   assert.equal((await token(job("    permissions: { contents: admin }\n"))).status, "FAIL", "a value GitHub does not take is not read as read");
 });
 
-test("doctor's CI workflow is the one whose jobs make the required checks, not the first GitHub lists (#418)", async () => {
+test("doctor's CI workflow row decides per required check: a workflow on pull_request makes it, and with a queue one on merge_group (#418)", async () => {
   const flow = "on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n";
+  const wf = (name, on, job, extra = "") => `name: ${name}\non: ${on}\njobs:\n  ${job}:\n    runs-on: ubuntu-24.04\n${extra}    steps:\n      - run: npm test\n`;
+  const row = async (files, required, more = {}) => (await rowsWith({ flow, files, required, ...more }))["ci workflow"];
   // Listed first and on merge_group, but none of its jobs is required; the workflow that makes `test (ubuntu)` is not on merge_group.
   const files = {
-    ".github/workflows/lint.yml": "name: Lint\non: [pull_request, merge_group]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm run lint\n",
-    ".github/workflows/ci.yml": "name: CI\non: pull_request\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    strategy: { matrix: { os: [ubuntu] } }\n    steps:\n      - run: npm test\n",
+    ".github/workflows/lint.yml": wf("Lint", "[pull_request, merge_group]", "lint"),
+    ".github/workflows/ci.yml": wf("CI", "pull_request", "test", "    strategy: { matrix: { os: [ubuntu] } }\n"),
   };
-  const missing = (await rowsWith({ flow, files, required: ["test (ubuntu)"] }))["ci workflow"];
-  assert.equal(missing.status, "FAIL");
-  assert.match(missing.detail, /^CI makes required checks but does not run on merge_group/);
-  assert.match(missing.fix, /in \.github\/workflows\/ci\.yml$/);
-  // With merge_group on it too, the row names it and the checks it makes.
+  const missing = await row(files, ["test (ubuntu)"]);
+  assert.deepEqual([missing.status, missing.detail], ["FAIL", "test (ubuntu) is made on pull_request by CI but by no workflow on merge_group, so the queue's commit never gets it"]);
+  assert.equal(missing.fix, 'add "merge_group:" under on: in .github/workflows/ci.yml');
   files[".github/workflows/ci.yml"] = files[".github/workflows/ci.yml"].replace("on: pull_request", "on: [pull_request, merge_group]");
-  const ok = (await rowsWith({ flow, files, required: ["test (ubuntu)", "lint"] }))["ci workflow"];
-  assert.deepEqual([ok.status, ok.detail], ["PASS", "Lint, CI, which makes the required checks (test (ubuntu), lint), runs on merge_group"]);
+  const ok = await row(files, ["test (ubuntu)", "lint"]);
+  assert.deepEqual([ok.status, ok.detail], ["PASS", "the required checks run on pull_request and merge_group: test (ubuntu) (CI), lint (Lint)"]);
   // A required check no workflow's job makes (an App's): doctor says it cannot tell, rather than judge another workflow.
-  const app = (await rowsWith({ flow, files, required: ["Vercel"] }))["ci workflow"];
-  assert.equal(app.status, "WARN");
-  assert.match(app.detail, /^no workflow doctor read has a job that makes the required checks \(Vercel\), so doctor cannot tell what runs them or whether it runs on merge_group$/);
+  const app = await row(files, ["Vercel"]);
+  assert.deepEqual([app.status, app.detail], ["WARN", "no workflow doctor read makes Vercel, so doctor cannot tell what runs it (an App's check, or a workflow doctor could not read)"]);
+
+  const ci = wf("CI", "[pull_request, merge_group]", "build");
+  // (A) A release workflow on a tag push with a job of the same name makes no check a pull request or the queue gets.
+  const release = await row({ ".github/workflows/ci.yml": ci, ".github/workflows/release.yml": wf("Release", "\n  push:\n    tags: ['v*']", "build") }, ["build"]);
+  assert.deepEqual([release.status, release.detail], ["PASS", "the required checks run on pull_request and merge_group: build (CI)"]);
+  // (E) Nor does a nightly schedule's matrix job.
+  const nightly = await row({ ".github/workflows/nightly.yml": wf("Nightly", "\n  schedule:\n    - cron: '0 3 * * *'", "test", "    strategy: { matrix: { os: [ubuntu] } }\n"), ".github/workflows/ci.yml": wf("CI", "[pull_request, merge_group]", "test", "    strategy: { matrix: { os: [ubuntu] } }\n") }, ["test (ubuntu)"]);
+  assert.equal(nightly.status, "PASS");
+  // A pull_request-only shim and a merge_group workflow that make the same check together cover it.
+  assert.equal((await row({ ".github/workflows/shim.yml": wf("Shim", "pull_request", "build"), ".github/workflows/queue.yml": wf("Queue", "merge_group", "build") }, ["build"])).status, "PASS");
+  // (B) Made only on merge_group: a pull request never gets the check, so it is never enqueued.
+  const mgOnly = await row({ ".github/workflows/ci.yml": wf("CI", "[merge_group]", "build") }, ["build"]);
+  assert.deepEqual([mgOnly.status, mgOnly.detail, mgOnly.fix], ["FAIL", "build is made only by CI (on merge_group), so a pull request never gets it", 'add "pull_request:" under on: in .github/workflows/ci.yml']);
+  // Made only by a release workflow: no pull request ever gets it either.
+  assert.equal((await row({ ".github/workflows/release.yml": wf("Release", "\n  push:\n    tags: ['v*']", "build") }, ["build"])).status, "FAIL");
+  // (C) Only some checks matched: the row names the one no workflow makes, and the PASS never claims it.
+  const partial = await row({ ".github/workflows/ci.yml": ci }, ["build", "e2e"]);
+  assert.deepEqual([partial.status, partial.detail], ["WARN", "no workflow doctor read makes e2e, so doctor cannot tell what runs it (an App's check, or a workflow doctor could not read)"]);
+  // (D) The same with a workflow doctor could not read: it is named, and no FAIL rests on a check it could make.
+  const e2e = { ".github/workflows/ci.yml": ci, ".github/workflows/e2e.yml": wf("E2E", "[pull_request, merge_group]", "e2e") };
+  const hidden = await row(e2e, ["build", "e2e"], { refused: { ".github/workflows/e2e.yml": 403 } });
+  assert.equal(hidden.status, "WARN");
+  assert.match(hidden.detail, /^no workflow doctor read makes e2e, .*; could not read the triggers of \.github\/workflows\/e2e\.yml \(HTTP 403\)$/);
+  const unsure = await row({ ".github/workflows/ci.yml": wf("CI", "pull_request", "build"), ".github/workflows/e2e.yml": "" }, ["build"], { refused: { ".github/workflows/e2e.yml": 403 } });
+  assert.equal(unsure.status, "WARN", "the unread workflow could be the merge_group maker");
+  // Once every check has both makers, the row fetches no later workflow (the ci token row reads each one once before it).
+  const fetched = [];
+  await row({ ".github/workflows/ci.yml": ci, ".github/workflows/other.yml": wf("Other", "push", "x") }, ["build"], { fetched });
+  assert.deepEqual([fetched.filter((p) => p.endsWith("ci.yml")).length, fetched.filter((p) => p.endsWith("other.yml")).length], [2, 1]);
 });

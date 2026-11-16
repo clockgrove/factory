@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
+import { SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -769,7 +769,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
     const exitBefore = io?.files?.()?.["exit.json"];
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : `${taskCard}\n\n---\n\n${ask}`, freshPrompt: `${taskCard}\n\n---\n\n${ask}`, maxUsd: left, resume, cwd, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label, onLine: live.onLine, onResume: live.onResume });
-    live.finish();
+    await live.finish();
     if (io) await io.collect();
     usage.push(rec);
     if (rec.sessionId && session) session.id = rec.sessionId;
@@ -1054,8 +1054,9 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     onLine,
     onResume: tracker.since,
     tracker,
-    finish: () => {
-      drift?.stop();
+    // The drift check in flight lands first, so its decision record is in the stage's usage before it is written.
+    finish: async () => {
+      await drift?.stop();
       progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
     },
   };
@@ -1076,6 +1077,8 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
 export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
+  // The decision calls' spend during this loop (triage, the drift advisory: decisionSpend) is taken off what is left too.
+  const decisionsAtStart = decisionSpend();
   const usage = [];
   let passes = 0;
   let last = null;
@@ -1305,10 +1308,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       : [`Factory's validation pass ${red.passes} failed on the branch you delivered${red.failures.length > 1 ? ` (${red.failures.length} commands)` : ""}.`, ...failureText(red), "", fixClosing].join("\n");
     const resume = !fresh && session.canResume ? session.id : null;
     const full = `${taskCard}\n\n---\n\n${ask}`;
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onResume: live.onResume });
-    live.finish();
+    await live.finish();
     if (io) await io.collect();
     usage.push(rec);
     if (!fresh) red.rec = rec;
@@ -1320,7 +1323,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const end = (more) => ({ green: false, passes, lastOutput: red.tail, command: red.command, usage, ...more });
     if (rec.timedOut || rec.budgetExceeded || rec.refusal) return end({ harness: rec });
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
-    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
+    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage) + (decisionSpend() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
     usage.push(...held.usage);
     if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused } : {}) });
     if (held.refused) {
@@ -1371,7 +1374,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         }
         // Read after the rerun's red (its reads can wait on a rate limit): what is left now.
         const runMs = Math.max(0, Date.parse(lastFix.rec?.ended) - Date.parse(lastFix.rec?.started)) || 0;
-        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage) : 0, needUsd: sumSpend([lastFix.rec]), leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
+        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]), leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
         const said = denied ? `the fix pass changed nothing on ${head.slice(0, 7)}; no fresh worker pass (${denied})` : `the fix pass changed nothing on ${head.slice(0, 7)}; one fresh worker pass, a new session with the failing checks' output, before Blocking`;
         log(`${label}: ${said}`);
         if (onPhase) await onPhase(`${label}: ${said}`);
@@ -1450,7 +1453,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (v.fromChecks) checksFixed = true;
     redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
     // Each failure's whole output goes to $FACTORY_IN/checks/ with the rest of what the fix run reads.
     if (io) await io.beforeFix(failures, { diff: detail?.diff ?? null });
@@ -1738,6 +1741,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
   // choice passes that account over for a while.
   const spent = exit === "blocked" && !usageLimit ? (records || []).map((r) => r?.refusal).find(noResetLimit) : null;
+  const runs = (records || []).filter((r) => r && !r.decision);
   const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
   const result = {
@@ -1754,9 +1758,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     models: merged.models ?? null,
     // With a relayed worker key the dollars are the harness's plus the key's, and the basis says so: added once already.
     basis: kb.fields.workerKeyUsd > 0 ? `${merged.basis}; plus ${kb.fields.workerKeyUsd} USD through the relayed worker key (workerKeyUsd), included in usd` : merged.basis,
-    started: records[0]?.started ?? merged.started ?? null,
-    ended: records.at(-1)?.ended ?? merged.ended ?? null,
-    runs: records.length,
+    started: runs[0]?.started ?? merged.started ?? null,
+    ended: runs.at(-1)?.ended ?? merged.ended ?? null,
+    // Harness passes only: the stage's decision record (harness.mjs keepDecision) is in usd and tokens, never a run.
+    runs: runs.length,
     passes,
     exit,
     reason,
@@ -2844,7 +2849,7 @@ export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }
       const v = JSON.parse(line.slice(ROUNDS_RECORD(issue).length, -4));
       if (Number(v?.pr) !== Number(prNumber)) continue;
       if (Array.isArray(v.rounds)) rounds.push(...v.rounds.filter(after));
-      if (Array.isArray(v.checks)) checks.push(...v.checks.filter((x) => after(x?.at) && Array.isArray(x.ids)).map((x) => ({ at: x.at, ids: x.ids.map((i) => (typeof i === "number" ? i : String(i))), error: typeof x.error === "string" ? x.error : null })));
+      if (Array.isArray(v.checks)) checks.push(...v.checks.filter((x) => after(x?.at) && Array.isArray(x.ids)).map((x) => ({ at: x.at, ids: x.ids.map((i) => (typeof i === "number" ? i : String(i))), error: typeof x.error === "string" ? x.error : null, ...(x.limit === true ? { limit: true } : {}) })));
     } catch {
       // not a record
     }
@@ -2855,8 +2860,9 @@ export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }
 
 /**
  * What the record says of the finding check: `unjudged`, the ids its last check left without a verdict; `failed`, how many
- * checks in a row did; `judgeOnly`, whether the stage after it was started only to judge them again (no answer round
- * after that check), so it gives the worker none of them.
+ * checks in a row did, not counting one the stage harness's usage limit stopped (`limit`: that stage paused or held as a
+ * pass meeting the limit does); `judgeOnly`, whether the stage after it was started only to judge them again (no answer
+ * round after that check), so it gives the worker none of them.
  */
 export const checkState = (rec) => {
   const failed = [];
@@ -2866,7 +2872,7 @@ export const checkState = (rec) => {
   }
   const round = rec?.rounds?.at(-1);
   const judgeOnly = failed.length > 0 && !(round && Date.parse(round) >= Date.parse(failed[0].at));
-  return { unjudged: failed[0]?.ids ?? [], failed: failed.length, error: failed[0]?.error ?? null, judgeOnly };
+  return { unjudged: failed[0]?.ids ?? [], failed: failed.filter((x) => !x.limit).length, error: failed[0]?.error ?? null, judgeOnly };
 };
 
 const writeAnswerRecord = (repo, { issue, prNumber }, rec, opts) =>
@@ -2881,7 +2887,7 @@ const writeAnswerRecord = (repo, { issue, prNumber }, rec, opts) =>
 export async function takeAnswerRound(repo, ctx, opts, { check = null, rec = null } = {}) {
   const now = rec ?? (await readAnswerRounds(repo, ctx, opts));
   const at = new Date().toISOString();
-  const checks = check ? [...now.checks, { at, ids: check.ids, ...(check.error ? { error: check.error } : {}) }] : now.checks;
+  const checks = check ? [...now.checks, { at, ids: check.ids, ...(check.error ? { error: check.error } : {}), ...(check.limit ? { limit: true } : {}) }] : now.checks;
   if (now.rounds.length >= ANSWER_ROUNDS) return { taken: false, rounds: now.rounds.length };
   // The round and the check it follows share their time: that stage answers (checkState judgeOnly).
   const rounds = [...now.rounds, at];
@@ -2893,8 +2899,8 @@ const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.
 const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
 const RESUME = "re-apply `factory:objective` to resume";
 
-/** The Block cause of a finding check the gateway answered with no verdict, from its code (adapters/decider.mjs). */
-const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limited" ? "provider-quota" : "outage");
+/** The Block cause of a finding check the decider answered with no verdict, from its code (adapters/decider.mjs). */
+const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limited" || error === "billing" ? "provider-quota" : "outage");
 
 /**
  * The review stage's exit with findings still open after its answer pass (decideExit's `findingsOpen`; `open`, those
@@ -2903,11 +2909,15 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
  *   (takeAnswerRound), the review label goes back on and the exit is delivered with `rerun`, so the next review stage's
  *   answer pass takes it, with its earlier answer; past the bound the Block stands, naming each one and how to clear it.
  * - An answer with no verdict costs no answer round: the next stage judges it again with no worker pass, up to
- *   FINDING_CHECK_TRIES stages in a row, and then the stage Blocks naming the gateway's failure (its cause from the code).
+ *   FINDING_CHECK_TRIES stages in a row, and then the stage Blocks naming the decider's failure (its cause from the code)
+ *   and the decider asked (`decider`, {name, model}: the gateway's model or the stage's harness).
+ * - The stage harness's usage limit stopped the check (`limit`, its refusal): that check is recorded but counts as no try,
+ *   and with nothing else judged the exit is `usageLimit` (the refusal), which the caller ends the stage on as a pass
+ *   meeting the limit does (session.mjs usageLimitExit: paused or held, never this Block).
  * A record that cannot be read or written, or a label that cannot go back on, Blocks as any exit step does (exitStep).
  * Returns `decision`, changed.
  */
-export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [] }, opts) {
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], decider = null, limit = null }, opts) {
   delete decision.findingsOpen;
   const ctx = { issue, prNumber, objectiveLabel };
   const rec = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read`, () => readAnswerRounds(repo, ctx, opts));
@@ -2916,18 +2926,28 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const pending = open.filter((c) => errors.has(String(c.id)));
   const judged = open.filter((c) => !errors.has(String(c.id)));
   const codes = [...new Set(pending.map((c) => errors.get(String(c.id))))];
-  const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null };
+  const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}) };
   const where = (list) => listed(list.map((c) => placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })));
   const tries = pending.length ? checkState({ checks: [...rec.checks, check] }).failed : 0;
+  // Who was asked, as each line names it: the stage's harness or the AI Gateway's model.
+  const who = decider?.name === "harness" ? `the stage's own harness (${decider.model})` : `the AI Gateway's decision model${decider?.model ? ` (${decider.model})` : ""}`;
   if (pending.length && tries >= FINDING_CHECK_TRIES) {
-    Object.assign(decision, { exit: "blocked", cause: checkCause(codes[0]), reason: `the decision model gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) on PR #${prNumber} in ${tries} review stages in a row: ${where(pending)}. Check the AI Gateway key, its budget and the gateway's status, then ${RESUME}` });
+    const fix = decider?.name === "harness" ? "Check the harness login this stage runs on and its usage" : "Check the AI Gateway key, its budget and the gateway's status";
+    Object.assign(decision, { exit: "blocked", cause: checkCause(codes[0]), reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) on PR #${prNumber} in ${tries} review stages in a row: ${where(pending)}. ${fix}, then ${RESUME}` });
     return decision;
   }
   const relabel = (what) => exitStep(decision, `${what} and the review label could not be re-applied`, () => addLabels(repo, prNumber, [REVIEW_LABEL], opts));
   if (!judged.length) {
     const ok = await exitStep(decision, `the finding check's record on PR #${prNumber} could not be written`, () => writeAnswerRecord(repo, ctx, { rounds: rec.rounds, checks: [...rec.checks, { at: new Date().toISOString(), ...check }] }, opts).then(() => true));
     if (!ok) return decision;
-    Object.assign(decision, { exit: "delivered", rerun: true, reason: `the decision model gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) (${where(pending)}); the review runs again to judge them, with no worker pass (${tries} of ${FINDING_CHECK_TRIES} stages without a verdict)` });
+    // The stage harness's usage limit: the stage ends on it as a pass meeting it does; the next stage judges them again.
+    if (check.limit) {
+      Object.assign(decision, { usageLimit: limit, reason: `the stage's own harness met its usage limit judging the answers to ${pending.length} reviewer finding(s) (${where(pending)}); they are judged again after it` });
+      delete decision.cause;
+      log(decision.reason);
+      return decision;
+    }
+    Object.assign(decision, { exit: "delivered", rerun: true, reason: `${who} gave no verdict (${check.error}) on the answers to ${pending.length} reviewer finding(s) (${where(pending)}); the review runs again to judge them, with no worker pass (${tries} of ${FINDING_CHECK_TRIES} stages without a verdict)` });
     delete decision.cause;
     log(decision.reason);
     await relabel(`the answers to ${pending.length} reviewer finding(s) are still to be judged`);

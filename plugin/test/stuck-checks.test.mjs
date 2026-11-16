@@ -442,3 +442,18 @@ test("on the local route no Actions job is read: a running required check is jud
     else process.env.FACTORY_LOCAL = before;
   }
 });
+
+test("a required check no workflow produces Blocks as soon as every workflow run on the head completed, unless another app may still report it", async () => {
+  // The repository's CI ran and finished green on the head; its job is `lint`, so the required `quality` is a wrong name.
+  const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2), app: { id: 15368, slug: "github-actions" } }];
+  const github = (suites) => ({ checkRuns: lint, workflowRuns: [ciRun({ status: "completed", conclusion: "success" })], files: { ".github/workflows/ci.yml": "jobs:\n  lint:\n    runs-on: x\n" }, workflows: oneWorkflow, routes: (p) => (p === `/repos/${REPO.full}/commits/${SHA}/check-suites` ? { total_count: suites.length, check_suites: suites } : undefined) });
+  const actions = { id: 9, app: { id: 15368 }, status: "completed", latest_check_runs_count: 1 };
+  const wrong = await loop(github([actions]), { checks: { timeoutMs: undefined } });
+  assert.equal(wrong.checkReads, 1, "the wait ended at the first reading, not at a timeout");
+  assert.equal(wrong.result.harness, undefined, "no fix pass");
+  assert.equal(wrong.result.stuck.kind, "unreported");
+  assert.match(wrong.result.stuck.reason, /^required check\(s\) quality never reported on a{7}: no workflow run on it produces it \(CI \(run 77\) completed success\); check the required check names; no failing run to fix$/);
+  // Another app's check suite on the head still going may report it: the wait goes on (to its bound here).
+  const outside = await loop(github([actions, { id: 12, app: { id: 999 }, status: "queued", latest_check_runs_count: 0 }]), { checks: { timeoutMs: 50 } });
+  assert.ok(outside.checkReads > 2, "it kept reading");
+});

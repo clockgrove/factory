@@ -1134,14 +1134,25 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
-    // A required check with no run whose own producing workflow runs all ended before their jobs ran (classify reads
-    // kind `ended`, checksNotStarted) will get none, so the wait ends then. Read only when every workflow run on the head
-    // completed and one ended so; past one page of runs (100) it is not read, and the wait goes on as before.
+    // A required check with no run will get none once every workflow run on the head has completed, so the wait ends
+    // then (classify, checksNotStarted): its own producing workflow runs all ended before their jobs ran (kind `ended`),
+    // or no workflow on the head produces it (`unreported`: a wrong check name) or its workflow skips this change
+    // (`filtered`). Those two only while no other app's check suite on the head is still going: that app may report it.
+    // Read only when every workflow run completed; past one page of runs (100) it is not read, and the wait goes on.
     const ended = async (runs) => {
       const page = await rest(`repos/${checks.repo.full}/actions/runs?head_sha=${sha}&per_page=100`, { token: checks.actionsToken || checks.token });
       const all = page?.workflow_runs || [];
-      if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed") || !all.some((w) => ENDED_EARLY.includes(w.conclusion))) return false;
-      return (await classify({ runs })).kind === "ended";
+      if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed")) return false;
+      let going = null;
+      // Another app's check suite not completed; unread, it counts as going.
+      const outside = async () =>
+        (going ??= await rest(`repos/${checks.repo.full}/commits/${sha}/check-suites?per_page=100`, { token: checks.token, paginate: true }).then(
+          (suites) => (suites || []).some((x) => x?.app?.id !== ACTIONS_APP_ID && x?.status !== "completed"),
+          () => true,
+        ));
+      if (!all.some((w) => ENDED_EARLY.includes(w.conclusion)) && (await outside())) return false;
+      const { kind } = await classify({ runs });
+      return kind === "ended" || ((kind === "unreported" || kind === "filtered") && !(await outside()));
     };
     // A required check whose step is past its usual duration in recent green runs has hung (logic.mjs jobStall): the
     // wait ends unfinished, as at the stage's wall clock. One still within it is waited for. Actions are not read on the

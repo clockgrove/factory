@@ -1368,13 +1368,14 @@ export async function checksStarted(repo, sha, gate, opts) {
 }
 
 /** A check run as logic.mjs queueHangs reads it (queueCommitChecks, awaitChecks' `progress`). */
-const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null });
+const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null, app: r.app?.id ?? null });
 
 /** A commit status as a check run: `in_progress` while pending, else completed, `success` or failed; from its creation. */
-const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, details_url: x.target_url ?? null, commitStatus: true });
+const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, completed_at: x.state === "pending" ? null : (x.updated_at ?? x.created_at ?? null), details_url: x.target_url ?? null, commitStatus: true });
 
 /**
- * The checks on a queue commit as logic.mjs queueHangs reads them: each check run `{id, name, status, started_at, app}`
+ * The checks on a queue commit as logic.mjs queueHangs and hungOutcome read them: each check run `{id, name, status,
+ * conclusion, started_at, completed_at, app}`
  * (GitHub's status: `queued`, `in_progress`, `completed`, ...; `app` its integration's id; an Actions run's id is its
  * job's) and each commit status, `in_progress` while pending, from its creation. A failed read throws, so it never reads
  * as "nothing running".

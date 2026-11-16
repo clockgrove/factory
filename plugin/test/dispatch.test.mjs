@@ -197,6 +197,73 @@ test("queueRetry: a PR the merge queue dropped goes back in once; dropped again 
   assert.deepEqual(queueRetry([stalled], { since }), { enqueue: true, drops: 1, last: { at: stalled.at, code: "dequeued" } }, "without Factory's login known, its App is still a bot: a drop, never a hold that leaves the PR out");
 });
 
+test("queueRetry: a hung removal of Factory's whose step then finished green in time counts toward no try; anything else counts (#437)", async () => {
+  const { HUNG_CODE, STALL_CODE, queueRetry } = await import("../scripts/lib/logic.mjs");
+  const since = "2026-11-09T09:30:00Z";
+  const self = "factory-app[bot]";
+  const hung = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE };
+  const again = { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true };
+  assert.ok(queueRetry([hung, again], { since, self }).block, "both count: two drops Block");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }, again], { since, self }), { enqueue: true, drops: 1, last: { at: again.at, code: HUNG_CODE, factory: true }, cleared: 1 }, "the slow step's removal leaves the tries as they were");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }], { since, self }), { enqueue: true, drops: 0, last: { at: hung.at, code: HUNG_CODE, factory: true, cleared: true }, cleared: 1 }, "a cleared removal is never a hold: the PR goes back");
+  assert.ok(queueRetry([{ ...hung, code: STALL_CODE, cleared: true }, again], { since, self }).block, "only a hung removal can be cleared");
+  const person = { at: "2026-11-09T09:40:00Z", reason: "dequeued", actor: "kirk", person: true, code: HUNG_CODE, cleared: true };
+  assert.deepEqual(queueRetry([person], { since, self }).hold, { at: person.at, code: "dequeued" }, "a person's removal stays a hold");
+  const queue = { at: "2026-11-09T09:50:00Z", reason: "checks_timed_out", actor: "github-merge-queue", code: HUNG_CODE, cleared: true };
+  assert.ok(queueRetry([queue, again], { since, self }).block, "the queue's own drop counts whatever it carries");
+  // A step slow on every try: one removal at most is cleared, so the third hung removal Blocks, never an endless loop.
+  const slow = (min) => ({ at: `2026-11-09T${String(9 + Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}:00Z`, reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE, cleared: true });
+  assert.deepEqual(queueRetry([slow(40), slow(80)], { since, self }), { enqueue: true, drops: 1, last: { at: slow(80).at, code: HUNG_CODE, factory: true }, cleared: 1 });
+  const thrice = queueRetry([slow(40), slow(80), slow(120)], { since, self });
+  assert.equal(thrice.drops, 2);
+  assert.equal(thrice.cleared, 1);
+  assert.ok(thrice.block, "three slow-but-green removals still Block");
+  assert.ok(queueRetry([slow(40), slow(80), slow(120), slow(160), slow(200), slow(240)], { since, self }).block, "and so do six");
+});
+
+test("hungOutcome: green only when each judged step, its job and the queue commit's required checks concluded success by the queue's deadline; undecided before it, counted after (#437)", async () => {
+  const { hungOutcome, queueDeadline } = await import("../scripts/lib/logic.mjs");
+  const by = queueDeadline("2026-11-10T05:00:00Z", 60);
+  assert.equal(by, "2026-11-10T06:00:00.000Z");
+  assert.equal(queueDeadline("2026-11-10T05:00:00Z", null), null, "the timeout unread: no deadline is assumed");
+  assert.equal(queueDeadline("2026-11-10T05:00:00Z", 30), "2026-11-10T05:30:00.000Z");
+  const before = Date.parse("2026-11-10T05:45:00Z");
+  const after = Date.parse("2026-11-10T06:05:00Z");
+  const head = "c".repeat(40);
+  const done = { status: "completed", conclusion: "success", completed_at: "2026-11-10T05:40:00Z" };
+  const running = { status: "in_progress", conclusion: null, completed_at: null };
+  const step = (extra) => ({ name: "Run npm ci", number: 4, ...done, completed_at: "2026-11-10T05:26:00Z", ...extra });
+  const read = (s, job = {}, check = job, more = []) => ({
+    jobs: new Map([[9, { id: 9, ...done, steps: [{ name: "Set up job", number: 1, ...done }, s], ...job }]]),
+    checks: new Map([[head, [{ id: 9, name: "Quality", ...done, ...check }, ...more]]]),
+    names: ["Quality"],
+  });
+  const rec = [{ name: "Quality", job: 9, step: "Run npm ci", number: 4, head, by }];
+  assert.equal(hungOutcome(rec, read(step()), after), "green", "slow, then the step, its job and the required check green in time");
+  assert.equal(hungOutcome(rec, read(step(), { conclusion: "failure" }), after), "counted", "the step green, then a later step of the job failed: the queue would have dropped it");
+  assert.equal(hungOutcome(rec, read(step(), { completed_at: "2026-11-10T06:00:01Z" }), after), "counted", "the job finished after the queue's own timeout");
+  assert.equal(hungOutcome(rec, read(step({ completed_at: "2026-11-10T06:00:01Z" })), after), "counted", "the step finished after the queue's own timeout");
+  assert.equal(hungOutcome(rec, read(step({ conclusion: "cancelled" }), { conclusion: "cancelled" }), after), "counted", "cancelled");
+  assert.equal(hungOutcome(rec, read(step({ number: 5 })), after), "counted", "another step of the same name");
+  assert.equal(hungOutcome(rec, read(step({ ...running }), running), before), "pending", "still running before the deadline: undecided");
+  assert.equal(hungOutcome(rec, read(step({ ...running }), running), after), "counted", "still running past the deadline");
+  assert.equal(hungOutcome(rec, { names: ["Quality"] }, before), "pending", "nothing read before the deadline: undecided");
+  assert.equal(hungOutcome(rec, { names: ["Quality"] }, after), "counted", "nothing read past the deadline");
+  assert.equal(hungOutcome([{ ...rec[0], job: null }], read(step()), before), "counted", "no job recorded (a check that is no Actions job)");
+  assert.equal(hungOutcome([{ ...rec[0], head: null }], read(step()), before), "counted", "no queue commit recorded");
+  assert.equal(hungOutcome([{ ...rec[0], by: null }], read(step()), before), "counted", "no deadline recorded (the queue's timeout unread)");
+  assert.equal(hungOutcome([...rec, { job: 10, step: "Run build", number: 2, head, by }], read(step()), before), "pending", "every step judged hung must be decided");
+  assert.equal(hungOutcome([...rec, { job: 10, step: "Run build", number: 2, head, by }], read(step(), { conclusion: "failure" }), before), "counted", "one counted step decides, whatever else waits");
+  // An aggregate required check (`CI`, behind `needs:`): the hung job is upstream of it, and the aggregate decides too.
+  const agg = (check) => ({ ...read(step(), {}, {}, [{ id: 11, name: "CI", ...done, ...check }]), names: ["CI"] });
+  assert.equal(hungOutcome(rec, agg({}), after), "green", "the upstream job and the aggregate check green in time");
+  assert.equal(hungOutcome(rec, agg({ conclusion: "failure" }), after), "counted", "another upstream job failed the aggregate");
+  assert.equal(hungOutcome(rec, agg({ completed_at: "2026-11-10T06:00:01Z" }), after), "counted", "the aggregate concluded after the deadline");
+  assert.equal(hungOutcome(rec, { ...read(step()), names: ["CI"] }, before), "pending", "the aggregate not reported yet: undecided before the deadline");
+  assert.equal(hungOutcome(rec, { ...read(step()), names: ["CI"] }, after), "counted", "and counted past it");
+  assert.equal(hungOutcome([], read(step()), after), "counted");
+});
+
 test("queueStall: a queue commit with no check run for QUEUE_STALL_MS is stalled; a fresh entry with no commit yet is watched", async () => {
   const { QUEUE_FRESH_MS, QUEUE_STALL_MS, queueStall } = await import("../scripts/lib/logic.mjs");
   const headAt = "2026-11-09T09:36:44Z";

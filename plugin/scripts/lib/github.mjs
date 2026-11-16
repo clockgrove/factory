@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, factoryReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -157,13 +157,23 @@ const rateLimitOf = (status, headers, message) => status === 429 || (status === 
 /**
  * Mark a rate-limited GitHubError `err`, GitHub's answer to a request to `url` with `token`, as quota `quota`'s primary
  * limit spent, when it is (network.mjs spentResetOf: GitHub's count of the quota, read with the same token from
- * GET /rate_limit, which no limit counts, decides): code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell,
- * and the process's record of it (noteSpent).
+ * GET /rate_limit, decides): code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell, and the process's record
+ * of it (noteSpent). The count read is of the quota the answer names (its x-ratelimit-resource; else quotaResource of
+ * the path) and ends with the caller's `signal`. GET /rate_limit is not counted against the primary rate limit but can
+ * count toward the secondary one, so it is not read again while this process holds the quota spent until this answer's
+ * reset or later (the same spent window): the answer's own reset stands, the latest answer's as always.
  */
-async function markSpent(err, quota, url, token, headers) {
+async function markSpent(err, quota, url, token, headers, signal = null) {
   if (!err.rateLimited || !spentCandidate(headers)) return;
-  const count = await call(`${API()}/rate_limit`, { token }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), quotaResource(url), r.headers.get("date")) : null)).catch(() => null);
-  const resetAt = spentResetOf(headers, count, RETRY.now());
+  const now = RETRY.now();
+  const held = spentUntil(quota);
+  const stated = spentResetOf(headers, null, now);
+  let resetAt = held !== null && stated !== null && held >= stated ? stated : null;
+  if (resetAt === null) {
+    const resource = headers.get("x-ratelimit-resource") || quotaResource(url);
+    const count = await call(`${API()}/rate_limit`, { token, signal }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), resource, r.headers.get("date")) : null)).catch(() => null);
+    resetAt = spentResetOf(headers, count, now);
+  }
   if (resetAt === null) return;
   err.code = RATE_LIMIT_SPENT;
   err.resetAt = resetAt;
@@ -486,7 +496,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited: limited });
     const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
     if (asked !== null) err.waitMs = asked;
-    await markSpent(err, quota, url, sent.token, r.headers);
+    await markSpent(err, quota, url, sent.token, r.headers, signal);
     throw err;
   };
   const pages = [];

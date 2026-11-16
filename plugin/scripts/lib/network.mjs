@@ -58,8 +58,9 @@ export const spentCandidate = (headers) => headers?.get?.("x-ratelimit-remaining
 
 /**
  * GitHub's own count of one quota, from its answer to GET /rate_limit (`body`, the answer's JSON, and `date`, its Date
- * header), which GitHub does not count against any limit: `resource` (quotaResource: core, graphql, search,
- * code_search) as {remaining, reset (s), date}; null when the answer holds no such count.
+ * header; GitHub does not count the read against the primary rate limit, though it can count toward the secondary one):
+ * `resource` (the answer's x-ratelimit-resource, else quotaResource) as {remaining, reset (s), date}; null when the
+ * answer holds no such count.
  */
 export function quotaNow(body, resource, date = null) {
   const r = body?.resources?.[resource];

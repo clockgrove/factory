@@ -90,8 +90,8 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * to the next morning, fits with room; under the dispatcher's day for a claim gone quiet, local.mjs CLAIM_PAUSE_MS, so an
  * outage of twelve to twenty-four hours Blocks naming the outage, while one that keeps the machine off GitHub for over a
  * day meets the dispatcher's Block first). `probeMs`: the pause before each probe, the last
- * repeated. `passReruns`: how many times one pass its harness reported cut off by its provider or the network
- * (passCutOff) runs again before its failure stands. `flapMs`: a host lost again this soon after answering is the same
+ * repeated. `passReruns`: how many times one pass cut off by its provider or the network (passCutOff) runs again
+ * before its failure stands. `flapMs`: a host lost again this soon after answering is the same
  * outage (its first loss and its limit carried over). `quotaJitterMs`: the most a wait for a rate limit's reset runs past
  * it (a tenth of it at least), so the callers of several processes on one quota do not all go again at once; a limit
  * still refused after its stated reset waits `probeMs` (doubling) instead. `exitWaitMs`: how long past its deadline a
@@ -240,9 +240,9 @@ export const downFor = (origin) => {
 /**
  * A host this process gave up waiting for (past its limit, or stopped waiting while it was lost) that still fails a probe
  * now, as the NetworkDown its requests fail with: its host, code and first loss. Null when there is none, or each such host
- * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass its harness
- * reported cut off by its provider or the network, and a run left with no exit record, are that outage's (harness.mjs
- * outageCut, session.mjs exitRecord).
+ * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass that failed
+ * with no structured error or with a provider or network failure, and a run left with no exit record, are that outage's
+ * (harness.mjs outageCut, session.mjs exitRecord).
  */
 export async function givenUp() {
   const hosts = [...GIVEN_UP.values()].filter((g) => !Number.isFinite(g.resetAt)).sort((a, b) => b.since - a.since);
@@ -433,19 +433,20 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
 export const outageOn = (origin) => (origin && EPISODES.get(origin)) || null;
 
 /**
- * Where a failed harness pass stands whose harness reported it cut off by its provider or the network (usage.mjs
- * providerOutage: `failure`, its own structured error), `origin` being the provider's API: {origin, code, since,
- * ongoing}. Ongoing when an outage on that host is under way in this process or the host does not answer a probe now:
- * the pass waits for it (networkBack) before it runs again. Else the provider answered (its 5xx), and the pass runs again
- * at once; the code is then the failure's status (`HTTP 529`), else its type. Null with no such failure: a pass the
- * harness did not report so failed on its own, whatever the network did meanwhile.
+ * Whether a failed harness pass was cut off by its provider or this machine's network, `origin` being the provider's
+ * API: {origin, code, since, ongoing}, else null. `failure` is the provider or network failure its harness reported as
+ * its own structured error (a record's `providerOutage`, usage.mjs outageError), or null for a pass whose harness
+ * reported no structured error at all (a harness that prints a 5xx or a lost connection as prose only). Ongoing when an
+ * outage on that host is under way in this process or the host does not answer a probe now: the pass waits for it
+ * (networkBack) before it runs again. With the host answering, a reported failure (its 5xx) runs the pass again at
+ * once, its code the failure's status (`HTTP 529`), else its type; a pass with no structured error is then no cut.
  */
 export async function passCutOff(failure, origin) {
-  if (!failure) return null;
   const now = origin ? EPISODES.get(origin) : null;
   if (now) return { origin, code: now.code, since: now.since, ongoing: true };
   const code = origin ? await probe(origin) : null;
   if (code !== null) return { origin, code, since: OUTAGE.now(), ongoing: true };
+  if (!failure) return null;
   return { origin, code: failure.status !== null ? `HTTP ${failure.status}` : failure.code || failure.type || "no answer", since: OUTAGE.now(), ongoing: false };
 }
 

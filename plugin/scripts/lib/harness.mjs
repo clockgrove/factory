@@ -985,23 +985,26 @@ export function providerOrigin(harness, env = {}) {
 }
 
 /**
- * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out: only a
- * pass that failed (no answer, no cap, no stop, no provider refusal) and whose harness reported that as its own
- * structured error (usage.mjs providerOutage: a 5xx, or a connection it could not make); then the provider's API is
- * probed to know whether to wait for it before the pass runs again (network.mjs passCutOff). A pass that failed any
- * other way is no cut, whatever the network did meanwhile. In a process that gave up waiting (stoppedWaiting), such a
+ * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out. Only a pass
+ * that failed (no answer, no cap, no stop, no provider refusal) is asked, on its harness's structured error (usage.mjs):
+ * a provider or network failure (`providerOutage`: a 5xx, or a connection it could not make) is a cut, and the provider's
+ * API is probed only to know whether to wait for it before the pass runs again; any other structured error
+ * (`providerError`: a 429, a 4xx the provider retries) is no cut, whatever the network did. A pass with no structured error
+ * at all (a harness that prints a 5xx or a lost connection as prose only, a crash) is a cut exactly when its provider's
+ * API does not answer a probe now (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a
  * pass while a host it gave up on still does not answer (network.mjs givenUp) runs no more: it throws that outage, which
- * the stage ends on (session.mjs outageExit). With every such host answering again, it runs again as any other would.
+ * the stage ends on (session.mjs outageExit). With every such host answering again, it is judged as any other would be.
  */
 async function outageCut(rec, { harness, env }) {
-  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun || !rec.providerOutage) return null;
+  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  if (rec.providerError && !rec.providerOutage) return null;
   const gaveUp = stoppedWaiting();
   if (gaveUp) {
     const down = await givenUp();
     if (down) throw down;
   }
   if (!gaveUp && !waitingOutages()) return null;
-  return passCutOff(rec.providerOutage, providerOrigin(harness, env));
+  return passCutOff(rec.providerOutage ?? null, providerOrigin(harness, env));
 }
 
 /**

@@ -109,9 +109,12 @@ test("providerOutage: a failed run's provider or network failure is read from th
   // Codex: a provider's JSON error body with a 5xx is one; its prose (a 503 and a lost stream, as codex-cli 0.167 prints them) is not.
   const body = (status) => JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "server_error", code: null, message: "m" }, status }) } });
   assert.deepEqual(failed("codex", body(503)).providerOutage, { harness: "codex", status: 503, type: "server_error", code: null });
+  // A 429 is a structured error, though no outage: providerError alone, so nothing probes for it.
   assert.equal(failed("codex", body(429)).providerOutage, undefined);
+  assert.deepEqual(failed("codex", body(429)).providerError, { harness: "codex", status: 429, type: "server_error", code: null });
   for (const prose of ["unexpected status 503 Service Unavailable: Service Unavailable, url: http://127.0.0.1:8080/v1/responses", "stream disconnected before completion: error sending request"]) {
-    assert.equal(failed("codex", JSON.stringify({ type: "turn.failed", error: { message: prose } })).providerOutage, undefined, prose);
+    const rec = failed("codex", JSON.stringify({ type: "turn.failed", error: { message: prose } }));
+    assert.deepEqual([rec.providerOutage, rec.providerError], [undefined, undefined], prose);
   }
   // Copilot: session.error's statusCode.
   const copilot = fixture("copilot-1.0.107-session-error.jsonl").replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', '"errorType":"server","errorCode":"bad_gateway","statusCode":502');

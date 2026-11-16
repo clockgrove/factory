@@ -197,12 +197,27 @@ const readByReview = (fake, kind = "flaky") => {
   }
 };
 const MIN = 60_000;
-/** Moves every removal so far, and Factory's record of it, `ms` into the past: the next pass comes that much later. */
+/**
+ * Moves every removal so far, Factory's records of them (their times and the queue's deadlines they keep) and every
+ * job's times `ms` into the past: the next pass comes that much later.
+ */
 const earlier = (fake, ms) => {
-  const back = (t) => new Date(Date.parse(t) - ms).toISOString();
+  const back = (t) => (t ? new Date(Date.parse(t) - ms).toISOString() : t);
   for (const r of fake.s.removals) r.createdAt = back(r.createdAt);
-  for (const c of requeues(fake.s)) c.body = c.body.replace(/("at":")([^"]+)"/, (_, k, t) => `${k}${back(t)}"`);
+  for (const c of requeues(fake.s)) c.body = c.body.replace(/("(?:at|by)":")([^"]+)"/g, (_, k, t) => `${k}${back(t)}"`);
+  for (const x of [...Object.values(fake.s.jobs).flatMap((j) => [j, ...(j.steps || [])]), ...Object.values(fake.s.runs).flat()]) for (const k of ["started_at", "completed_at"]) x[k] = back(x[k]);
 };
+/**
+ * The job `id` and its judged step (number 2) finish: the step with `step` at `stepAt`, the job, and so its check run on
+ * the queue commit, with `job` at `jobAt`.
+ */
+const finish = (fake, id, { step = "success", stepAt, job = "success", jobAt = stepAt }) => {
+  Object.assign(fake.s.jobs[id].steps[1], { status: "completed", conclusion: step, completed_at: new Date(stepAt).toISOString() });
+  const end = { status: "completed", conclusion: job, completed_at: new Date(jobAt).toISOString() };
+  Object.assign(fake.s.jobs[id], end);
+  for (const run of Object.values(fake.s.runs).flat()) if (run.id === id) Object.assign(run, end);
+};
+const tries = (s) => requeues(s).map((c) => /try (\d)/.exec(c.body)?.[1] ?? "wait");
 
 test("queue watch: a PR the queue drops after its CI started ticks the dispatcher, with no dequeued run; the merge pass re-enqueues it once (#2683)", async () => {
   let now = Date.now();
@@ -275,8 +290,15 @@ test("hung queue check: tonight's case, a setup step normally ~1 min, is left at
     assert.equal(requeues(fake.s).length, 1);
     assert.match(requeues(fake.s)[0].body, new RegExp(`Factory took PR #21 out of the merge queue \\(${HUNG_CODE}; no progress: \`Quality\` / \`Run scripts/ci/setup\\.sh\` running 16 min, normally ~1 min\\).*try 2`));
 
-    // It hangs again on the new queue commit: out again, and the Objective Blocks with the step named.
+    // It hangs again on the new queue commit: out again. Whether the first removal counts waits for its job, which is
+    // still running before the queue's own deadline: the PR stays out, unwatched, and nothing Blocks yet.
     fake.building("e".repeat(40), since);
+    const waiting = {};
+    assert.equal(await merge(waiting), "pending");
+    assert.equal(waiting.watch, undefined, "out of the queue and unwatched: the run's end or the next tick brings the next pass");
+    assert.equal(fake.s.entry, null);
+    // The queue's deadline passes with both jobs still running: they hung, and the Objective Blocks with the step named.
+    earlier(fake, 45 * MIN);
     const blocked = {};
     const how = await merge(blocked);
     assert.equal(how, "dropped");
@@ -287,7 +309,7 @@ test("hung queue check: tonight's case, a setup step normally ~1 min, is left at
   });
 });
 
-test("hung queue check: a hung removal whose step then finished green before the queue's own timeout counts toward no try; one that did not still Blocks (#437)", async () => {
+test("hung queue check: a hung removal whose step and job then finished green before the queue's own timeout counts toward no try, once; a step slow on every try still Blocks (#437)", async () => {
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
@@ -297,28 +319,130 @@ test("hung queue check: a hung removal whose step then finished green before the
     const job = fake.s.runs["d".repeat(40)][0].id;
     assert.equal(await merge({}), "queued");
     const record = JSON.parse(/requeue-drop (\{.*\}) -->/.exec(requeues(fake.s)[0].body)[1]);
-    assert.deepEqual(record.hung.map((h) => [h.job, h.step, h.number, h.by]), [[job, "Run scripts/ci/setup.sh", 2, new Date(first + 60 * MIN).toISOString()]], "the record names the step and the queue's deadline for its commit");
-    // That step then finished green, 24 minutes in: well before the queue's 60.
-    Object.assign(fake.s.jobs[job].steps[1], { status: "completed", conclusion: "success", completed_at: new Date(first + 24 * MIN).toISOString() });
+    assert.deepEqual(record.hung.map((h) => [h.name, h.job, h.step, h.number, h.by]), [["Quality", job, "Run scripts/ci/setup.sh", 2, new Date(first + 60 * MIN).toISOString()]], "the record names the check, the step and the queue's deadline for its commit");
+    // That step then finished green 24 minutes in, and its job at 30: well before the queue's 60.
+    finish(fake, job, { stepAt: first + 24 * MIN, jobAt: first + 30 * MIN });
     earlier(fake, 20 * MIN);
 
     // Slow again on the new queue commit: out again, and back in, not Blocked; its notice is try 3, beside try 2's.
-    fake.building("e".repeat(40), Date.now() - 25 * MIN);
-    const second = fake.s.runs["e".repeat(40)][0].id;
+    const second = Date.now() - 25 * MIN;
+    fake.building("e".repeat(40), second);
+    const job2 = fake.s.runs["e".repeat(40)][0].id;
     assert.equal(await merge({}), "queued");
     assert.equal(fake.s.dequeued, 2);
     assert.equal(fake.s.enqueued.length, 2);
-    assert.deepEqual(requeues(fake.s).map((c) => /try (\d)/.exec(c.body)[1]), ["2", "3"], "the first record stays, so its removal keeps its code");
+    assert.deepEqual(tries(fake.s), ["2", "3"], "the first record stays, so its removal keeps its code");
 
+    // Slow again, and green in time again: one removal at most is cleared, so the third Blocks rather than looping.
+    finish(fake, job2, { stepAt: second + 24 * MIN, jobAt: second + 30 * MIN });
     earlier(fake, 20 * MIN);
-    // This one's step finishes green only after the queue's own timeout: it was as good as hung, and the third Blocks.
-    Object.assign(fake.s.jobs[second].steps[1], { status: "completed", conclusion: "success", completed_at: new Date(Date.now() + 40 * MIN).toISOString() });
     fake.building("f".repeat(40), Date.now() - 25 * MIN);
     const blocked = {};
     const how = await merge(blocked);
     assert.equal(how, "dropped");
     assert.equal(fake.s.enqueued.length, 2, "no third enqueue");
-    assert.match(mergeBlockReason(how, blocked), /no progress on the merge queue's commit/);
+    assert.match(mergeBlockReason(how, blocked), /no progress on the merge queue's commit .*re-enqueued the PR 2 times/);
+  });
+});
+
+test("hung queue check: a hung step that went green in a job that then failed, or finished after the queue's deadline, counts; whether it counts waits for its job (#437)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
+    // A changed lockfile: install runs cold (25 min), goes green, then the job's tests fail. The queue would have
+    // dropped that (failed_checks), so Factory's early removal is no free try.
+    const first = Date.now() - 25 * MIN;
+    fake.building("d".repeat(40), first);
+    const job = fake.s.runs["d".repeat(40)][0].id;
+    assert.equal(await merge({}), "queued");
+    finish(fake, job, { stepAt: first + 25 * MIN, job: "failure", jobAt: first + 31 * MIN });
+    earlier(fake, 20 * MIN);
+
+    // Cold again: out again. The first counts; whether this one does waits for its job, running before its deadline.
+    const second = Date.now() - 25 * MIN;
+    fake.building("e".repeat(40), second);
+    const job2 = fake.s.runs["e".repeat(40)][0].id;
+    const waiting = {};
+    assert.equal(await merge(waiting), "pending");
+    assert.equal(waiting.watch, undefined);
+    assert.equal(waiting.retry, undefined, "every job was read");
+    assert.equal(fake.s.enqueued.length, 1, "not back in the queue while undecided");
+    assert.deepEqual(tries(fake.s), ["2", "wait"]);
+    const wait = JSON.parse(/requeue-drop (\{.*\}) -->/.exec(requeues(fake.s)[1].body)[1]);
+    assert.deepEqual(wait.hung.map((h) => [h.name, h.job, h.by]), [["Quality", job2, new Date(second + 60 * MIN).toISOString()]], "the removal's record is on the issue for the next pass");
+
+    // Its step goes green, but the job ends after the queue's own timeout (checks_timed_out): it counts, and it Blocks.
+    finish(fake, job2, { stepAt: second + 26 * MIN, jobAt: second + 61 * MIN });
+    const blocked = {};
+    const how = await merge(blocked);
+    assert.equal(how, "dropped");
+    assert.equal(fake.s.enqueued.length, 1);
+    assert.match(mergeBlockReason(how, blocked), /no progress on the merge queue's commit \(`Quality` \/ `Run scripts\/ci\/setup\.sh` running 25 min, normally ~1 min\).*re-enqueued the PR once/, "the step the waiting removal judged hung is named from its record");
+  });
+});
+
+test("hung queue check: a hung step still running at the next hung removal, then green before the queue's deadline, does not Block; an unread job waits with a retry (#437)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
+    // Out at minute 18 of the first queue commit: its deadline is minute 60. (`earlier` moves that commit back 22 minutes.)
+    const first = Date.now() - 18 * MIN;
+    fake.building("d".repeat(40), first);
+    const job = fake.s.runs["d".repeat(40)][0].id;
+    assert.equal(await merge({}), "queued");
+    earlier(fake, 22 * MIN);
+
+    // The second hang is judged at about minute 40, with the first step still running: undecided, so no Block.
+    fake.building("e".repeat(40), Date.now() - 20 * MIN);
+    const waiting = {};
+    assert.equal(await merge(waiting), "pending");
+    assert.equal(fake.s.dequeued, 2);
+    assert.equal(fake.s.enqueued.length, 1);
+    assert.equal(fake.s.entry, null, "left out of the queue");
+
+    // A failed read of that job before its deadline is undecided too, and asks for a retry.
+    const kept = fake.s.jobs[job];
+    delete fake.s.jobs[job];
+    const unread = {};
+    assert.equal(await merge(unread), "pending");
+    assert.equal(unread.retry, true);
+    fake.s.jobs[job] = kept;
+
+    // The first step then finishes green at minute 50, its job too, inside the deadline: that removal was slow, not
+    // hung. The PR goes back in (try 3), its notice naming the second removal's step from its record.
+    finish(fake, job, { stepAt: first - 22 * MIN + 50 * MIN });
+    const report = {};
+    assert.equal(await merge(report), "queued");
+    assert.equal(report.watch, true);
+    assert.equal(fake.s.enqueued.length, 2);
+    const notice = requeues(fake.s).find((c) => /try 3/.test(c.body));
+    assert.match(notice.body, /Factory took PR #21 out of the merge queue \(checks_hung; no progress: `Quality` \/ `Run scripts\/ci\/setup\.sh` running 20 min/);
+  });
+});
+
+test("hung queue check: the queue's timeout is read once per pass, and with it unread no deadline is assumed, so a hung removal always counts (#437)", async () => {
+  const fake = fakeGitHub();
+  const real = fake.fetch;
+  let rulesetReads = 0;
+  fake.fetch = (url, init) => {
+    if (/\/rulesets\/1$/.test(String(url))) rulesetReads += 1;
+    return real(url, init);
+  };
+  await withGitHub(fake, async () => {
+    fake.s.history = Array.from({ length: 12 }, () => ({ "Run scripts/ci/setup.sh": MIN }));
+    fake.s.timeout = null;
+    const first = Date.now() - 25 * MIN;
+    fake.building("d".repeat(40), first);
+    const job = fake.s.runs["d".repeat(40)][0].id;
+    assert.equal(await merge({}), "queued");
+    assert.equal(rulesetReads, 2, "the required checks' read and the timeout's, once");
+    const record = JSON.parse(/requeue-drop (\{.*\}) -->/.exec(requeues(fake.s)[0].body)[1]);
+    assert.equal(record.hung[0].by, null, "no deadline recorded, never setup's 60 assumed");
+    // Green 24 minutes in: with no deadline known, the removal still counts, and the second Blocks at once.
+    finish(fake, job, { stepAt: first + 24 * MIN });
+    earlier(fake, 20 * MIN);
+    fake.building("e".repeat(40), Date.now() - 25 * MIN);
+    assert.equal(await merge({}), "dropped");
   });
 });
 
@@ -398,7 +522,10 @@ test("hung queue check: a hung removal read back on a later pass keeps its code,
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     fake.building("3".repeat(40), Date.now() - 52 * MIN);
+    const job = fake.s.runs["3".repeat(40)][0].id;
     assert.equal(await merge({}), "queued");
+    // That job then failed: the removal counts.
+    finish(fake, job, { step: "failure", stepAt: Date.now() });
     // Factory's removal is on the timeline now, and its requeue comment holds the code. The queue then drops the PR.
     fake.drop("FAILED_CHECKS", "github-merge-queue", "Bot");
     readByReview(fake);

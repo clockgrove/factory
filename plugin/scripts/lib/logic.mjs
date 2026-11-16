@@ -2078,29 +2078,64 @@ export function queueHangs({ names, checks, jobs = new Map(), baselines = new Ma
 }
 
 /**
- * When the merge queue's own check timeout (`timeoutMinutes`, SETUP_QUEUE_TIMEOUT_MIN's when unread) ends for the queue
- * commit made at `headAt`: the time a check on it had to report by. An ISO string, or null with no time.
+ * When the merge queue's own check timeout (`timeoutMinutes`, the ruleset's `check_response_timeout_minutes`) ends for
+ * the queue commit made at `headAt`: the time a check on it had to report by. An ISO string, or null with no time or no
+ * timeout read: no deadline is assumed, so nothing is judged against one.
  */
 export function queueDeadline(headAt, timeoutMinutes) {
-  const t = Number(timeoutMinutes);
+  const t = timeoutMinutes === null || timeoutMinutes === undefined ? NaN : Number(timeoutMinutes);
   const at = Date.parse(headAt);
-  return Number.isFinite(at) ? new Date(at + (Number.isFinite(t) && t > 0 ? t : SETUP_QUEUE_TIMEOUT_MIN) * 60_000).toISOString() : null;
+  return Number.isFinite(at) && Number.isFinite(t) && t > 0 ? new Date(at + t * 60_000).toISOString() : null;
 }
 
+/** Hung removals at most cleared (hungOutcome "green") since queueRetry's `since`: past that, every hung removal counts. */
+export const QUEUE_CLEARED_MAX = 1;
+
 /**
- * Whether every step a HUNG_CODE removal judged hung (`hung`: its record's `{job, step, number, by}`) then finished
- * green before the queue's own check timeout (`by`, queueDeadline): its job (`jobs`, id -> actions/jobs record) shows
- * that step, by name and number, completed with `success` no later than `by`. Such a step was slow, not hung, and the
- * queue would have taken its result. A step with no job id, an unread job, a step still running, cancelled or failed,
- * or one that finished after `by` is not.
+ * What became of the steps a HUNG_CODE removal judged hung (`hung`: its record's `{job, step, number, head, by}`, `head`
+ * the queue commit), read at `now` from their jobs (`jobs`, id -> actions/jobs record) and their queue commits' checks
+ * (`checks`, sha -> queueCommitChecks' list, with each check's conclusion and completion time); an id or sha missing is
+ * a read not made or failed. `names` are the required checks (every check on the commit when empty):
+ * - "green": each judged step and its job completed with `success`, and every required check on that queue commit
+ *   (the job's own, or an aggregate one that waits on it) concluded `success`, all by `by` (queueDeadline): the queue
+ *   would have taken that result, so the step was slow, not hung;
+ * - "pending": nothing says otherwise yet, and `now` is not past the `by` of a job or required check unread, still
+ *   running or not reported yet: the answer waits for it, never past `by`;
+ * - "counted": anything else: no job, queue commit or `by` recorded, a step, job or required check that failed, was
+ *   cancelled or skipped, or completed after `by`, or one still running, missing or unread once `by` has passed.
+ * Decided on ids, names, numbers, statuses, conclusions and times only.
  */
-export function hungFinishedGreen(hung, jobs) {
-  if (!Array.isArray(hung) || !hung.length) return false;
-  return hung.every((e) => {
-    const step = (jobs.get(e?.job)?.steps || []).find((x) => x?.name === e.step && (e.number ?? null) === (Number.isInteger(x?.number) ? x.number : null));
-    const done = Date.parse(step?.completed_at);
-    return step?.status === "completed" && step.conclusion === "success" && Number.isFinite(done) && done <= Date.parse(e.by);
-  });
+export function hungOutcome(hung, { jobs = new Map(), checks = new Map(), names = [] } = {}, now = Date.now()) {
+  if (!Array.isArray(hung) || !hung.length) return "counted";
+  let pending = false;
+  for (const e of hung) {
+    const by = Date.parse(e?.by);
+    if (!Number.isInteger(e?.job) || typeof e?.head !== "string" || !e.head || !Number.isFinite(by)) return "counted";
+    const ok = (x) => x?.status === "completed" && x.conclusion === "success" && Date.parse(x.completed_at) <= by;
+    // Not known yet: undecided until `by`, counted past it.
+    const unknown = () => {
+      pending = true;
+      return now > by;
+    };
+    const job = jobs.get(e.job);
+    if (!job || job.status !== "completed") {
+      if (unknown()) return "counted";
+    } else {
+      const step = (job.steps || []).find((x) => x?.name === e.step && (e.number ?? null) === (Number.isInteger(x?.number) ? x.number : null));
+      if (!ok(job) || !ok(step)) return "counted";
+    }
+    const runs = checks.get(e.head);
+    if (!runs) {
+      if (unknown()) return "counted";
+      continue;
+    }
+    const { latest } = queueTargets(names, runs);
+    for (const n of names?.length ? names : [...latest.keys()]) {
+      const c = latest.get(n);
+      if (c?.status === "completed" ? !ok(c) : unknown()) return "counted";
+    }
+  }
+  return pending ? "pending" : "green";
 }
 
 const QUEUE_BOT = "github-merge-queue";
@@ -2129,8 +2164,9 @@ export const CONFLICT_CODE = "merge_conflict";
  * none. Who removed it decides what it is:
  * - Factory (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
  *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE. A
- *   HUNG_CODE removal marked `cleared` (its hung step then finished green in time: hungFinishedGreen) is no drop: it
- *   counts as `cleared`, never toward QUEUE_TRIES or as a hold;
+ *   HUNG_CODE removal marked `cleared` (its hung step's job then concluded green in time: hungOutcome "green") is no
+ *   drop: it counts as `cleared`, never toward QUEUE_TRIES or as a hold. Only the first QUEUE_CLEARED_MAX of those
+ *   since `since` are cleared; any later one counts as a drop, so a step that is slow on every try still Blocks;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
@@ -2147,6 +2183,7 @@ export const CONFLICT_CODE = "merge_conflict";
 export function queueRetry(removals, { since, self = null }) {
   const from = Date.parse(since);
   const me = botless(self);
+  let clears = 0;
   const after = (removals || [])
     .filter((r) => r && r.reason !== "merged" && Date.parse(r.at) > (Number.isFinite(from) ? from : -Infinity))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
@@ -2155,7 +2192,7 @@ export function queueRetry(removals, { since, self = null }) {
       // Factory's own removal names why: this pass's (`self`), or one read back from Factory's requeue record (`code`).
       if (r.self === true || (me && who === me)) {
         const code = r.code ? queueCode(r.code) : STALL_CODE;
-        const cleared = r.cleared === true && code === HUNG_CODE;
+        const cleared = r.cleared === true && code === HUNG_CODE && clears++ < QUEUE_CLEARED_MAX;
         return { at: r.at, code, drop: !cleared, factory: true, ...(cleared ? { cleared } : {}) };
       }
       const drop = r.person !== true || who === QUEUE_BOT;

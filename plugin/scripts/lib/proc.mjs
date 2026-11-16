@@ -664,9 +664,11 @@ export function agentRoute(args) {
 /**
  * The install directory of the harness CLI `file` (as PATH finds it), symlinks resolved: the npm package it belongs to
  * (the last `node_modules/<name>` or `node_modules/@scope/<name>` in its real path, where its native binary and
- * helpers live), else its own directory. Null when it cannot be resolved.
+ * helpers live), else its own directory. Null when it cannot be resolved, or when it holds the system's own commands:
+ * a SAFE_PATH directory or a directory on `env`'s PATH, or one above either (a CLI installed into /usr/bin), so what
+ * runs from there keeps its command role.
  */
-export function harnessHome(file) {
+export function harnessHome(file, env = process.env) {
   let real;
   try {
     real = realpathSync(file);
@@ -675,8 +677,16 @@ export function harnessHome(file) {
   }
   const parts = real.split("/");
   const at = parts.lastIndexOf("node_modules");
-  if (at >= 0 && parts.length > at + 2) return parts.slice(0, at + (parts[at + 1].startsWith("@") ? 3 : 2)).join("/");
-  return parts.slice(0, -1).join("/");
+  const home = at >= 0 && parts.length > at + 2 ? parts.slice(0, at + (parts[at + 1].startsWith("@") ? 3 : 2)).join("/") : parts.slice(0, -1).join("/");
+  const resolved = (d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return null;
+    }
+  };
+  const system = [...SAFE_PATH.split(":"), ...String(env.PATH || "").split(delimiter)].filter((d) => d.startsWith("/")).map(resolved).filter(Boolean);
+  return system.some((d) => d === home || d.startsWith(`${home}/`)) ? null : home;
 }
 
 /** A systemd unit's cgroup directory (/sys/fs/cgroup/system.slice/<unit>.service), as its manager reports it; null while it has none. */

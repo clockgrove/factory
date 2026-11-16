@@ -91,7 +91,7 @@ test("exec: a helper the harness ships beside its own binary is the harness's, s
   }
 });
 
-test("harnessHome: a CLI's install directory, symlinks resolved: its npm package, else its own directory", () => {
+test("harnessHome: a CLI's install directory, symlinks resolved: its npm package, else its own directory; never one of the system's command directories", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-home-"));
   try {
     const pkg = join(root, "lib", "node_modules", "@openai", "codex");
@@ -103,7 +103,14 @@ test("harnessHome: a CLI's install directory, symlinks resolved: its npm package
     mkdirSync(plain, { recursive: true });
     writeFileSync(join(plain, "codex"), "");
     symlinkSync(join(plain, "codex"), join(root, "bin", "codex2"));
-    assert.deepEqual([harnessHome(join(root, "bin", "codex")), harnessHome(join(root, "bin", "codex2")), harnessHome(join(root, "none"))], [pkg, plain, null].map((p) => (p ? realpathSync(p) : null)));
+    const env = { PATH: join(root, "bin") };
+    assert.deepEqual([harnessHome(join(root, "bin", "codex"), env), harnessHome(join(root, "bin", "codex2"), env), harnessHome(join(root, "none"), env)], [pkg, plain, null].map((p) => (p ? realpathSync(p) : null)));
+    // A CLI in a directory of the system's own commands, or on PATH, or above one: no harness home.
+    const sh = realpathSync("/bin/sh");
+    assert.equal(harnessHome(sh, env), null, "a SAFE_PATH directory");
+    assert.equal(harnessHome(join(root, "bin", "codex"), { PATH: `${join(pkg, "bin")}:${join(root, "bin")}` }), null, "a PATH directory inside it");
+    writeFileSync(join(root, "bin", "tool"), "");
+    assert.equal(harnessHome(join(root, "bin", "tool"), env), null, "a PATH directory");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

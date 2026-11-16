@@ -63,12 +63,20 @@ export function unjudgedEntries(review, entries = []) {
 }
 
 /**
- * Whether a reviewer pass missed: the call failed, its answer held no JSON, or the issue states acceptance entries and
- * the answer judges none of them. Such a pass is not a clean pass: the review job reruns it once (reviewRetry).
+ * Whether a parsed answer judged no acceptance entry: with the issue's entries (acceptanceEntries), none of them; with
+ * none (the issue has no exact `Acceptance` section, so the prompt asked the reviewer to name the entries itself), an
+ * empty or missing `acceptance` list.
  */
-export function reviewMissed({ ok = true, review, entries = [] }) {
+export const judgedNone = (review, entries = []) => (entries.length ? unjudgedEntries(review, entries).length === entries.length : !(review?.acceptance || []).length);
+
+/**
+ * Whether a reviewer pass missed: the call failed, its answer held no JSON, or it judged no acceptance entry (judgedNone).
+ * Such a pass is not a clean pass: the review job reruns it once (reviewRetry). `judges` false: a pass asked for
+ * comments only (the foundation pass), which misses only on the first two.
+ */
+export function reviewMissed({ ok = true, review, entries = [], judges = true }) {
   if (!ok || !review?.parsed) return true;
-  return entries.length > 0 && unjudgedEntries(review, entries).length === entries.length;
+  return judges && judgedNone(review, entries);
 }
 
 /**
@@ -171,9 +179,9 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
     // review body as plain text (logic.mjs reviewBody), so a review still goes up.
     const first = Object.entries(diffLines(diff)).find(([, v]) => v.lines.size);
     placeholder = true;
-    // A pass that judged none of the entries (reviewMissed) is not a clean pass: the placeholder says so.
+    // A pass that judged no entry (reviewMissed) is not a clean pass: the placeholder says so.
     const said =
-      entries.length && unjudged.length === entries.length
+      review && judgedNone(review, entries)
         ? "the reviewer judged none of the acceptance entries; this is not a clean pass."
         : "no findings; the pass ran and returned nothing line-tied.";
     comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nFactory reviewer: ${said}` }];
@@ -185,7 +193,7 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
     : review
       ? [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: one comment-only review of two passes${on}, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
       : [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
-  if (review && (judged.length || entries.length)) {
+  if (review) {
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));
     if (unjudged.length) lines.push("", `Not judged: ${unjudged.map((id) => sanitize(id)).join(", ")}.`);
   }

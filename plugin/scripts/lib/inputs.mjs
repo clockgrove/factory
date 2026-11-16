@@ -57,6 +57,7 @@ export const DEFAULTS = {
   validation: "",
   budget_command: "",
   protected_paths: "",
+  toolchain_paths: "", // paths a fix pass may change only in its scope or on the fence check's yes, beside the exact lists (logic.mjs toolchainFile); empty: none
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
   third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
@@ -557,6 +558,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     validation: list(get("validation")),
     budgetCommand: get("budget_command"),
     protectedAdditions: list(get("protected_paths")),
+    toolchainPaths: list(get("toolchain_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
     thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,

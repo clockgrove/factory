@@ -32,6 +32,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { replayIssueBody } from "./lib/replay-issue.mjs";
 
 const run = promisify(execFile);
 const here = resolve(new URL(".", import.meta.url).pathname);
@@ -97,23 +98,10 @@ function loadSet() {
 }
 
 /** The Objective's goal text from inputs/<n>.json's shown blocks, for the issue text. */
-function objectiveText(objective) {
-  const f = join(set, "inputs", `${objective}.json`);
-  if (!existsSync(f)) return "";
-  const blocks = JSON.parse(readFileSync(f, "utf8")).shown?.blocks ?? [];
-  const lines = [];
-  for (const b of blocks) {
-    if (b.kind === "heading") lines.push(`${"#".repeat(Math.min(6, (b.level ?? 2) + 1))} ${b.text}`);
-    else if (b.kind === "text") lines.push(b.text);
-    else if (b.kind === "list" && Array.isArray(b.items)) lines.push(...b.items.map((i) => `- ${typeof i === "string" ? i : i.text ?? JSON.stringify(i)}`));
-  }
-  return lines.join("\n\n");
-}
-
 function issueBody(r) {
-  const goal = objectiveText(r.objective);
-  const acceptance = r.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
-  return `${goal}\n\n## Acceptance (this Work Item: ${r.item})\n${acceptance}\n`;
+  const f = join(set, "inputs", `${r.objective}.json`);
+  const blocks = existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")).shown?.blocks ?? []) : [];
+  return replayIssueBody({ blocks, item: r.item, criteria: r.criteria });
 }
 
 function prBody(r) {

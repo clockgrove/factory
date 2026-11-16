@@ -133,14 +133,22 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     const p = u.pathname.replace(`/repos/${REPO}`, "");
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : null;
-    if (u.pathname === "/graphql") return json({ data: {} });
+    // The merge queue's reads (github.mjs inMergeQueue, mergeQueueRemovals, mergeQueueEntry), from `state.queue` by PR.
+    if (u.pathname === "/graphql") {
+      const q = state.queue?.[body?.variables?.n];
+      if (!q) return json({ data: {} });
+      const pullRequest = body.query.includes("isInMergeQueue") ? { isInMergeQueue: !!q.entry } : body.query.includes("timelineItems") ? { timelineItems: { nodes: q.removals || [] } } : { mergeQueueEntry: q.entry ?? null };
+      return json({ data: { repository: { pullRequest } } });
+    }
     let m;
     if (method === "GET") state.reads.push(`${p}${u.search}`);
     else state.writes.push(`${method} ${p}${body?.body ? ` ${body.body}` : ""}`);
     if (method === "GET" && u.pathname === "/user") return json({ login: SELF, type: "Bot" });
     if (method === "GET" && p === "/issues") return json(u.searchParams.get("state") === "closed" ? [] : state.issues.filter((i) => i.labels.some((l) => l.name === u.searchParams.get("labels"))));
     if (method === "GET" && p === "") return json({ default_branch: "main" });
-    if (method === "GET" && p === "/rulesets") return json([]);
+    // `state.queue` set: a ruleset with a merge queue on the default branch.
+    if (method === "GET" && p === "/rulesets") return json(state.queue ? [{ id: 1, target: "branch", enforcement: "active" }] : []);
+    if (method === "GET" && p === "/rulesets/1" && state.queue) return json({ conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "merge_queue", parameters: {} }] });
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) return json(state.comments[m[1]] || []);
     if (method === "POST" && (m = /^\/issues\/(\d+)\/comments$/.exec(p))) {
@@ -184,7 +192,7 @@ function world(issues, { comments = {}, prs = {} } = {}) {
     // The merge pass's reads and its merge (session.mjs mergeReadyOne): the Objective, the PR's review, green CI.
     if (method === "GET" && (m = /^\/issues\/(\d+)$/.exec(p))) return json(state.issues.find((i) => i.number === Number(m[1])) ?? { message: "Not Found" }, state.issues.some((i) => i.number === Number(m[1])) ? 200 : 404);
     if (method === "GET" && /^\/pulls\/\d+\/comments$/.test(p)) return json([]);
-    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return json([{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, submitted_at: new Date().toISOString() }]);
+    if (method === "GET" && (m = /^\/pulls\/(\d+)\/reviews$/.exec(p))) return json([{ id: 1, user: { login: SELF, type: "Bot" }, body: `${marker(7, "review")}\nFactory reviewer`, submitted_at: state.reviewedAt ?? new Date().toISOString() }]);
     if (method === "GET" && /\/check-runs$/.test(p)) return json({ total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success", app: { id: 15368 } }] });
     if (method === "GET" && /\/commits\/[0-9a-f]+\/status$/.test(p)) return json({ statuses: [] });
     if (method === "GET" && (m = /^\/commits\/([0-9a-f]+)$/.exec(p))) return json({ sha: m[1], parents: [], commit: { committer: { date: "2026-01-01T00:00:00Z" } } });
@@ -1019,6 +1027,46 @@ test("#340: a sibling on the other route counts by its own record: the Action's 
   const q = await tick(p);
   assert.deepEqual(q.reviewHeld, [8]);
   assert.match(overlap(p, 8)[0].body, /its review waits for #7 to merge \(its review waits for a third-party reviewer\)/);
+});
+
+test("#439: a hand-off, and the rebase of one that conflicts by then, do not wait for a sibling a person took out of the merge queue: both go on the tick that sees it, whichever PR it reads first; put back, the sibling is ahead again", async () => {
+  const since = Date.now() - 3600_000;
+  // #7 is reviewed (its head recorded mergeable, its checks green, no review label) and a person took PR #12 out of the
+  // merge queue after its review; #8's hand-off waits for #7 (their heads conflict).
+  const setup = (order, { pr8 = {}, entry = null } = {}) => {
+    forgetFiles();
+    const prs = { ...PR7(), 8: PR8(pr8) };
+    prs[7].pr.labels = [];
+    const mergeable = { id: 970, user: { login: SELF, type: "Bot" }, body: `${marker(7, "mergeable", H7)}\nFactory: mergeable.`, created_at: new Date(since - 3600_000).toISOString() };
+    const w = world(
+      order.map((n) => (n === 7 ? issue(7, ["factory:in-review"]) : issue(8, ["factory:in-review"], 2))),
+      { comments: { 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 12: [mergeable], 13: [holdRecord(8, 7, since)] }, prs },
+    );
+    w.state.reviewedAt = new Date(since - 3600_000).toISOString();
+    w.state.queue = { 12: { removals: [{ createdAt: new Date(since + 60_000).toISOString(), reason: "dequeued", actor: { login: "maintainer", __typename: "User" } }], entry } };
+    return w;
+  };
+  for (const order of [
+    [7, 8],
+    [8, 7],
+  ]) {
+    const w = setup(order);
+    const r = await tick(w);
+    assert.deepEqual([r.reviewHeld, r.reviewResumed], [[], [8]], `#${order[0]} read first`);
+    assert.deepEqual(prLabels(w, 8), ["factory:review"]);
+    assert.equal(reviewWaitOf(w.state.comments[13], 8)?.released, true);
+    assert.match(overlap(w, 8)[0].body, /no longer waits for #7/);
+  }
+  // #8 conflicts by then: it goes back for its rebase the same tick, with no rebase wait for #7.
+  const d = setup([8, 7], { pr8: { mergeable_state: "dirty" } });
+  const s = await tick(d);
+  assert.deepEqual([s.reviewHeld, s.sentBack, s.rebaseHeld], [[], [8], []]);
+  assert.equal(reviewWaitOf(d.state.comments[13], 8)?.released, true);
+  // The person put PR #12 back in the merge queue: #7 is ahead again and #8 still waits.
+  const b = setup([8, 7], { entry: { state: "QUEUED", enqueuedAt: new Date().toISOString(), headCommit: null } });
+  const q = await tick(b);
+  assert.deepEqual([q.reviewHeld, q.reviewResumed], [[8], []]);
+  assert.deepEqual(prLabels(b, 8), []);
 });
 
 test("#340: `factory run` on an Objective whose hand-off waits reviews it now: the label goes on, the record is released", async () => {

@@ -64,8 +64,8 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
 export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null }) {
   if (!onto) return "";
   const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
-  // A change the branch undid that the head carries anyway: said on the progress comment, never a Block.
-  if (outbox.rebaseNote) {
+  // A change the branch undid that the head carries anyway: said on the progress comment when the branch goes out.
+  if (!left && outbox.rebaseNote) {
     log(`rebase check: ${outbox.rebaseNote}`);
     try {
       await progress?.(`rebase check: ${outbox.rebaseNote}`);
@@ -780,10 +780,10 @@ async function main() {
   const planNeeds = needs.reason || "";
   if (planNeeds) log(`plan-time Question: ${planNeeds}`);
   // A send-back's conflict pass that left the checkout not the branch rebased onto the base Factory's rebase conflicted
-  // on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a commit dropped): nothing of it is pushed,
-  // whatever ended the pass. Blocked naming the files, with no validation run; a cap, death or refusal that ended it
-  // stays the reason (decideExit puts those first).
-  // A commit the conflict reshaped is judged by the decision model when there is a key (kept.mjs).
+  // on (outbox.mjs rebaseLeft: a rebase left in progress, the base not taken, a change of the branch missing from it):
+  // nothing of it is pushed, whatever ended the pass. Blocked naming the files and the changes, with no validation run;
+  // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
+  // branch's is judged by the decision model when there is a key (kept.mjs); without one the commits are matched.
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs }) : null;
   const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress });
   let pushed = await outbox.push();

@@ -566,14 +566,17 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
     if (empty.code !== 0) throw new Error(`git hash-object exited ${empty.code}`);
     const none = empty.stdout.trim();
-    // A path's entry in `tree` as `<mode> <blob id>`, "" when it has none.
+    // A path's entry in `tree` as `<mode> <object id>` (a file, a symlink or a submodule's commit), "" when it has none.
     const entry = async (tree, p) => {
       const r = await git(["--literal-pathspecs", "ls-tree", "-z", tree, "--", p]);
       if (r.code !== 0) throw new Error(`git ls-tree exited ${r.code}`);
-      const m = r.stdout.split("\0").map((l) => /^(\d+) blob ([0-9a-f]+)\t(.+)$/s.exec(l)).find((x) => x && x[3] === p);
+      const m = r.stdout.split("\0").map((l) => /^(\d+) (?:blob|commit) ([0-9a-f]+)\t(.+)$/s.exec(l)).find((x) => x && x[3] === p);
       return m ? `${m[1]} ${m[2]}` : "";
     };
     const oid = (e) => (e ? e.split(" ")[1] : "");
+    const mode = (e) => (e ? e.split(" ")[0] : "");
+    // Anything but a regular file (a submodule's commit, a symlink): decided on its mode and object id alone.
+    const plain = (e) => !e || mode(e) === "100644" || mode(e) === "100755";
     // A blob git reads as binary (a NUL in its first 8000 bytes, git's own test) or a Git LFS pointer.
     const binary = async (e) => {
       if (!e) return false;
@@ -590,12 +593,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const head = (l) => /^(diff --git |--- |\+\+\+ )/.test(l);
       return r.stdout
         .split("\n")
-        .map((l) => (head(l) ? ids.reduce((x, id) => x.replaceAll(id, p), l) : l))
+        .map((l) => (head(l) ? ids.reduce((x, id) => x.replaceAll(id, () => p), l) : l))
         .join("\n");
     };
     // Each path decided exactly where it can be; the rest queued for the decision model.
     const verdicts = new Map();
     const asks = [];
+    // The head's entries at the replay's conflicted paths, read once when a rename conflict needs them.
+    let held = null;
     for (const p of paths) {
       const st = stages.get(p);
       const theirs = st ? st[3] || "" : await entry(replayed.tree, p);
@@ -603,15 +608,27 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       if (now === theirs) continue;
       if (!judge) return null;
       const exact = await (async () => {
-        if (oid(now) && oid(now) === oid(theirs)) return `its file mode is ${now.split(" ")[0]}, the branch's is ${theirs.split(" ")[0]}`;
+        // A name only the branch's side has in a replay conflict (the branch renamed the file where the default branch
+        // renamed it too): kept when the head holds exactly that file under another name of the conflict.
+        if (st && st[3] && !st[1] && !st[2]) {
+          held ??= new Set(await Promise.all(replayed.conflicts.filter((q) => q !== p).map((q) => entry(head, q))));
+          if (held.has(st[3])) return "";
+        }
+        // The file mode, apart from the content: the mode the branch's change sets (a replay conflict: its side's, when
+        // it changed it; a path git merged into the head: the merge's), against the head's.
+        const changed = (to, from) => (mode(to) !== mode(from) ? mode(to) : "");
+        const meant = st ? changed(st[3], st[1]) : mergeConflicts.has(p) ? changed(theirs, await entry(onto, p)) : mode(await entry(merged.tree, p));
+        if (now && meant && mode(now) !== meant) return `its file mode is ${mode(now)}, the branch's change makes it ${meant}`;
+        if (oid(now) && oid(now) === oid(theirs)) return "";
         const ours = st ? st[2] || "" : await entry(onto, p);
+        if (![theirs, now, ours].every(plain)) return "a submodule or symlink that is not the branch's version";
         if ((await binary(theirs)) || (await binary(now)) || (await binary(ours))) return "a binary or Git LFS file that is not the branch's version";
-        // The head moved or removed the file and git cannot merge the branch's change into it: nothing to judge.
-        if (!st && !theirs && mergeConflicts.has(p)) return "the head renamed or removed it where git cannot merge the branch's change into it";
-        return "";
+        // git cannot merge the branch's change into the head's file: nothing to judge.
+        if (!st && !theirs && mergeConflicts.has(p)) return now && (await entry(onto, p)) ? "the branch deletes it, and the head keeps it with edits git cannot merge that deletion into" : "the head renamed or removed it where git cannot merge the branch's change into it";
+        return null;
       })();
-      if (exact) {
-        verdicts.set(p, exact);
+      if (exact !== null) {
+        if (exact) verdicts.set(p, exact);
         continue;
       }
       // A conflict of the replay: the branch's and the default branch's sides from its base. Any other path: what

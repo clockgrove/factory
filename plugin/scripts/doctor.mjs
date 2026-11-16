@@ -1138,7 +1138,7 @@ export function gitCheck(present, version) {
 export function decisionKeyCheck({ inputs, env = process.env }) {
   const { key, code } = triageKeyState({ inputs, env });
   if (key) return PASS("decision model", "an AI Gateway key: red-check triage, the drift advisory, and a content check of each send-back's conflict pass are on");
-  const without = "a red goes to the fix pass untriaged, and a send-back's conflict pass is checked by matching commits where a file is not exactly the branch's: a squashed or reworded rebase Blocks, and a change lost through a rename or a merge can pass";
+  const without = "a red goes to the fix pass untriaged, and a send-back's conflict pass is checked by matching commits where a file is not exactly the branch's: a squashed or reworded rebase Blocks, and a change lost through a rename or a merge, or a commit kept by author, time and subject whose conflict was resolved to the default branch's side, can pass";
   if (code === "no-key") return PASS("decision model", `off (no key): ${without}; a key in ~/.config/factory/ai-gateway-key turns the content check on (LOCAL.md)`);
   return WARN("decision model", `the AI Gateway key is not used (${code}): ${without}`, "fix the key file as LOCAL.md says (step 4)");
 }

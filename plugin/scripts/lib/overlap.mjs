@@ -279,6 +279,11 @@ function writeWait(repo, n, prNumber, { on, since, released = false }, text, opt
 const keyOf = (since, issue) => [since, priorityOf(issue), issue.number];
 const before = (a, b) => (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) < 0;
 
+/** Whether a trusted comment among `comments` starts with marker `mark` (any id after it). */
+const hasMark = (comments, mark) => (comments || []).some((c) => trustedAuthor(c) && String(c.body || "").startsWith(mark.replace(/ -->$/, ":")));
+/** Whether issue `n`'s PR was handed to review before (its worker's validated or handed-off marker, on any head). */
+const handedOff = (comments, n) => hasMark(comments, marker(n, "validated")) || hasMark(comments, marker(n, "handed-off"));
+
 /** A sibling's PR, its record and what its own review waits for (a third-party reviewer, an account label), read once per `memo`. */
 function siblingState(repo, n, opts, prOf, memo) {
   if (!memo.has(n))
@@ -289,7 +294,7 @@ function siblingState(repo, n, opts, prOf, memo) {
         if (!pr) return { pr: null, record: null, cause: null };
         const comments = await listComments(repo, pr.number, opts);
         const cause = waitOf(comments, n) ? "its review waits for a third-party reviewer" : accountWaitOf(comments, n) ? "its review waits for one account label" : null;
-        return { pr, record: reviewWaitOf(comments, n), cause };
+        return { pr, record: reviewWaitOf(comments, n), cause, sentBack: handedOff(comments, n) && hasMark(comments, marker(n, "rebase")) };
       })(),
     );
   return memo.get(n);
@@ -298,22 +303,25 @@ function siblingState(repo, n, opts, prOf, memo) {
 /**
  * The first sibling, by priority then number, that `issue` (its listing) overlaps heavily and that is ahead of it:
  * `{on, shared, of, cause}`, or null. `others` are the other Objectives In review or Running, `stateOf(s)` the state of
- * one, `key` this Objective's place in the release order (keyOf). Ahead is: In review with no record (in review or in
- * the merge queue); a record whose wait is over, on an open ready PR (In review, or Running its rebase after the wait);
- * a record still waiting, In review, earlier in the release order. A Running sibling with no record is not ahead: the
- * first to hand off goes first. Files come from knownFiles; unknown files overlap nothing.
+ * one, `key` this Objective's place in the release order (keyOf), `stuck(s)` whether one can run no stage now (two
+ * account labels, as Blocked). Ahead is: In review with no record (in review or in the merge queue); Running the
+ * send-back rebase of an open ready PR it handed to review before; a record whose wait is over, on an open ready PR (In
+ * review, or Running its rebase after the wait); a record still waiting, In review, earlier in the release order. A
+ * Running sibling that has not handed off is not ahead: the first to hand off goes first. Files come from knownFiles;
+ * unknown files overlap nothing.
  */
-async function aheadOf(repo, { issue, key, others, state }, opts, prOf, memo, log) {
+async function aheadOf(repo, { issue, key, others, state, stuck = () => false }, opts, prOf, memo, log) {
   const mine = (await readFiles(repo, issue, opts, prOf, log)).files;
   if (!mine) return null;
   const order = [...others].filter((s) => s.number !== issue.number).sort((a, b) => priorityOf(a) - priorityOf(b) || a.number - b.number);
   for (const s of order) {
     const theirs = (await readFiles(repo, s, opts, prOf, log)).files;
     const shared = sharedFiles(mine, theirs);
-    if (!theirs || !heavyOverlap(shared, mine, theirs)) continue;
-    const { pr, record, cause } = await siblingState(repo, s.number, opts, prOf, memo);
+    if (!theirs || !heavyOverlap(shared, mine, theirs) || stuck(s)) continue;
+    const { pr, record, sentBack, cause } = await siblingState(repo, s.number, opts, prOf, memo);
     const st = state(s);
-    const ahead = record?.released ? !!pr && !pr.draft : record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review";
+    const open = !!pr && !pr.draft;
+    const ahead = record?.released ? open : record ? st === "In review" && before(keyOf(record.since, s), key) : st === "In review" || (st === "Running" && open && sentBack);
     if (ahead) return { on: s.number, shared, of: new Set(mine).size, cause: record && !record.released ? `it waits for #${record.on} itself` : cause };
   }
   return null;
@@ -330,8 +338,10 @@ export async function sayWaiting(repo, issue, prNumber, wait, since, opts, { log
  * off). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on the PR first, keeping the
  * Objective's first wait start when it waited before, then the note on the issue, and the review label stays off; the
  * stage ends delivered and the Objective In review, its slot free. Returns the wait (`{on, shared, of, cause}`) or null:
- * the caller puts the review label on. With `hold` off (sibling_hold) nothing waits. Nothing holds a reviewed head Factory rebased (`rebaseMode` and `reviewed`), nor
- * the rebase of a hand-off whose wait is over (its record released): it goes next. A read that fails holds nothing (the
+ * the caller puts the review label on. With `hold` off (sibling_hold) nothing waits. Nothing holds a reviewed head
+ * Factory rebased (`rebaseMode` and `reviewed`), nor the rebase of a PR that was ahead already (its wait over, or handed
+ * to review before and sent back): it goes next. A hold within WAIT_MAX_MS of the Objective's last one keeps that one's
+ * start (one episode); a later one starts its own. A read that fails holds nothing (the
  * review goes on, as without siblings); a record that cannot be written holds nothing either.
  */
 export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false }, opts, { log = () => {}, now = Date.now() } = {}) {
@@ -341,10 +351,13 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
     const others = new Map();
     for (const label of ["factory:in-review", "factory:running"]) for (const i of await listIssuesByLabel(repo, label, opts)) if (i.number !== issue && has(i, objectiveLabel)) others.set(i.number, i);
     if (!others.size) return null;
-    const own = reviewWaitOf(await listComments(repo, pr.number, opts), issue);
-    if (rebaseMode && own?.released) return null;
+    const ownComments = await listComments(repo, pr.number, opts);
+    const own = reviewWaitOf(ownComments, issue);
+    // A rebase of a PR that was ahead already (its wait over, or handed to review before and sent back) is next.
+    if (rebaseMode && (own?.released || (!own && handedOff(ownComments, issue)))) return null;
     const self = await getIssue(repo, issue, opts);
-    const since = own ? own.since : now;
+    // One hold episode keeps its first start; held again past the bound, a new episode starts.
+    const since = own && now - own.since < WAIT_MAX_MS ? own.since : now;
     const prOf = prFinder(repo, opts, { [issue]: pr });
     const wait = await aheadOf(repo, { issue: self, key: keyOf(since, self), others: [...others.values()], state: (s) => (has(s, "factory:in-review") ? "In review" : "Running") }, opts, prOf, new Map(), log);
     if (!wait) return null;
@@ -360,7 +373,8 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
 /**
  * The dispatcher's half (dispatch.mjs, an In-review Objective `issue` whose PR `pr` is unlabelled with a waiting record
  * `wait`): `issues` and `statuses` the tick's Objectives, `landed` those whose PR the tick merged, `memo` the siblings
- * this tick read (siblingState). Returns, writing nothing when `dryRun`:
+ * this tick read (siblingState), `stuck(s)` whether a sibling can run no stage now (aheadOf). Returns, writing nothing
+ * when `dryRun`:
  * - "draft": the PR went back to a draft (a stop, a Block); the record goes and no label goes on;
  * - "stale": the review label went on after the record (a person, or a review resumed): the record is released and the
  *   PR handled as any In-review PR;
@@ -371,7 +385,7 @@ export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, obje
  * Without `autoMerge`, or with `hold` off (sibling_hold), nothing waits, so a record found then is released at once. The issue's
  * note says when the wait is over. A failed read or write throws (the next tick tries again).
  */
-export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, hold = true, prOf, memo = new Map() }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
+export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, hold = true, stuck = () => false, prOf, memo = new Map() }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
   if (pr.draft) {
     if (!dryRun) await rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" });
     return "draft";
@@ -382,7 +396,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   const gaveUp = now - wait.since >= WAIT_MAX_MS;
   if (autoMerge && hold && !gaveUp) {
     const others = issues.filter((i) => i.number !== issue.number && !landed.includes(i.number) && ["In review", "Running"].includes(stateOf(i, statuses[i.number] ?? null)));
-    const on = await aheadOf(repo, { issue, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null) }, opts, prOf, memo, log);
+    const on = await aheadOf(repo, { issue, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null), stuck }, opts, prOf, memo, log);
     if (on) return { waiting: on };
   }
   if (!pr.mergeable_state || pr.mergeable_state === "unknown") return "unsettled";

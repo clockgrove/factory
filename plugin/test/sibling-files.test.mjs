@@ -358,6 +358,53 @@ test("#340: three hand-offs waiting on one sibling that conflict once it merges 
   assert.deepEqual([8, 9, 10].map(notices), [1, 1, 1], "each rebased exactly once");
 });
 
+test("#340: a PR sent back for an unrelated merge after it went to review is still ahead while it rebases, and that rebase goes to review: the PR waiting on it rebases once", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  const head = "c".repeat(40);
+  // #8 handed off with no wait (its validated marker), then another merge made it conflict: it was sent back (the
+  // send-back's notice on its head) and is Running that rebase. #9 waits for #8.
+  const own = (n, body) => ({ id: 800 + body.length, user: { login: SELF, type: "Bot" }, body, created_at: new Date(since).toISOString() });
+  const w = world([issue(8, ["factory:running"], 1), issue(9, ["factory:in-review"], 2)], {
+    comments: { 8: [PLAN(8, SHARED3)], 9: [PLAN(9, [...SHARED3, "src/nine.ts"])], 13: [own(8, `${marker(8, "validated", "b".repeat(40))}\nFactory: validated.`), own(8, `${marker(8, "rebase", head)}\nFactory: the branch conflicts with main.`)], 14: [holdRecord(9, 8, since)] },
+    prs: { 8: PR8({ mergeable_state: "dirty" }), 9: { pr: { number: 14, state: "open", draft: false, mergeable: true, mergeable_state: "dirty", head: { sha: "9".repeat(40), ref: "factory/9", repo: { full_name: REPO } }, base: { ref: "main" }, labels: [] }, files: [...SHARED3, "src/nine.ts"] } },
+  });
+  const r = await tick(w);
+  assert.deepEqual([r.reviewHeld, r.reviewResumed, r.sentBack], [[9], [], []], "#9 waits while #8 rebases");
+  // #8's rebase hands off: it was ahead, so it goes to review although #9 began waiting first.
+  forgetFiles();
+  assert.equal(await withWorld(w, () => reviewHold(repoOf(REPO), { issue: 8, pr: w.state.prs[8].pr, autoMerge: true, rebaseMode: true }, { token: "t" })), null);
+  assert.equal(reviewWaitOf(w.state.comments[13], 8), null, "no record written");
+  // A PR that never went to review (it conflicted at its delivery) has no such standing: its rebase waits behind #9.
+  w.state.comments[13] = [own(8, `${marker(8, "rebase", head)}\nFactory: the branch conflicts with main.`)];
+  forgetFiles();
+  assert.equal((await withWorld(w, () => reviewHold(repoOf(REPO), { issue: 8, pr: w.state.prs[8].pr, autoMerge: true, rebaseMode: true }, { token: "t" })))?.on, 9);
+});
+
+test("#340: a sibling that can run no stage (two account labels) is not ahead; a hold more than 6 h after the Objective's last starts a new wait", async () => {
+  forgetFiles();
+  const since = Date.now() - 3600_000;
+  const saved = process.env.FACTORY_ACCOUNTS;
+  process.env.FACTORY_ACCOUNTS = JSON.stringify({ claude: ["claude", "claude-2"] });
+  try {
+    const w = world([issue(7, ["factory:in-review", "factory:account:claude", "factory:account:claude-2"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 12: [holdRecord(7, 6, since - 60_000, 957, true)], 13: [holdRecord(8, 7, since)] }, prs: { ...PR7(), 8: PR8() } });
+    w.state.prs[7].pr.mergeable_state = "dirty";
+    w.state.prs[7].pr.labels = [];
+    const r = await tick(w);
+    assert.deepEqual(r.reviewResumed, [8], "#7 cannot rebase while two account labels are on it: it holds no one");
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_ACCOUNTS;
+    else process.env.FACTORY_ACCOUNTS = saved;
+  }
+
+  // #8's last wait began 7 h ago (released since): held again now, its new wait starts now and has its own 6 h.
+  forgetFiles();
+  const now = Date.now();
+  const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)], 13: [holdRecord(8, 6, now - 7 * 3600_000, 958, true)] }, prs: { ...PR7(), 8: PR8() } });
+  assert.equal((await withWorld(v, () => reviewHold(repoOf(REPO), { issue: 8, pr: v.state.prs[8].pr, autoMerge: true }, { token: "t" }, { now })))?.on, 7);
+  assert.equal(reviewWaitOf(v.state.comments[13], 8).since, Math.floor(now / 1000) * 1000);
+});
+
 test("#340: a dispatcher tick leaves a waiting hand-off alone while its sibling is In review (no send-back, no review), arms a wake for the bound, then rebases it once the sibling merged, before its review", async () => {
   forgetFiles();
   const since = Date.now() - 3600_000;

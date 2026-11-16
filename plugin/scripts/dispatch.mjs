@@ -857,7 +857,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!reviewing && reviewWait && !reviewWait.released && pr) {
         let how;
         try {
-          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
+          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
         } catch (e) {
           log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
           retry(`#${issue.number}'s review wait`);

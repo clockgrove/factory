@@ -57,7 +57,8 @@ test("a re-render with no options keeps every setting a custom render states, on
 test("the real case: factory-scratch's factory.yml at 96ce800 keeps its validation, setup, checks, notify, plan credential, caps and timeout", () => {
   const text = readFileSync(join(PLUGIN, "test/fixtures/factory-scratch-96ce800.yml"), "utf8");
   const r = render({}, { text });
-  assert.deepEqual(r.after.env, r.before.env);
+  // Every setting the file states stays; one the template gained since the file was written comes in at its default.
+  assert.deepEqual(r.after.env, { ...r.before.env, FACTORY_IMAGE_MAX_AGE_DAYS: "7" });
   for (const [k, v] of Object.entries({
     FACTORY_VALIDATION: "npm run check, npm test, npm run test:db",
     FACTORY_SETUP: "scripts/ci/setup.sh",
@@ -80,6 +81,7 @@ test("the real case: factory-scratch's factory.yml at 96ce800 keeps its validati
   assert.deepEqual(r.report, [
     `kept ${Object.keys(r.before.env).join(", ")}, launch gate maintainer ids, CI workflow`,
     `changed action "clockgrove/factory@v0.7.106" -> "clockgrove/factory@${LATEST}" (the newest release: the template is that release's)`,
+    'new in this template FACTORY_IMAGE_MAX_AGE_DAYS="7"',
   ]);
 });
 

@@ -18,7 +18,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -1097,12 +1097,14 @@ async function main() {
     Object.assign(childBase, wrote);
     allowAgentEnv(Object.keys(wrote));
   }
-  const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // Which install runs is read from Factory's own checkout when the agent has a clone of its own.
+  const installTree = access.agent ? factoryTree : checkout;
+  const install = installCommand(installTree, inputs.install);
   if (install) {
     await progress("install");
     // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
     // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.
-    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     if (!i.ok) {
       log(i.reason);

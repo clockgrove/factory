@@ -379,6 +379,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     default_branch: sandbox ? { raw: JSON.stringify(defaultBranch) } : "",
     image_refresh: inputs.imageRefresh,
     image_daily_minutes: String(inputs.imageDailyMinutes),
+    image_max_age_days: String(inputs.imageMaxAgeDays),
     sandbox_idle_days: String(inputs.sandboxIdleDays),
     sweep_max_destroys: String(inputs.sweepMaxDestroys),
     // The declaration the credential inputs below are rendered for: the account steps pick none under another.

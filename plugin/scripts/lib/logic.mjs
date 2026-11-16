@@ -1022,7 +1022,8 @@ export function harnessActivity(now = () => Date.now()) {
   const since = (thread, prior) => {
     if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
   };
-  return { feed, snapshot, since, open: () => open.size + [...s.subagents.values()].filter((a) => !a.done).length };
+  // A background shell's tool call ends at its launch, so its task counts; a sub-agent's task is its open tool call already.
+  return { feed, snapshot, since, open: () => open.size + [...s.subagents.values()].filter((a) => !a.done && a.kind === "command").length };
 }
 
 /** The status line for a running or finished harness, from a snapshot. */

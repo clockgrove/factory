@@ -325,7 +325,7 @@ test("review: a missed pass reruns once on every harness; with no review from ei
   // The Blocked reason and the log name a crash as a crash, apart from a pass that ran and found nothing.
   assert.equal(noReviewReason([crash, { ...crash, signal: "SIGSEGV", exitCode: null }], reviewOf), "the reviewer produced no review (a crash (exit 101), then a crash (signal SIGSEGV)), so nothing was posted and the PR does not merge");
   assert.equal(noReviewReason([prose, { ok: false, timedOut: true }], reviewOf), "the reviewer produced no review (an answer with no findings JSON, then the time cap), so nothing was posted and the PR does not merge");
-  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no CPU; killed)", "a stop by Factory", "a review"]);
+  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no progress; killed)", "a stop by Factory", "a review"]);
 });
 
 test("review: a pass that failed, held no JSON or judged no entry is missed; one judgment is enough", () => {

@@ -120,7 +120,7 @@ export function reviewCallEnd(rec, review) {
   if (rec.ok) return review?.parsed ? "a review" : "an answer with no findings JSON";
   if (rec.budgetExceeded) return "the dollar cap";
   if (rec.timedOut) return "the time cap";
-  if (rec.idle) return "a hang (no output and no CPU; killed)";
+  if (rec.idle) return "a hang (no output and no progress; killed)";
   if (rec.stopped) return "a stop by Factory";
   if (rec.refusal) return `a refusal by the provider (${refusalFields(rec.refusal)})`;
   return rec.signal ? `a crash (signal ${rec.signal})` : `a crash (exit ${rec.exitCode ?? "?"})`;

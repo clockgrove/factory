@@ -406,7 +406,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * prompt or the env.
  */
 // The window a silent harness is checked over (proc.mjs exec `idleMs`): one that printed nothing across it is killed as
-// hung only when none of its processes used CPU across it, whatever command its stream shows open.
+// hung only when its own state says so (proc.mjs hangVerdict), never for the silence alone.
 export const HARNESS_IDLE_MS = 30 * 60_000;
 
 /**
@@ -1290,7 +1290,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     rec.error = rec.error || "wall clock reached";
   } else if (r.idle) {
     rec.ok = false;
-    rec.error = `hung: no output and no CPU used by its processes for ${Math.round(idleMs / 60000)} min${r.idleOpen ? ` with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open` : ""}; killed`;
+    const min = Math.round(idleMs / 60000);
+    rec.error = r.idleOpen ? `hung: no output for ${min} min with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open and no CPU or I/O by its commands; killed` : `hung: no output for ${min} min and no byte of the model's answer read; killed`;
   } else if (r.code !== 0 && rec.ok) {
     rec.ok = false;
     rec.error = `${cmd} exited ${r.code ?? r.signal}`;

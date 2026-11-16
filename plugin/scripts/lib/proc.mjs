@@ -1,11 +1,11 @@
 // Child processes: run to completion with optional stdin, a wall clock, and captured
 // stdout/stderr. Used for gh, git and the harness CLIs. No dependencies.
-import { spawn } from "node:child_process";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
 // ------------------------------------------------------------------ the agent uid
@@ -229,6 +229,10 @@ function fileStdio(limit) {
   };
   return {
     stdio: [files.out.w, files.err.w],
+    /** Factory's descriptor of the stdout file, open until drop: what the run's own processes hold as their stdout. */
+    get streamFd() {
+      return files.out.r;
+    },
     /** The child holds its own copies once it is spawned: Factory's write ends are closed. */
     spawned: () => {
       for (const f of Object.values(files)) closeOnce(f, "w");
@@ -288,10 +292,10 @@ function fileStdio(limit) {
  * regular files Factory reads every FILE_STDIO_POLL_MS (fileStdio above says why: the harness runs). There an output
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
- * `idleMs`: the window a silent run is checked over, and `openItems` (a function) the count of commands its own stream
- * shows started and not yet ended. Silence alone kills nothing: a run that printed nothing across a whole window is hung
- * only when none of its processes (runCpu) used CPU across that window, whatever it had open. It is then killed and
- * reported `idle`, with `idleOpen` the items open at the kill.
+ * `idleMs`: the window a silent run is checked over, and `openItems` (a function) the count of command items its own
+ * stream shows started and not yet ended. Silence alone kills nothing: a run that printed nothing across a whole window
+ * is killed only when hangVerdict finds it hung (its open command made no progress, or with none open the harness read
+ * no byte of its model's answer), and reported `idle`, with `idleOpen` the items open at the kill.
  */
 export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, openItems = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
@@ -359,31 +363,54 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     };
     if (signal?.aborted) stop();
     else signal?.addEventListener("abort", stop, { once: true });
-    // Each idleMs window: a run that printed nothing across it and whose processes used no CPU across it is hung (an
-    // open command item with CPU is a long command, no item with CPU a long model answer); it is killed. CPU that cannot
-    // be read decides nothing: the wall clock (timeoutMs) still stops the run.
+    // Each idleMs window, a run that printed nothing across it is judged from its own state (runReading, hangVerdict):
+    // killed when hung, left when working or when that cannot be told (the wall clock, timeoutMs, still stops it).
     let heard = false;
+    let exited = false;
+    let baseline = null;
     if (idleMs > 0 && child.pid) {
-      // A run as the agent goes on in its own systemd unit (asAgent), outside the child's process tree: its cgroup counts,
-      // and a unit whose cgroup cannot be read (not started yet, or gone) makes the reading unknown.
-      const unit = agentUnit(args);
-      const reading = () => {
-        const cgroup = unit ? unitCgroup(unit) : null;
-        return unit && !cgroup ? null : runCpu(child.pid, { group, tag, cgroup });
-      };
-      let before = reading();
-      check = setInterval(() => {
-        const after = reading();
-        const used = cpuUsed(before, after);
-        if (!heard && used === 0) {
-          idle = true;
-          idleOpen = openItems?.() ?? 0;
-          clearInterval(check);
-          kill();
+      const opts = { group, tag, agent: agentRoute(args), streamFd: files ? files.streamFd : null };
+      const read = () => runReading(child.pid, opts).catch(() => null);
+      let before = null;
+      let busy = false;
+      const tick = async () => {
+        if (busy || exited) return;
+        busy = true;
+        try {
+          const after = await read();
+          if (exited) return;
+          const open = openItems?.() ?? 0;
+          if (hangVerdict(before, after, { heard, open }) === true) {
+            idle = true;
+            idleOpen = open;
+            clearInterval(check);
+            kill();
+          } else if (after) {
+            before = after;
+            heard = false;
+          }
+        } catch {
+          // decides nothing
+        } finally {
+          busy = false;
         }
-        heard = false;
-        before = after;
-      }, idleMs);
+      };
+      // The windows count from the first reading that finds the run (an agent's unit starts after its client): tried at
+      // the start, and again at each output until one does.
+      baseline = async () => {
+        if (busy || before || exited) return;
+        busy = true;
+        try {
+          before = await read();
+          if (before && !exited) {
+            heard = false;
+            check = setInterval(tick, idleMs);
+          }
+        } finally {
+          busy = false;
+        }
+      };
+      baseline();
     }
     let partial = "";
     const onOut = (chunk) => {
@@ -393,6 +420,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       else if (killPastMax) kill();
       if (tee) appendOwn(tee, chunk);
       heard = true;
+      baseline?.();
       if (onLine) {
         partial += chunk.toString("utf8");
         const parts = partial.split("\n");
@@ -434,6 +462,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     }
     // A run whose own process has exited is not hung: what it left goes with it (`group`), or is no longer the run's.
     child.on("exit", () => {
+      exited = true;
       if (check) clearInterval(check);
     });
     child.on("error", (e) => {
@@ -564,32 +593,38 @@ export function cpuTimeMs(text) {
   return seconds * 1000 + Number((m[3] || "0").padEnd(3, "0"));
 }
 
+/** A bounded command's stdout, whatever its exit status (a missing pid fails a batch read only for that pid); null if none. */
+async function runOut(cmd, args, { env = { PATH: SAFE_PATH, LC_ALL: "C", TZ: "UTC0" } } = {}) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: "utf8", timeout: READ_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, env }, (e, out) => resolve(typeof out === "string" && (out || !e) ? out : null));
+  });
+}
+/** The longest one of a run's readings may wait for a helper (systemctl on a slow D-Bus, sudo, ps, lsof). */
+const READ_TIMEOUT_MS = 60_000;
+
 /** Every process as {ppid, pgid, cpu, start} by pid: Linux /proc, CPU in clock ticks; null when /proc cannot be read. */
-function procRows() {
+async function procRows() {
   let names;
   try {
-    names = readdirSync("/proc");
+    names = await readdir("/proc");
   } catch {
     return null;
   }
   const rows = new Map();
-  for (const p of names) {
-    if (!/^\d+$/.test(p)) continue;
-    const f = procStat(p);
-    // utime + stime, and cutime + cstime: what its children used before it waited for them.
-    if (f) rows.set(Number(p), { ppid: Number(f[1]), pgid: Number(f[2]), cpu: Number(f[11]) + Number(f[12]) + Number(f[13]) + Number(f[14]), start: f[19] });
-  }
+  await Promise.all(
+    names.filter((p) => /^\d+$/.test(p)).map(async (p) => {
+      const f = statFields(await readFile(`/proc/${p}/stat`, "utf8").catch(() => ""));
+      // utime + stime, and cutime + cstime: what its children used before it waited for them.
+      if (f) rows.set(Number(p), { ppid: Number(f[1]), pgid: Number(f[2]), cpu: Number(f[11]) + Number(f[12]) + Number(f[13]) + Number(f[14]), start: f[19] });
+    }),
+  );
   return rows;
 }
 
 /** Every process as procRows has it, from `ps` (macOS: `-S` adds what its exited children used), CPU in ms; null on failure. */
-function psRows() {
-  let text;
-  try {
-    text = ps(["-A", ...(process.platform === "darwin" ? ["-S"] : []), "-o", "pid=,ppid=,pgid=,time=,lstart="]);
-  } catch {
-    return null;
-  }
+async function psRows() {
+  const text = await runOut("ps", ["-A", ...(process.platform === "darwin" ? ["-S"] : []), "-o", "pid=,ppid=,pgid=,time=,lstart="]);
+  if (text === null) return null;
   const rows = new Map();
   for (const line of text.split("\n")) {
     const [pid, ppid, pgid, time, ...start] = line.trim().split(/\s+/);
@@ -600,74 +635,217 @@ function psRows() {
 }
 
 /**
- * The systemd unit an asAgent command runs in, from its own argv (`--unit=factory-agent-…`, `--user` for a user
- * manager's), or null for any other command.
+ * The agent route an asAgent command runs on, from its own argv: `{unit: {name, user}}` for a systemd unit
+ * (`--unit=factory-agent-…`, `--user` for a user manager's), `{cgroup: AGENT_CGROUP}` for the namespace wrapper, or
+ * null for any other command.
  */
-export function agentUnit(args) {
+export function agentRoute(args) {
   const end = args.indexOf("--");
   const own = end < 0 ? args : args.slice(0, end);
   const name = own.find((a) => String(a).startsWith(`--unit=${UNIT_PREFIX}`))?.slice("--unit=".length);
-  return name ? { name, user: own.includes("--user") } : null;
+  if (name) return { unit: { name, user: own.includes("--user") } };
+  return args.includes("factory-agent-wrap") ? { cgroup: AGENT_CGROUP } : null;
 }
 
-/** A systemd unit's cgroup ("/system.slice/<unit>.service"), as its manager reports it; null while it has none. */
-export function unitCgroup({ name, user = false }) {
+/** A systemd unit's cgroup directory (/sys/fs/cgroup/system.slice/<unit>.service), as its manager reports it; null while it has none. */
+async function unitCgroup({ name, user = false }) {
+  const out = await runOut("systemctl", [...(user ? ["--user"] : []), "show", "--property=ControlGroup", "--value", `${name}.service`], { env: { ...process.env, PATH: SAFE_PATH } });
+  return out?.trim() ? `/sys/fs/cgroup${out.trim()}` : null;
+}
+
+/** The pids in a cgroup and every cgroup under it; null when it cannot be read. */
+async function cgroupPids(dir) {
   try {
-    return execFileSync("systemctl", [...(user ? ["--user"] : []), "show", "--property=ControlGroup", "--value", `${name}.service`], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, PATH: SAFE_PATH } }).trim() || null;
+    const pids = (await readFile(join(dir, "cgroup.procs"), "utf8")).split("\n").filter((p) => /^\d+$/.test(p)).map(Number);
+    for (const d of await readdir(dir, { withFileTypes: true })) if (d.isDirectory()) pids.push(...((await cgroupPids(join(dir, d.name))) ?? []));
+    return pids;
   } catch {
     return null;
   }
 }
 
+/** /proc/<pid>/io's rchar and wchar ("rchar: 123" lines), or null. */
+const ioCounts = (text) => {
+  const r = /^rchar: (\d+)$/m.exec(text || "")?.[1];
+  const w = /^wchar: (\d+)$/m.exec(text || "")?.[1];
+  return r && w ? { rchar: Number(r), wchar: Number(w) } : null;
+};
+
 /**
- * The CPU time each process of a run has used so far: a Map of "<pid>:<start>" to its time, in the source's own unit
- * (cpuUsed compares two of one source). The run's processes are `pid` and its descendants, with `group` every member
- * of the process group `pid` leads, and with `tag` every process carrying FACTORY_RUN_TAG=`tag` (one that left the
- * group, a setsid or double fork) and their descendants. Linux reads /proc; elsewhere, or with `procfs` false, `ps`.
- * With `cgroup` (a cgroup v2 path, as unitCgroup gives it), the cgroup's whole CPU time joins as "cgroup:<path>" in µs,
- * its exited processes' included. Null when any of these cannot be read.
+ * Linux: each pid's I/O counts (rchar, wchar) and what its stdout is ("<dev>:<ino>", or "stream" when it is the run's
+ * own stdout, `stream`: Factory's descriptor of it). Read directly; with `privileged` (an agent route, whose processes
+ * are another uid's and need ptrace access), what that cannot read is read through `sudo -n`, with no shell, and the
+ * stream through it too, so both sides of the comparison come from one reader. Whatever neither reads stays null.
  */
-export function runCpu(pid, { group = false, tag = null, cgroup = null, procfs = process.platform === "linux" } = {}) {
-  const rows = procfs ? procRows() : psRows();
-  if (!rows) return null;
-  let cgroupUsec = null;
-  if (cgroup) {
-    try {
-      cgroupUsec = /^usage_usec (\d+)$/m.exec(readFileSync(`/sys/fs/cgroup${cgroup}/cpu.stat`, "utf8"))?.[1] ?? null;
-    } catch {
-      // unread
+async function procIo(pids, streamFd, privileged) {
+  const io = new Map();
+  const fd1 = new Map();
+  const id = (st) => `${st.dev}:${st.ino}`;
+  const streams = new Set();
+  if (streamFd !== null) streams.add(await stat(`/proc/self/fd/${streamFd}`).then(id, () => null));
+  await Promise.all(
+    pids.map(async (p) => {
+      io.set(p, ioCounts(await readFile(`/proc/${p}/io`, "utf8").catch(() => null)));
+      fd1.set(p, await stat(`/proc/${p}/fd/1`).then(id, () => null));
+    }),
+  );
+  const missed = pids.filter((p) => io.get(p) === null || fd1.get(p) === null);
+  if (privileged && missed.length) {
+    // Each line names its file, so a pid gone meanwhile fails alone. Factory's own descriptor goes by its pid.
+    const ours = streamFd !== null ? `/proc/${process.pid}/fd/${streamFd}` : null;
+    const grep = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/grep", "-H", "-E", "^(rchar|wchar):", ...missed.map((p) => `/proc/${p}/io`)]);
+    const st = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/stat", "-L", "-c", "%n %d %i", ...(ours ? [ours] : []), ...missed.map((p) => `/proc/${p}/fd/1`)]);
+    const lines = new Map();
+    for (const l of String(grep || "").split("\n")) {
+      const m = /^\/proc\/(\d+)\/io:(.*)$/.exec(l);
+      if (m) lines.set(Number(m[1]), `${lines.get(Number(m[1])) || ""}${m[2]}\n`);
+    }
+    const ids = new Map();
+    for (const l of String(st || "").split("\n")) {
+      const m = /^(\S+) (\d+) (\d+)$/.exec(l);
+      if (m) ids.set(m[1], `${m[2]}:${m[3]}`);
+    }
+    if (ours && ids.has(ours)) streams.add(ids.get(ours));
+    for (const p of missed) {
+      if (io.get(p) === null) io.set(p, ioCounts(lines.get(p)));
+      if (fd1.get(p) === null) fd1.set(p, ids.get(`/proc/${p}/fd/1`) ?? null);
     }
   }
-  if (cgroup !== null && cgroupUsec === null) return null;
-  const children = new Map();
-  for (const [p, r] of rows) {
-    if (!children.has(r.ppid)) children.set(r.ppid, []);
-    children.get(r.ppid).push(p);
+  streams.delete(null);
+  for (const [p, v] of fd1) if (v !== null && streams.has(v)) fd1.set(p, "stream");
+  return { io, fd1 };
+}
+
+/** Elsewhere (no /proc): what each pid's stdout is, from `lsof` with the run's stream read beside it; no I/O counts. */
+async function lsofFd1(pids, streamFd) {
+  const fd1 = new Map(pids.map((p) => [p, null]));
+  if (!pids.length) return fd1;
+  const out = await runOut("lsof", ["-n", "-P", "-a", "-d", `1${streamFd !== null ? `,${streamFd}` : ""}`, "-F", "pfDi", "-p", [process.pid, ...pids].join(",")]);
+  let pid = null;
+  let fd = null;
+  const seen = new Map();
+  let dev = null;
+  for (const l of String(out || "").split("\n")) {
+    const v = l.slice(1);
+    if (l[0] === "p") pid = Number(v);
+    else if (l[0] === "f") {
+      fd = v;
+      dev = null;
+    }
+    else if (l[0] === "D") dev = v;
+    else if (l[0] === "i") seen.set(`${pid}/${fd}`, `${dev}:${v}`);
   }
-  const walk = [pid];
-  if (group) for (const [p, r] of rows) if (r.pgid === pid) walk.push(p);
-  if (tag) walk.push(...taggedPids(tag, procfs));
-  const run = new Map();
-  while (walk.length) {
-    const p = walk.pop();
-    const r = rows.get(p);
-    if (!r || p === process.pid || run.has(`${p}:${r.start}`)) continue;
-    run.set(`${p}:${r.start}`, r.cpu);
-    walk.push(...(children.get(p) || []));
+  const stream = streamFd !== null ? (seen.get(`${process.pid}/${streamFd}`) ?? null) : null;
+  for (const p of pids) {
+    const v = seen.get(`${p}/1`);
+    if (v) fd1.set(p, stream && v === stream ? "stream" : v);
   }
-  if (cgroupUsec !== null) run.set(`cgroup:${cgroup}`, Number(cgroupUsec));
-  return run;
+  return fd1;
 }
 
 /**
- * The CPU a run's processes used between two runCpu readings: each process's gain, and all of one that started
- * meanwhile. Null when either reading is.
+ * One reading of a run's processes: a Map of "<pid>:<start>" to {pid, ppid, cpu, io: {rchar, wchar} | null, role},
+ * with `ioRead` whether this platform gives I/O counts at all (Linux /proc does; elsewhere `ps` and `lsof` give CPU
+ * and stdout only). The run's processes: on an agent route (`agent`, agentRoute) its systemd unit's or the namespace's
+ * cgroup; otherwise `pid` and its descendants, with `group` its process group, and with `tag` every process carrying
+ * FACTORY_RUN_TAG=`tag` (a setsid or double fork) and their descendants. `streamFd`: Factory's descriptor of the run's
+ * stdout file (exec's fileStdio).
+ * Role: the harness and its launchers (sudo, systemd-run's unit, srt, bwrap) write the run's stdout and pass it on
+ * unchanged, so a process is `harness` when it is a root of the run (its parent outside it) whose stdout is the run's
+ * stream (or `pid` itself), or a child of a `harness` with its parent's stdout; every other process is a `command` the
+ * harness started; null when its stdout cannot be read. Null altogether when the run cannot be found: `pid` absent from
+ * the processes read (a hidepid /proc, an unparsed row), or an agent route's cgroup unread or empty.
  */
-export function cpuUsed(before, after) {
+export async function runReading(pid, { group = false, tag = null, agent = null, streamFd = null, procfs = process.platform === "linux" } = {}) {
+  const rows = procfs ? await procRows() : await psRows();
+  if (!rows) return null;
+  let members;
+  if (agent) {
+    const dir = agent.unit ? await unitCgroup(agent.unit) : agent.cgroup;
+    const pids = dir ? await cgroupPids(dir) : null;
+    if (!pids?.length) return null;
+    members = new Set(pids.filter((p) => rows.has(p)));
+    if (!members.size) return null;
+  } else {
+    if (!rows.has(pid)) return null;
+    const children = new Map();
+    for (const [p, r] of rows) {
+      if (!children.has(r.ppid)) children.set(r.ppid, []);
+      children.get(r.ppid).push(p);
+    }
+    const walk = [pid];
+    if (group) for (const [p, r] of rows) if (r.pgid === pid) walk.push(p);
+    if (tag) walk.push(...(await taggedPidsAsync(tag, procfs)));
+    members = new Set();
+    while (walk.length) {
+      const p = walk.pop();
+      if (!rows.has(p) || p === process.pid || members.has(p)) continue;
+      members.add(p);
+      walk.push(...(children.get(p) || []));
+    }
+  }
+  const pids = [...members];
+  const { io, fd1 } = procfs ? await procIo(pids, streamFd, !!agent) : { io: new Map(), fd1: await lsofFd1(pids, streamFd) };
+  // Roles, parents first. An unread stdout (null) leaves the role unknown, unless it is the run's own stream.
+  const role = new Map();
+  const roleOf = (p) => {
+    if (role.has(p)) return role.get(p);
+    const parent = rows.get(p).ppid;
+    const own = fd1.get(p) ?? null;
+    let r;
+    if (p === pid && !agent) r = "harness";
+    else if (own === "stream") r = members.has(parent) && roleOf(parent) !== "harness" ? roleOf(parent) : "harness";
+    else if (!members.has(parent)) r = own === null ? null : "command";
+    else if (roleOf(parent) !== "harness") r = roleOf(parent);
+    else r = own === null || (fd1.get(parent) ?? null) === null ? null : own === fd1.get(parent) ? "harness" : "command";
+    role.set(p, r);
+    return r;
+  };
+  const procs = new Map();
+  for (const p of pids) {
+    const r = rows.get(p);
+    procs.set(`${p}:${r.start}`, { pid: p, ppid: r.ppid, cpu: r.cpu, io: io.get(p) ?? null, role: roleOf(p) });
+  }
+  return { procs, ioRead: procfs };
+}
+
+/**
+ * Whether a run that printed nothing since `before` (a runReading) is hung at `after`: true hung, false working, null
+ * unknown (the caller then decides nothing; the wall clock still ends the run). Output since `before` is working.
+ * With a command item open (`open`, from the harness's own stream) and command processes running, the question is
+ * whether the commands progress: any CPU, or any byte read or written (a download, a pipe), by a command process, one
+ * started since included, is working; none, with every command's I/O read, is hung. With no item open, or one open with
+ * no command process (a sub-agent, a web fetch, in the harness itself), the question is whether the model's answer
+ * arrives: any byte the harness's processes read is working, none is hung; CPU says nothing there (an idle harness's
+ * timers use some). Whatever is unread (I/O on a platform without it, a process whose stdout or I/O cannot be read)
+ * makes that answer unknown, never "no progress".
+ */
+export function hangVerdict(before, after, { heard = false, open = 0 } = {}) {
+  if (heard) return false;
   if (!before || !after) return null;
-  let used = 0;
-  for (const [k, v] of after) used += Math.max(0, v - (before.get(k) ?? 0));
-  return used;
+  const was = (k) => before.procs.get(k);
+  const commands = [...after.procs].filter(([, v]) => v.role === "command");
+  const unclassified = [...after.procs.values()].some((v) => v.role === null);
+  const gain = (k, v, f) => Math.max(0, f(v) - (was(k) ? f(was(k)) : 0));
+  if (open > 0 && commands.length) {
+    let progress = 0;
+    let unread = false;
+    for (const [k, v] of commands) {
+      progress += gain(k, v, (x) => x.cpu);
+      if (v.io && (!was(k) || was(k).io)) progress += gain(k, v, (x) => x.io.rchar + x.io.wchar);
+      else if (after.ioRead) unread = true;
+    }
+    if (progress > 0) return false;
+    return unread || unclassified ? null : true;
+  }
+  if (!after.ioRead || unclassified) return null;
+  let read = 0;
+  for (const [k, v] of after.procs) {
+    if (v.role !== "harness") continue;
+    if (!v.io || (was(k) && !was(k).io)) return null;
+    read += gain(k, v, (x) => x.io.rchar);
+  }
+  return read > 0 ? false : true;
 }
 
 /** The pids in process group `pgid`, from `ps -A -o pid=,pgid=` output. */
@@ -904,6 +1082,15 @@ export function killTagged(tag) {
     }
   }
   return killed;
+}
+
+/** taggedPids without holding the event loop: a run's reading scans /proc while the stage goes on. */
+async function taggedPidsAsync(tag, procfs = process.platform === "linux") {
+  const mark = `FACTORY_RUN_TAG=${tag}`;
+  if (!procfs) return String((await runOut("ps", ["eww", "-A", "-o", "pid=,command="])) || "").split("\n").filter((l) => holdsMark(l, mark)).map((l) => Number(l.trim().split(/\s+/)[0]));
+  const names = await readdir("/proc").catch(() => []);
+  const hits = await Promise.all(names.map(async (p) => /^\d+$/.test(p) && Number(p) !== process.pid && (await readFile(`/proc/${p}/environ`, "latin1").catch(() => "")).split("\0").includes(mark)));
+  return names.filter((_, i) => hits[i]).map(Number);
 }
 
 /** The pids of this user's processes whose environment carries FACTORY_RUN_TAG=`tag`: /proc, or `ps eww` without it. */

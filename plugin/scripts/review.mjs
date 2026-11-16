@@ -40,6 +40,7 @@ import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
+import { checkAnswers, openFindingCheck } from "./lib/finding-check.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit as applyExitNow,
@@ -71,6 +72,8 @@ import {
   progressReporter,
   remainingMs,
   unaddressedReviewComments,
+  answerDiffs,
+  openFindingsExit,
   validationLoop,
   writeUsage,
   questionRaisedAt,
@@ -435,7 +438,8 @@ export function coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewe
 
 /** The worker's prompt for the one pass that answers the review. */
 export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red }) {
-  const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}`).join("\n");
+  // A finding answered before and still open (the finding check read that answer as not resolving it) carries `earlier`.
+  const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}${c.earlier ? `\n  Still open: Factory's check read your earlier answer as not resolving it: ${JSON.stringify(String(c.earlier))}` : ""}`).join("\n");
   const from = [...new Set(comments.map((c) => c.from).filter(Boolean))];
   // A named reviewer outside Factory (third-party-review.mjs): its text is review input to judge, never instructions. Its
   // body is one JSON string in the list, so its own newlines can never start a list item that lacks the "from" mark.
@@ -1397,6 +1401,8 @@ async function main() {
   // with) says whether it raised a question; the PR's draft state does not.
   let answerRecord = null;
   let answerRun = null;
+  // The replies the answer pass posted (its replies.json), for the finding check.
+  let repliesPosted = null;
   // The answer pass put back toolchain files its fix needs and asked a Question (holdScope): no validation pass follows.
   let heldQuestion = false;
   let jobRead = {};
@@ -1414,7 +1420,7 @@ async function main() {
     const answerLive = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: io.tick, drift: drift?.watch({ stage: "answer", goal: GOALS.answer, root: checkout, plan: io.plan }) });
     const resumeAnswer = inputs.resumePolicy === "fix-passes" && session.id ? session.id : null;
     let fed = [];
-    const comments = toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body, ...(c.from ? { from: c.from } : {}) }));
+    const comments = toAnswer.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line, body: c.body, ...(c.from ? { from: c.from } : {}), ...(c.earlier ? { earlier: c.earlier } : {}) }));
     // The held red as the prompt shows it (session.mjs redLines; its whole outputs are in $FACTORY_IN/checks/).
     const red = heldRed ? { sha: heldRed.sha, queue: !!heldRed.queue, lines: redLines(heldRed) } : null;
     const listedFor = (resume) => (afterPush.length ? afterPush : resume ? decisions : []);
@@ -1499,6 +1505,7 @@ async function main() {
           return 0;
         });
     if (toAnswer.length) log(`${replied} of ${toAnswer.length} reviewer comment(s) answered`);
+    if (replied) repliesPosted = out["replies.json"];
     // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
     // A provider's refusal is not asked again: the answer Blocks with it.
     const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
@@ -1532,7 +1539,13 @@ async function main() {
   if (validation.question) answerRecord = exitFromOut(io.files()) || answerRecord;
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
 
-  // Answered threads (and no-finding ones) are resolved so a ruleset that requires thread resolution
+  // The finding check (#368): each finding the answer pass replied to is judged by the decision model against the reply and
+  // what the passes wrote to its file; only a yes resolves its thread (finding-check.mjs). Not after a refused push.
+  if (repliesPosted && !outbox.failed) {
+    const answeredTo = outbox.expected() || answerTo;
+    await checkAnswers({ repo, issue, prNumber: pr.number, findings: toAnswer, repliesText: repliesPosted, check: openFindingCheck({ inputs }), diffsOf: (paths) => answerDiffs(outbox.git, { base: outbox.base, from: answerFrom, head: answeredTo, paths }), issueBody: issueData.body || "", opts: token, progress }).catch((e) => log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`));
+  }
+  // Threads a person answered (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR. Not after a refused push: the answers never reached the branch.
   const resolvedThreads = outbox.failed
     ? 0
@@ -1547,7 +1560,7 @@ async function main() {
   const after = await observe(repo, outbox, { branch, prNumber: pr.number }, token);
   pr = after.pr;
   // A named reviewer's comment counts only when the answer pass was given it (third-party-review.mjs exitUnaddressed).
-  const unaddressed = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), toAnswer.map((c) => c.id)).length;
+  const stillOpen = exitUnaddressed(await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await factoryReviewIds(), thirdParty }), toAnswer.map((c) => c.id));
   // The answer pass's own result counts: one that failed while applying maintainers' decisions Blocks even on green
   // validation (green proves the old code, not the change asked for); one that only answered findings is judged as
   // the worker's run is, where green validation outweighs a late harness error.
@@ -1556,7 +1569,7 @@ async function main() {
   // answer, unanswered findings); a delivered exit merges nothing and goes to the dispatcher's send-back, whose rebase
   // brings it back to review.
   const conflict = !!validation.conflict;
-  const decision = decideExit({
+  const exitArgs = {
     harness: validation.harness ?? (answerRun ? { ...answerRun, ok: answerOk } : { ok: true }),
     pr: { exists: true, draft: pr.draft, body: pr.body },
     commits: after.delta.count,
@@ -1564,14 +1577,15 @@ async function main() {
     protectedHits: protectedTouched(after.delta.files, protectedList),
     record: answerRecord,
     question: answerRecord ? answerRecord.exit === "question" : false,
-    reviewUnaddressed: unaddressed,
+    reviewUnaddressed: stillOpen.length,
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     handoverRefused: handover.refused(),
-  });
+  };
+  const decision = decideExit(exitArgs);
   if (publishRefused && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: publishRefused, cause: "work" });
   if (overBudget && decision.exit !== "blocked") Object.assign(decision, { exit: "blocked", reason: capReason(), cause: capCause() });
   // Stopped meanwhile (the watch's last read, or the issue read once more now): nothing of this exit is applied (no
@@ -1589,6 +1603,9 @@ async function main() {
     decision.cause = relayCause(decision.cause);
   }
   await dropLabel();
+  // Findings still open after the answer pass (no answer, or one the finding check did not read as resolving them), with
+  // the rest of the exit delivered: another answer round within the bound, else the Block names them (session.mjs).
+  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen }, token);
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally the Question stands: logic.mjs answerDuring). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
   // applies the answer (or, with nothing new since the Question, makes it a Question again). Either alone, or

@@ -57,7 +57,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -660,36 +660,58 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 }
 
 /**
- * Reviewer findings with no answer. Line comments: the reviewer's root comments with no reply (the reviewer and the
- * worker both post as the App, so any reply counts: the factory-review-pr skill forbids the reviewer replying). `reviewIds`
- * (Factory's own reviews on the PR) decides which roots are the reviewer's by structure, which also holds in local mode,
- * where reviewer and developer are one login. Findings GitHub took in no line (postReview set them out in the body of
- * Factory's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one counts until Factory
- * answers it in a PR comment under its reply marker (handoff.mjs postReplies). Factory's own reviews and reply markers
- * are those by Factory or someone who can push (trustedAuthor). `thirdParty` (third-party-review.mjs logins): a named
- * reviewer's root comments are listed too, shaped and sanitised for the answer pass with `from` set (thirdPartyComment);
- * one counts until it is answered (logic.mjs answersComment: on code scanning's, only Factory's own answer counts).
+ * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
+ * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
+ * answered when a person answered it (any reply but Factory's own answer on the reviewer's comment, since the
+ * factory-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named reviewer's, never on code
+ * scanning's), or when its thread is resolved after Factory's own answer (logic.mjs factoryReply): the finding check's
+ * yes resolves it (finding-check.mjs), so an answer it read as not resolving the finding, or did not judge, leaves the
+ * finding open. `reviewIds` (Factory's own reviews on the PR) decides which roots are the reviewer's by structure, which
+ * also holds in local mode, where reviewer and developer are one login. Findings GitHub took in no line (postReview set
+ * them out in the body of Factory's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
+ * is answered once a comment under Factory's resolved marker for it (finding-check.mjs) is on the PR. Factory's own
+ * reviews and markers are those by Factory or someone who can push (trustedAuthor). An open finding Factory answered
+ * before carries `earlier`, that answer's text, for the next answer pass.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
-  const replies = new Set(comments.filter((c) => c.in_reply_to_id).map((c) => c.in_reply_to_id));
+  const byId = new Map(comments.map((c) => [c.id, c]));
   // A named reviewer's comment is never Factory's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
-  const byId = new Map(comments.map((c) => [c.id, c]));
-  const answeredByUs = new Set(comments.filter((c) => c.in_reply_to_id && answersComment(byId.get(c.in_reply_to_id)?.user?.login, c)).map((c) => c.in_reply_to_id));
-  const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty) && !answeredByUs.has(c.id)).map((c) => thirdPartyComment(c, namedReviewer(c, thirdParty))) : [];
-  const open = [...roots.filter((c) => !replies.has(c.id)), ...theirs];
+  const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
+  const ourIds = new Set(roots.map((c) => c.id));
+  const replies = comments.filter((c) => c.in_reply_to_id);
+  // A person's answer, as ever; Factory's own answer, its latest per comment (the finding check's to judge).
+  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? !factoryReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const answer = new Map(replies.filter(factoryReply).map((c) => [c.in_reply_to_id, c.body]));
+  const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
+  // Only a thread Factory answered can have been resolved on the finding check's yes: read the threads then.
+  const resolved = candidates.some((c) => answer.has(c.id)) ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
+  const earlier = (c) => (answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {});
+  const open = candidates.filter((c) => !(answer.has(c.id) && resolved.has(c.id))).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
   const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true })));
   if (!inBody.length) return open;
-  const answered = new Set((await listComments(repo, prNumber, { token })).filter(trustedAuthor).map((c) => BODY_REPLY.exec(c.body || "")?.[1]).filter(Boolean));
-  return [...open, ...inBody.filter((f) => !answered.has(f.id))];
+  const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
+  const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));
+  const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
+  return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)) } : f))];
 }
+/** Factory's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
+const answerText = (body) =>
+  sanitize(
+    String(body || "")
+      .replace(/^<!-- factory:\d+:reply:\S+ -->\n?/, "")
+      .replace(/^On review finding r\d+-\d+ \(in the review body\):\n+/, "")
+      .trim(),
+    { max: 4000 },
+  );
 const REVIEW_AT_START = /^<!-- factory:\d+:review -->/;
 const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
+const BODY_RESOLVED = /^<!-- factory:\d+:resolved:(r\d+-\d+) -->/;
 
 /**
  * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. A
@@ -1630,6 +1652,27 @@ export async function writtenSince(mgit, { base, from, head }) {
     .filter(Boolean)
     .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0) }));
   return { files, lines: files.reduce((n, f) => n + f.lines, 0) };
+}
+
+/**
+ * What the passes after `from` wrote by `head` on each of `paths` (a finding's file; null for the whole change), the
+ * default branch's changes left out (replayOnto; the plain diff when the replay cannot be made), for the finding check
+ * (finding-check.mjs): a Map path -> git's diff ("" for no change; cut at `maxBytes`, with `truncated` set by git), or
+ * null for a path whose diff git could not make.
+ */
+export async function answerDiffs(mgit, { base, from, head, paths = [], maxBytes = 12_000 }) {
+  const out = new Map();
+  if (!from || !head || from === head) {
+    for (const p of paths) out.set(p, "");
+    return out;
+  }
+  const r = await replayOnto(mgit, { base, covered: from, head });
+  const left = r.why ? from : r.tree;
+  for (const p of new Set(paths)) {
+    const d = await mgit(["diff", "--no-color", "--no-ext-diff", "--no-textconv", left, head, ...(p ? ["--", p] : [])], { maxBytes });
+    out.set(p, d.code === 0 || d.truncated ? `${String(d.stdout)}${d.truncated ? "\n[diff cut]" : ""}` : null);
+  }
+  return out;
 }
 
 /**
@@ -2765,23 +2808,26 @@ export function mergeBlockReason(how, report = {}) {
 const RESOLVED_SETTLE_MS = 5_000;
 /** The most unresolved conversations a Block names one by one. */
 const THREADS_NAMED = 5;
-/** The most review rounds the merge pass starts for code scanning's comments per re-entry (conversationsGate). */
-export const CODE_SCANNING_ROUNDS = 2;
+/**
+ * The most answer rounds per re-entry: review stages started again for findings still open after an answer pass, by the
+ * review stage itself (openFindingsExit) or by the merge pass for code scanning's comments (conversationsGate).
+ */
+export const ANSWER_ROUNDS = 2;
 
-const SCAN_RECORD = (issue) => `<!-- factory:${issue}:code-scanning-record `;
+const ROUNDS_RECORD = (issue) => `<!-- factory:${issue}:answer-rounds-record `;
 
 /**
- * The review rounds the merge pass started for code scanning's comments on `prNumber`, from Factory's own record on the
- * issue (one comment, marker(issue, "code-scanning"); a record by Factory or someone who can push, since two routes can
- * write it): the times of each, oldest first. Throws when the comments cannot be read.
+ * The answer rounds started on `prNumber`, from Factory's own record on the issue (one comment, marker(issue,
+ * "answer-rounds"); a record by Factory or someone who can push, since two routes can write it): the times of each,
+ * oldest first. Throws when the comments cannot be read.
  */
-export async function codeScanningRounds(repo, issue, prNumber, opts) {
+export async function answerRounds(repo, issue, prNumber, opts) {
   const rounds = [];
   for (const c of await listComments(repo, issue, opts)) {
-    if (!trustedAuthor(c) || !(c.body || "").startsWith(marker(issue, "code-scanning"))) continue;
-    const line = (c.body || "").split("\n").find((l) => l.startsWith(SCAN_RECORD(issue)) && l.endsWith(" -->"));
+    if (!trustedAuthor(c) || !(c.body || "").startsWith(marker(issue, "answer-rounds"))) continue;
+    const line = (c.body || "").split("\n").find((l) => l.startsWith(ROUNDS_RECORD(issue)) && l.endsWith(" -->"));
     try {
-      const v = JSON.parse(line.slice(SCAN_RECORD(issue).length, -4));
+      const v = JSON.parse(line.slice(ROUNDS_RECORD(issue).length, -4));
       if (Number(v?.pr) === Number(prNumber) && Array.isArray(v.rounds)) rounds.push(...v.rounds.filter((t) => Number.isFinite(Date.parse(t))));
     } catch {
       // not a record
@@ -2790,21 +2836,54 @@ export async function codeScanningRounds(repo, issue, prNumber, opts) {
   return [...new Set(rounds)].sort((a, b) => Date.parse(a) - Date.parse(b));
 }
 
-/** Write the record of code scanning's review rounds on `prNumber` (codeScanningRounds). */
-const writeScanRounds = (repo, issue, prNumber, rounds, opts) =>
-  upsertComment(repo, issue, marker(issue, "code-scanning"), `${SCAN_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds })} -->\nFactory: code scanning commented on PR #${Number(prNumber)} after its answer pass; the review ran again to answer it (${rounds.length} time(s) since its last re-entry, at most ${CODE_SCANNING_ROUNDS}).`, opts);
+/**
+ * Start one more answer round on `prNumber` when the bound allows: the rounds since the Objective's last re-entry (its
+ * label applied again, a restart or a Block, from the issue's timeline) are read, and under ANSWER_ROUNDS one more is
+ * recorded and `{taken: true, round}` returned; at the bound, `{taken: false, rounds}`. The caller puts the review label
+ * back on. Throws when the record or the timeline cannot be read or written.
+ */
+export async function takeAnswerRound(repo, { issue, prNumber, objectiveLabel }, opts) {
+  const [rounds, since] = await Promise.all([answerRounds(repo, issue, prNumber, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked", "factory:restart"], opts)]);
+  const counted = rounds.filter((t) => !since || Date.parse(t) > Date.parse(since));
+  if (counted.length >= ANSWER_ROUNDS) return { taken: false, rounds: counted.length };
+  const next = [...counted, new Date().toISOString()];
+  await upsertComment(repo, issue, marker(issue, "answer-rounds"), `${ROUNDS_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds: next })} -->\nFactory: PR #${Number(prNumber)} had review findings still open after its answer pass; the review ran again to answer them (${next.length} time(s) since its last re-entry, at most ${ANSWER_ROUNDS}).`, opts);
+  return { taken: true, round: next.length };
+}
 
 const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`;
 const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
 const RESUME = "re-apply `factory:objective` to resume";
 
 /**
+ * The review stage's exit with findings still open after its answer pass (decideExit's `findingsOpen`; `open`, those
+ * findings as unaddressedReviewComments lists them): within the answer rounds (takeAnswerRound), the review label goes
+ * back on and the exit is delivered with `rerun`, so the next review stage's answer pass takes them, each with its earlier
+ * answer; past the bound the Block stands, naming each open finding's file and line. A round that cannot be read or
+ * recorded, or a label that cannot go back on, Blocks as any exit step does (exitStep). Returns `decision`, changed.
+ */
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [] }, opts) {
+  const places = listed(open.map((c) => placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })));
+  const round = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read or recorded`, () => takeAnswerRound(repo, { issue, prNumber, objectiveLabel }, opts));
+  delete decision.findingsOpen;
+  if (!round) return decision;
+  if (!round.taken) {
+    Object.assign(decision, { exit: "blocked", cause: "work", reason: `${open.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${places}. Fix or answer them on the branch, or resolve their threads on the PR, then ${RESUME}` });
+    return decision;
+  }
+  Object.assign(decision, { exit: "delivered", rerun: true, reason: `${open.length} reviewer finding(s) still open after the answer pass (${places}); the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})` });
+  delete decision.cause;
+  log(decision.reason);
+  await exitStep(decision, `${open.length} reviewer finding(s) are still open and the review label could not be re-applied to answer them`, () => addLabels(repo, prNumber, [REVIEW_LABEL], opts));
+  return decision;
+}
+
+/**
  * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Factory
  * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
- * resolved now (`resolvedNow` counts them). Code scanning's unanswered comment is the answer pass's: the review label
- * goes back on and this returns "code-scanning", at most CODE_SCANNING_ROUNDS times per re-entry (the Objective label
- * applied again, a restart or a Block, from the issue's timeline), counted in Factory's record on the issue; past that it
- * Blocks ("threads") naming each open alert. Any other unresolved thread, when the base's rules require every
+ * resolved now (`resolvedNow` counts them). Code scanning's open comment (unanswered, or answered and not resolved by
+ * the finding check) is the answer pass's: the review label goes back on and this returns "code-scanning", within the
+ * answer rounds per re-entry (takeAnswerRound); past them it Blocks ("threads") naming each open alert. Any other unresolved thread, when the base's rules require every
  * conversation resolved (branch protection, or an active ruleset's pull_request rule), returns "threads" with
  * `report.reason` naming each one: its author, file and line. Otherwise null: the merge goes on. Unreadable threads or
  * rules are null too, and GitHub's own rule decides the merge; an unreadable or unwritable round count is "pending".
@@ -2835,28 +2914,20 @@ async function conversationsGate(repo, ctx, report, opts) {
   }
   const scans = open.filter((t) => t.author === CODE_SCANNING && !t.answered);
   if (scans.length) {
-    let rounds;
-    let since;
+    let round;
     try {
-      [rounds, since] = await Promise.all([codeScanningRounds(repo, issue, prNumber, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked", "factory:restart"], opts)]);
+      round = await takeAnswerRound(repo, { issue, prNumber, objectiveLabel }, opts);
     } catch (e) {
-      log(`#${issue}: the code scanning rounds on PR #${prNumber} are unreadable (${errCode(e)}); next tick`);
+      log(`#${issue}: the answer rounds on PR #${prNumber} could not be read or recorded (${errCode(e)}); next tick`);
       return "pending";
     }
-    const counted = rounds.filter((t) => !since || Date.parse(t) > Date.parse(since));
-    if (counted.length >= CODE_SCANNING_ROUNDS) {
-      report.reason = `code scanning still has ${scans.length} unanswered alert(s) on PR #${prNumber} after ${counted.length} review rounds answered its earlier ones: ${listed(scans.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`;
+    if (!round.taken) {
+      report.reason = `code scanning still has ${scans.length} open alert(s) on PR #${prNumber} after ${round.rounds} answer rounds: ${listed(scans.map(placeOf))}. Fix them on the branch or resolve them on the PR, then ${RESUME}`;
       return "threads";
-    }
-    try {
-      await writeScanRounds(repo, issue, prNumber, [...counted, new Date().toISOString()], opts);
-    } catch (e) {
-      log(`#${issue}: the code scanning round on PR #${prNumber} could not be recorded (${errCode(e)}); next tick`);
-      return "pending";
     }
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
-    log(`#${issue}: code scanning commented on PR #${prNumber} after its answer pass; the review runs again to answer it (round ${counted.length + 1} of ${CODE_SCANNING_ROUNDS})`);
+    log(`#${issue}: code scanning has open comments on PR #${prNumber} after its answer pass; the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})`);
     return "code-scanning";
   }
   if (!open.length) return null;

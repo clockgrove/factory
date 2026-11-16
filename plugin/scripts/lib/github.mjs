@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, factoryReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
@@ -768,12 +768,14 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
 }
 
 /**
- * The PR's review threads as Factory sorts them, each `{id, resolved, author, path, line, by, answered}`: `author` the root comment's, named as REST names it (an App's `<slug>[bot]`; GraphQL
+ * The PR's review threads as Factory sorts them, each `{id, rootId, resolved, author, path, line, by, answered}`: `rootId` the root comment's REST id, `author` the root comment's, named as REST names it (an App's `<slug>[bot]`; GraphQL
  * names a Bot without the suffix), `line` the current line, else the original one. `by` is "ours" for a thread Factory's
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Factory answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
- * root comment's author), else null. `answered`: ours once a reply exists or the root is Factory's placeholder; named once
- * a reply answers it (logic.mjs answersComment, as the answer pass's list judges it).
+ * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
+ * reply other than Factory's own answer exists (logic.mjs factoryReply) or the root is Factory's placeholder; named once a
+ * person's reply answers it (logic.mjs answersComment). Factory's own answer is the finding check's to judge
+ * (finding-check.mjs): only its yes resolves the thread.
  */
 export async function reviewThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
   const nodes = [];
@@ -781,7 +783,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
   // Every thread, a page of 100 at a time (THREAD_PAGES at most).
   for (let page = 0; page < THREAD_PAGES; page += 1) {
     const data = await graphql(
-      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
+      `query($owner: String!, $name: String!, $n: Int!, $after: String) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id isResolved path line originalLine comments(first: 50) { nodes { databaseId body authorAssociation author { __typename login } pullRequestReview { body authorAssociation author { __typename login } } } } } } } } }`,
       { owner: repo.owner, name: repo.name, n: Number(number), after },
       opts,
     );
@@ -802,8 +804,9 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     // A reviewer outside Factory is told by the root comment's own author, as the answer pass's list tells it.
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
-    const answered = ours ? comments.length > 1 || isPlaceholder(root.body) : theirs ? comments.slice(1).some((c) => answersComment(author, asRest(c.author, c.authorAssociation, c.body))) : false;
-    return { id: t.id, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
+    const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
+    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => !factoryReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
+    return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
   });
 }
 /** The most pages of 100 review threads reviewThreads reads. */
@@ -815,9 +818,10 @@ export async function resolveThread(id, opts) {
 }
 
 /**
- * Resolve the answered review threads Factory handles (reviewThreads: its own reviewer's, and those of the reviewers in
- * `thirdParty`), so a rule that requires resolved conversations can merge; they stay visible on the PR. Returns the
- * number resolved.
+ * Resolve the review threads Factory handles (reviewThreads: its own reviewer's, and those of the reviewers in
+ * `thirdParty`) that a person answered or that hold Factory's placeholder, so a rule that requires resolved
+ * conversations can merge; they stay visible on the PR. A thread Factory's own answer is in is resolved by the finding
+ * check's yes (finding-check.mjs), never here. Returns the number resolved.
  */
 export async function resolveFactoryThreads(repo, number, issue, opts, { thirdParty = [] } = {}) {
   let resolved = 0;

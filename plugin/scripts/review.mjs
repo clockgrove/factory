@@ -373,12 +373,14 @@ export async function reviewRead({ scope, head, rescope, wholeDiff }) {
 }
 
 /**
- * The PR's head on GitHub when it is not `own` (Factory's last head: a push by anyone else since), else null. Moved, the
- * review label goes back on, so the review runs again on the new head.
+ * The PR's head on GitHub when it is not `own` (Factory's last head: a push by anyone else since), else null. Moved,
+ * `before` runs first (the stage's stop check, which parks a stopped stage), then the review label goes back on, so the
+ * review runs again on the new head.
  */
-export async function headMovedFrom({ repo, prNumber, own, token }) {
+export async function headMovedFrom({ repo, prNumber, own, token, before = null }) {
   const now = await getPr(repo, prNumber, token);
   if (now.head.sha === own) return null;
+  await before?.();
   await removeLabel(repo, prNumber, REVIEW_LABEL, token).catch(() => {});
   await addLabels(repo, prNumber, [REVIEW_LABEL], token);
   return now.head.sha;
@@ -414,13 +416,18 @@ export function answerGate({ written, comments = [], texts = [] }) {
  * own answer and fix passes being the review's answer, with no review of their own. Two kinds of commits are new work
  * that gets a review pass before the merge (`review` true): an answer pass's that applied maintainers' decisions
  * (`answerQuestion`: a Question's answer, a comment no pass had read) and committed (`answerTo` past `answerFrom`), the
- * stage covering up to `answerFrom`; and answer and fix passes over the bound (`gate`, answerGate), the stage covering up
- * to the head its review read (`reviewedAt`), recorded as `answer` so the pass that reads them is their review and its
+ * stage covering up to `answerFrom` (up to `reviewedAt` when what came before that pass is over the bound); and answer
+ * and fix passes over the bound (`gate`, answerGate, of what was written up to `answerFrom` when the answer applied
+ * decisions, else up to `head`), the stage covering up to the head its review read (`reviewedAt`), recorded as `answer` so the pass that reads them is their review and its
  * own answer is not gated again (`answering`: this stage's review is that pass). `record`: the head to record (session.mjs
  * recordCovered) when the review's own commit_id does not already say it, else null.
  */
 export function coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate = null, answering = false }) {
-  if (answerQuestion && answerTo && answerTo !== answerFrom) return { review: true, answer: false, record: answerFrom !== reviewedAt ? answerFrom : null };
+  if (answerQuestion && answerTo && answerTo !== answerFrom) {
+    // What came before that answer pass (a fix pass after the review) over the bound too: the pass reads from the review.
+    if (gate?.review && !answering) return { review: true, answer: true, record: reviewedAt, why: gate.why };
+    return { review: true, answer: false, record: answerFrom !== reviewedAt ? answerFrom : null };
+  }
   if (head && head !== reviewedAt && gate?.review && !answering) return { review: true, answer: true, record: reviewedAt, why: gate.why };
   return { review: false, answer: false, record: head && head !== reviewedAt ? head : null };
 }
@@ -1302,7 +1309,8 @@ async function main() {
   // head this review read, so nothing is posted and the review runs again on it, as validatedOn does.
   let postedAt = null;
   if (comments.length) {
-    const moved = await headMovedFrom({ repo, prNumber: pr.number, own: outbox.expected() || read.head, token });
+    // A stop comes first (stop.mjs confirmRunning): a stopped Objective gets no review label back and no exit of this stage.
+    const moved = await headMovedFrom({ repo, prNumber: pr.number, own: outbox.expected() || read.head, token, before: () => beforeExit?.() });
     if (moved) {
       const reason = `PR #${pr.number}'s head moved to ${moved.slice(0, 7)} while the reviewer read ${read.head.slice(0, 7)}; nothing is posted and the review runs again on the new head`;
       log(reason);
@@ -1322,7 +1330,9 @@ async function main() {
   const settleCover = async ({ answerQuestion = false, answerFrom, answerTo, comments: answered }) => {
     const head = outbox.failed ? null : outbox.expected();
     const answering = !!scope.answer && !alreadyReviewed;
-    const gate = head && head !== reviewedAt && !answering ? answerGate({ written: await writtenSince(outbox.git, { base: outbox.base, from: reviewedAt, head }), comments: answered, texts: [...fixTexts, ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }) : null;
+    // An answer that applied decisions is reviewed anyway: the bound is on what this stage wrote before it.
+    const upTo = answerQuestion && answerTo && answerTo !== answerFrom ? answerFrom : head;
+    const gate = upTo && upTo !== reviewedAt && !answering ? answerGate({ written: await writtenSince(outbox.git, { base: outbox.base, from: reviewedAt, head: upTo }), comments: answered, texts: [...fixTexts, ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }) : null;
     const c = coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate, answering });
     if (c.record) await recordCovered(repo, pr.number, issue, c.record, token, { answer: c.answer }).catch((e) => log(`covered record: ${String(e?.message || e).slice(0, 120)}`));
     return c;

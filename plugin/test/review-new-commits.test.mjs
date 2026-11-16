@@ -423,8 +423,62 @@ test("#350: the worker's rebase keeps the review only for a rebase of the covere
   assert.match(src, /const alreadyReviewed = scope\.covered;/);
   assert.match(src, /postReview\(repo, pr\.number, \{ body: post\.body, comments, commitId: read\.head \}, token\)/);
   assert.ok(src.indexOf("await headMovedFrom(") < src.indexOf("commitId: read.head"), "the head is checked before the review goes up");
+  assert.match(src, /await headMovedFrom\(\{[^\n]*before: \(\) => beforeExit\?\.\(\) \}\)/);
   assert.ok(src.indexOf("await settleCover({") < src.indexOf("let stoppedAtMerge = null;"));
   const worker = readFileSync(join(ROOT, "plugin", "scripts", "worker.mjs"), "utf8");
   assert.match(worker, /const scope = await reviewScope\(outbox\.git, \{ reviews: prReviews, comments: prComments, issue, base: outbox\.base, head: rebasedTo \}\);\n\s+if \(!scope\.covered\) \{/);
   assert.ok(worker.indexOf("const scope = await reviewScope(") < worker.indexOf("await recordMergeable(repo, pr.number, issue, rebasedTo, token);"));
+});
+
+test("#350: a large fix pass after the review, then an answer that applied decisions: the next pass reads from the reviewed head", async () => {
+  const r = repos();
+  setSelf(SELF);
+  try {
+    // The review went up on `reviewed`; a fix pass beside it rewrote a file no failure names; then the answer pass
+    // applied a maintainer's decision.
+    r.put("big.txt", Array.from({ length: ANSWER_REVIEW_LINES + 1 }, (_, i) => `fix ${i}`).join("\n") + "\n");
+    r.run("commit", "-q", "-m", "fix pass beside the reviewer");
+    const fixed = r.push();
+    r.put("decided.txt", "as the maintainer said\n");
+    r.run("commit", "-q", "-m", "the decision");
+    const decided = r.push();
+    // The bound is on what came before the decision's answer pass.
+    const written = await inMirror(r, (box) => writtenSince(box.git, { base: box.base, from: r.reviewed, head: fixed }));
+    const gate = answerGate({ written, texts: ["FAIL app.txt"] });
+    assert.equal(gate.review, true);
+    const c = coverAfter({ answerQuestion: true, answerFrom: fixed, answerTo: decided, head: decided, reviewedAt: r.reviewed, gate });
+    assert.deepEqual([c.review, c.answer, c.record], [true, true, r.reviewed], "not the fix pass's head");
+    const next = await scopeNow(r, { reviews: [review(r.reviewed)], comments: [record(c.record, "2026-11-15T10:30:00Z", c.answer)] });
+    assert.deepEqual(files(next.diff), ["big.txt", "decided.txt"], "the fix pass and the decision, both read");
+    // Within the bound, the decision alone is read.
+    assert.deepEqual(coverAfter({ answerQuestion: true, answerFrom: fixed, answerTo: decided, head: decided, reviewedAt: r.reviewed, gate: { review: false } }), { review: true, answer: false, record: fixed });
+  } finally {
+    setSelf(null);
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test("#350: a moved head honours a stop before the review label goes back on", async () => {
+  const gh = { head: "b".repeat(40) };
+  const stopped = new Error("stopped");
+  await assert.rejects(
+    withGitHub(gh, () =>
+      headMovedFrom({
+        repo: REPO,
+        prNumber: 12,
+        own: "a".repeat(40),
+        token: { token: "t" },
+        before: async () => {
+          throw stopped;
+        },
+      }),
+    ),
+    stopped,
+  );
+  assert.deepEqual(gh.writes, [], "no label written for a stopped stage");
+  const order = [];
+  const moved = await withGitHub(gh, () => headMovedFrom({ repo: REPO, prNumber: 12, own: "a".repeat(40), token: { token: "t" }, before: async () => order.push("stop check") }));
+  assert.equal(moved, gh.head);
+  assert.deepEqual(order, ["stop check"]);
+  assert.equal(gh.writes.at(-1), "POST /issues/12/labels factory:review");
 });

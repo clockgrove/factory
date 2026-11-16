@@ -1619,7 +1619,8 @@ export async function sinceReview(mgit, { base, covered, head, maxBytes = 16 * 1
 
 /**
  * What was written on the branch from `from` to `head`, the default branch's changes left out (replayOnto), as git's own
- * count: `{files: [{path, lines}], lines}` (lines added and removed; a binary file counts none), or null when it cannot
+ * count: `{files: [{path, lines, binary?}], lines}` (lines added and removed; a file git counts as binary, its numstat
+ * `-`, counts none and is marked `binary`), or null when it cannot
  * be told (a conflicting replay, a commit that cannot be had).
  */
 export async function writtenSince(mgit, { base, from, head }) {
@@ -1633,7 +1634,7 @@ export async function writtenSince(mgit, { base, from, head }) {
     .filter(Boolean)
     .map((l) => /^(-|\d+)\t(-|\d+)\t(.+)$/s.exec(l))
     .filter(Boolean)
-    .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0) }));
+    .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0), ...(add === "-" || del === "-" ? { binary: true } : {}) }));
   return { files, lines: files.reduce((n, f) => n + f.lines, 0) };
 }
 

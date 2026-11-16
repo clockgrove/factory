@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
@@ -649,9 +649,11 @@ async function main() {
     log(`setup: ${inputs.setup}`);
     await progress("setup");
     // On Actions setup may need sudo: it runs as the runner on a clean tree of the default branch, never on branch code.
-    const s = access.agent ? await sh(await outbox.defaultTree(), inputs.setup, { env: { ...childBase, TMPDIR: tmp.factory }, timeoutMs: remainingMs(deadlineAt), asRunner: true }) : await sh(checkout, inputs.setup, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    // One that fails while this machine's network is down runs once more after it is back (checkout.mjs runSetup).
+    const tree = access.agent ? await outbox.defaultTree() : checkout;
+    const s = await runSetup({ tree, command: inputs.setup, env: access.agent ? { ...childBase, TMPDIR: tmp.factory } : childBase, asRunner: !!access.agent, deadlineAt, head: "setup failed:" });
     if (!s.ok) {
-      const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}`;
+      const reason = s.reason;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "setup" }, token);
       await finish("blocked", reason);
       return;

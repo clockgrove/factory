@@ -148,11 +148,15 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
    * flight. A run GitHub no longer holds (a 404 or 410: deleted, expired) runs no launch job either: lost at the
    * marker's time. Returns `{record, flight}`: `flight` null when none is in flight, else when to look again: the started
    * job's own limit, or Infinity while it waits for a runner or its group (its end ticks the dispatcher; the cron is the
-   * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry.
+   * backstop). Any other read that fails says nothing of the launch: in flight, read again on a retry, up to the
+   * unread-claim bound (CLAIM_PAUSE_MS from the marker; GitHub ends a job that waits that long for a runner). Past it, a
+   * read that still fails (not rate limited) returns `unread` too, `{run, read, code}`, the read named: the caller Blocks
+   * the Objective with cause `factory`, its notice naming that read.
    */
   const settleMarkers = async (n, record, since) => {
     let rec = record;
     let flight = null;
+    let unread = null;
     const look = (t) => (flight = flight === null ? t : Math.min(flight, t));
     for (const m of pendingMarkers(record, since)) {
       if (m.run && m.run === process.env.GITHUB_RUN_ID) {
@@ -161,16 +165,21 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       let state = { ended: m.at };
       if (m.run) {
-        const jobs = await readOnce(`run ${m.run}'s jobs`, () => runJobs(repo, m.run, readToken));
+        let failed = `run ${m.run}'s jobs`;
+        const jobs = await readOnce(failed, () => runJobs(repo, m.run, readToken));
         state = jobs.error ? null : launchJobState(jobs.value, n);
         let error = jobs.error;
         if (state?.unlisted) {
-          const run = await readOnce(`run ${m.run}`, () => actionsRun(repo, m.run, readToken));
+          failed = `run ${m.run}`;
+          const run = await readOnce(failed, () => actionsRun(repo, m.run, readToken));
           if (run.error) error = run.error;
           else state = launchJobState(jobs.value, n, run.value);
         }
         if (error && runGone(error)) state = { ended: m.at };
-        else if (error) {
+        else if (error && !error.rateLimited && Date.now() - Date.parse(m.at) > CLAIM_PAUSE_MS) {
+          unread ??= { run: m.run, read: failed, code: Number.isInteger(error.status) && error.status > 0 ? `HTTP ${error.status}` : error.transport ? "network" : "error" };
+          continue;
+        } else if (error) {
           retry(`#${n}'s launch job`);
           look(Infinity);
           continue;
@@ -199,7 +208,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       rec = lostLaunch(rec, lost) ?? rec;
     }
-    return { record: rec, flight };
+    return { record: rec, flight, unread };
+  };
+  // The Block for a launch whose dispatcher run stayed unreadable past the bound (settleMarkers `unread`): Factory
+  // cannot tell whether it started, so the Objective stops with one notice naming the read, never a silent wait.
+  const blockUnreadLaunch = async (issue, { run, read, code }, stage) => {
+    const n = issue.number;
+    vanished.push(n);
+    statuses[n] = "Blocked";
+    const from = stage === "review" ? "factory:in-review" : "factory:running";
+    issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== from), { name: "factory:blocked" }];
+    log(`  #${n}: its ${stage} launch (dispatcher run ${run}) unread for over a day (${read}: ${code}); Blocked`);
+    if (!dryRun) await blockLocalWait(n, null, `its ${stage} launch, named by dispatcher run ${run}, has been unknown for over a day: ${read} could not be read (${code}), so Factory cannot tell whether it started; re-apply the label once GitHub answers that read`, "factory");
   };
   // A launch grace for the Objective whose launch job just failed (its tick names it): the grace's end is a wake of
   // its own, not a wait for the cron, since that launch will not come.
@@ -731,6 +751,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
             // A start that failed in this stint is tried again after its pause (the third failure Blocks, in the
             // launcher); one that never ran gets the grace for its own launch first.
             const settled = await settleMarkers(issue.number, record, since);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "work");
+              continue;
+            }
             const again = startRetryAt(settled.record, since);
             const flight = settled.flight;
             boxRecords.set(issue.number, settled.record);
@@ -1071,6 +1095,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (quotaWaiting(record)) due(issue.number, "quota", Date.parse(record.quota.retryAt));
           if (labelledAt && !launchedSince(record, "review", labelledAt) && !holds && !quotaWaiting(record)) {
             const settled = await settleMarkers(issue.number, record, labelledAt);
+            if (settled.unread) {
+              await blockUnreadLaunch(issue, settled.unread, "review");
+              continue;
+            }
             const again = startRetryAt(settled.record, labelledAt);
             const flight = settled.flight;
             boxRecords.set(issue.number, settled.record);

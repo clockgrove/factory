@@ -608,6 +608,68 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
   }
 });
 
+test("dispatch: a launch whose run stays unreadable past a day Blocks with one notice naming the read; inside the day it is in flight", async () => {
+  const HOUR = 60 * min;
+  const { dispatch } = await import("../scripts/dispatch.mjs");
+  const now = Date.now();
+  setSelf(BOT.login);
+  const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  // #48 and #49 Running 26 hours, named 25 hours ago: run 78's jobs answer 403; run 79 lists no launch job for #49 and
+  // the run itself answers 403. #50, named an hour ago, its run 80's jobs answer 403 too: inside the day, in flight.
+  const named = (n, run, ago) => `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state: "named", at: iso(now - ago), launches: [{ stage: "work", event: "dispatch", ok: null, run, at: iso(now - ago) }] })}`;
+  const s = githubStore({ seed: 5 });
+  for (const [n, run, ago] of [[48, "78", 25 * HOUR], [49, "79", 25 * HOUR], [50, "80", HOUR]]) s.put(n, named(n, run, ago));
+  const posted = [];
+  const labelled = [];
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const method = init.method || "GET";
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
+    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [48, 49, 50].map(iss));
+    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues/comments`) return json([]);
+    if (method === "GET" && /\/actions\/runs\/(78|80)\/jobs$/.test(u.pathname)) return json({ message: "Resource not accessible by integration" }, 403);
+    if (method === "GET" && u.pathname.endsWith("/actions/runs/79/jobs")) return json({ total_count: 1, jobs: [{ id: 1, name: "dispatch", status: "completed" }] });
+    if (method === "GET" && u.pathname.endsWith("/actions/runs/79")) return json({ message: "Resource not accessible by integration" }, 403);
+    if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 26 * HOUR) }]);
+    if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json([{ id: 100 + n, user: BOT, updated_at: iso(now), body: s.bodyOf(n, marker(n, "sandbox")) }]);
+    if (method === "POST" && /\/issues\/\d+\/comments$/.test(u.pathname)) {
+      posted.push({ n, body: JSON.parse(init.body).body });
+      return json({ id: 900 + n, user: BOT, body: JSON.parse(init.body).body }, 201);
+    }
+    if (method === "POST" && /\/issues\/\d+\/labels$/.test(u.pathname)) labelled.push([n, ...JSON.parse(init.body).labels]);
+    if (method !== "GET") return json({}, 200);
+    return json({ message: "Not Found" }, 404);
+  };
+  try {
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 10, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", now: new Date(now), recordWrites: { api: s.api, base: BASE } });
+    for (const [n, read] of [[48, "run 78's jobs"], [49, "run 79"]]) {
+      assert.ok(r.vanished.includes(n), `#${n} Blocked`);
+      assert.ok(!r.relaunch.includes(n), `#${n} not named again`);
+      assert.deepEqual(r.deadlines.filter((d) => d.issue === n), [], `#${n}: no wait left on it`);
+      const notes = posted.filter((p) => p.n === n);
+      assert.equal(notes.length, 1, `#${n}: one notice`);
+      assert.ok(notes[0].body.includes(`${read} could not be read (HTTP 403)`), notes[0].body);
+      assert.ok(notes[0].body.includes('<!-- factory:block {"cause":"factory"} -->'), notes[0].body);
+      assert.ok(labelled.some(([m, label]) => m === n && label === "factory:blocked"), `#${n} labelled Blocked`);
+    }
+    // #50: an hour in, the same 403 says nothing yet: in flight, read again on a retry, no notice.
+    assert.ok(!r.vanished.includes(50) && !r.relaunch.includes(50));
+    assert.equal(posted.filter((p) => p.n === 50).length, 0);
+    assert.equal(sandboxRecordOf(s.bodyOf(50, marker(50, "sandbox"))).launches.at(-1).ok, null);
+    assert.ok(r.deadlines.some((d) => d.kind === "retry"), "#50's read is the one retry due");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+    setSelf(null);
+  }
+});
+
 test("every kind a wake is armed for is read back from its job name and its tick: an armed start-retry covers its deadline", async () => {
   const { firedByWake } = await import("../scripts/dispatch.mjs");
   assert.ok(WAKE_KINDS.every((k) => parseWake(`wake (${k} ${iso(T + 5 * min)})`)?.kind === k), "no sleeper the dispatcher cannot see");

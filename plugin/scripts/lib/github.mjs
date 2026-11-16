@@ -1186,6 +1186,11 @@ export async function branchState(repo, branch, opts) {
   return { head: target.oid, headAt: target.committedDate ?? null, queued: Number(d.repository.mergeQueue?.entries?.totalCount) || 0 };
 }
 
+/** Actions run `runId` itself (`status`, `updated_at`). Throws when it cannot be read (a 404 or 410: no such run now). */
+export async function actionsRun(repo, runId, opts) {
+  return rest(`repos/${repo.full}/actions/runs/${encodeURIComponent(runId)}`, opts);
+}
+
 /** The jobs of Actions run `runId`, their latest attempts, every page. Throws when they cannot be read. */
 export async function runJobs(repo, runId, opts) {
   return (await rest(`repos/${repo.full}/actions/runs/${encodeURIComponent(runId)}/jobs?filter=latest&per_page=100`, { ...opts, paginate: true })) || [];

@@ -2853,20 +2853,24 @@ export const LAUNCH_JOB_MS = 5 * 60_000;
 /** The name of a dispatcher run's launch job for Objective `n`: workflow-template.yml's `launch` matrix job. */
 export const launchJobName = (n) => `launch (${n})`;
 /**
- * What became of the launch a dispatcher run named for Objective `n`, from that run's jobs as GitHub lists them:
- * `{ended: iso}` once its launch job for `n` has completed (the latest attempt), or once the run's `dispatch` job has
- * completed with no launch job for `n` (the matrix never had it), at that completion; else `{running: true, until}`, the
- * job queued, waiting for a runner or its concurrency group, or running, `until` the moment its own limit ends it when it
- * has started (LAUNCH_JOB_MS), null when it has not.
+ * What became of the launch a dispatcher run named for Objective `n`, from that run's jobs as GitHub lists them and,
+ * when none of them is the launch job for `n`, the run itself (`run`, actions/runs/{run}): `{ended: iso}` once its
+ * launch job for `n` has completed (the latest attempt), at that completion, or once the run has completed with no launch
+ * job for `n` (the matrix never had it), at the run's end; else `{running: true, until}`, the job queued, waiting for a
+ * runner or its concurrency group, or running, `until` the moment its own limit ends it when it has started
+ * (LAUNCH_JOB_MS), null when it has not. GitHub lists a matrix job only once it expands the matrix, after the `dispatch`
+ * job it needs completes: until the run has completed, no launch job listed is one still to come. With no launch job
+ * listed and `run` not read, it says `unlisted: true` too: the run's own status decides.
  */
-export function launchJobState(jobs, n) {
+export function launchJobState(jobs, n, run = null) {
   const list = Array.isArray(jobs) ? jobs : [];
   const job = list.filter((j) => j?.name === launchJobName(n)).sort((a, b) => (b.run_attempt ?? 0) - (a.run_attempt ?? 0) || (b.id ?? 0) - (a.id ?? 0))[0];
   if (job) return job.status === "completed" ? { ended: job.completed_at ?? null } : { running: true, until: Number.isFinite(Date.parse(job.started_at)) ? Date.parse(job.started_at) + LAUNCH_JOB_MS : null };
-  const dispatch = list.find((j) => j?.name === "dispatch");
-  if (dispatch?.status === "completed") return { ended: dispatch.completed_at ?? null };
-  return { running: true, until: null };
+  if (run?.status === "completed") return { ended: run.updated_at ?? null };
+  return run ? { running: true, until: null } : { running: true, until: null, unlisted: true };
 }
+/** A read of a dispatcher run (or its jobs) that failed because GitHub holds no such run any more (deleted, expired). */
+export const runGone = (e) => !!e && !e.rateLimited && (e.status === 404 || e.status === 410);
 /** The dispatcher's starting markers (`ok: null`) at or after `since` with no outcome yet, oldest first. */
 export function pendingMarkers(record, since) {
   const t = Date.parse(since) - CLOCK_SKEW_MS;
@@ -2983,16 +2987,18 @@ export function refusalStreakAt(record, since, now = Date.now()) {
 }
 /**
  * What other Objectives' sandbox records (`others`, as sandboxRecord reads them) say of the vendor since `at` (ms, the
- * first refusal of an Objective's streak, refusalStreakAt), from their launches: `up` when any started since (the
- * vendor serves others: the refusal is that Objective's own), else `refused` when any was refused by the vendor since,
- * `trying` when a launch named since has no outcome yet, and `none` when no other Objective tried since.
+ * first refusal of an Objective's streak, refusalStreakAt), from their launches: `up` when any started at or after `at`
+ * (the vendor serves others: the refusal is that Objective's own), else `trying` when a launch named since has no outcome
+ * yet (a try whose answer is coming), `refused` when any was refused by the vendor since, and `none` when no other
+ * Objective tried since. Runner clocks differ by a few seconds (CLOCK_SKEW_MS): the allowance widens only the evidence
+ * that holds picks (`trying`, `refused`), never `up`, so a start just before the outage never releases it.
  */
 export function vendorEvidence(at, others = [], now = Date.now()) {
-  const t = at - CLOCK_SKEW_MS;
-  const since = (others || []).flatMap((r) => (r ? settleStale(r, now).launches || [] : [])).filter((l) => Date.parse(l?.at) >= t);
-  if (since.some((l) => l.ok === true)) return "up";
-  if (since.some((l) => l.ok === false && VENDOR_DOWN.includes(l.code))) return "refused";
+  const launches = (others || []).flatMap((r) => (r ? settleStale(r, now).launches || [] : []));
+  if (launches.some((l) => l?.ok === true && Date.parse(l.at) >= at)) return "up";
+  const since = launches.filter((l) => Date.parse(l?.at) >= at - CLOCK_SKEW_MS);
   if (since.some((l) => l.ok === null)) return "trying";
+  if (since.some((l) => l.ok === false && VENDOR_DOWN.includes(l.code))) return "refused";
   return "none";
 }
 /**

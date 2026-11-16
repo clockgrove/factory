@@ -324,6 +324,8 @@ test("a vendor's transient start failures back off 2, 4, 8, 16, then every 30 mi
   const other = (launches) => ({ state: "running", launches });
   assert.equal(vendorEvidence(Date.parse(at(1)), [other([{ stage: "work", ok: true, at: at(90) }])], now), "up", "another Objective started since: this refusal is its own");
   assert.equal(vendorEvidence(Date.parse(at(1)), [other([{ stage: "work", ok: true, at: at(-5) }])], now), "none", "a start before the streak says nothing");
+  assert.equal(vendorEvidence(Date.parse(at(1)), [other([{ stage: "work", ok: true, at: iso(Date.parse(at(1)) - 30_000) }])], now), "none", "nor one inside the clock allowance before it");
+  assert.equal(vendorEvidence(Date.parse(at(1)), [other([fail(20, "rate_limited"), { stage: "work", event: "dispatch", ok: null, at: at(25) }])], now), "trying", "a try in flight is waited for, even after a refusal");
   assert.equal(vendorEvidence(Date.parse(at(1)), [other([fail(20, "rate_limited")])], now), "refused", "refused too: the vendor is down");
   assert.equal(vendorEvidence(Date.parse(at(1)), [other([{ stage: "work", event: "dispatch", ok: null, at: at(123) }])], now), "trying", "a try in flight: wait for it");
   assert.equal(vendorEvidence(Date.parse(at(1)), [other([fail(20, "error")])], now), "none", "a failure of its own says nothing of the vendor");
@@ -354,8 +356,10 @@ test("every launch attempt ends stored: a marker whose launch job ended and a cu
   assert.deepEqual(launchJobState([job("in_progress", { started_at: at(2) })], 7), { running: true, until: Date.parse(at(2)) + LAUNCH_JOB_MS }, "running: its own limit ends it");
   assert.deepEqual(launchJobState([job("completed", { completed_at: at(4) })], 7), { ended: at(4) });
   assert.deepEqual(launchJobState([job("completed", { completed_at: at(4) }), job("in_progress", { id: 3, run_attempt: 2, started_at: at(5) })], 7).running, true, "a rerun's attempt is the latest");
-  assert.deepEqual(launchJobState([{ name: "dispatch", status: "completed", completed_at: at(1) }, job("queued", { name: launchJobName(8) })], 7), { ended: at(1) }, "the matrix never had it");
-  assert.deepEqual(launchJobState([{ name: "dispatch", status: "in_progress" }], 7), { running: true, until: null });
+  assert.deepEqual(launchJobState([{ name: "dispatch", status: "completed", completed_at: at(1) }, job("queued", { name: launchJobName(8) })], 7), { running: true, until: null, unlisted: true }, "none listed yet: the run's status decides");
+  assert.deepEqual(launchJobState([{ name: "dispatch", status: "completed", completed_at: at(1) }], 7, { status: "in_progress" }), { running: true, until: null }, "the matrix is not listed yet: still to come");
+  assert.deepEqual(launchJobState([{ name: "dispatch", status: "completed", completed_at: at(1) }, job("completed", { name: launchJobName(8) })], 7, { status: "completed", updated_at: at(3) }), { ended: at(3) }, "the run ended: the matrix never had it");
+  assert.deepEqual(launchJobState([{ name: "dispatch", status: "in_progress" }], 7, { status: "in_progress" }), { running: true, until: null });
   const stored = lostLaunch(named, { run: "5", stage: "work", at: at(4) });
   assert.deepEqual(stored.launches, [{ stage: "work", event: "dispatch", ok: false, run: "5", at: at(4), code: "lost" }]);
   assert.equal(lostLaunch(stored, { run: "5", stage: "work", at: at(4) }), null, "settled already: nothing to store");
@@ -471,7 +475,8 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
       if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json(comments[n] || []);
       if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(since[n] ? [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - since[n]) }] : []);
       if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
-      // #26's launch job, of dispatcher run 1: running for two minutes.
+      // #26's launch job, of dispatcher run 1: running for two minutes; #28's, of run 9, running for ten seconds.
+      if (method === "GET" && u.pathname === `/repos/${REPO.full}/actions/runs/9/jobs`) return json({ total_count: 1, jobs: [{ id: 3, name: "launch (28)", status: "in_progress", run_attempt: 1, started_at: iso(now - 10_000) }] });
       if (method === "GET" && u.pathname === `/repos/${REPO.full}/actions/runs/1/jobs`) return json({ total_count: 2, jobs: [{ id: 1, name: "dispatch", status: "completed" }, { id: 2, name: "launch (26)", status: "in_progress", run_attempt: 1, started_at: iso(now - 2 * min) }] });
       if (method !== "GET") return json({}, 200);
       return json({ message: "Not Found" }, 404);
@@ -488,7 +493,7 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
     // No other Objective tried a start since #20's refusal: one new pick goes, as the try that tells an outage from #20's own.
     const { r, s } = await run(null);
     assert.deepEqual(r.ready, [30], "one new pick goes to tell the two apart");
-    assert.match(r.skipped.find((x) => x.number === 32).reason, /refusing starts \(#20 waits to retry\); #30 starts to tell/);
+    assert.match(r.skipped.find((x) => x.number === 32).reason, /refusing starts \(#20 waits to retry\); #30 starts as the one try into it/);
     assert.deepEqual(r.relaunch, [22]);
     const kinds = Object.fromEntries(r.deadlines.filter((d) => d.issue).map((d) => [d.issue, [d.kind, d.at]]));
     assert.deepEqual(kinds[20], ["start-retry", iso(now - 30_000 + START_RETRY_MS)]);
@@ -496,10 +501,15 @@ test("dispatch: a vendor's refusals hold the route's new picks by what other Obj
     assert.deepEqual(kinds[26], ["start-retry", iso(now - 2 * min + LAUNCH_JOB_MS + 1000)], "a launch whose job still runs is not named again before its job's own limit");
     const marked = sandboxRecordOf(s.bodyOf(22, marker(22, "sandbox")));
     assert.deepEqual(marked.launches.at(-1).ok, null, "the relaunch is marked as it is named");
-    // Another Objective was refused by the vendor since: an outage, so every new pick waits, however many refusals.
-    const down = (await run([{ stage: "work", ok: true, at: iso(now - 39 * min) }, f(10_000, "rate_limited")])).r;
-    assert.deepEqual(down.ready, [], "the vendor refuses others too: nothing new starts");
-    assert.match(down.skipped.find((x) => x.number === 30).reason, /refusing starts.*new Objectives wait/);
+    // #28 refused by the vendor too, each one's refusals the other's evidence: still one new pick goes when no try is in
+    // flight, so two Objectives refused for reasons of their own never hold the route for good.
+    const down = (await run([f(10_000, "rate_limited")])).r;
+    assert.deepEqual(down.ready, [30], "one try at a time into a suspected outage");
+    assert.match(down.skipped.find((x) => x.number === 32).reason, /refusing starts \(#20, #28 waits to retry\); #30 starts as the one try/);
+    // A try is in flight (#28's retry, named 10 s ago, its launch job running): every new pick waits for its answer.
+    const flying = (await run([f(20_000, "rate_limited"), { stage: "work", event: "dispatch", ok: null, run: "9", at: iso(now - 10_000) }])).r;
+    assert.deepEqual(flying.ready, [], "at most one try in flight into the outage");
+    assert.match(flying.skipped.find((x) => x.number === 30).reason, /a start into it is in flight, and new Objectives wait/);
     // Another Objective started since: the vendor serves others, so #20's refusal is its own and holds nothing.
     const up = (await run([{ stage: "work", ok: true, at: iso(now - 10_000) }])).r;
     assert.deepEqual(up.ready, [30, 32], "the vendor is up: the route is free");
@@ -515,14 +525,23 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
   setSelf(BOT.login);
   const iss = (number) => ({ number, state: "open", labels: [{ name: "factory:objective" }, { name: "factory:running" }], body: "", updated_at: iso(now), user: { login: "maintainer" } });
   // Each Running for two hours, named by a dispatcher an hour ago (its marker far past any fixed window):
-  // #41's launch job still waits for a runner; #42's ran and ended without writing any outcome; #43's run cannot be read.
+  // #41's launch job still waits for a runner; #42's ran and ended without writing any outcome; #43's run cannot be read
+  // (a 502). #44's dispatch job completed and its run goes on, but GitHub has not listed the launch matrix yet: still to
+  // come. #46's run completed with no launch job for it: the matrix never had it. #47's run was deleted (a 404). #45's
+  // launch job ended and its launcher's failure landed after this tick read the record: GitHub's record decides.
   const named = (n, run) => `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state: "named", at: iso(now - HOUR), launches: [{ stage: "work", event: "dispatch", ok: null, run, at: iso(now - HOUR) }] })}`;
   const s = githubStore({ seed: 4 });
-  for (const [n, run] of [[41, "71"], [42, "72"], [43, "73"]]) s.put(n, named(n, run));
+  for (const [n, run] of [[41, "71"], [42, "72"], [43, "73"], [44, "74"], [46, "76"], [47, "77"]]) s.put(n, named(n, run));
+  s.put(45, `${marker(45, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", stage: "work", state: "failed", at: iso(now - 30_000), launches: [{ stage: "work", event: "dispatch", ok: false, run: "75", at: iso(now - 30_000), code: "error" }] })}`);
   const jobs = {
     71: [{ id: 1, name: "dispatch", status: "completed", completed_at: iso(now - HOUR) }, { id: 2, name: "launch (41)", status: "queued", run_attempt: 1, started_at: null }],
     72: [{ id: 3, name: "dispatch", status: "completed", completed_at: iso(now - HOUR) }, { id: 4, name: "launch (42)", status: "completed", conclusion: "failure", run_attempt: 1, started_at: iso(now - HOUR + min), completed_at: iso(now - HOUR + 5 * min) }],
+    74: [{ id: 5, name: "dispatch", status: "completed", completed_at: iso(now - HOUR) }],
+    75: [{ id: 6, name: "dispatch", status: "completed", completed_at: iso(now - HOUR) }, { id: 7, name: "launch (45)", status: "completed", conclusion: "failure", run_attempt: 1, started_at: iso(now - HOUR + min), completed_at: iso(now - HOUR + 2 * min) }],
+    76: [{ id: 8, name: "dispatch", status: "completed", completed_at: iso(now - HOUR) }, { id: 9, name: "launch (99)", status: "completed", run_attempt: 1, completed_at: iso(now - HOUR + 3 * min) }],
   };
+  const runs = { 74: { status: "in_progress", updated_at: iso(now - HOUR) }, 76: { status: "completed", updated_at: iso(now - HOUR + 4 * min) } };
+  const reads = [];
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -532,8 +551,14 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     const n = Number(/\/issues\/(\d+)\//.exec(u.pathname)?.[1]);
     const run = /\/actions\/runs\/(\d+)\/jobs$/.exec(u.pathname)?.[1];
-    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [iss(41), iss(42), iss(43)]);
+    const runOnly = /\/actions\/runs\/(\d+)$/.exec(u.pathname)?.[1];
+    if (run || runOnly) reads.push(u.pathname);
+    if (method === "GET" && u.pathname === `/repos/${REPO.full}/issues`) return json(u.searchParams.get("state") === "closed" ? [] : [41, 42, 43, 44, 45, 46, 47].map(iss));
+    if (method === "GET" && (run === "77" || runOnly === "77")) return json({ message: "Not Found" }, 404);
     if (method === "GET" && run) return jobs[run] ? json({ total_count: jobs[run].length, jobs: jobs[run] }) : json({ message: "Server Error" }, 502);
+    if (method === "GET" && runOnly) return runs[runOnly] ? json(runs[runOnly]) : json({ message: "Server Error" }, 502);
+    // #45's read here is older than its record: its marker still pending.
+    if (method === "GET" && n === 45 && /\/comments$/.test(u.pathname)) return json([{ id: 145, user: BOT, updated_at: iso(now), body: named(45, "75") }]);
     if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 2 * HOUR) }]);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /\/issues\/\d+\/comments$/.test(u.pathname)) return json([{ id: 100 + n, user: BOT, updated_at: iso(now), body: s.bodyOf(n, marker(n, "sandbox")) }]);
@@ -557,6 +582,24 @@ test("dispatch: a starting marker is settled by its launch job as GitHub lists i
     assert.ok(!r.relaunch.includes(43));
     assert.equal(sandboxRecordOf(s.bodyOf(43, marker(43, "sandbox"))).launches.at(-1).ok, null);
     assert.ok(r.deadlines.some((d) => d.kind === "retry"));
+    // #44: no launch job listed while its run goes on: in flight, no strike (GitHub lists the matrix after dispatch ends).
+    assert.ok(!r.relaunch.includes(44), "a launch job still to be listed is not named again");
+    assert.equal(sandboxRecordOf(s.bodyOf(44, marker(44, "sandbox"))).launches.at(-1).ok, null, "no strike while the run goes on");
+    // #46: its run completed with no launch job for it: lost, at the run's end.
+    const lost46 = sandboxRecordOf(s.bodyOf(46, marker(46, "sandbox"))).launches.find((l) => l.run === "76");
+    assert.deepEqual([lost46.ok, lost46.code, lost46.at], [false, "lost", iso(now - HOUR + 4 * min)]);
+    // #47: GitHub holds no such run any more: no launch job can be in flight, so it is lost at its marker's time.
+    const lost47 = sandboxRecordOf(s.bodyOf(47, marker(47, "sandbox"))).launches.find((l) => l.run === "77");
+    assert.deepEqual([lost47.ok, lost47.code, lost47.at], [false, "lost", iso(now - HOUR)]);
+    assert.ok(r.relaunch.includes(47), "its pause has passed: named again");
+    // #45: the record under the lock holds its launcher's failure 30 s ago, not a lost start an hour ago: it waits its pause.
+    assert.ok(!r.relaunch.includes(45), "the launcher's own failure decides its retry");
+    assert.deepEqual(r.deadlines.find((d) => d.issue === 45), { issue: 45, kind: "start-retry", at: iso(now - 30_000 + START_RETRY_MS) });
+    assert.deepEqual(sandboxRecordOf(s.bodyOf(45, marker(45, "sandbox"))).launches.map((l) => l.code), ["error"]);
+    // Each run read once (run 73's 502 aside: its read retries): its run itself only where no launch job is listed.
+    const once = reads.filter((p) => !p.includes("/runs/73/"));
+    assert.equal(once.length, new Set(once).size);
+    assert.deepEqual(reads.filter((p) => !p.endsWith("/jobs")).sort(), [`/repos/${REPO.full}/actions/runs/74`, `/repos/${REPO.full}/actions/runs/76`]);
   } finally {
     globalThis.fetch = realFetch;
     if (saved === undefined) delete process.env.GITHUB_API_URL;
@@ -606,7 +649,7 @@ test("a deferred stage's note: the vendor's code, the try count, the next try, a
   assert.match(note, /`unavailable`/);
   assert.match(note, /5 time\(s\) in a row/);
   assert.match(note, /2026-11-10 12:30Z/);
-  assert.match(deferredNote({ stage: "work", vendor: "vercel", code: "<script>", tries: 1, next: NaN }), /`\?`.*New Objectives on this route wait while the vendor refuses other Objectives too/);
+  assert.match(deferredNote({ stage: "work", vendor: "vercel", code: "<script>", tries: 1, next: NaN }), /`\?`.*new ones start one at a time, each once the try before it has its answer/);
 });
 
 test("dispatch: the run that names a launch owns it: a wake when its launch job could first have ended, and a launch that started nothing ticks", async () => {

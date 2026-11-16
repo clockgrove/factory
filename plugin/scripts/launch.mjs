@@ -1169,7 +1169,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
  */
 export function deferredNote({ stage, vendor, code, tries, next }) {
   const when = Number.isFinite(next) ? new Date(next).toISOString().slice(0, 16).replace("T", " ") + "Z" : "soon";
-  const route = "New Objectives on this route wait while the vendor refuses other Objectives too; once another starts, only this one's own tries go on.";
+  const route = "Until another Objective starts on this route, new ones start one at a time, each once the try before it has its answer; once another starts, only this one's own tries go on.";
   return `Factory: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
 }
 

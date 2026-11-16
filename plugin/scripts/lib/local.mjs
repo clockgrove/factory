@@ -513,8 +513,8 @@ export async function prepareClone(clone, dirs, run, { clear = false, fresh = fa
   const r = await run([process.execPath, "-e", PREPARE_CLONE, clone, clear ? "1" : fresh ? (strict ? "fresh-strict" : "fresh") : "0", JSON.stringify(locks), ...dirs]);
   // `strict` (a fresh work stage, worker.mjs): leftovers that could not all be removed are a failure, code clone-clean.
   // Its output can name a path on this machine (the clone, wherever it is): it goes to the log, never into the error.
-  if (r.code === 4) throw commandFailed("the clone's leftovers could not all be removed", r, { code: "clone-clean" });
-  if (r.code !== 0) throw commandFailed("the clone could not be prepared in its sandbox", r);
+  if (r.code === 4) throw commandFailed("the clone's leftovers could not all be removed", r, { code: "clone-clean", exitCode: 4 });
+  if (r.code !== 0) throw commandFailed("the clone could not be prepared in its sandbox", r, { exitCode: r.code ?? r.signal ?? null });
   try {
     return { locks: [], ...JSON.parse(String(r.stdout).trim().split("\n").at(-1)) };
   } catch {

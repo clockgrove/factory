@@ -244,7 +244,8 @@ const number = (v) => v.trim() !== "" && Number.isFinite(Number(v));
 export const OWNER_LIMITS = {
   FACTORY_USAGE_LIMIT_WAITS: { whole: true, from: 0, max: 10 },
   FACTORY_USAGE_LIMIT_MOVE_MINUTES: { from: 0, above: true, max: 24 * 60 },
-  // At least two of the hourly beats a loop writes on a paused Objective's claim (local.mjs PAUSED_BEAT_MS).
+  // At least two of the hourly beats a loop writes on a paused Objective's claim (local.mjs PAUSED_BEAT_MS), and twice
+  // the most a local stage waits in place writing none (FACTORY_LOCAL_WAIT_MINUTES).
   FACTORY_CLAIM_PAUSE_HOURS: { from: 2, max: 30 * 24 },
   FACTORY_SIBLING_WAIT_HOURS: { from: 0, above: true, max: 7 * 24 },
   FACTORY_MAX_PARTS: { whole: true, from: 1, max: 50 },

@@ -180,7 +180,7 @@ inputs:
     description: On GitHub Actions and in the cloud sandbox with automatic account choice, a usage limit that resets further away than this many minutes, while another account is free, ends the stage so the Objective goes on there, starting afresh from its branch; 60 when empty. A number above 0, at most 1440. Scheduling only.
     required: false
   claim_pause_hours:
-    description: How long an Objective a local loop holds may stay paused while that loop is away (its machine asleep or off, serve stopped) before the dispatcher Blocks it; 24 when empty. A number from 2 (twice the hourly beat a loop writes on a paused claim) to 720 (30 days). Keep it above local mode's FACTORY_LOCAL_OUTAGE_HOURS, so an outage Blocks naming the outage first.
+    description: How long an Objective a local loop holds may stay paused while that loop is away (its machine asleep or off, serve stopped) before the dispatcher Blocks it, and how long a factory:local Objective no loop has claimed (Running, or In review with its review owed) or whose claim cannot be read waits for one; 24 when empty. A number from 2 (twice the hourly beat a loop writes on a paused claim, and twice the most a local stage waits in place) to 720 (30 days). Keep it above local mode's FACTORY_LOCAL_OUTAGE_HOURS, so an outage Blocks naming the outage first.
     required: false
   sibling_wait_hours:
     description: The longest a hand-off to review, or a conflicting PR's rebase, waits for a sibling ahead of it that it conflicts with (sibling_hold), counted from its first wait; then it goes on beside the sibling. 6 when empty. A number above 0, at most 168 (7 days). Scheduling only.

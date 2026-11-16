@@ -105,9 +105,9 @@
       }
     },
     "factory-serve": {
-      "sha256": "1bf32c25a12770637fa022903b84dfd25ad435e35a71d4e36ee77f66db798b90",
+      "sha256": "74cc937471c415074d1f2c4889f32f2fb77f67eb20e11d2189668202e0dffbc8",
       "lines": 34,
-      "words": 697
+      "words": 699
     },
     "factory-setup": {
       "sha256": "06f8f9f9e02ac9d08a827d8fc1f0461b9a30c1b0fc569f09a06be333a4d805f4",

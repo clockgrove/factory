@@ -185,12 +185,13 @@ export function keptPrompt(prompt, { note = "" } = {}) {
 /**
  * What a failed install (checkout.mjs installDeps: {ok, reason}) means for a work stage: `block` with its reason, as for
  * any stage; but on a continued stage's kept checkout, whose pass may have stopped mid-way through a dependency change
- * (a manifest edited, its lockfile not yet), the pass goes on and is told (`note`), so it can finish that change. {}
- * when the install succeeded.
+ * (a manifest edited, its lockfile not yet), the pass goes on and is told (`note`), so it can finish that change,
+ * unless a program the install runs is missing (`absent`), which no pass can fix. {} when the install succeeded.
  */
 export function installEnd(result, { continued, command }) {
   if (result.ok) return {};
-  if (!continued) return { block: result.reason };
+  // A program the install needs that is not there (installDeps `absent`) is setup's to bring, never the pass's.
+  if (!continued || result.absent?.length) return { block: result.reason };
   return { note: `Factory's install (${command}) failed on this checkout, which keeps your unfinished changes: finish any dependency change, its lockfile included, and install before you validate.` };
 }
 

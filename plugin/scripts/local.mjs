@@ -58,6 +58,7 @@ import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout,
 import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
+import { openCommentCheck } from "./lib/comment-check.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
@@ -2982,7 +2983,7 @@ export class Local {
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
-        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
+        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
         const why = mergeBlockReason(how, report);
         if (why) {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
@@ -3984,7 +3985,7 @@ async function handoverForPerson(issue, flags) {
 
 /**
  * The review `factory post-review` posts from a findings file's text, or a throw when the file is no reviewer pass: it
- * holds no reviewer JSON, or it judges none of the issue's acceptance entries (handoff.mjs reviewMissed). On a foundation
+ * holds no reviewer JSON, or it judges no acceptance entry (handoff.mjs reviewMissed). On a foundation
  * Objective (`foundation`, foundationTrusted) the file also holds the foundation pass, `"foundation": {"comments": [...]}`,
  * posted as the review job posts it; a file without it, or with it on any other Objective, is refused. Nothing is
  * posted then, so the user fixes the file and runs the command again; a review carrying the marker would stop the
@@ -4001,7 +4002,7 @@ export function reviewPostFor({ issue, text, file, diff, entries, foundation = f
   }
   const review = whole === undefined ? parseReview(text) : reviewOfValue(whole);
   if (!review.parsed) throw new Error(`${file} holds no reviewer JSON; nothing posted`);
-  if (reviewMissed({ review, entries })) throw new Error(`${file} judges none of the issue's acceptance entries (${entries.map((e) => e.id).join(", ")}); nothing posted`);
+  if (reviewMissed({ review, entries })) throw new Error(entries.length ? `${file} judges none of the issue's acceptance entries (${entries.map((e) => e.id).join(", ")}); nothing posted` : `${file} judges no acceptance entry (its "acceptance" list is empty); nothing posted`);
   const pass = whole && typeof whole === "object" && !Array.isArray(whole) ? whole.foundation : undefined;
   if (foundation && !Array.isArray(pass?.comments)) throw new Error(`${file} holds no foundation pass ("foundation": {"comments": [...]}), which #${issue}'s factory:foundation label asks for; nothing posted`);
   if (!foundation && pass !== undefined) throw new Error(`${file} holds a foundation pass, but #${issue} is not a foundation Objective (no trusted factory:foundation label); nothing posted`);

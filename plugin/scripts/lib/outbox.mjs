@@ -13,9 +13,10 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, guardLinks, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fenceDecidable, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, guardLinks, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
+import { UsageLimitReached } from "./harness.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
 import { commandFailed, gitError, heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
@@ -51,6 +52,10 @@ const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const PACKAGE_JSON_MAX = 1024 * 1024;
 /** The most of one diff the rebase check's decision model is given (box.rebaseLeft): a larger one is not judged. */
 export const JUDGE_MAX_BYTES = 32 * 1024;
+/** The most of one file's diff the fence check is given (box.outside): a larger change is not judged, and stays refused. */
+export const FENCE_DIFF_MAX = 32 * 1024;
+/** The most fenced files the fence check asks about in one reading of the fence; the rest stay refused. */
+export const FENCE_MAX_PATHS = 10;
 /** The most paths the rebase check asks the decision model about, how many at once, and the most time it spends asking. */
 export const JUDGE_MAX_PATHS = 40;
 export const JUDGE_AT_ONCE = 4;
@@ -75,22 +80,26 @@ export const gitAtLeast = (v, min) => {
 };
 
 /**
- * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
- * Text is the only signal git gives here (no exit code tells a dropped connection from a refusal), so the list is kept
- * this short and in this one place. An HTTP 4xx other than 429 (GIT_REFUSED) is a refusal and wins over it.
+ * The HTTP status a remote refused a git or Git LFS request with, as git, curl and git-lfs print it (`The requested URL
+ * returned error: 403`, `RPC failed; HTTP 413`, LFS's `HTTP 404` / `Client error: … 403`): a 4xx is the remote's answer.
+ * 408 and 429 (a timeout, a rate limit) are no refusal of the request, and a 5xx is the remote failing, not answering.
  */
-const GIT_TRANSPORT = /returned error: (5\d\d|429)|RPC failed; (HTTP (5\d\d|429)|curl \d+)|Could not resolve host|Failed to connect to|Connection (timed out|reset|refused)|Operation timed out|Network is unreachable|the remote end hung up unexpectedly|unexpected disconnect|early EOF|gnutls_handshake|SSL_ERROR_SYSCALL|SSL_read|HTTP\/2 stream \d+ was not closed cleanly|dial tcp|connection reset by peer|i\/o timeout|TLS handshake timeout|no such host|Server error/i;
-const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4(?!29)\d\d\b/i;
+const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4(?!29|08)\d\d\b/i;
 
 /**
- * Whether a failed git network command (fetch, ls-remote, push, lfs push) failed in transport, so it may go again. A push
- * whose porcelain has a line for `ref` was answered (refused or done) and is never transport, whatever else it says.
+ * Whether a failed git network command (fetch, ls-remote, push, lfs push) got no answer from the remote, so it may go
+ * again: it ended with an exit code (not timed out or killed) and nothing in its output is the remote's answer. The
+ * answers: for a push, git's porcelain line for `ref` (done, or refused: rejected, a hook's decline), except git's
+ * `[remote failure]`, a remote that failed to report the ref's status; for any command, an HTTP 4xx refusal
+ * (GIT_REFUSED). Anything else (a dropped connection, DNS, TLS, a 5xx, a timeout of the remote) never completed. A
+ * refusal git reports without a status (a missing ref, a 401's `Authentication failed`) is tried again within
+ * GIT_RETRY's bound before it stands.
  */
 export function gitTransport(r, ref = null) {
   if (!r || r.code === 0 || r.timedOut || r.code == null) return false;
-  if (ref && String(r.stdout).split("\n").some((l) => l.split("\t")[1]?.endsWith(`:${ref}`))) return false;
-  const text = `${r.stdout}\n${r.stderr}`;
-  return !GIT_REFUSED.test(text) && GIT_TRANSPORT.test(text);
+  const line = ref ? String(r.stdout).split("\n").map((l) => l.split("\t")).find((f) => f[1]?.endsWith(`:${ref}`)) : null;
+  if (line) return /^\[remote failure\]/.test(String(line[2] || ""));
+  return !GIT_REFUSED.test(`${r.stdout}\n${r.stderr}`);
 }
 
 /**
@@ -248,7 +257,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, toolchainPaths = [], setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -290,7 +299,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       if (r.code === 0 || n >= GIT_RETRY.tries || !gitTransport(r, ref)) return r;
       const wait = Math.round(RETRY.baseMs * 2 ** (n - 1) * (0.7 + 0.6 * RETRY.random()));
       if (RETRY.now() + wait > end) return r;
-      log(`git ${what}: a network failure (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
+      log(`git ${what}: no answer from the remote (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
       await RETRY.sleep(wait);
       if (landed && (await landed().catch(() => false))) return { ...r, code: 0, landed: true };
     }
@@ -340,6 +349,10 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     failed: false,
     error: "",
     errorKind: "",
+    // The Block's cause for a fix-scope refusal the fence check could not judge (`factory`, `outage`), else null.
+    errorCause: null,
+    // The fence check (fence-check.mjs openFenceCheck), set by the stage once its decider exists; null: none asked.
+    fenceCheck: null,
     lfsRefused: false,
     head: null,
     conflicts: [],
@@ -365,10 +378,11 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   let unsynced = null;
   // `kind`: what refused it, for a caller that names it apart ("protected", "fix-scope", "lfs-quota": GitHub's Git LFS
   // refused the upload for its quota or storage; "" for anything else).
-  const refuse = (reason, { lfs = false, kind = "" } = {}) => {
+  const refuse = (reason, { lfs = false, kind = "", cause = null } = {}) => {
     box.failed = true;
     box.error = reason;
     box.errorKind = kind;
+    box.errorCause = cause;
     box.lfsRefused = lfs;
     return false;
   };
@@ -1101,20 +1115,23 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * comments) widen it at each call. `toolchain` (what the `setup` and `install` commands refer to, logic.mjs
    * setupPaths) counts as toolchain: the files they name, the package.json scripts they run, and, when they may run a
    * file Factory cannot name, every file. Every later push is checked against it (box.outside). A fence that could not be set fails closed: every
-   * later push is refused, never let through unchecked.
+   * later push is refused, never let through unchecked. `lead` (the failing checks' lead lines) and `comments` (the review
+   * comments the pass answers, [{path, line, body}]) are this pass's, for the fence check's question: each call replaces them.
    */
-  box.fence = async ({ plan = "", texts = [] } = {}) => {
+  box.fence = async ({ plan = "", texts = [], lead = "", comments = [] } = {}) => {
     if (!fence) {
       const since = await take().catch(() => expected || base);
       try {
-        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved };
+        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], plan, extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved, paths: toolchainPaths };
       } catch (e) {
-        fence = { since, prior: [], texts: [], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved, broken: String(e?.message || e).slice(0, 160) };
+        fence = { since, prior: [], texts: [], plan: "", extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved, paths: toolchainPaths, broken: String(e?.message || e).slice(0, 160) };
         throw e;
       }
     }
     fence.texts.push(...texts);
     fence.texts = fence.texts.filter((t) => typeof t === "string" && t);
+    fence.lead = typeof lead === "string" ? lead : "";
+    fence.comments = Array.isArray(comments) ? comments : [];
   };
   box.fenced = () => !!fence;
   box.fenceStart = () => fence?.since ?? null;
@@ -1189,10 +1206,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   };
 
   /**
-   * The toolchain files changed since the fence started, on the branch, that its scope does not reach, and the
-   * package.json scripts of the `setup` and `install` commands it changed ([] unfenced).
+   * The toolchain files changed since the fence started, on the branch, that its scope does not reach and the fence
+   * check did not let go (fenceJudged), and the package.json scripts of the `setup` and `install` commands it changed
+   * ([] unfenced). What the fence check said of them is box.fenceVerdict().
    */
   box.outside = async ({ head = null } = {}) => {
+    verdict = { judged: [], told: [], undecided: [], cause: null, limited: null };
     if (!fence) return [];
     if (fence.broken) throw new Error(fence.broken);
     const h = head || (await take());
@@ -1202,8 +1221,113 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const own = new Set(await names([`${base}...${h}`]));
     const mine = since.filter((f) => own.has(f));
     const moved = await scriptsMoved(mine, fence.since, h, toolchain.scripts ?? []);
-    return [...(await outsideFiles(mine, h)), ...moved];
+    return fenceJudged([...(await outsideFiles(mine, h)), ...moved], h);
   };
+
+  // The fence check's verdicts in this stage: a yes by file, diff and what the question was given (the failure lines, the
+  // comments, the plan), so another red or comment asks again; a no by file and diff, so the same change is not asked
+  // again; and how many noes each file had (after two, a new change to it is not asked about). What it said in the last
+  // reading of the fence: {judged: ["<path>: <why>"] (Factory's record), told: [...] (the same for the worker, without
+  // the model's confidence), undecided: [paths], cause, limited}.
+  const allowed = new Set();
+  const denied = new Map();
+  const denials = new Map();
+  let verdict = { judged: [], told: [], undecided: [], cause: null, limited: null };
+  box.fenceVerdict = () => verdict;
+  const hashOf = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  // A path's entry at `rev` as git's literal pathspec reads it: its mode, null when `rev` has no such path.
+  const modeAt = async (rev, path) => {
+    const r = await git(["--literal-pathspecs", "ls-tree", "-z", rev, "--", path]);
+    if (r.code !== 0) return undefined;
+    const lines = r.stdout.split("\0").filter(Boolean);
+    if (!lines.length) return null;
+    const m = /^(\d+) \w+ [0-9a-f]+\t(.*)$/s.exec(lines[0]);
+    return lines.length === 1 && m && m[2] === path ? m[1] : undefined;
+  };
+  const regular = (mode) => mode === "100644" || mode === "100755";
+  /**
+   * `refused` (fixScopeRefused's) less the files the fence check (box.fenceCheck) judges part of the fix: only those
+   * logic.mjs fenceDecidable allows (a lockfile; never a protected path, or what setup or install names or runs, as the
+   * setup guard reads it on the default branch), FENCE_MAX_PATHS at most, each a regular file both where the fence
+   * starts and at the head (one the pass created or deleted is not judged), by
+   * the pass's textual diff to it from where the fence starts, given in full. A diff over FENCE_DIFF_MAX, a binary or
+   * empty one, or one that cannot be read is not judged. No check, and anything but its yes, keeps the file refused. The
+   * stage harness's usage limit stops the asking.
+   */
+  const fenceJudged = async (refused, h) => {
+    const check = box.fenceCheck;
+    if (!refused.length || !check?.judge || check.off) return refused;
+    const guard = await box.setupFiles().catch(() => undefined);
+    // A setup whose guard cannot be read: nothing is judged.
+    if (guard === undefined) return refused;
+    const ctx = { extra: fence.extra, unknown: fence.unknown, protectedList, guarded: guard?.files ?? [] };
+    const decidable = refused.filter((p) => fenceDecidable(p, ctx));
+    for (const path of decidable.slice(FENCE_MAX_PATHS)) verdict.judged.push(`${path}: not judged (over the cap of ${FENCE_MAX_PATHS} files)`);
+    const goes = new Set();
+    const not = (path, why) => {
+      verdict.judged.push(`${path}: not judged (${why})`);
+      verdict.told.push(`${path}: not judged (${why})`);
+    };
+    for (const path of decidable.slice(0, FENCE_MAX_PATHS)) {
+      const modes = await Promise.all([fence.since, h].map((rev) => modeAt(rev, path)));
+      // A lockfile the pass created or deleted can change which install `install: auto` runs: never judged.
+      if (modes.some((m) => m === null)) {
+        not(path, "created or deleted by the pass");
+        continue;
+      }
+      if (!modes.every(regular)) {
+        not(path, "not a regular file");
+        continue;
+      }
+      const r = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", fence.since, h, "--", path], { maxBytes: FENCE_DIFF_MAX });
+      if (r.code !== 0 && !r.truncated) {
+        not(path, "its change could not be read");
+        continue;
+      }
+      if (r.truncated) {
+        not(path, `a change over ${FENCE_DIFF_MAX / 1024} KiB`);
+        continue;
+      }
+      if (!/^@@ /m.test(r.stdout) || /^(Binary files |GIT binary patch)/m.test(r.stdout)) {
+        not(path, "no textual change to read");
+        continue;
+      }
+      const change = hashOf(path, r.stdout);
+      const asked = hashOf(path, r.stdout, fence.lead, fence.comments, fence.plan);
+      let v = denied.get(change) ?? (allowed.has(asked) ? { allow: true, why: `${path}: judged part of the fix before`, told: "" } : null);
+      if (!v && (denials.get(path) ?? 0) >= 2) {
+        not(path, "judged twice already in this stage");
+        continue;
+      }
+      if (!v) {
+        v = await check.judge({ path, diff: r.stdout, lead: fence.lead, comments: fence.comments, plan: fence.plan });
+        if (v.allow) allowed.add(asked);
+        else if (!v.undecided) {
+          denied.set(change, v);
+          denials.set(path, (denials.get(path) ?? 0) + 1);
+        }
+      }
+      if (v.allow) {
+        goes.add(path);
+        log(`fence check: ${v.why}; it goes`);
+        continue;
+      }
+      verdict.judged.push(v.why);
+      verdict.told.push(v.told || v.why);
+      if (v.undecided) {
+        verdict.undecided.push(path);
+        verdict.cause = verdict.cause === "factory" || v.cause === "factory" ? "factory" : v.cause;
+      }
+      if (v.limited) {
+        verdict.limited = v.limited;
+        break;
+      }
+    }
+    return refused.filter((p) => !goes.has(p));
+  };
+  /** The Block's cause for `out`, still refused: the fence check's (`factory`, `outage`) when it gave no answer on every one of them, else null (the work's). */
+  const undecidedCause = (out) => (verdict.cause && out.length && out.every((p) => verdict.undecided.includes(p)) ? verdict.cause : null);
+  box.fenceCause = undecidedCause;
   /** box.outside's toolchain files among `mine`, the branch's own changes since the fence started, to the head `h`. */
   const outsideFiles = async (mine, h) => {
     let refused = fixScopeRefused(mine, fence);
@@ -1331,7 +1455,17 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (leak) return refuse(leak);
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
-    if (outside.length) return refuse(fixScopeReason(outside, toolchain.unresolved), { kind: "fix-scope" });
+    // The stage harness's usage limit stopped the fence check's questions: nothing goes out, and the stage ends on it as a
+    // pass meeting the limit does (paused locally until the reset), never as a refusal of the work.
+    if (verdict.limited) {
+      const why = `the fence check met ${verdict.limited.harness}'s usage limit; nothing of the fix pass was pushed, and it is checked again after the reset`;
+      refuse(why);
+      log(why);
+      throw new UsageLimitReached(verdict.limited, { since: Date.now(), label: "fence check" });
+    }
+    // A refusal that stands only because the fence check gave no answer on every file still refused is Factory's (or its
+    // vendor's outage), not the work's.
+    if (outside.length) return refuse(fixScopeReason(outside, toolchain.unresolved, verdict.judged), { kind: "fix-scope", cause: undecidedCause(outside) });
     const plain = await plainLfsBlobs(mirror, base, { source: "HEAD", env: gitEnv() }).catch(() => []);
     if (plain.length) return refuse(`committed as plain git blobs though .gitattributes routes them to Git LFS: ${plain.slice(0, 5).join(", ")}`, { lfs: true });
     const media = await lfsMedia(head);

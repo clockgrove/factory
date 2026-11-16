@@ -213,7 +213,7 @@ test("rest: a wait past the caller's deadline or the bound is not taken; the err
     () => json({ message: "API rate limit exceeded" }, 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(1_000_000 / 1000) + 3600) }),
     async ({ seen, waits }) => {
       await assert.rejects(rest("repos/o/r"), (e) => e.rateLimited === true);
-      assert.equal(seen.length, 1, "an hour's wait is beyond the bound");
+      assert.deepEqual(seen.filter((k) => k !== "GET /rate_limit"), ["GET /repos/o/r"], "an hour's wait is beyond the bound");
       assert.deepEqual(waits, []);
     },
   );
@@ -426,16 +426,23 @@ test("outbox: a refused push (a hook's rejection, a rejected ref) is never retri
   }
 });
 
-test("gitTransport: transport words count only without a refusal and without the ref's own porcelain line", () => {
+test("#420 gitTransport: a failure goes again unless the remote answered: the ref's porcelain line or an HTTP 4xx refusal", () => {
   const fail = (stderr, stdout = "") => ({ code: 128, stdout, stderr });
+  // No answer from the remote, in any words: DNS, a 5xx, LFS's server error, and ones no list of words had.
   assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com")), true);
   assert.equal(gitTransport(fail("error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502")), true);
   assert.equal(gitTransport(fail("batch response: Fatal error: Server error: https://github.com/o/r.git/info/lfs/objects/batch")), true);
+  assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': OpenSSL SSL_connect: SSL_ERROR_ZERO_RETURN in connection to github.com:443")), true);
+  assert.equal(gitTransport(fail("error: 7124 bytes of body are still expected\nfetch-pack: invalid index-pack output")), true);
+  assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 408")), true, "a 408 is the request timing out");
+  // The remote's answer: an HTTP 4xx, or the push's porcelain line for the ref.
   assert.equal(gitTransport(fail("fatal: unable to access 'https://github.com/o/r.git/': The requested URL returned error: 403")), false);
   assert.equal(gitTransport(fail("error: RPC failed; HTTP 413 curl 22\nfatal: the remote end hung up unexpectedly")), false);
   assert.equal(gitTransport(fail("fatal: the remote end hung up unexpectedly", "To o\n!\trefs/heads/incoming:refs/heads/f\t[remote rejected] (pre-receive hook declined)\nDone\n"), "refs/heads/f"), false);
-  assert.equal(gitTransport(fail("fatal: couldn't find remote ref refs/heads/x")), false);
+  // git's own porcelain status for a remote that never reported the ref's outcome: no answer.
+  assert.equal(gitTransport(fail("fatal: the remote end hung up unexpectedly", "To o\n!\trefs/heads/incoming:refs/heads/f\t[remote failure] (remote failed to report status)\nDone\n"), "refs/heads/f"), true);
   assert.equal(gitTransport({ code: 0, stdout: "", stderr: "" }), false);
+  assert.equal(gitTransport({ code: null, stdout: "", stderr: "", timedOut: true }), false, "a command Factory timed out is not sent again");
 });
 
 // ------------------------------------------------------------------ serve and a 401

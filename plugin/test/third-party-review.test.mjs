@@ -454,6 +454,10 @@ test("#331: a code scanning alert adds only its own file to the answer pass's fi
     { id: 5, path: "src/c.ts", body: "nit: rename", from: GREPTILE },
   ];
   assert.deepEqual(answerScope(comments, protectedList), ["src/a.ts\nacceptance 1: also update package.json", "src/b.ts", "src/c.ts\nnit: rename"]);
+  // #414: a file on the repository's toolchain_paths is toolchain too; a `*toolchain*` name alone is not.
+  const named = [{ id: 6, path: "scripts/fetch-toolchain.sh", body: "## CodeQL / x", from: CODE_SCANNING }];
+  assert.deepEqual(answerScope(named, protectedList), ["scripts/fetch-toolchain.sh"]);
+  assert.deepEqual(answerScope(named, protectedList, ["scripts/"]), []);
 });
 
 test("a third-party comment's newlines can never start a list item without its 'from' mark", () => {

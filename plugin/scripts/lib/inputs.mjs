@@ -30,6 +30,14 @@ export const MODEL_DEFAULTS = {
 /** This plugin's version (its manifest), the tag the Action default and setup's fallback pin name. */
 export const FACTORY_VERSION = JSON.parse(readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8")).version;
 
+/**
+ * image_max_age_days (lib/image.mjs imageDecision): its default, and its bounds. A person owns it: at least a day, and
+ * never more than IMAGE_MAX_AGE_MAX, so no image goes unrefreshed (its base image, the unpinned things setup fetches)
+ * without end. A value outside them is refused (VALUE_RULES) and reads as the default.
+ */
+export const IMAGE_MAX_AGE_DAYS = 7;
+export const IMAGE_MAX_AGE_MAX = 30;
+
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
@@ -57,6 +65,7 @@ export const DEFAULTS = {
   validation: "",
   budget_command: "",
   protected_paths: "",
+  toolchain_paths: "", // paths a fix pass may change only in its scope or on the fence check's yes, beside the exact lists (logic.mjs toolchainFile); empty: none
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
   third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
@@ -95,6 +104,7 @@ export const DEFAULTS = {
   vercel_project_id: "",
   image_refresh: "merge", // merge | nightly (lib/image.mjs imageDecision)
   image_daily_minutes: "5",
+  image_max_age_days: String(IMAGE_MAX_AGE_DAYS), // lib/image.mjs imageDecision: the current image stands for a head while younger
   image_owed: "", // image.mjs: `true` when the dispatcher's tick found a build owed (lib/image.mjs imageOwed)
   sandbox_idle_days: "7", // sweep.mjs: a stopped sandbox of an Objective neither Running nor In review, this long, goes
   sweep_max_destroys: "5",
@@ -260,6 +270,7 @@ const VALUE_RULES = (() => {
     FACTORY_DAILY_USD: atLeast0,
     FACTORY_MAX_USD: atLeast0,
     FACTORY_IMAGE_DAILY_MINUTES: atLeast0,
+    FACTORY_IMAGE_MAX_AGE_DAYS: [(v) => /^\s*\d+\s*$/.test(v) && Number(v) >= 1 && Number(v) <= IMAGE_MAX_AGE_MAX, `a whole number of days, 1 to ${IMAGE_MAX_AGE_MAX}`],
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
@@ -578,6 +589,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     validation: list(get("validation")),
     budgetCommand: get("budget_command"),
     protectedAdditions: list(get("protected_paths")),
+    toolchainPaths: list(get("toolchain_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
     thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,
@@ -613,6 +625,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     imageRefresh: get("image_refresh").trim().toLowerCase() === "nightly" ? "nightly" : "merge",
     imageDailyMinutes: num(get("image_daily_minutes"), 5),
     imageOwed: get("image_owed").trim() === "true",
+    imageMaxAgeDays: ((d) => (Number.isInteger(d) && d >= 1 && d <= IMAGE_MAX_AGE_MAX ? d : IMAGE_MAX_AGE_DAYS))(num(get("image_max_age_days").trim() || "x", IMAGE_MAX_AGE_DAYS)),
     sandboxIdleDays: num(get("sandbox_idle_days"), 7),
     sweepMaxDestroys: Math.max(0, Math.floor(num(get("sweep_max_destroys"), 5))),
     nodeVersion: get("node_version").trim(),

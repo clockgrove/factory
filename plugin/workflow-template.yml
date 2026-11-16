@@ -76,8 +76,9 @@ env:
   # {{#sandbox}}
   FACTORY_SANDBOX: {{sandbox}} # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
   FACTORY_SANDBOX_VCPUS: {{sandbox_vcpus}} # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test
-  FACTORY_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on each merge until the minutes below, then on the next UTC day's first tick; nightly: once a day
+  FACTORY_IMAGE_REFRESH: {{image_refresh}} # merge: rebuild the sandbox image on a merge that changes what it is made from (docs/ADAPTERS.md, Refresh) until the minutes below, then on the next UTC day's first tick; nightly: once a day
   FACTORY_IMAGE_DAILY_MINUTES: {{image_daily_minutes}} # image build minutes a day on merges
+  FACTORY_IMAGE_MAX_AGE_DAYS: {{image_max_age_days}} # an image older than this many days (1 to 30) is built again even when nothing it is made from changed
   FACTORY_SANDBOX_IDLE_DAYS: {{sandbox_idle_days}} # the sweep destroys a sandbox stopped this long, its Objective neither Running nor In review
   FACTORY_SWEEP_MAX_DESTROYS: {{sweep_max_destroys}} # sandboxes one sweep run destroys at most
   # {{/sandbox}}
@@ -384,7 +385,8 @@ jobs:
   image:
     # The sandbox image every stage starts from: FACTORY_SETUP run in a fresh sandbox beside a clone of the default
     # branch's head, the dependency store and the harness CLIs, kept as a snapshot and recorded by the Factory App on
-    # its image issue (label factory:image). Built on each merge until today's builds reach FACTORY_IMAGE_DAILY_MINUTES,
+    # its image issue (label factory:image). Built on a merge that changes what it is made from, or once it is
+    # FACTORY_IMAGE_MAX_AGE_DAYS old (docs/ADAPTERS.md, Refresh), until today's builds reach FACTORY_IMAGE_DAILY_MINUTES,
     # then nightly; by hand with the workflow's `image` input. Never on a pull request: the image is the default branch's.
     # A head an earlier day left unbuilt (today's minutes used up, or image_refresh nightly) is built on the UTC day's
     # first dispatcher tick that finds it owed (needs.dispatch.outputs.image_owed), from the default branch's head, on

@@ -19,7 +19,7 @@ import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, che
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -35,6 +35,7 @@ import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/netw
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
+import { openCommentCheck } from "./lib/comment-check.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -1084,7 +1085,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           // green, with no unread maintainer decision. Nothing is armed between ticks.
           const report = {};
           if (queue) hungMs ??= await queueBoundMs(repo, opts);
-          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }) }, opts).catch((e) => {
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
             log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
             return null;
           });
@@ -1499,20 +1500,16 @@ export function firedByWake(eventName, payload) {
 
 /**
  * Whether a run is worth its reads: every event but an issue closing is. A closed issue is when it was an Objective, or
- * when it blocks one: GitHub's own count in the payload (`issue_dependencies_summary.blocking`), or a "Blocked by #N"
- * line in an open Objective's body (one listing read). A payload with no such count cannot rule a relation out, so the
- * run goes ahead.
+ * when it blocks one by GitHub's own count in the payload (`issue_dependencies_summary.blocking`). That count is
+ * GitHub's issue dependencies, which the dispatcher reads (blockedByRelations) wherever the payload carries it; a payload
+ * with no such count is from a host without them, where body lines are the fallback, so the run goes ahead.
  */
-export async function closedIssueTicks(eventName, payload, { objectiveLabel, objectives }) {
+export function closedIssueTicks(eventName, payload, { objectiveLabel }) {
   if (eventName !== "issues" || payload?.action !== "closed") return true;
   const issue = payload.issue || {};
   if ((issue.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === objectiveLabel)) return true;
   const summary = issue.issue_dependencies_summary;
-  if (!summary || typeof summary.blocking !== "number") return true;
-  if (summary.blocking > 0) return true;
-  const open = await objectives().catch(() => null);
-  if (!open) return true;
-  return open.some((o) => parseBlockedBy(o.body).includes(issue.number));
+  return !summary || typeof summary.blocking !== "number" || summary.blocking > 0;
 }
 
 /** The deadline kinds an event or a local loop owns: listed, never slept to on any repository. */
@@ -1586,7 +1583,7 @@ async function main() {
     payload = {};
   }
   const eventName = process.env.GITHUB_EVENT_NAME || "";
-  if (!(await closedIssueTicks(eventName, payload, { objectiveLabel: inputs.objectiveLabel, objectives: () => listIssuesByLabel(repoOf(inputs.repo), inputs.objectiveLabel, { token }) }))) {
+  if (!closedIssueTicks(eventName, payload, { objectiveLabel: inputs.objectiveLabel })) {
     log(`issue #${payload.issue?.number} closed: not an Objective and blocks none; nothing to do`);
     for (const [k, v] of [["issues", []], ["count", "0"], ["reason", ""], ["queue_watch", ""], ["wake_at", ""], ["wake_kind", ""], ["image_owed", ""]]) setOutput(k, v);
     return;

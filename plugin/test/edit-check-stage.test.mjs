@@ -53,7 +53,7 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
         return send(200, { api_key: exchanged.at(-1) });
       }
       if (req.method === "POST" && u.endsWith("/graphql")) {
-        if (/issue\(number/.test(JSON.parse(body).query)) return send(200, { data: { repository: { issue: { ...AFTER, lastEditedAt: "2026-11-15T11:00:00Z", author: kirk, editor: kirk, labels: { nodes: names.map((name) => ({ name })) } } } } });
+        if (/issue\(number/.test(JSON.parse(body).query)) return send(200, { data: { repository: { issue: { ...AFTER, lastEditedAt: "2026-11-15T11:00:00Z", author: kirk, editor: kirk, labels: { nodes: names.map((name) => ({ name })) }, renames: { nodes: [] } } } } });
         return send(200, { data: {} });
       }
       if (req.method === "GET" && /\/issues\/7$/.test(u)) return send(200, { number: 7, state: "open", ...AFTER, user: { login: "kirk" }, labels: names.map((name) => ({ name })) });

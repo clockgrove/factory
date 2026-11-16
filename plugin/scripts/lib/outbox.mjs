@@ -13,7 +13,7 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, guardLinks, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
@@ -1107,9 +1107,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (!fence) {
       const since = await take().catch(() => expected || base);
       try {
-        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], extra: toolchain.paths, unknown: toolchain.unresolved };
+        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved };
       } catch (e) {
-        fence = { since, prior: [], texts: [], extra: toolchain.paths, unknown: toolchain.unresolved, broken: String(e?.message || e).slice(0, 160) };
+        fence = { since, prior: [], texts: [], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved, broken: String(e?.message || e).slice(0, 160) };
         throw e;
       }
     }
@@ -1147,6 +1147,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return hits;
   };
 
+  const commandNamedHas = (guards, f) => guards.some((g) => g.named.includes(f));
   // The setup guard's view of a commit (logic.mjs setupGuard `io`), from one listing of its tree.
   const treeIo = async (rev) => {
     const ls = await git(["ls-tree", "-r", "-z", "--full-tree", rev]);
@@ -1304,12 +1305,24 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (setup && files.length) {
       const mb = await git(["merge-base", base, head]);
       const fork = mb.code === 0 ? mb.stdout.trim() : null;
-      const guards = [];
-      for (const rev of new Set([fork, base].filter(Boolean))) guards.push(await setupGuard(setup, await treeIo(rev)));
-      const unresolved = [...new Set(guards.flatMap((g) => g.unresolved))];
+      const at = new Map();
+      for (const rev of new Set([fork, base, start].filter(Boolean))) at.set(rev, await setupGuard(setup, await treeIo(rev)));
+      const guards = [...at.values()];
+      // What cannot be named where the branch left counts only while it still cannot at the stage's start: a script the
+      // default branch has fixed since (taken in by a catch-up merge) no longer refuses the push.
+      const still = new Set(at.get(start)?.unresolved ?? []);
+      const unresolved = [...new Set([...(at.get(base)?.unresolved ?? []), ...(fork ? at.get(fork).unresolved.filter((u) => fork === start || still.has(u)) : [])])];
       if (unresolved.length) return refuse(setupGuardReason([], unresolved), { kind: "protected" });
-      const covered = guards.flatMap((g) => g.files);
-      const touched = files.filter((f) => covered.some((p) => guardCovers(p, f)));
+      // Every guarded path with the pushed tree's symlinks followed too: a link the branch made along it leads elsewhere.
+      const covered = [...new Set(guards.flatMap((g) => g.files))];
+      const linked = await guardLinks(covered, await treeIo(head));
+      if (linked.unresolved.length) return refuse(setupGuardReason([], linked.unresolved), { kind: "protected" });
+      covered.push(...linked.paths);
+      // A change to pnpm-workspace.yaml's packages list alone stays the branch's (logic.mjs membershipOnly), though a
+      // package manager setup runs reads it; the setup command naming the file itself keeps it whole.
+      const membersOnly = async (f) => settingsFile(f) && !commandNamedHas(guards, f) && membershipOnly(await settingsAt(start, f), await settingsAt(head, f));
+      const touched = [];
+      for (const f of files) if (covered.some((p) => guardCovers(p, f)) && !(await membersOnly(f))) touched.push(f);
       const moved = await scriptsMoved(files, start, head, guards.flatMap((g) => g.scripts), fork);
       if (touched.length || moved.length) return refuse(setupGuardReason([...touched, ...moved]), { kind: "protected" });
     }

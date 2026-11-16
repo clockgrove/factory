@@ -2073,21 +2073,26 @@ export const LOCAL_TOKEN_PERMISSIONS = "Contents, Issues and Pull requests read 
  */
 export const variablesRefusedLine = (status) => `the local token cannot read this repository's variables (HTTP ${status}), so its FACTORY_* repository variables do not apply on this machine and the workflow's values stand; give the token Variables: read (docs/LOCAL.md, Set it up)`;
 
+const workflowWarned = new Set();
 /**
  * The adopter workflow's top-level `env:` block, so a local run uses the repository's own configuration, read from the
  * parsed file (yaml.mjs parseYaml): each FACTORY_* key whose value is text. An empty value reads as "", as Actions sets
  * it; a plain number or boolean reads as written in the file (`25`, `true`), where Actions may write a number its own
  * way (`1.0` as `1`), so quote one to be sure. A value that is an Actions expression (`${{ ... }}`) has no meaning off a
- * runner and is left out, and so is a mapping or a list. A file that does not parse throws (code `WORKFLOW_PARSE`).
+ * runner and is left out, and so is a mapping or a list. A file that does not parse throws (code `WORKFLOW_PARSE`);
+ * one with no env mapping to read is said through `warn`.
  */
-export function workflowEnv(text) {
+export function workflowEnv(text, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
   let doc;
   try {
     doc = parseYaml(text);
   } catch (e) {
     throw Object.assign(new Error(`.github/workflows/factory.yml does not parse (${e.message})`), { code: "WORKFLOW_PARSE" });
   }
-  const env = doc && typeof doc === "object" && !Array.isArray(doc) && doc.env && typeof doc.env === "object" && !Array.isArray(doc.env) ? doc.env : {};
+  const mapping = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  // An empty file, a scalar, or an `env:` that is no mapping holds no settings: said, never read silently as none.
+  if (!mapping(doc) || !mapping(doc.env)) warn(`.github/workflows/factory.yml ${!mapping(doc) ? "is no mapping" : doc.env === undefined ? "has no top-level env block" : "has an env: that is no mapping"}: no settings read from it`);
+  const env = mapping(doc) && mapping(doc.env) ? doc.env : {};
   const out = {};
   for (const [k, v] of Object.entries(env)) {
     if (!/^FACTORY_[A-Z0-9_]+$/.test(k)) continue;
@@ -2097,7 +2102,6 @@ export function workflowEnv(text) {
   return out;
 }
 
-const workflowWarned = new Set();
 /** The working tree's workflow env block (workflowEnv); none when the file is absent, or does not parse (said once per process, on stderr). */
 export function readWorkflowEnv(dir, { warn = (line) => workflowWarned.has(line) || (workflowWarned.add(line), process.stderr.write(`${line}\n`)) } = {}) {
   const file = join(dir, ".github", "workflows", "factory.yml");

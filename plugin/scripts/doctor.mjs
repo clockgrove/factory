@@ -1334,6 +1334,8 @@ export async function setupRuns(setup, checkout, env = process.env) {
   return { files, guard };
 }
 
+/** What the setup guard does not follow, said on doctor's setup-files row whatever the command. */
+export const SETUP_NOT_FOLLOWED = "Not followed, so protect them yourself: what a program reads by its own convention (a Makefile, docker compose files, the pyproject.toml uv or poetry read), what a file setup runs reads in turn (a script's own source), python -c imports and PYTHONPATH";
 const listed = (xs, n = 6) => `${xs.slice(0, n).join(", ")}${xs.length > n ? ` and ${xs.length - n} more` : ""}`;
 
 /**
@@ -1357,7 +1359,7 @@ export async function setupFilesCheck({ inputs, checkout, list = protectedPaths(
   const guarded = guard.files.filter((f) => !files.includes(f));
   const scripts = guard.scripts.map((x) => `${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`);
   const parts = [...(files.length ? [`${files.join(", ")} protected`] : []), ...(guarded.length ? [`a push changing ${listed(guarded)} is refused`] : []), ...(scripts.length ? [`and one changing ${listed(scripts)}`] : [])];
-  if (parts.length) out.unshift(PASS("setup files", `${parts.join("; ")}: what the command names or runs by name (a PATH entry, a package.json script and what it runs, a package manager's own files). Not followed: what a file it runs reads in turn (a script's own source, a Makefile, an install's lifecycle scripts)`));
+  out.unshift(PASS("setup files", `${parts.length ? `${parts.join("; ")}: what the command names or runs by name (a PATH entry, a package.json script and what it runs, an install's lifecycle scripts, a package manager's own files)` : "the command names no repository file it runs"}. ${SETUP_NOT_FOLLOWED}`));
   return out;
 }
 

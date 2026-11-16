@@ -44,11 +44,19 @@ const SCRIPT_ALIASES = { t: ["test"], tst: ["test"], restart: ["stop", "start"] 
 const PM_DIR = new Set(["--prefix", "-C", "--dir", "--cwd"]);
 const PM_WORKSPACE = /^(-r|--recursive|-w|--workspace|-ws|--workspaces|--workspace-root|-F|--filter|--include-workspace-root)(=|$)/;
 const PM_VALUED = new Set(["--filter", "-F", "--workspace", "-w", "--loglevel", "--registry", "--reporter", "--cache", "--userconfig", "--tag"]);
+// The install commands of each package manager, and the scripts an install runs (npm's documented lifecycle).
+const INSTALLS = { npm: new Set(["ci", "install", "i", "add", "clean-install", "ic", "install-clean", "isntall"]), pnpm: new Set(["install", "i", "add"]), yarn: new Set(["install", "add"]), bun: new Set(["install", "i", "add"]) };
+const LIFECYCLE = ["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"];
 // What a package manager reads beside each package.json it runs from: its configuration and hook files.
 const PM_FILES = { npm: [".npmrc"], pnpm: [".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml"], yarn: [".yarnrc", ".yarnrc.yml", ".npmrc"], bun: ["bunfig.toml", ".npmrc"] };
 // Script runners other than the package managers: `node --run X`, `turbo run X` (every workspace package, with
 // turbo.json), `npm-run-all`/`run-s`/`run-p` (the names given).
 const RUN_ALL = new Set(["npm-run-all", "run-s", "run-p"]);
+// node: the options that load a module before the script, and the extensions it tries for an extensionless one.
+const NODE_LOADS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader"]);
+const NODE_EXTENSIONS = [".js", ".mjs", ".cjs", ".json", ".node"];
+// find's actions that run a program on what it finds.
+const FIND_RUNS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 // pip's install sources: a directory is built through its build backend files.
 const BACKEND = ["pyproject.toml", "setup.py", "setup.cfg"];
 // A literal argument holding one of these may be shell code another program runs (`flock /l -c './x.sh'`): it is read
@@ -110,28 +118,36 @@ const pathLooking = (v) => v.includes("/") || /\.[A-Za-z0-9]+$/.test(v);
  * What a shell command refers to in the repository, read from its bash syntax tree. `ctx`: `cwd` (from the root, where
  * it runs), `errexit` (it runs under `bash -e`, as setup and install do; a package.json script does not), `env` (the
  * environment it starts with) and `roots` (absolute directories that are the repository: an absolute path under one is
- * a path in it). Returns {paths, maybe, guarded, scripts, unresolved}:
- * - `paths`: what a word names as a file, from the root: the command run (`./x.sh`), a script operand (`bash x.sh`), a
- *   path-looking argument (a directory, an extension, `./`), an option's or `NAME=`'s value, an input redirection, and
- *   the same inside code the command runs (`bash -c`, `su -c`, `sudo -s`, `eval`, `trap`, `$(…)`, a here-document fed to
- *   a shell), in each directory a literal `cd` may leave it (under `bash -e` a failing `cd` stops the command, except
- *   in an `&&`/`||` list). Every path-looking word of the text, as Factory read it before it parsed commands, counts
- *   too, and of a here-document, an assignment's value or inline code of another language.
- * - `maybe`: any other literal argument: a path only if the repository holds it.
+ * a path in it). Returns {paths, guarded, scripts, unresolved}:
+ * - `paths`: what setup may run or read from the repository, from the root, a path whether it exists yet or not: a word
+ *   where setup runs what it names (the command word, a shell's or interpreter's script operand, a `source`/`.`
+ *   operand, a `find … -exec` start path, a `run-parts` directory, a shell's input redirection, `BASH_ENV`/`ENV`),
+ *   bare or not; any other argument, option value or `NAME=` value that is one fixed path-looking string (a directory,
+ *   an extension, `./`); the same inside code the command runs (`bash -c`, `su -c`, `sudo -s`, `eval`, `trap`, `$(…)`, a
+ *   here-document fed to a shell). Each in every directory a literal `cd` may leave it in (under `bash -e` a failing `cd`
+ *   stops the command, but in an `&&`/`||` list). Every path-looking word of the text, as Factory read it before it
+ *   parsed commands, counts too, and of a here-document, an assignment's value or inline code of another language. A
+ *   variable is each value the command gives it anywhere (a loop's words included).
  * - `guarded`: what the command runs without naming it: a PATH entry in the repository (a directory) and the commands
- *   it finds there, the files `python -m` may run, node's candidates for an extensionless script, the build files of a
+ *   it finds there, the files `python -m` may run, node's candidates for an extensionless module, the build files of a
  *   directory `pip install` builds, a package manager's configuration and hook files where it runs.
- * - `scripts`: package.json scripts it runs, {pkg, name}: `pkg` a package.json path, or `*` for any (a workspace option,
- *   `turbo`).
- * - `unresolved`: what may name a file and is not one fixed string (a variable, a substitution's output, a glob, a brace
- *   expansion), code it cannot read (a shell reading a pipe, remote code), a `cd` it cannot follow, `.` (the whole
- *   repository) outside `pip install`, a command that does not parse: each with why.
+ * - `scripts`: package.json scripts it runs, {pkg, name, lifecycle?}: `pkg` a package.json path, or `*` for any (a
+ *   workspace option, `turbo`); `lifecycle`: an install's, which `ignore-scripts=true` in .npmrc turns off.
+ * - `unresolved`: what setup may run and is not one fixed string, in a place it runs it (a variable, a substitution's
+ *   output but a fixed program's, a glob, a brace expansion), a `cd` it cannot follow, `.` (the whole repository) outside
+ *   `pip install`, a command that does not parse: each with why. Any other computed word is data.
  * A word whose fixed start is a URL, `~/`, `$HOME/`, an absolute path outside `roots`, or a variable `env` holds as such
  * a path, names no repository file, and neither does a requirement spec (`uv==${V}`).
  */
 export function commandRefs(command, { cwd = "", errexit = true, env = null, roots = [] } = {}) {
-  const out = { paths: new Set(), maybe: new Set(), guarded: new Set(), scripts: new Set(), unresolved: new Set() };
+  const out = { paths: new Set(), guarded: new Set(), scripts: new Set(), unresolved: new Set() };
+  // Every value each variable is given anywhere in the command (an assignment, `export`, `env NAME=`, a `for` loop's
+  // words, `read`): a reference is each of them, never only the last one written.
   const vars = new Map();
+  const given = (name, value) => {
+    if (!vars.has(name)) vars.set(name, []);
+    vars.get(name).push(value);
+  };
   const pathDirs = new Set();
   const deferred = [];
   const allDirs = new Set([cwd]);
@@ -150,7 +166,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   /** Whether an absolute directory prefix may lead into a root (`/` does; `/tmp/` does not, but for a checkout under it). */
   const mayLeadIn = (prefix) => roots.some((r) => `${r.replace(/\/+$/, "")}/`.startsWith(prefix) || prefix.startsWith(`${r.replace(/\/+$/, "")}/`));
 
-  /** A word's value as a path: {path, rel} (rel: relative to the working directory), {outside}, {spec} or {unknown}. */
+  const resolving = new Set();
+  /** A word's value as a path: {path, rel, alts} (rel: relative to the working directory; alts: each value a variable may hold), {outside}, {spec} or {unknown}. */
   const resolve = (w, segs = segments(w)) => {
     const allLit = segs.every((s) => "lit" in s);
     if (allLit) {
@@ -182,11 +199,23 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     if (name === "HOME") return { outside: true };
     const tail = restLit === null ? null : restLit.replace(/^\/+/, "");
     if (name === "PWD") return tail === null ? { unknown: true } : { path: tail || ".", rel: true };
-    const known = vars.get(name);
-    if (known) {
-      if (known.outside) return { outside: true };
-      if (known.path !== undefined && tail !== null) return { path: tail ? `${known.path}/${tail}` : known.path, rel: false };
-      return { unknown: true };
+    if (vars.has(name)) {
+      if (tail === null || resolving.has(name)) return { unknown: true };
+      resolving.add(name);
+      try {
+        const alts = [];
+        for (const v of vars.get(name)) {
+          if (v === null) return { unknown: true };
+          const r = typeof v === "string" ? resolve({ text: v, value: v }, [{ lit: v }]) : resolve(v);
+          if (r.outside || r.spec) continue;
+          if (r.unknown) return { unknown: true };
+          for (const a of r.alts ?? [r]) alts.push({ path: tail ? `${a.path === "." ? "" : `${a.path}/`}${tail}` : a.path, rel: a.rel });
+        }
+        if (!alts.length) return { outside: true };
+        return { ...alts[0], alts };
+      } finally {
+        resolving.delete(name);
+      }
     }
     const value = env?.[name];
     if (typeof value === "string" && value.startsWith("/")) {
@@ -211,7 +240,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     }
     return got;
   };
-  /** Records a word that names a file, into `into` (`paths`, `maybe` or `guarded`); the whole repository is unresolved. */
+  /** Records a word that names a file, into `into` (`paths` or `guarded`); the whole repository is unresolved. */
   const add = (into, value, rel, cwds, spec, what) => {
     const ps = join(value, rel, cwds);
     if (ps === null) return;
@@ -220,11 +249,39 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       else out[into].add(p);
     }
   };
-  const addWord = (w, cwds, spec, into = null) => {
+  /** A word in a place where setup may run what it names: every path it may be, bare or not; unresolved when it may be any. */
+  const execWord = (w, cwds, spec, why = "not a fixed path") => {
     const r = resolve(w);
     if (r.outside || r.spec) return;
-    if (r.unknown) return unknown(w.text, "not a fixed path", spec);
-    add(into ?? (pathLooking(r.path) || !r.rel || w.text.includes("/") ? "paths" : "maybe"), r.path, r.rel, cwds, spec, w.text);
+    if (r.unknown) {
+      if (!externalOutput(w, false)) unknown(w.text, why, spec);
+      return;
+    }
+    for (const a of r.alts ?? [r]) add("paths", a.path, a.rel, cwds, spec, w.text);
+  };
+  /** Any other argument: a path when it is one fixed path-looking string; a variable or a bare word there is data. */
+  const argWord = (w, cwds, spec) => {
+    if (!literal(w) || (tilde(w) && !w.value.startsWith("~+"))) return;
+    const r = resolve(w);
+    if (r.path !== undefined && (pathLooking(w.value) || !r.rel)) add("paths", r.path, r.rel, cwds, spec, w.text);
+  };
+  /**
+   * Whether a word is only the output of substitutions whose commands are fixed programs: code from one (`eval
+   * "$(mise activate bash)"`, `sh -c "$(curl …)"`, with `asCode`) or a pipe to one (`bash <(curl …)`) is no repository
+   * file, since a file such a command reads is a path of its own, guarded where it is named. A path a substitution prints
+   * (`node $(cat .entry)`) may be any file, and a program that is a variable may be anything.
+   */
+  const externalOutput = (w, asCode = true) => {
+    const segs = segments(w);
+    const ok = (x) => x.exp.type === "ProcessSubstitution" || (asCode && x.exp.type === "CommandExpansion");
+    if (!segs.length || !segs.every((x) => ("exp" in x && ok(x)) || ("lit" in x && !x.lit.trim()))) return false;
+    let fixed = true;
+    const look = (n) => {
+      if (n.type === "Command" && n.name && !literal(n.name)) fixed = false;
+      forEachChild(n, look);
+    };
+    for (const x of segs) if ("exp" in x && x.exp.script) look(x.exp.script);
+    return fixed;
   };
   const scan = (text, cwds) => {
     for (const p of wordScan(text)) add("paths", p, true, cwds, true);
@@ -242,10 +299,27 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     return [...got];
   };
 
+  /** Records every value each variable is given in `ast` (vars), before any reference is read. */
+  const collect = (ast) => {
+    const look = (n) => {
+      if (n.type === "Assignment") given(n.name, n.value?.type === "Word" ? (literal(n.value) ? n.value.value ?? segments(n.value).map((x) => x.lit).join("") : n.value) : null);
+      else if ((n.type === "For" || n.type === "Select") && n.name) {
+        if (!n.wordlist) given(n.name.value ?? n.name.text, null);
+        for (const w of n.wordlist ?? []) given(n.name.value ?? n.name.text, literal(w) ? w.value : w);
+      } else if (n.type === "Command" && n.name && literal(n.name)) {
+        if (["read", "mapfile", "readarray", "getopts", "printf"].includes(n.name.value)) for (const a of n.args) if (a.type === "Word" && literal(a) && /^[A-Za-z_]\w*$/.test(a.value)) given(a.value, null);
+        if (base(n.name.value) === "env") for (const a of n.args) if (a.type === "Word" && assignment(a)) { const x = assignment(a); given(x.name, literal(a) ? a.value.slice(a.value.indexOf("=") + 1) : x.value); }
+      }
+      forEachChild(n, look);
+    };
+    look(ast);
+  };
+
   /** A string a program runs as shell code; `spec` (only maybe code) adds paths only, and scans it where it does not parse. */
   const code = (text, cwds, mode) => {
     if (mode.depth >= MAX_DEPTH) return unknown(`shell code nested past ${MAX_DEPTH} levels`, "", mode.spec);
     const ast = parse(text);
+    if (!mode.spec) collect(ast);
     if (mode.spec && ast.errors?.length) return scan(text, cwds);
     run(ast, cwds, { ...mode, depth: mode.depth + 1, errexit: false });
   };
@@ -288,8 +362,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           unknown(`PATH entry ${e.map((s) => ("lit" in s ? s.lit : s.exp.text)).join("")}`, "not a fixed directory", mode.spec);
           continue;
         }
-        const ps = join(r.path, r.rel, cwds);
-        for (const p of ps ?? []) {
+        const ps = (r.alts ?? [r]).flatMap((a) => join(a.path, a.rel, cwds) ?? []);
+        for (const p of ps) {
           if (p === "") unknown("PATH entry", "the whole repository", mode.spec);
           else {
             out.guarded.add(p);
@@ -299,10 +373,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       }
       return;
     }
-    if (FILE_VARS.has(name)) addWord(w, cwds, mode.spec, "paths");
+    if (FILE_VARS.has(name)) execWord(w, cwds, mode.spec);
     for (const s of segs) if ("lit" in s) scan(s.lit, cwds);
-    const r = resolve(w, segs);
-    vars.set(name, r.outside ? { outside: true } : r.path !== undefined && !r.unknown ? { path: (join(r.path, r.rel, cwds) ?? [])[0] } : {});
   };
 
   /** cd/pushd: the directories the command after it may run in, {ok, ko}: ok when it succeeded, ko when it failed. */
@@ -335,43 +407,42 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   };
 
   /** One simple command: what it names, runs and changes. Returns {ok, ko}. */
-  const simple = (node, cwds, mode, piped) => {
+  const simple = (node, cwds, mode) => {
     const same = { ok: cwds, ko: cwds };
     for (const a of node.prefix) if (a.type === "Assignment" && a.value?.type === "Word") assign(a.name, a.value, cwds, mode);
     subs(node, cwds, mode);
     const redirects = node.redirects;
-    for (const r of redirects) {
-      if (r.type === "Redirect" && (r.operator === "<" || r.operator === "<>") && r.target) addWord(r.target, cwds, mode.spec, "paths");
-    }
     const name = node.name;
-    if (!name) return same;
+    if (!name) {
+      for (const r of redirects) if (r.type === "Redirect" && (r.operator === "<" || r.operator === "<>") && r.target) argWord(r.target, cwds, mode.spec);
+      return same;
+    }
     const words = [name, ...node.args.filter((a) => a.type === "Word")];
     const nv = literal(name) ? name.value : null;
     if (nv === "cd" || nv === "pushd") return cd(node, cwds, mode);
     if (nv === "popd") return { ok: new Set(allDirs), ko: cwds };
 
     // The command word: a path in the repository, one found on a PATH entry in it, or a program elsewhere.
-    if (nv === null) {
-      const r = resolve(name);
-      if (r.unknown) unknown(name.text, "not a fixed command", mode.spec);
-      else if (r.path !== undefined) add("paths", r.path, r.rel, cwds, mode.spec, name.text);
-    } else if (nv.includes("/")) addWord(name, cwds, mode.spec, "paths");
-    else for (const d of pathDirs) out.guarded.add(`${d}/${nv}`);
+    commandWord(name, cwds, mode);
 
     // `export NAME=value` and the like: after the command word, so a PATH it sets finds the commands after it.
     for (const a of node.args) if (a.type === "Assignment" && a.value?.type === "Word") assign(a.name, a.value, cwds, mode);
     if (nv === "eval" || nv === "trap") {
       const args = nv === "trap" ? words.slice(1, 2) : words.slice(1);
       if (args.every(literal)) code(args.map((w) => w.value).join(" "), cwds, mode);
-      else unknown(node.args.map((a) => a.text).join(" "), "shell code Factory cannot read", mode.spec);
+      else if (!args.every((w) => literal(w) || externalOutput(w))) unknown(node.args.map((a) => a.text).join(" "), "shell code Factory cannot read", mode.spec);
+      return same;
+    }
+    if (nv === "source" || nv === ".") {
+      if (words[1]) execWord(words[1], cwds, mode.spec);
+      for (const w of words.slice(2)) argWord(w, cwds, mode.spec);
       return same;
     }
     if (nv !== null && DATA_BUILTINS.has(nv)) return same;
 
     // Find the command each wrapper runs (`sudo -u x env K=v timeout 5 bash -c '…'`), reading the words they hold.
-    const role = new Map(); // word -> "code" | "skip" | "named" | "guard"
+    const role = new Map(); // word -> "code" | "skip" | "named"
     let i = 0;
-    let xargs = false;
     const at = (k) => (k < words.length ? words[k] : null);
     const lv = (k) => (at(k) && literal(at(k)) ? at(k).value : null);
     for (;;) {
@@ -405,7 +476,6 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         continue;
       }
       if (b !== null && Object.hasOwn(WRAPPERS, b)) {
-        if (b === "xargs") xargs = true;
         const valued = WRAPPERS[b];
         if (b === "sudo") {
           // sudo -s/-i: the words after its options are one shell command.
@@ -437,15 +507,17 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     const cb = cmd === null ? null : base(cmd);
     if (cmdAt > 0 && at(cmdAt)) {
       // The wrapped command is a command word too.
-      if (cmd === null) {
-        const r = resolve(at(cmdAt));
-        if (r.unknown) unknown(at(cmdAt).text, "not a fixed command", mode.spec);
-        else if (r.path !== undefined) add("paths", r.path, r.rel, cwds, mode.spec, at(cmdAt).text);
-      } else if (cmd.includes("/")) addWord(at(cmdAt), cwds, mode.spec, "paths");
-      else for (const d of pathDirs) out.guarded.add(`${d}/${cmd}`);
+      commandWord(at(cmdAt), cwds, mode);
       role.set(at(cmdAt), "named");
     }
-    const stdin = piped || xargs;
+    const shellLike = cb !== null && (SHELLS.has(cb) || interpreterOf(cb));
+    for (const r of redirects) {
+      if (r.type === "Redirect" && (r.operator === "<" || r.operator === "<>") && r.target) {
+        // Input a shell or an interpreter runs as its script; any other program's input is data.
+        if (shellLike) execWord(r.target, cwds, mode.spec);
+        else argWord(r.target, cwds, mode.spec);
+      }
+    }
 
     if (cb !== null && SHELLS.has(cb)) {
       let k = cmdAt + 1;
@@ -463,20 +535,20 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           code(operand.value, cwds, mode);
         } else {
           role.set(operand, "code");
-          unknown(operand.text, /curl|wget/.test(operand.text) ? "remote code, which nothing in the repository can protect" : "shell code Factory cannot read", mode.spec);
+          if (!externalOutput(operand)) unknown(operand.text, "shell code Factory cannot read", mode.spec);
         }
       } else if (operand) {
         role.set(operand, "named");
-        if (!literal(operand) && operand.parts?.some((p) => p.type === "ProcessSubstitution")) unknown(operand.text, /curl|wget/.test(operand.text) ? "remote code, which nothing in the repository can protect" : "a script Factory cannot read", mode.spec);
-        else addWord(operand, cwds, mode.spec, "paths");
-      } else if (stdin) unknown(words.map((w) => w.text).join(" "), "a shell reading its script from a pipe runs code Factory cannot see", mode.spec);
+        execWord(operand, cwds, mode.spec, "a script Factory cannot name");
+      }
+      // A shell with no script reads stdin: a here-document is its code; a pipe's is the left side's output, whose
+      // repository files are named there (`cat scripts/x | bash`), and remote code is no repository file.
       for (const r of redirects) {
-        if (r.type === "HereDoc") {
-          if (!operand && !codeMode && (r.body.parts ?? []).every(literalPart)) code(r.body.text, cwds, mode);
-          else if (!operand && !codeMode) unknown(`a here-document fed to ${cmd}`, "shell code Factory cannot read", mode.spec);
-        } else if (r.type === "HereString" && r.target && !operand && !codeMode) {
+        if (operand || codeMode) continue;
+        if (r.type === "HereDoc") code(r.body.text, cwds, mode);
+        else if (r.type === "HereString" && r.target) {
           if (literal(r.target)) code(r.target.value, cwds, mode);
-          else unknown(r.target.text, "shell code Factory cannot read", mode.spec);
+          else if (!externalOutput(r.target)) unknown(r.target.text, "shell code Factory cannot read", mode.spec);
         }
       }
     } else if (cb !== null && SU.has(cb)) {
@@ -484,13 +556,18 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         if (lv(k) !== null && SHELL_CODE.test(lv(k)) && at(k + 1)) {
           role.set(at(k + 1), "code");
           if (literal(at(k + 1))) code(at(k + 1).value, cwds, mode);
-          else unknown(at(k + 1).text, "shell code Factory cannot read", mode.spec);
+          else if (!externalOutput(at(k + 1))) unknown(at(k + 1).text, "shell code Factory cannot read", mode.spec);
         }
       }
     } else if (cb !== null && interpreterOf(cb)) {
       const spec = interpreterOf(cb);
+      const isNode = cb.startsWith("node");
+      // node resolves an extensionless module as a file with each extension, or a directory.
+      const nodeCandidates = (value) => {
+        if (!/\.[A-Za-z0-9]+$/.test(value)) for (const ext of NODE_EXTENSIONS) add("guarded", `${value}${ext}`, true, cwds, mode.spec);
+      };
       let k = cmdAt + 1;
-      if (cb.startsWith("node") && lv(k) === "--run") {
+      if (isNode && lv(k) === "--run") {
         // `node --run X`: package.json's scripts.X, from the working directory's package.json or the nearest above.
         role.set(at(k + 1), "skip");
         if (at(k + 1) && literal(at(k + 1))) addScript(packages(cwds ?? []).map((d) => (d ? `${d}/package.json` : "package.json")), lv(k + 1));
@@ -514,7 +591,10 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         if (spec.code.test(v) && at(k + 1)) {
           inline = true;
           role.set(at(k + 1), "code");
-          if (literal(at(k + 1))) scan(at(k + 1).value, cwds);
+          if (literal(at(k + 1))) {
+            scan(at(k + 1).value, cwds);
+            if (isNode) for (const p of wordScan(at(k + 1).value)) nodeCandidates(p);
+          }
           k += 1;
           break;
         }
@@ -528,21 +608,25 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           break;
         }
         if (spec.valued.has(v)) {
-          if (at(k + 1) && literal(at(k + 1)) && cb.startsWith("node")) add("paths", lv(k + 1), true, cwds, mode.spec);
+          // node -r/--require/--import load a module before the script: a file setup runs, with its candidates.
+          if (at(k + 1) && isNode && NODE_LOADS.has(v)) {
+            role.set(at(k + 1), "named");
+            execWord(at(k + 1), cwds, mode.spec);
+            if (literal(at(k + 1)) && /^\.{0,2}\//.test(lv(k + 1))) nodeCandidates(lv(k + 1));
+          } else if (at(k + 1)) role.set(at(k + 1), "skip");
           k += 1;
         }
       }
       if (!inline && k < words.length && at(k)) operand = at(k);
       if (operand) {
         role.set(operand, "named");
-        addWord(operand, cwds, mode.spec, "paths");
-        // node resolves an extensionless script as a file with each extension, or a directory.
-        if (cb.startsWith("node") && literal(operand) && !/\.[A-Za-z0-9]+$/.test(operand.value)) for (const ext of [".js", ".mjs", ".cjs", ".json", ".node"]) add("guarded", `${operand.value}${ext}`, true, cwds, mode.spec);
-      } else if ((inline === "stdin" || (!inline && k <= words.length && !(cb.startsWith("node") && lv(cmdAt + 1) === "--run"))) && stdin) unknown(words.map((w) => w.text).join(" "), "an interpreter reading its script from a pipe runs code Factory cannot see", mode.spec);
+        execWord(operand, cwds, mode.spec, "a script Factory cannot name");
+        if (isNode && literal(operand)) nodeCandidates(operand.value);
+      }
       if (inline === "stdin" || (!inline && !operand)) for (const r of redirects) if (r.type === "HereDoc") scan(r.body.text, cwds);
-    } else if (cb !== null && (PACKAGE_MANAGERS.has(cb) || cb === "corepack" || cb === "turbo" || RUN_ALL.has(cb) || cb === "uv" || cb === "pip" || cb === "pip3")) {
+    } else if (cb !== null && (cb === "uv" || cb === "pip" || cb === "pip3")) {
       if (cb === "pip" || cb === "pip3") pip(words, cmdAt + 1, cwds, mode, role);
-      else if (cb === "uv") {
+      else {
         if (lv(cmdAt + 1) === "pip") pip(words, cmdAt + 2, cwds, mode, role);
         if (lv(cmdAt + 1) === "run") {
           for (let k = cmdAt + 2; at(k); k += 1) {
@@ -553,57 +637,67 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
             }
           }
         }
-      } else packageManager(words, cmdAt, cwds, mode, role);
+      }
+    } else if (cb === "find" && words.some((w) => literal(w) && FIND_RUNS.has(w.value))) {
+      // find … -exec: what it runs is each file under its start paths.
+      for (let k = cmdAt + 1; at(k) && !(literal(at(k)) && /^[-(!]/.test(at(k).value)); k += 1) {
+        role.set(at(k), "named");
+        execWord(at(k), cwds, mode.spec);
+      }
+    } else if (cb === "run-parts") {
+      let k = cmdAt + 1;
+      while (lv(k) !== null && lv(k).startsWith("-")) k += 1;
+      if (at(k)) {
+        role.set(at(k), "named");
+        execWord(at(k), cwds, mode.spec);
+      }
+    }
+    // Script runners wherever they stand in the words (`npx turbo run build`, `cross-env CI=1 npm run gen`,
+    // `mise exec -- pnpm run setup`): each run of runner words is followed, whatever wraps it.
+    for (let k = cmdAt; k < words.length; k += 1) {
+      const b = lv(k) === null ? null : base(lv(k));
+      if (b !== null && (PACKAGE_MANAGERS.has(b) || b === "corepack" || b === "turbo" || RUN_ALL.has(b))) packageManager(words, k, cwds, mode, role);
     }
 
-    // Every other argument: a path when it names one, unresolved when it may and cannot be read.
+    // Every other argument: a path when it is a fixed path-looking string; data otherwise.
     for (let k = 1; k < words.length; k += 1) {
       const w = words[k];
       const r0 = role.get(w);
       if (r0 === "code" || r0 === "skip" || r0 === "named") continue;
       if (!literal(w)) {
         const segs = segments(w);
-        const lead = "lit" in (segs[0] ?? {}) ? segs[0].lit : "";
-        if (lead.startsWith("-")) {
-          // An option's computed value: a count from a substitution (`-j$(nproc)`) names no file; a long one's value is a path.
-          if (/^-[A-Za-z]$/.test(lead) && segs.slice(1).every((s) => "exp" in s && (s.exp.type === "CommandExpansion" || s.exp.type === "ArithmeticExpansion"))) continue;
-          if (lead.includes("=")) {
-            const value = { type: "Word", text: w.text.slice(w.text.indexOf("=") + 1), parts: [{ type: "Literal", value: lead.slice(lead.indexOf("=") + 1) }, ...segs.slice(1).map((s) => ("lit" in s ? { type: "Literal", value: s.lit } : s.exp))].filter((p) => p.type !== "Literal" || p.value !== "") };
-            if (!value.parts.length) continue;
-            const r = resolve(value);
-            if (r.unknown) unknown(w.text, "not a fixed path", mode.spec);
-            else if (r.path !== undefined) add("paths", r.path, r.rel, cwds, mode.spec, w.text);
-            continue;
-          }
-          unknown(w.text, "not a fixed path", mode.spec);
-          continue;
-        }
-        if (NAME_VALUE.test(lead)) {
-          for (const s of segs) if ("lit" in s) scan(s.lit, cwds);
-          continue;
-        }
-        if (segs.some((s) => "exp" in s && s.exp.type === "ProcessSubstitution") && /curl|wget/.test(w.text)) unknown(w.text, "remote code, which nothing in the repository can protect", mode.spec);
-        else addWord(w, cwds, mode.spec);
+        // An option's or NAME='s computed value is data; its fixed text may still name a file.
+        for (const x of segs) if ("lit" in x && /[\/.]/.test(x.lit)) scan(x.lit, cwds);
         continue;
       }
       const v = w.value;
       if (tilde(w) && !v.startsWith("~+")) continue;
       if (v.startsWith("-")) {
-        if (v.includes("=")) add("paths", v.slice(v.indexOf("=") + 1), true, cwds, mode.spec);
+        if (v.includes("=")) addValue(v.slice(v.indexOf("=") + 1), cwds, mode);
         continue;
       }
       if (NAME_VALUE.test(v)) {
-        const value = v.slice(v.indexOf("=") + 1);
-        if (value && !URL_SCHEME.test(value) && !value.startsWith("/")) add(pathLooking(value) ? "paths" : "maybe", value, true, cwds, true);
+        addValue(v.slice(v.indexOf("=") + 1), cwds, mode);
         continue;
       }
       if (SPEC.test(v) && !v.includes("/")) continue;
-      addWord(w, cwds, mode.spec, r0 === "guard" ? "guarded" : null);
+      argWord(w, cwds, mode.spec);
       if (MAYBE_CODE.test(v)) code(v, cwds, { ...mode, spec: true });
     }
     // A here-document fed to anything else: its fixed text is read for paths.
-    if (!(cb !== null && (SHELLS.has(cb) || interpreterOf(cb)))) for (const r of redirects) if (r.type === "HereDoc") scan(r.body.text, cwds);
+    if (!shellLike) for (const r of redirects) if (r.type === "HereDoc") scan(r.body.text, cwds);
     return same;
+  };
+
+  /** The command word: a path in the repository, one found on a PATH entry in it, or a program elsewhere. */
+  const commandWord = (w, cwds, mode) => {
+    if (!literal(w)) return execWord(w, cwds, mode.spec, "not a fixed command");
+    if (w.value.includes("/")) return execWord(w, cwds, mode.spec);
+    for (const d of pathDirs) out.guarded.add(`${d}/${w.value}`);
+  };
+  /** An option's or `NAME=`'s fixed value: a path when it looks like one. */
+  const addValue = (value, cwds, mode) => {
+    if (value && !URL_SCHEME.test(value) && !value.startsWith("/") && !value.startsWith("~") && pathLooking(value)) add("paths", value, true, cwds, mode.spec);
   };
 
   /** `python -m module`: the files it may run from the working directory. */
@@ -654,17 +748,23 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     let anyPackage = pm === "turbo";
     const names = [];
     let first = true;
+    let sub = null;
+    let ignoreScripts = false;
     for (k += 1; k < words.length; k += 1) {
       const w = words[k];
       if (!literal(w)) {
         role.set(w, "skip");
+        // A computed option or option value is data; a computed script name may be any script.
+        const prev = k > 0 && literal(words[k - 1]) ? words[k - 1].value : "";
+        const lead = segments(w)[0]?.lit ?? "";
         const r = resolve(w);
-        if (!r.spec && !r.outside) unknown(w.text, "a script or option Factory cannot read", mode.spec);
+        if (!lead.startsWith("-") && !(prev.startsWith("-") && !prev.includes("=")) && !r.spec && !r.outside) unknown(w.text, "a script Factory cannot name", mode.spec);
         continue;
       }
       const v = w.value;
       role.set(w, "skip");
       if (v === "--") break;
+      if (v === "--ignore-scripts") ignoreScripts = true;
       if (v.startsWith("-")) {
         const opt = v.split("=")[0];
         if (PM_DIR.has(opt)) {
@@ -684,11 +784,15 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       }
       if ((pm === "yarn" && (v === "workspace" || v === "workspaces")) || (pm === "pnpm" && v === "-r")) anyPackage = true;
       if (RUN_ALL.has(pm) && /[*?{]/.test(v)) unknown(v, "scripts Factory cannot name", mode.spec);
+      if (first) sub = v;
       if (!RUN_WORDS.has(v) || !first) names.push(v);
       first = false;
     }
     const pkgs = anyPackage ? ["*"] : packages(dirs).map((d) => (d ? `${d}/package.json` : "package.json"));
     for (const n of names) addScript(pkgs, n);
+    // An install runs the package's install lifecycle scripts (npm's documented list), unless scripts are off: by
+    // `--ignore-scripts`, or by `ignore-scripts=true` in the repository's .npmrc (setupGuard reads it). Bare `yarn` installs.
+    if (!ignoreScripts && (INSTALLS[pm]?.has(sub) || (pm === "yarn" && sub === null))) for (const n of LIFECYCLE) for (const pkg of pkgs) out.scripts.add(`${pkg}\0${n}\0lifecycle`);
     for (const d of packages(dirs)) for (const f of PM_FILES[pm] ?? []) out.guarded.add(d ? `${d}/${f}` : f);
     if (pm === "turbo") out.guarded.add("turbo.json");
   };
@@ -750,7 +854,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       case "Command":
         return simple(node, cwds, mode, piped);
       case "Redirected": {
-        for (const r of node.redirects) if (r.type === "Redirect" && (r.operator === "<" || r.operator === "<>") && r.target) addWord(r.target, cwds, mode.spec, "paths");
+        for (const r of node.redirects) if (r.type === "Redirect" && (r.operator === "<" || r.operator === "<>") && r.target) argWord(r.target, cwds, mode.spec);
         subs(node.redirects, cwds, mode);
         return run(node.command, cwds, mode, piped);
       }
@@ -805,7 +909,9 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
 
   const text = String(command || "");
   const start = new Set([cwd]);
-  const end = run(parse(text), start, { spec: false, depth: 0, errexit });
+  const ast = parse(text);
+  collect(ast);
+  const end = run(ast, start, { spec: false, depth: 0, errexit });
   // A function's body runs where it is called: in any directory the command reached.
   const reached = end.ok && end.ko ? new Set([...allDirs]) : null;
   while (deferred.length) {
@@ -814,7 +920,6 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   }
   // Every path-looking word of the text, as Factory read a command before it parsed one: never fewer files than that.
   for (const p of wordScan(text)) add("paths", p, true, start, true);
-  const scripts = [...out.scripts].map((s) => ({ pkg: s.split("\0")[0], name: s.split("\0")[1] }));
-  for (const p of out.paths) out.maybe.delete(p);
-  return { paths: [...out.paths], maybe: [...out.maybe], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved] };
+  const scripts = [...out.scripts].map((s) => s.split("\0")).map(([pkg, name, kind]) => (kind ? { pkg, name, lifecycle: true } : { pkg, name }));
+  return { paths: [...out.paths], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved] };
 }

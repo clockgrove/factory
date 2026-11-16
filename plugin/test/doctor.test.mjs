@@ -71,7 +71,9 @@ test("setup files: every repository file the setup command runs must be protecte
   assert.match(fail[0].fix, /add \/scripts\/ci\/toolchain\.sh to protected_paths/, "the fix names the root-anchored entry");
   assert.equal((await setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/ci/"] }, checkout: dir }))[0].status, "PASS", "a directory entry covers both");
   assert.equal((await setupFilesCheck({ inputs: { setup, protectedAdditions: ["setup.sh", "toolchain.sh"] }, checkout: dir }))[0].status, "PASS", "a file-name entry matches at any depth, as on push");
-  assert.deepEqual(await setupFilesCheck({ inputs: { setup: "sudo apt-get install -y libpq-dev", protectedAdditions: [] }, checkout: dir }), [], "a setup naming no repository file has nothing to protect");
+  const [nothing] = await setupFilesCheck({ inputs: { setup: "sudo apt-get install -y libpq-dev", protectedAdditions: [] }, checkout: dir });
+  assert.equal(nothing.status, "PASS", "a setup naming no repository file has nothing to protect");
+  assert.match(nothing.detail, /^the command names no repository file it runs\. Not followed/, "and says what is never followed");
   const [missing] = await setupFilesCheck({ inputs: { setup: "bash scripts/ci/missing.sh", protectedAdditions: [] }, checkout: dir });
   assert.equal(missing.status, "PASS", "a named path the checkout does not hold needs no protected entry");
   assert.match(missing.detail, /a push changing scripts\/ci\/missing\.sh is refused/, "but no push may create it (#387)");

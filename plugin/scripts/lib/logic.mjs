@@ -47,14 +47,26 @@ export function renderTaskCard(template, values) {
 
 /**
  * The task card's and the fix pass's line on what the setup command runs (setupGuard's `files` and `scripts`), so a
- * worker leaves it alone rather than meet a refused push: at most `max` entries, then how many more. "" with none.
+ * worker leaves it alone rather than meet a refused push: at most `max` entries, then how many more, each at most
+ * `width` characters and in a code span, with what could break out of one (a backtick, a line break) or read as a
+ * template slot or a comment replaced. "" with none.
  */
-export function setupFilesNote(guard, max = 25) {
+export function setupFilesNote(guard, max = 25, width = 80) {
   if (!guard || (!guard.files?.length && !guard.scripts?.length && !guard.unresolved?.length)) return "";
-  const items = [...[...guard.files].sort(), ...guard.scripts.map((x) => `${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`)];
-  const shown = items.length ? `${items.slice(0, max).join(", ")}${items.length > max ? ` and ${items.length - max} more` : ""} (each path and anything under it)` : "";
-  const unknown = guard.unresolved?.length ? `${shown ? "; " : ""}it also runs what Factory cannot name, so every push is refused until a person fixes the setup command` : "";
-  return `Setup's files, don't change: ${shown}${unknown}. Setup runs them as the runner from the default branch, so Factory refuses a push that changes one.`;
+  const plain = (x) => {
+    const t = String(x).replace(/[\r\n\t`]/g, " ").replace(/\{(?=\{)/g, "{ ").replace(/\}(?=\})/g, "} ").replace(/<!--|-->/g, "--");
+    return `\`${t.length > width ? `${t.slice(0, width - 3)}...` : t}\``;
+  };
+  const files = [...guard.files].sort().map(plain);
+  const scripts = guard.scripts.map((x) => plain(`${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`));
+  const cut = (xs, room) => `${xs.slice(0, room).join(", ")}${xs.length > room ? ` and ${xs.length - room} more` : ""}`;
+  const room = Math.min(files.length, max);
+  const lines = [];
+  if (files.length) lines.push(`Setup's files, don't change them or anything under them: ${cut(files, room)}.`);
+  if (scripts.length) lines.push(`Setup's package.json scripts, don't change them: ${cut(scripts, Math.max(max - room, Math.min(scripts.length, 5)))}.`);
+  if (lines.length) lines.push("Setup runs them as the runner from the default branch, so Factory refuses a push that changes one.");
+  if (guard.unresolved?.length) lines.push("Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");
+  return lines.join(" ");
 }
 
 /** The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote). */
@@ -216,12 +228,12 @@ const dependencyFile = (path) => {
 
 /**
  * What the shell command `command` (`setup`, an explicit `install`, a package.json script) refers to in the repository
- * (shell.mjs commandRefs, `ctx` its context): {paths, maybe, guarded, scripts, unresolved}, with the manifests,
- * lockfiles and requirements files an install reads (dependencyFile) left out of `paths` and `maybe`.
+ * (shell.mjs commandRefs, `ctx` its context): {paths, guarded, scripts, unresolved}, with the manifests,
+ * lockfiles and requirements files an install reads (dependencyFile) left out of `paths`.
  */
 export function commandRefs(command, ctx = {}) {
   const refs = shellRefs(command, ctx);
-  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)), maybe: refs.maybe.filter((p) => !dependencyFile(p)) };
+  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)) };
 }
 /** The repository paths a shell command names (commandRefs `paths`). */
 export const commandPaths = (command) => commandRefs(command).paths;
@@ -264,16 +276,51 @@ export function simpleCommands(command) {
 
 /**
  * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
- * (outbox.mjs box.outside). {paths (every path either may run, named, guarded or only maybe one), scripts, unresolved}.
+ * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name), scripts, unresolved}.
  */
 export function setupPaths({ setup = "", install = "auto" } = {}, ctx = {}) {
-  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], maybe: [], guarded: [], scripts: [], unresolved: [] }];
-  const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, x]));
-  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.maybe, ...r.guarded]))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
+  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], guarded: [], scripts: [], unresolved: [] }];
+  const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, { pkg: x.pkg, name: x.name }]));
+  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))], named: [...new Set(all.flatMap((r) => r.paths))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
 }
 
-/** Whether `file` is `path` or under it: what the setup guard protects is each path as a file and as a directory. */
-export const guardCovers = (path, file) => file === path || file.startsWith(`${path}/`);
+/**
+ * Whether a change to `file` changes the guarded `path`: the path itself, anything under it (each guarded path is a
+ * file and a directory), or a directory above it (a change there, a symlink made there included, moves what the path is).
+ */
+export const guardCovers = (path, file) => file === path || file.startsWith(`${path}/`) || path.startsWith(`${file}/`);
+
+/**
+ * Each path with every symlink along it followed, as `io` (setupGuard's) reads the tree: {paths (the resolved ones,
+ * beside the given), unresolved (a link out of the repository, or a chain too long)}.
+ */
+export async function guardLinks(paths, io) {
+  const out = new Set();
+  const unresolved = [];
+  for (const p of paths) {
+    let parts = p.split("/");
+    let hops = 0;
+    for (let k = 0; k < parts.length; k += 1) {
+      const at = parts.slice(0, k + 1).join("/");
+      const target = await io.link?.(at);
+      if (typeof target !== "string") continue;
+      if ((hops += 1) > 40) {
+        unresolved.push(`${p} (a chain of links Factory cannot follow)`);
+        break;
+      }
+      const real = posixJoin(dirOf(at), target);
+      if (!real) {
+        if (!target.startsWith("/")) unresolved.push(`${at} (a link out of the repository)`);
+        parts = null;
+        break;
+      }
+      parts = [...real.split("/"), ...parts.slice(k + 1)];
+      k = -1;
+    }
+    if (parts && parts.join("/") !== p) out.add(parts.join("/"));
+  }
+  return { paths: [...out], unresolved };
+}
 
 /**
  * Everything the `setup` command runs from the repository, as read through `io` at one revision (the checkout for
@@ -282,10 +329,11 @@ export const guardCovers = (path, file) => file === path || file.startsWith(`${p
  * target, else null)}, all may be async, plus commandRefs' `env` and `roots`.
  * - `named`: the paths the command itself names (commandRefs `paths`); doctor wants each regular file among them on
  *   the protected list.
- * - `files`: what no push may change, each as a file and as a directory (guardCovers): `named`, each other argument the
- *   revision holds (`maybe`), what the command runs without naming it (`guarded`), the same for every package.json script
- *   it runs, read from its package's directory and followed through the scripts that one runs, `.yarnrc.yml`'s
- *   `yarnPath`, and a symlink's target beside the link.
+ * - `files`: what no push may change, each as a file and as a directory, and with every directory above it
+ *   (guardCovers): `named`, what the command runs without naming it (`guarded`), the same for every package.json script
+ *   it runs, read from its package's directory and followed through the scripts that one runs (an install's lifecycle
+ *   scripts unless `.npmrc` sets `ignore-scripts=true`), `.yarnrc.yml`'s `yarnPath` and `plugins`, and each path with
+ *   its symlinks followed (guardLinks), beside the path itself.
  * - `scripts`: {pkg, name}, each package.json entry it runs (`pkg` `*`: in any package.json), which no push may change.
  * - `unresolved`: what may run and cannot be named, in the command or a script it runs (`<pkg> scripts.<name>: …`).
  */
@@ -295,8 +343,10 @@ export async function setupGuard(setup, io) {
   const files = new Set([...refs.paths, ...refs.guarded]);
   const unresolved = [...refs.unresolved];
   const scripts = new Map();
-  const maybe = [...refs.maybe];
-  const queue = refs.scripts.map((x) => ({ ...x, from: "" }));
+  // An install's lifecycle scripts run unless the repository's .npmrc turns scripts off.
+  const npmrc = await io.read(".npmrc");
+  const scriptsOff = typeof npmrc === "string" && /^\s*ignore-scripts\s*=\s*true\s*$/m.test(npmrc);
+  const queue = refs.scripts.filter((x) => !(x.lifecycle && scriptsOff));
   const seen = new Set();
   while (queue.length) {
     const { pkg, name } = queue.shift();
@@ -320,35 +370,31 @@ export async function setupGuard(setup, io) {
       if (typeof value !== "string") continue;
       const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
       for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
-      maybe.push(...sub.maybe);
       unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
-      queue.push(...sub.scripts);
+      queue.push(...sub.scripts.filter((x) => !(x.lifecycle && scriptsOff)));
     }
   }
-  for (const m of maybe) if (await io.exists(m)) files.add(m);
   for (const f of [...files]) {
     if (fileName(f) === ".yarnrc.yml") {
+      // The yarn release it runs (`yarnPath`) and the plugins it loads (`plugins:`, a path or {path}).
       const text = await io.read(f);
-      let yarnPath = null;
+      let doc = null;
       try {
-        yarnPath = typeof text === "string" ? parseYaml(text)?.yarnPath : null;
+        doc = typeof text === "string" ? parseYaml(text) : null;
       } catch {
-        unresolved.push(`${f} (does not parse, so the yarn release it names cannot be read)`);
+        unresolved.push(`${f} (does not parse, so the yarn release and plugins it names cannot be read)`);
       }
-      if (typeof yarnPath === "string") {
-        const p = posixJoin(dirOf(f), yarnPath);
+      const named = [doc?.yarnPath, ...(Array.isArray(doc?.plugins) ? doc.plugins.map((x) => (typeof x === "string" ? x : x?.path)) : [])];
+      for (const n of named) {
+        if (typeof n !== "string") continue;
+        const p = posixJoin(dirOf(f), n);
         if (p) files.add(p);
       }
     }
   }
-  for (const f of [...files]) {
-    const target = await io.link?.(f);
-    if (typeof target === "string") {
-      const p = posixJoin(dirOf(f), target);
-      if (p) files.add(p);
-      else if (!target.startsWith("/")) unresolved.push(`${f} (a link out of the repository)`);
-    }
-  }
+  const links = await guardLinks([...files], io);
+  for (const p of links.paths) files.add(p);
+  unresolved.push(...links.unresolved);
   return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)] };
 }
 /** `dir` + `rel` as a path from the root, or null when it leaves the root or is absolute. */
@@ -577,7 +623,7 @@ export const settingsFile = (path) => fileName(String(path)) === SETTINGS_FILE;
  * `membership` (its change touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may
  * change as before.
  */
-export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], unknown = [], workspaces = [], membership = [] } = {}) {
+export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], named: commandNamed = extra, unknown = [], workspaces = [], membership = [] } = {}) {
   const clean = (p) => String(p).replace(/^\.\//, "");
   const before = new Set(prior.map(clean));
   const setupPaths = new Set([...extra].map(clean));
@@ -586,7 +632,10 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], u
   const manifestIn = (p) => (Object.hasOwn(LOCK_PAIRS, fileName(p)) ? LOCK_PAIRS[fileName(p)] : []).some((m) => [before, now].some((s) => s.has(`${dirOf(p)}${m}`)) || named(`${dirOf(p)}${m}`));
   const memberIn = (p) => workspaces.some((w) => w.dir === dirOf(p) && w.locks.includes(fileName(p)) && [before, now].some((s) => [...s].some((m) => workspaceMember(w, m))));
   const members = new Set(membership.map(clean));
-  const membersOnly = (p) => settingsFile(p) && members.has(p) && !setupPaths.has(p);
+  // Membership alone stays a fix pass's to change though a package manager setup runs reads the file; not when the
+  // setup command names the file itself.
+  const namedBySetup = new Set([...commandNamed].map(clean));
+  const membersOnly = (p) => settingsFile(p) && members.has(p) && !namedBySetup.has(p);
   return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
 }
 

@@ -36,7 +36,7 @@ import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-t
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, openTriage, triageKey } from "./lib/triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor, openTriage, triageKey } from "./lib/triage.mjs";
 import { openDecider } from "./lib/decider.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
@@ -487,13 +487,13 @@ const BINARY_DIFF = /^(?:Binary files .* differ|GIT binary patch)$/m;
  */
 export function answerDecider({ inputs, env = process.env, home = homedir(), stage = null, decider = null }) {
   const d = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
-  return { model: d.model, off: d.off, decider: d.off ? null : d };
+  return { model: d.model, off: d.off, floor: () => confidenceFloor(inputs, d), decider: d.off ? null : d };
 }
 
 /**
  * Whether what a review stage's answer and fix passes wrote after the review (#350, #367) stays the review's answer: the
  * decision model (`ask`, answerDecider) reads the `diff` they wrote, the findings they answered (`comments`) and the
- * failures they were given (`checks`), and answers `only_asked` at triage's MIN_CONFIDENCE or more. Any other answer, a
+ * failures they were given (`checks`), and answers `only_asked` at triage's confidence floor (`ask.floor`) or more. Any other answer, a
  * lower or missing confidence, a failed, timed-out or unreadable call, no decision model, a diff git prints as binary
  * (its content unseen), an input over ANSWER_INPUT_BYTES or a diff that cannot be told (`diff` null, `why` says why)
  * gives `review` true: those commits get a review pass. `{review, why, verdict, confidence, error, off?}`.
@@ -513,8 +513,9 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
   }
   const verdict = ANSWER_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
   const confidence = typeof a?.confidence === "number" ? a.confidence : null;
-  if (verdict === "only_asked" && confidence !== null && confidence >= MIN_CONFIDENCE) return { review: false, why: "", verdict, confidence, error: null };
-  if (verdict === "only_asked") return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as only what was asked, at ${confidence === null ? "no stated confidence" : `confidence ${confidence.toFixed(2)}`}, under ${MIN_CONFIDENCE}`, { verdict, confidence });
+  const floor = ask.floor?.() ?? confidenceFloor();
+  if (verdict === "only_asked" && confidence !== null && confidence >= floor.min) return { review: false, why: "", verdict, confidence, error: null };
+  if (verdict === "only_asked") return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as only what was asked, at ${confidence === null ? "no stated confidence" : `confidence ${confidence.toFixed(2)}`}, under the ${floor.text}`, { verdict, confidence });
   if (verdict) return reviewed(`the decision model (${ask.model}) read what the answer and fix passes wrote as more than the findings and failing checks asked`, { verdict, confidence });
   return reviewed(`the decision model (${ask.model}) gave no answer on what the answer and fix passes wrote (${a?.error || "no_answer"})`, { error: a?.error || "no_answer" });
 }

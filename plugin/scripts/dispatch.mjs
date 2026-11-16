@@ -25,7 +25,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { WAIT_MAX_MS, announceStarts, orderSiblings, prFinder, reviewWaitResume, sayWaiting, sendBackOrder, siblingTrials, waitReason } from "./lib/overlap.mjs";
+import { WAIT_MAX_MS, announceStarts, clearRebaseWait, orderSiblings, prFinder, rebaseWaitReason, reviewWaitResume, sayRebaseWait, sayWaiting, sendBackOrder, siblingTrials, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
@@ -785,6 +785,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Waiting hand-offs this tick released (their record no longer waits), and the In-review PRs that conflict this tick,
   // sent back in the release order once every PR is read (overlap.mjs sendBackOrder, #366).
   const holdReleased = new Set();
+  const holdDeferred = new Set();
+  // Each In-review Objective's merge pass answer this tick (session.mjs mergeReadyOne): one that cannot merge soon (red
+  // checks, a person took it out of the queue) is no sibling a send-back waits for.
+  const mergeHow = {};
   const dirty = [];
   const rebaseHeld = [];
   try {
@@ -829,7 +833,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
       // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
@@ -901,6 +905,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (how.waiting) {
           reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
           due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+          continue;
+        }
+        if (how === "deferred") {
+          holdDeferred.add(issue.number);
+          due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+          retry(`#${issue.number}'s trial merges`);
           continue;
         }
         if (how === "unsettled") {
@@ -996,7 +1006,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
       } else if (decision === "rebase") {
         // When Factory merges, the send-backs go in the release order once every PR is read (below); else each goes now.
-        if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already });
+        if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already, reviewWait, rebaseWait });
         else {
           sentBack.push(issue.number);
           if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
@@ -1013,6 +1023,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
           return null;
         });
+        mergeHow[issue.number] = how;
         if (how === "merged" || how === "queued") merged.push(issue.number);
         // Merged now (not only queued): no longer a sibling anything waits for this tick.
         if (how === "merged") landed.push(issue.number);
@@ -1027,16 +1038,25 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
     }
     // The conflicting In-review PRs (#366): each goes back in the release order unless a sibling ahead of it, which
-    // merges first, conflicts with it too; that one waits, since its rebase now would be undone by that merge. With one
-    // conflicting PR and no sibling ahead, nothing is merged on trial.
-    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set(reviewHeld.map((h) => h.issue.number)), released: holdReleased, stuck: (s) => twoAccounts(s) || personHeld.has(s.number), prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { log }) : [];
-    for (const { issue, pr, open, recent, already, wait } of sendOrder) {
+    // merges first, conflicts with it too; that one waits (at most WAIT_MAX_MS, with a note and a wake), since its
+    // rebase now would be undone by that merge. With one conflicting PR and no sibling ahead, nothing is merged on trial.
+    const cannotMerge = new Set(["red", "queue-red", "held", "threads", "edited", "dropped", "stopped"]);
+    const mergesLate = (s) => twoAccounts(s) || personHeld.has(s.number) || cannotMerge.has(mergeHow[s.number]) || !!localHold?.(s);
+    const sendOrder = dirty.length ? await sendBackOrder(repo, { dirty, issues, statuses, landed, held: new Set([...reviewHeld.map((h) => h.issue.number), ...holdDeferred]), released: holdReleased, stuck: mergesLate, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf() }, opts, { log }) : [];
+    for (const { issue, pr, open, recent, already, rebaseWait, wait, since } of sendOrder) {
       if (wait) {
         rebaseHeld.push(issue.number);
-        log(`  #${issue.number}: PR #${open.number} conflicts; its rebase waits for #${wait.on} to merge first (a trial merge of the two heads conflicts in ${wait.files.slice(0, 3).join(", ")}${wait.files.length > 3 ? ` and ${wait.files.length - 3} more` : ""})`);
+        log(`  #${issue.number}: PR #${open.number} conflicts; ${rebaseWaitReason(wait)}`);
+        due(issue.number, "sibling-wait", since + WAIT_MAX_MS + WAKE_SLACK_MS);
+        if (!dryRun)
+          await sayRebaseWait(repo, { issue, prNumber: open.number, wait, record: rebaseWait }, opts, { log }).catch((e) => {
+            log(`  #${issue.number}: its rebase wait could not be recorded (${String(e.message).slice(0, 120)}); the next tick tries again`);
+            retry(`#${issue.number}'s rebase wait`);
+          });
         continue;
       }
       sentBack.push(issue.number);
+      if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, gaveUp: Date.now() - since >= WAIT_MAX_MS }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
       if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
     }
   } finally {

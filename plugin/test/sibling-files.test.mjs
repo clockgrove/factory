@@ -23,10 +23,12 @@ const SELF = "factory-app[bot]";
 const PLAN = (n, files) => ({ id: 500 + n, user: { login: SELF, type: "Bot" }, body: `${marker(n, "plan")}\n## Checklist\n1. The change\n   Files: ${files.join(", ")}\n`, created_at: new Date(Date.now() - 60_000).toISOString() });
 
 /**
- * acme/app on the test's git server (temp.mjs GITHUB_SERVER_URL), where the trial merges fetch from: `main` has every
- * file of FILES at LINES lines. `head(tag, edits)` commits on main's base, and `next(sha, tag, edits)` on `sha`: each
- * edit `{path: [line, ...]}` writes `tag` over those lines (a path main lacks starts as LINES lines). Each commit is
- * pushed under a ref of its own; returns its id. Two heads that write different tags over one line conflict there.
+ * acme/app on the test's git server (temp.mjs GITHUB_SERVER_URL), where the trial merges fetch from: `main` starts with
+ * every file of FILES at LINES lines. `head(tag, edits)` commits on main's first commit, `next(sha, tag, edits)` on
+ * `sha`, and `onMain(tag, edits)` on main's head now: each edit `{path: [line, ...]}` writes `tag` over those lines (a
+ * path missing starts as LINES lines), and the commit is pushed under a ref of its own; each returns its id.
+ * `advance(tag, edits)` commits on main and moves main there (another PR merged); `land(sha)` moves main to `sha`, a
+ * commit on main's head (the PR merged). Two heads that write different tags over one line conflict there.
  */
 const LINES = 30;
 const FILES = ["test/fixtures/env.ts", "docs/commands.md", "src/commands/run.ts", "README.md", "src/registry.ts", ...Array.from({ length: 6 }, (_, i) => `src/m${i}.ts`)];
@@ -36,7 +38,7 @@ function gitServer() {
   const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.test" };
   const git = (...args) => execFileSync("git", ["-C", work, ...args], { encoding: "utf8", env }).trim();
   mkdirSync(dirname(origin), { recursive: true });
-  execFileSync("git", ["init", "-q", "--bare", origin]);
+  execFileSync("git", ["init", "-q", "--bare", "--initial-branch=main", origin]);
   git("init", "-q", "-b", "main");
   const lines = (path) => Array.from({ length: LINES }, (_, i) => `${path} ${i}`);
   const put = (path, text) => {
@@ -48,6 +50,7 @@ function gitServer() {
   git("commit", "-q", "-m", "base");
   git("push", "-q", origin, "main");
   const base = git("rev-parse", "HEAD");
+  let main = base;
   let n = 0;
   const commit = (from, tag, changes) => {
     git("checkout", "-q", "--detach", from);
@@ -63,7 +66,19 @@ function gitServer() {
     git("push", "-q", origin, `HEAD:refs/heads/t${n++}`);
     return sha;
   };
-  return { head: (tag, changes) => commit(base, tag, changes), next: (sha, tag, changes) => commit(sha, tag, changes) };
+  const land = (sha) => {
+    git("push", "-q", origin, `+${sha}:refs/heads/main`);
+    main = sha;
+  };
+  return {
+    head: (tag, changes) => commit(base, tag, changes),
+    next: (sha, tag, changes) => commit(sha, tag, changes),
+    onMain: (tag, changes) => commit(main, tag, changes),
+    advance: (tag, changes) => land(commit(main, tag, changes)),
+    land,
+    /** Main back at its first commit (a test that moved it, done). */
+    reset: () => land(base),
+  };
 }
 const G = gitServer();
 /** Edits of line `k` in each of `paths`. */
@@ -294,14 +309,14 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
   const now = Date.now();
   const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, [...SHARED3, "src/new.ts"])] }, prs: { ...PR7(), 8: PR8() } });
   const held = await withWorld(w, () => reviewHold(repoOf(REPO), { issue: 8, pr: w.state.prs[8].pr, autoMerge: true }, { token: "t" }, { now }));
-  assert.deepEqual(held, { on: 7, files: [...SHARED3].sort(), cause: null });
+  assert.deepEqual(held, { on: 7, files: [...SHARED3].sort(), cause: null, unread: null });
   assert.equal(waitReason(held), "its review waits for #7 to merge: a trial merge of the two heads conflicts in 3 file(s) (`docs/commands.md`, `src/commands/run.ts`, `test/fixtures/env.ts`)");
   const record = w.state.comments[13].at(-1);
   assert.ok(record.body.startsWith(`<!-- factory:8:review-wait:7-${Math.floor(now / 1000)} -->`), record.body);
   assert.deepEqual(prLabels(w, 8), [], "no review label: no review starts");
   const [note] = overlap(w, 8);
   assert.ok(note.body.startsWith(marker(8, "overlap", `waits-7-${Math.floor(now / 1000)}`)), note.body);
-  assert.match(note.body, /PR #13 is ready, and its review waits for #7 to merge: a trial merge of the two PRs' heads conflicts in `docs\/commands\.md`, `src\/commands\/run\.ts`, `test\/fixtures\/env\.ts`\..*after 6 h of waiting at most since its first wait.*sends it back for its rebase when it conflicts/);
+  assert.match(note.body, /PR #13 is ready, and its review waits for #7 to merge: a trial merge of the two heads conflicts in 3 file\(s\) \(`docs\/commands\.md`, `src\/commands\/run\.ts`, `test\/fixtures\/env\.ts`\)\..*after 6 h of waiting at most since its first wait.*sends it back for its rebase when it conflicts/);
 
   // #7 Running its work stage (no record: not handed off yet): the first to hand off goes first.
   forgetFiles();
@@ -360,9 +375,10 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
  * The worker's rebase of a PR the dispatcher sent back, as far as GitHub sees it: a new head (one more commit on the
  * old, so it still conflicts with the siblings it conflicted with), no conflict with main, its hand-off.
  */
-async function rebased(w, n, { held = null } = {}) {
+async function rebased(w, n, { held = null, onto = null } = {}) {
   const x = w.state.prs[n];
-  x.pr.head.sha = G.next(x.pr.head.sha, `rebased ${n}`, { [`src/rebased${n}.ts`]: [0] });
+  // `onto`: its edits made again on main's head now (the conflict resolved), else one more commit on its head.
+  x.pr.head.sha = onto ? G.onMain(`rebased ${n}`, onto) : G.next(x.pr.head.sha, `rebased ${n}`, { [`src/rebased${n}.ts`]: [0] });
   x.pr.mergeable_state = "clean";
   forgetFiles();
   const wait = held ?? (await withWorld(w, () => reviewHold(repoOf(REPO), { issue: n, pr: x.pr, autoMerge: true, rebaseMode: true }, { token: "t" })));
@@ -457,7 +473,7 @@ test("#365: the hold is a trial merge of the two heads: many shared files that m
   one[8].files = mine;
   const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, ten)], 8: [PLAN(8, mine)] }, prs: one });
   const held = await withWorld(v, () => reviewHold(repoOf(REPO), { issue: 8, pr: v.state.prs[8].pr, autoMerge: true }, { token: "t" }));
-  assert.deepEqual(held, { on: 7, files: ["README.md"], cause: null });
+  assert.deepEqual(held, { on: 7, files: ["README.md"], cause: null, unread: null });
   assert.ok(reviewWaitOf(v.state.comments[13], 8), "its record is on the PR");
 
   // The dispatcher's half decides the same way: a waiting hand-off whose sibling ahead merges cleanly with it goes to
@@ -471,7 +487,7 @@ test("#365: the hold is a trial merge of the two heads: many shared files that m
   const k = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)], { comments: { 7: [PLAN(7, ten)], 8: [PLAN(8, mine)], 13: [holdRecord(8, 7, since)] }, prs: one });
   const t = await tick(k);
   assert.deepEqual([t.reviewHeld, t.reviewResumed], [[8], []]);
-  assert.match(overlap(k, 8)[0].body, /waits for #7 to merge: a trial merge of the two PRs' heads conflicts in `README\.md`/);
+  assert.match(overlap(k, 8)[0].body, /waits for #7 to merge: a trial merge of the two heads conflicts in 1 file\(s\) \(`README\.md`\)/);
 });
 
 test("#365: trial merges are cached by the pair of heads, and a tick computes at most its bound of new ones", async () => {
@@ -482,8 +498,8 @@ test("#365: trial merges are cached by the pair of heads, and a tick computes at
   const c = G.head("pair-c", edits(["src/m1.ts"], 5));
   const one = siblingTrials(repoOf(REPO), { token: "t" }, { max: 1 });
   try {
-    assert.deepEqual(await one.conflicts(a, b), ["src/m0.ts"]);
-    assert.deepEqual(await one.conflicts(b, a), ["src/m0.ts"], "the same pair either way round: from the cache");
+    assert.deepEqual(await one.conflicts(a, b), { conflict: true, files: ["src/m0.ts"] });
+    assert.deepEqual(await one.conflicts(b, a), { conflict: true, files: ["src/m0.ts"] }, "the same pair either way round: from the cache");
     await assert.rejects(one.conflicts(a, c), /past the 1 trial merges a tick computes/);
   } finally {
     one.close();
@@ -491,8 +507,8 @@ test("#365: trial merges are cached by the pair of heads, and a tick computes at
   // Another tick in this process reads the pair from the cache; a commit the server lacks is unread.
   const next = siblingTrials(repoOf(REPO), { token: "t" }, { max: 1 });
   try {
-    assert.deepEqual(await next.conflicts(a, b), ["src/m0.ts"]);
-    assert.deepEqual(await next.conflicts(a, c), []);
+    assert.deepEqual(await next.conflicts(a, b), { conflict: true, files: ["src/m0.ts"] });
+    assert.deepEqual(await next.conflicts(a, c), { conflict: false, files: [] });
     await assert.rejects(siblingTrials(repoOf(REPO), { token: "t" }).conflicts(a, "e".repeat(40)), /could not be fetched/);
   } finally {
     next.close();
@@ -504,11 +520,14 @@ const dirtyPr = (n, head) => ({ pr: { number: 10 + n, state: "open", draft: fals
 const validated = (n, head) => ({ id: 700 + n, user: { login: SELF, type: "Bot" }, body: `${marker(n, "validated", head)}\nFactory: validated.`, created_at: new Date(Date.now() - 3600_000).toISOString() });
 
 for (const siblingHold of [true, false]) {
-  test(`#366: six conflicting In-review PRs on one registry go back one per merge, in the release order, each rebased once (sibling_hold ${siblingHold ? "on" : "off"})`, async () => {
+  test(`#366: six conflicting In-review PRs on one registry go back one per merge, in the release order, each rebased once (sibling_hold ${siblingHold ? "on" : "off"})`, async (t) => {
     forgetFiles();
     const ns = [21, 22, 23, 24, 25, 26];
-    // Each writes its own entry over the same registry line: every two of them conflict.
-    const heads = Object.fromEntries(ns.map((n) => [n, G.head(`entry ${n}`, { "src/registry.ts": [29], [`src/entry${n}.ts`]: [0] })]));
+    // Each writes its own entry over the same registry line: every two of them conflict, and #20's entry, merged on
+    // main, conflicts with each.
+    const entry = (n) => ({ "src/registry.ts": [29], [`src/entry${n}.ts`]: [0] });
+    const heads = Object.fromEntries(ns.map((n) => [n, G.head(`entry ${n}`, entry(n))]));
+    G.advance("entry 20", entry(20));
     const w = world(
       ns.map((n) => issue(n, ["factory:in-review"], 1)),
       { comments: Object.fromEntries(ns.map((n) => [10 + n, [validated(n, heads[n])]])), prs: Object.fromEntries(ns.map((n) => [n, dirtyPr(n, heads[n])])) },
@@ -516,11 +535,13 @@ for (const siblingHold of [true, false]) {
     const notices = (n) => (w.state.comments[10 + n] || []).filter((c) => c.body.startsWith(marker(n, "rebase").replace(/ -->$/, ""))).length;
     const running = (n) => (w.state.issues = w.state.issues.map((i) => (i.number === n ? issue(n, ["factory:running"], i.comments) : i)));
     const merge = (n) => {
+      G.land(w.state.prs[n].pr.head.sha);
       w.state.issues = w.state.issues.filter((i) => i.number !== n);
       delete w.state.prs[n];
       for (const x of Object.values(w.state.prs)) x.pr.mergeable_state = "dirty";
     };
     const inputs = { siblingHold, maxConcurrent: 6 };
+    t.after(() => G.reset());
     for (const n of ns) {
       const rest = w.state.issues.map((i) => i.number).filter((x) => x !== n);
       // A merge made every open PR conflict: only the first in the release order goes back; a rebase of the others now
@@ -531,7 +552,7 @@ for (const siblingHold of [true, false]) {
       running(n);
       const during = await tick(w, inputs);
       assert.deepEqual([during.sentBack, during.rebaseHeld], [[], rest]);
-      await rebased(w, n);
+      await rebased(w, n, { onto: entry(n) });
       const review = await tick(w, inputs);
       assert.deepEqual([review.sentBack, review.rebaseHeld], [[], rest]);
       merge(n);
@@ -564,6 +585,135 @@ test("#366: a conflicting PR that merges cleanly with every sibling ahead of it 
   );
   const o = await tick(m, { maxConcurrent: 6, autoMerge: false });
   assert.deepEqual([o.sentBack, o.rebaseHeld], [[21, 22, 23, 24], []]);
+});
+
+/** Objective n In review with PR 10 + n, clean, under review (its label on), at `head`. */
+const reviewingPr = (n, head) => ({ pr: { ...dirtyPr(n, head).pr, mergeable: true, mergeable_state: "clean", labels: [{ name: "factory:review" }] }, files: [] });
+/** The comments of PR `prNumber` that start with Objective n's record marker of `kind`. */
+const records = (w, n, prNumber, kind) => (w.state.comments[prNumber] || []).filter((c) => c.body.startsWith(marker(n, kind).replace(/ -->$/, ":")));
+/** A record of `kind` on n's PR waiting for `on` since `sinceMs` (overlap.mjs writeRecord's form). */
+const waitRecord = (n, kind, on, sinceMs, id = 960 + n) => ({ id, user: { login: SELF, type: "Bot" }, body: `${marker(n, kind).replace(/ -->$/, "")}:${on}-${Math.floor(sinceMs / 1000)} -->\nFactory: waits.`, created_at: new Date(sinceMs).toISOString(), updated_at: new Date(sinceMs).toISOString() });
+
+test("#365: heads on different bases are judged against main: a stale head does not conflict with a sibling over a change of main's that the sibling never touched", async (t) => {
+  const { siblingTrials } = await import("../scripts/lib/overlap.mjs");
+  forgetFiles();
+  t.after(() => G.reset());
+  // #31 branched before main changed line 5 of src/m4.ts and changed that line too: it conflicts with main. #30 branched
+  // from main since and changes src/m1.ts only; #32, from main too, changes line 1 of src/m0.ts, as #31 does.
+  const w31 = G.head("w", { "src/m4.ts": [5], "src/m0.ts": [1] });
+  G.advance("main", { "src/m4.ts": [5] });
+  const x30 = G.onMain("x", { "src/m1.ts": [3] });
+  const y32 = G.onMain("y", { "src/m0.ts": [1] });
+  const trials = siblingTrials(repoOf(REPO), { token: "t" });
+  try {
+    assert.deepEqual(await trials.conflicts(w31, x30), { conflict: false, files: [] }, "main's change is #31's own conflict, not one with #30");
+    assert.deepEqual(await trials.conflicts(w31, y32), { conflict: true, files: ["src/m0.ts"] }, "both change line 1 of src/m0.ts");
+    assert.deepEqual(await trials.conflicts(x30, y32), { conflict: false, files: [] });
+  } finally {
+    trials.close();
+  }
+
+  // #30's hand-off is not held behind the stale #31 (In review, conflicting with main) ...
+  forgetFiles();
+  const comments = { 41: [validated(31, w31)] };
+  const hand = world([issue(30, ["factory:running"], 1), issue(31, ["factory:in-review"], 1)], { comments, prs: { 30: { pr: { ...reviewingPr(30, x30).pr, labels: [] }, files: ["src/m1.ts"] }, 31: dirtyPr(31, w31) } });
+  assert.equal(await withWorld(hand, () => reviewHold(repoOf(REPO), { issue: 30, pr: hand.state.prs[30].pr, autoMerge: true }, { token: "t" })), null);
+  // ... and #31 goes back for its rebase rather than wait for #30, In review ahead of it.
+  forgetFiles();
+  const back = world([issue(30, ["factory:in-review"], 1), issue(31, ["factory:in-review"], 1)], { comments, prs: { 30: reviewingPr(30, x30), 31: dirtyPr(31, w31) } });
+  const r = await tick(back, { maxConcurrent: 6 });
+  assert.deepEqual([r.sentBack, r.rebaseHeld], [[31], []]);
+});
+
+test("#366: a send-back that waits says so on its PR and issue and arms a wake; it waits 6 h at most, counted with its hand-off's wait, and not for a sibling whose own review waits", async () => {
+  forgetFiles();
+  const h21 = G.head("reg 21", { "src/registry.ts": [29] });
+  const h22 = G.head("reg 22", { "src/registry.ts": [29] });
+  const setup = (comments = {}) => world([issue(21, ["factory:in-review"], 1), issue(22, ["factory:in-review"], 1)], { comments: { 31: [validated(21, h21)], 32: [validated(22, h22)], ...comments }, prs: { 21: reviewingPr(21, h21), 22: dirtyPr(22, h22) } });
+  const w = setup();
+  const before = Date.now();
+  const r = await tick(w, { maxConcurrent: 6 });
+  assert.deepEqual([r.sentBack, r.rebaseHeld], [[], [22]]);
+  const [rec] = records(w, 22, 32, "sendback-wait");
+  const since = Number(/sendback-wait:21-(\d+) -->/.exec(rec?.body ?? "")?.[1]) * 1000;
+  assert.ok(since >= Math.floor(before / 1000) * 1000, rec?.body);
+  assert.match(rec.body, /its rebase waits for #21 to merge first: a trial merge of the two heads conflicts in 1 file\(s\) \(`src\/registry\.ts`\)/);
+  assert.ok(overlap(w, 22)[0].body.startsWith(marker(22, "overlap", `rebasewait-21-${since / 1000}`)), overlap(w, 22)[0]?.body);
+  assert.match(overlap(w, 22)[0].body, /PR #32 conflicts with the default branch, and its rebase waits for #21 to merge first.*after 6 h of waiting at most/);
+  assert.deepEqual(r.deadlines.filter((d) => d.kind === "sibling-wait"), [{ issue: 22, kind: "sibling-wait", at: new Date(since + 6 * 3600_000 + 60_000).toISOString() }]);
+  assert.equal(records(w, 22, 32, "rebase").length, 0, "no send-back notice");
+  // The next tick still waits, with nothing written again.
+  const writes = w.state.writes.length;
+  assert.deepEqual((await tick(w, { maxConcurrent: 6 })).rebaseHeld, [22]);
+  assert.equal(w.state.writes.length, writes);
+
+  // Waiting since 7 h ago: it goes back now; its record is released and the note says why.
+  forgetFiles();
+  const late = setup({ 32: [validated(22, h22), waitRecord(22, "sendback-wait", 21, Date.now() - 7 * 3600_000)], 22: [] });
+  const l = await tick(late, { maxConcurrent: 6 });
+  assert.deepEqual([l.sentBack, l.rebaseHeld], [[22], []]);
+  assert.match(records(late, 22, 32, "sendback-wait")[0].body, /-released -->/);
+
+  // A hand-off released at its 6 h bound that conflicts goes back at once: the bound covers both waits.
+  forgetFiles();
+  const held = setup({ 32: [validated(22, h22), holdRecord(22, 21, Date.now() - 7 * 3600_000)] });
+  const h = await tick(held, { maxConcurrent: 6 });
+  assert.deepEqual([h.sentBack, h.rebaseHeld], [[22], []]);
+
+  // #21's own review waits for a third-party reviewer: it will not merge soon, so #22 does not wait for it.
+  forgetFiles();
+  const thirdParty = { id: 941, user: { login: SELF, type: "Bot" }, body: `${marker(21, "third-party").replace(/ -->$/, "")} {"sha":"${h21}","logins":["greptile-apps[bot]"],"at":"${new Date().toISOString()}"} -->\nFactory: waiting.`, created_at: new Date().toISOString() };
+  const tp = setup({ 31: [validated(21, h21), thirdParty] });
+  const p = await tick(tp, { maxConcurrent: 6 });
+  assert.deepEqual([p.sentBack, p.rebaseHeld], [[22], []]);
+});
+
+test("#366: trial merges that cannot be computed fall back to the release order (the first conflicting PR goes back, the later ones wait) and keep a waiting hand-off waiting without an error", async () => {
+  forgetFiles();
+  const heads = { 21: G.head("a21", edits(["src/m1.ts"], 3)), 22: G.head("a22", edits(["src/m2.ts"], 3)), 23: G.head("a23", edits(["src/m3.ts"], 3)), 24: G.head("a24", edits(["src/m4.ts"], 3)) };
+  const w = world([21, 22, 23, 24].map((n) => issue(n, ["factory:in-review"], 1)), {
+    comments: { ...Object.fromEntries([21, 22, 23].map((n) => [10 + n, [validated(n, heads[n])]])), 34: [holdRecord(24, 21, Date.now() - 3600_000)] },
+    prs: { ...Object.fromEntries([21, 22, 23].map((n) => [n, dirtyPr(n, heads[n])])), 24: { pr: { ...dirtyPr(24, heads[24]).pr, mergeable_state: "clean" }, files: [] } },
+  });
+  // The git server cannot be reached this tick.
+  const saved = process.env.GITHUB_SERVER_URL;
+  process.env.GITHUB_SERVER_URL = join(saved, "nowhere");
+  try {
+    const r = await tick(w, { maxConcurrent: 6 });
+    assert.deepEqual([r.sentBack, r.rebaseHeld], [[21], [22, 23]]);
+    assert.match(records(w, 23, 33, "sendback-wait")[0].body, /its rebase waits for #22 to merge first \(the trial merges could not be computed this tick, so the release order decides\)\./);
+    assert.deepEqual([r.reviewResumed, r.reviewHeld], [[], []]);
+    assert.equal(reviewWaitOf(w.state.comments[34], 24)?.released, false, "the hand-off still waits");
+    assert.ok(r.deadlines.some((d) => d.kind === "retry"));
+  } finally {
+    process.env.GITHUB_SERVER_URL = saved;
+  }
+});
+
+test("#366: a sibling head the server does not have counts as conflicting for one tick, named in the record, then is left out", async () => {
+  forgetFiles();
+  const gone = "e".repeat(40);
+  const h22 = G.head("reg 22b", { "src/registry.ts": [29] });
+  const w = world([issue(21, ["factory:in-review"], 1), issue(22, ["factory:in-review"], 1)], { comments: { 31: [validated(21, gone)], 32: [validated(22, h22)] }, prs: { 21: reviewingPr(21, gone), 22: dirtyPr(22, h22) } });
+  const r = await tick(w, { maxConcurrent: 6 });
+  assert.deepEqual([r.sentBack, r.rebaseHeld], [[], [22]]);
+  assert.match(records(w, 22, 32, "sendback-wait")[0].body, new RegExp(`^<!-- factory:22:sendback-wait:21-\\d+-u${gone} -->\\nFactory: its rebase waits for #21 to merge first \\(its head could not be fetched for a trial merge\\)\\.`));
+  forgetFiles();
+  const again = await tick(w, { maxConcurrent: 6 });
+  assert.deepEqual([again.sentBack, again.rebaseHeld], [[22], []]);
+
+  // The same for a hand-off: held once, named in its record; the dispatcher's next tick goes on without it.
+  forgetFiles();
+  const prs = { ...PR7(), 8: PR8() };
+  prs[7].pr.head.sha = gone;
+  const v = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs });
+  const wait = await withWorld(v, () => reviewHold(repoOf(REPO), { issue: 8, pr: v.state.prs[8].pr, autoMerge: true }, { token: "t" }));
+  assert.deepEqual(wait, { on: 7, files: [], cause: "its head could not be fetched for a trial merge", unread: gone });
+  assert.equal(reviewWaitOf(v.state.comments[13], 8)?.unread, gone);
+  v.state.issues = [issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2)];
+  forgetFiles();
+  const t = await tick(v);
+  assert.deepEqual([t.reviewHeld, t.reviewResumed], [[], [8]]);
 });
 
 test("#340: a sibling that can run no stage (two account labels) is not ahead; a hold more than 6 h after the Objective's last starts a new wait", async () => {

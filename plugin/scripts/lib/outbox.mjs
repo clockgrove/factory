@@ -1125,49 +1125,114 @@ export async function mergeTree({ remote, token = () => null, ours, theirs, base
   }
 }
 
+/** A trial merge that could not be computed; `missing` the commits `remote` did not serve (none: something else failed). */
+export class TrialUnread extends Error {
+  constructor(message, missing = []) {
+    super(message);
+    this.missing = missing;
+  }
+}
+
 /**
- * Trial merges of two commits, in one scratch mirror kept for its caller's lifetime (git merge-tree, no worktree, no
- * hooks): commits are fetched by id from `remote` once each, blobs as the merges need them. `conflicts(ours, theirs)`
- * resolves to the paths a merge of the two would conflict in, sorted (none: they merge cleanly), and rejects when a
- * commit cannot be had or git cannot merge them (no common history). `close()` removes the mirror.
+ * Trial merges of two PR heads against the default branch, in one scratch mirror kept for its caller's lifetime (git
+ * merge-tree, no worktree, no hooks): the default branch (`remote`'s HEAD) is fetched once, each head by id once, blobs
+ * as the merges need them. `conflicts(a, b)` resolves to `{conflict, files, main}`: whether the two would conflict once
+ * one of them has merged into the default branch `main`, and the paths (sorted; none when git names none). When both
+ * heads merge cleanly into `main`, that is exact: the two merged trees are merged with `main` as their base. When one
+ * does not (it conflicts with `main` and will be rebased whatever its siblings do), the heads are merged with each other
+ * and a path counts only when both heads' own changes (since their merge base with `main`) touch it, so a head on an old
+ * base does not conflict with a sibling over a change of `main`'s that the sibling never touched. Rejects with
+ * TrialUnread when a commit cannot be had or git cannot merge them. `close()` removes the mirror.
  */
 export function trialMerges({ remote, token = () => null, base = tmpdir() }) {
   let dir = null;
   let ready = null;
+  let main = null;
   const fetched = new Set();
-  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
+  const memo = new Map();
+  const once = (key, fn) => {
+    if (!memo.has(key)) memo.set(key, fn());
+    return memo.get(key);
+  };
+  // commit-tree writes the trial merges' commits: a fixed identity and time, so the same inputs make the same commit.
+  const who = { GIT_AUTHOR_NAME: "factory", GIT_AUTHOR_EMAIL: "factory@localhost", GIT_COMMITTER_NAME: "factory", GIT_COMMITTER_EMAIL: "factory@localhost", GIT_AUTHOR_DATE: "@0 +0000", GIT_COMMITTER_DATE: "@0 +0000" };
+  const env = () => addConfig({ PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", LANG: "C", ...who, ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"]]);
   const git = (args) => exec("git", ["-C", dir, ...args], { env: env() });
   const must = async (args, what) => {
     const r = await git(args);
-    if (r.code !== 0) throw new Error(`${what} (git exit ${r.code})`);
-    return r;
+    if (r.code !== 0) throw new TrialUnread(`${what} (git exit ${r.code})`);
+    return r.stdout.trim();
   };
+  const fetch = (refs) => git(["fetch", "-q", "--no-tags", "--filter=blob:none", "origin", ...refs]);
   const open = () =>
     (ready ??= (async () => {
       dir = mkdtempSync(join(base, "trial-merge-"));
       await must(["init", "-q", "--bare"], "the trial-merge mirror could not be made");
       await must(["config", "remote.origin.url", remote], "the trial-merge mirror could not be made");
+      if ((await fetch(["HEAD"])).code !== 0) throw new TrialUnread("the default branch could not be fetched");
+      main = await must(["rev-parse", "FETCH_HEAD"], "the default branch could not be read");
     })());
   const have = async (shas) => {
-    const missing = shas.filter((s) => !fetched.has(s));
+    const missing = [...new Set(shas)].filter((s) => !fetched.has(s));
     if (!missing.length) return;
-    await must(["fetch", "-q", "--no-tags", "--filter=blob:none", "origin", ...missing], `${missing.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`);
+    if ((await fetch(missing)).code !== 0) {
+      // Which of them the server does not have: each alone.
+      const lost = [];
+      for (const s of missing) if ((await fetch([s])).code !== 0) lost.push(s);
+      if (!lost.length) throw new TrialUnread(`${missing.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`);
+      for (const s of missing.filter((x) => !lost.includes(x))) fetched.add(s);
+      throw new TrialUnread(`${lost.map((s) => s.slice(0, 7)).join(", ")} could not be fetched`, lost);
+    }
     for (const s of missing) fetched.add(s);
   };
+  // git merge-tree: {code, files}; exit 0 clean, 1 conflicted, any other unread.
+  const mergeTree = async (args, what) => {
+    const r = await git(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", ...args]);
+    if (r.code !== 0 && r.code !== 1) throw new TrialUnread(`git merge-tree could not merge ${what} (exit ${r.code})`);
+    const parts = r.stdout.split("\0");
+    return { code: r.code, tree: parts[0].trim(), files: [...new Set(parts.slice(1).filter(Boolean))].sort() };
+  };
+  // A head merged into main: the merge commit, or null when it conflicts with main.
+  const onMain = (h) =>
+    once(`on:${h}`, async () => {
+      const m = await mergeTree([main, h], `${h.slice(0, 7)} into the default branch`);
+      return m.code === 0 ? must(["commit-tree", m.tree, "-p", main, "-p", h, "-m", "trial"], "a trial merge could not be written") : null;
+    });
+  // The paths a head's own changes touch: since its merge base with main.
+  const own = (h) =>
+    once(`own:${h}`, async () => {
+      const b = await must(["merge-base", main, h], `${h.slice(0, 7)} has no history in common with the default branch`);
+      return new Set((await must(["diff", "--name-only", "-z", "--no-renames", b, h], "a head's changes could not be read")).split("\0").filter(Boolean));
+    });
   return {
-    async conflicts(ours, theirs) {
+    /** The default branch's head this mirror judges against (fetched at the first call). */
+    async main() {
       await open();
-      await have([ours, theirs]);
-      const r = await git(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", ours, theirs]);
-      if (r.code === 0) return [];
-      if (r.code !== 1) throw new Error(`git merge-tree could not merge ${ours.slice(0, 7)} and ${theirs.slice(0, 7)} (exit ${r.code})`);
-      return [...new Set(r.stdout.split("\0").slice(1).filter(Boolean))].sort();
+      return main;
+    },
+    async conflicts(a, b) {
+      await open();
+      await have([a, b]);
+      const [ma, mb] = [await onMain(a), await onMain(b)];
+      if (ma && mb) {
+        const m = await mergeTree([`--merge-base=${main}`, ma, mb], `${a.slice(0, 7)} and ${b.slice(0, 7)} on the default branch`);
+        return { conflict: m.code === 1, files: m.files, main };
+      }
+      const m = await mergeTree([a, b], `${a.slice(0, 7)} and ${b.slice(0, 7)}`);
+      if (m.code === 0) return { conflict: false, files: [], main };
+      // git named no path: a conflict all the same.
+      if (!m.files.length) return { conflict: true, files: [], main };
+      const [oa, ob] = [await own(a), await own(b)];
+      const files = m.files.filter((f) => oa.has(f) && ob.has(f));
+      return { conflict: files.length > 0, files, main };
     },
     close() {
       if (dir) rmSync(dir, { recursive: true, force: true });
       dir = null;
       ready = null;
+      main = null;
       fetched.clear();
+      memo.clear();
     },
   };
 }

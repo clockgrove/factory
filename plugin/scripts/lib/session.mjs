@@ -65,7 +65,7 @@ import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
-import { reviewWaitOf } from "./overlap.mjs";
+import { rebaseWaitOf, reviewWaitOf } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
@@ -2436,8 +2436,9 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
   }
   // The PR's third-party wait record (third-party-review.mjs waitOf), read from the same comments.
   // Its account-wait record (account-wait.mjs): a review waiting on two account labels.
-  // Its review-wait record (overlap.mjs reviewHold): a hand-off to review waiting for a sibling on the same files.
-  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue), accountWait: accountWaitOf(listed, issue), reviewWait: reviewWaitOf(listed, issue) };
+  // Its review-wait record (overlap.mjs reviewHold): a hand-off to review waiting for a sibling it conflicts with.
+  // Its rebase-wait record (overlap.mjs sendBackOrder): a send-back waiting for a sibling ahead of it to merge.
+  return { effective: pushed.length, recent, already: markers.some(here), since, record, stuck, wait: waitOf(listed, issue), accountWait: accountWaitOf(listed, issue), reviewWait: reviewWaitOf(listed, issue), rebaseWait: rebaseWaitOf(listed, issue) };
 }
 
 /**

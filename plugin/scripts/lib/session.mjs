@@ -1930,21 +1930,29 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
 }
 
 /**
- * Post a notice as the App when there is one (`notice`, local mode). Any failure on that path (no token from the
- * parent, or GitHub refusing the App's post: uninstalled, rate limited) posts it again with the local `token`, logged:
- * a comment no one is told of beats none. `post` takes the request options.
+ * Post a notice as the App when there is one (`notice`, local mode). The App's token goes as a getter whose refresh
+ * asks `notice` for a new one in place of the one GitHub refused, so a 401 on it is refreshed once (github.mjs
+ * refreshedOn401). Any failure on that path (no token from the parent, or GitHub refusing the App's post: uninstalled,
+ * rate limited) posts it again with the local `token`, logged: a comment no one is told of beats none. `post` takes the
+ * request options.
  */
 export async function noticePost({ notice, token, what, post }) {
   if (!notice) return post({ token });
   let appToken;
+  let mintedAt = null;
   try {
-    appToken = (await notice()).token;
+    ({ token: appToken, mintedAt = null } = await notice());
   } catch (e) {
     log(`${what}: no notice token (${e.message.slice(0, 160)}); posting with the local token`);
     return post({ token });
   }
+  const current = () => appToken;
+  current.refresh = async () => {
+    ({ token: appToken, mintedAt = null } = await notice({ stale: appToken }));
+  };
+  current.mintedAt = (t) => (t && t === appToken ? mintedAt : null);
   try {
-    return await post({ token: appToken });
+    return await post({ token: current });
   } catch (e) {
     log(`${what}: the App's post failed (${e.message.slice(0, 160)}); posting with the local token`);
     return post({ token });

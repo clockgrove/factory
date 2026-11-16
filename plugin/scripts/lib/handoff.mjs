@@ -415,7 +415,7 @@ export function inFiles({ issue, issueTitle, issueBody, decisions = [], plan = n
   const files = {
     "issue.md": `# #${issue}: ${issueTitle || ""}\n\n${issueBody || "(no body)"}\n`,
     "decisions.md": decisions.length ? `${decisionsSection(decisions, Infinity)}\n` : "No maintainer decisions recorded.\n",
-    "review-comments.json": `${JSON.stringify(reviewComments.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: c.body, ...(c.from ? { from: c.from } : {}) })), null, 2)}\n`,
+    "review-comments.json": `${JSON.stringify(reviewComments.map((c) => ({ id: c.id, path: c.path, line: c.line ?? c.original_line ?? null, body: c.body, ...(c.from ? { from: c.from } : {}), ...(c.earlier ? { earlier: c.earlier } : {}) })), null, 2)}\n`,
     "base.txt": `${base}\n`,
   };
   if (plan !== null) files["plan.md"] = plan;

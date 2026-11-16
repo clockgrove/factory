@@ -63,6 +63,17 @@ function onActions(code, env) {
   return execFileSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, GITHUB_ACTIONS: "true", ...env } });
 }
 
+test("#402: rebase_limit is a cap a repository variable may set (a whole number above 0); third_party_wait_minutes gates a merge, so only the workflow file sets it", () => {
+  assert.ok(VARIABLE_SETTINGS.has("FACTORY_REBASE_LIMIT"));
+  assert.deepEqual(variableSettings({ FACTORY_REBASE_LIMIT: "3" }).kept, { FACTORY_REBASE_LIMIT: "3" });
+  for (const bad of ["0", "2.5", "many"]) assert.deepEqual(variableSettings({ FACTORY_REBASE_LIMIT: bad }).invalid.map((x) => x.why), ["not a whole number above 0"], bad);
+  assert.ok(WORKFLOW_ONLY_SETTINGS.has("FACTORY_THIRD_PARTY_WAIT_MINUTES"));
+  assert.deepEqual(variableSettings({ FACTORY_THIRD_PARTY_WAIT_MINUTES: "1" }).excluded, ["FACTORY_THIRD_PARTY_WAIT_MINUTES"]);
+  const layers = settingLayers({ workflow: { FACTORY_THIRD_PARTY_WAIT_MINUTES: "30" }, variables: { FACTORY_REBASE_LIMIT: "3", FACTORY_THIRD_PARTY_WAIT_MINUTES: "1" } });
+  assert.deepEqual([layers.values.FACTORY_REBASE_LIMIT, layers.from.FACTORY_REBASE_LIMIT, layers.values.FACTORY_THIRD_PARTY_WAIT_MINUTES, layers.from.FACTORY_THIRD_PARTY_WAIT_MINUTES], ["3", "variable", "30", "workflow"]);
+  assert.ok(layerLines(layers).includes('FACTORY_REBASE_LIMIT: "3" (repository variable)'), "doctor and serve print the value in force and its layer");
+});
+
 test("on Actions the workflow's `vars` input lays the repository's variables over the env block before any script reads a setting, and the launcher hands them to the cloud sandbox's stage (#284)", () => {
   const block = { FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_MAX_CONCURRENT: "3", FACTORY_MAX_USD: "25", FACTORY_TIMEOUT_MINUTES: "240", FACTORY_AUTO_MERGE: "true" };
   const vars = { FACTORY_MAX_CONCURRENT: "6", FACTORY_MAX_USD: "10", FACTORY_AUTO_MERGE: "false", FACTORY_TIMEOUT_MINUTES: "300", ANTHROPIC_OIDC_EXCHANGE_URL: "https://x" };

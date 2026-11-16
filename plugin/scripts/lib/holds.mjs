@@ -37,7 +37,7 @@ export const HOLD_MAX_MS = 8 * 24 * 60 * 60_000;
 /**
  * How long automatic account choice (#266) avoids an account that met its usage limit or quota with no reset reported
  * (Copilot's always, Codex's when its snapshot names none: accountHolds.spent), by how many in a row: 1, 4, then 24
- * hours. Nothing else holds on it: with the setting off, or the Objective pinned, such a limit Blocks; with it on, the
+ * hours, unless the machine's guess_hours (machine.mjs machineLimits) says otherwise. Nothing else holds on it: with the setting off, or the Objective pinned, such a limit Blocks; with it on, the
  * Objective moves to a free account (#332), and Blocks only when none is free.
  */
 export const SPENT_GUESS_MS = [1, 4, 24].map((h) => h * 60 * 60_000);
@@ -184,8 +184,8 @@ const START = (key) => `${key}.started.json`;
  *   the streak ends (its hold, if any, stays) when that start is after the newest record's, and a guess (`spent`) made
  *   before that start is over.
  * - `limitedAt(account, now)`: when a stage last met the account's usage limit (ms), while its records are kept; else null.
- * - `spent({harness, account, now, window})`: a stage on the account met its usage limit or quota with no reset reported.
- *   Only automatic account choice (#266) weighs it (`avoidUntil`), for SPENT_GUESS_MS by how many in a row, until a pass
+ * - `spent({harness, account, now, window, steps})`: a stage on the account met its usage limit or quota with no reset
+ *   reported. Only automatic account choice (#266) weighs it (`avoidUntil`), for `steps` (SPENT_GUESS_MS) by how many in a row, until a pass
  *   on the account is served; `until` and `held`'s holds never include it. Returns the guess's end.
  * - `avoidUntil(account, now)`: `until`, or the guess's end when that is later; null when neither is ahead.
  * - `started({harness, account, now})`: a stage starts on the account now (automatic account choice's round-robin, #266):
@@ -262,9 +262,9 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
       const end = Math.max(h?.until ?? -Infinity, h?.guess?.until ?? -Infinity);
       return end > now ? end : null;
     },
-    spent({ harness, account, now, window = null }) {
+    spent({ harness, account, now, window = null, steps = SPENT_GUESS_MS }) {
       const n = (of(account, now)?.guess?.streak ?? 0) + 1;
-      const until = now + SPENT_GUESS_MS[Math.min(n, SPENT_GUESS_MS.length) - 1];
+      const until = now + steps[Math.min(n, steps.length) - 1];
       const w = windowOf(window);
       put({ harness, account, until, streak: n, at: now, guess: true, ...(w ? { window: w } : {}) });
       return until;

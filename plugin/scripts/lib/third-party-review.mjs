@@ -14,7 +14,10 @@ import { sanitize } from "./handoff.mjs";
 import { log } from "./inputs.mjs";
 import { CODE_SCANNING, REVIEW_LABEL, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
 
-/** How long Factory waits for a named reviewer's review of the head, from its wait record (Greptile takes 10 to 15 minutes). */
+/**
+ * How long Factory waits for a named reviewer's review of the head, from its wait record, by default (the
+ * third_party_wait_minutes setting; Greptile takes 10 to 15 minutes).
+ */
 export const THIRD_PARTY_WAIT_MS = 20 * 60_000;
 /** How often `serve`'s ticks read a waiting PR's reviews at most (the Action's dispatcher reads on its own ticks). */
 export const THIRD_PARTY_POLL_MS = 60_000;
@@ -88,16 +91,18 @@ const readReviews = (repo, prNumber, opts) => rest(`repos/${repo.full}/pulls/${p
 const WAIT_MARK = (issue) => `<!-- factory:${Number(issue)}:third-party `;
 const LOGINS_MAX = 10;
 
-/** The wait record's body: the head and the logins waited for, then a line for people. */
-export function waitBody(issue, { sha, logins, at }) {
-  const data = JSON.stringify({ sha, logins: logins.slice(0, LOGINS_MAX), at }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-  return `${WAIT_MARK(issue)}${data} -->\nFactory: waiting up to ${Math.round(THIRD_PARTY_WAIT_MS / 60_000)} min for ${logins.join(", ")} to review ${String(sha).slice(0, 7)}; the review goes on once that review is posted, or then without it.`;
+/** The wait record's body: the head, the logins waited for and the bound in minutes, then a line for people. */
+export function waitBody(issue, { sha, logins, at, waitMs = THIRD_PARTY_WAIT_MS }) {
+  const minutes = waitMs / 60_000;
+  const data = JSON.stringify({ sha, logins: logins.slice(0, LOGINS_MAX), at, minutes }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  return `${WAIT_MARK(issue)}${data} -->\nFactory: waiting up to ${Number(minutes.toFixed(1))} min for ${logins.join(", ")} to review ${String(sha).slice(0, 7)}; the review goes on once that review is posted, or then without it.`;
 }
 
 /**
  * The PR's wait record, the newest by Factory itself or by someone who can push (trustedAuthor: a local loop writes as
  * its developer, so the Action's dispatcher and another developer's loop read its record too): {id, sha, logins, since,
- * updatedAt, own}, or null. `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock;
+ * updatedAt, own, waitMs}, or null. `waitMs` is the bound the stage that wrote it had (third_party_wait_minutes), so
+ * every route ends the wait alike. `since` is GitHub's creation time of the comment, so the bound runs on GitHub's clock;
  * `updatedAt` its last write; `own` whether this process wrote it (only its own is rewritten).
  */
 export function waitOf(comments, issue) {
@@ -116,13 +121,14 @@ export function waitOf(comments, issue) {
     if (!data || !/^[0-9a-f]{40,64}$/.test(data.sha || "") || !Array.isArray(data.logins) || !Number.isFinite(since)) continue;
     const logins = thirdPartyReviewers(data.logins.slice(0, LOGINS_MAX)).logins;
     if (!logins.length) continue;
-    return { id: c.id, sha: data.sha, logins, since, updatedAt: Date.parse(c.updated_at || c.created_at), own: isSelf(c) };
+    const waitMs = typeof data.minutes === "number" && data.minutes > 0 && Number.isFinite(data.minutes) ? data.minutes * 60_000 : THIRD_PARTY_WAIT_MS;
+    return { id: c.id, sha: data.sha, logins, since, updatedAt: Date.parse(c.updated_at || c.created_at), own: isSelf(c), waitMs };
   }
   return null;
 }
 
-/** When a wait record's bound passes (ms): THIRD_PARTY_WAIT_MS after GitHub created it. */
-export const waitUntil = (wait) => wait.since + THIRD_PARTY_WAIT_MS;
+/** When a wait record's bound passes (ms): its own bound (waitOf `waitMs`) after GitHub created it. */
+export const waitUntil = (wait) => wait.since + (wait.waitMs ?? THIRD_PARTY_WAIT_MS);
 
 const dropWait = (repo, wait, opts) => (wait ? rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" }).catch((e) => log(`third-party wait record: ${String(e?.message || e).slice(0, 120)}`)) : null);
 
@@ -171,16 +177,16 @@ export function thirdPartyLine({ reviewed, missing }, sha, boundMs) {
 /**
  * The review stage's step before its answer pass: the named reviewers (`names`, the setting; `own`, Factory's logins)
  * and, unless `skip` (the cap is spent: no answer pass runs), whether to go on now. It reads the PR's reviews and its
- * wait record once each. Every named reviewer has reviewed `sha`, or the record for `sha` is past its bound
- * (THIRD_PARTY_WAIT_MS from GitHub's time of the record): the stage goes on, says so on its progress comment
- * (`progress`) and removes the record. Otherwise it records the wait (a new record for a new head; the same one,
+ * wait record once each. Every named reviewer has reviewed `sha`, or the record for `sha` is past its bound (`waitMs`,
+ * the third_party_wait_minutes setting, from GitHub's time of the record): the stage goes on, says so on its progress
+ * comment (`progress`) and removes the record. Otherwise it records the wait (a new record for a new head; the same one,
  * rewritten, when a review starts again within its bound, so the bound is never restarted) and returns `wait`
  * ({missing, until}): the stage ends there, holding nothing, and the dispatcher starts it again (waitState). A record
  * that cannot be read or written is no wait: the stage goes on without the reviewer rather than stall. Returns {logins,
  * wait}: `logins` are the ones whose comments the answer pass handles, every valid one named, reviewed or not, so a
  * comment one posted earlier is still answered. With none named it reads nothing and returns no logins.
  */
-export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], own = async () => [], skip = false, progress, token, now = Date.now } = {}) {
+export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], own = async () => [], skip = false, progress, token, now = Date.now, waitMs = THIRD_PARTY_WAIT_MS } = {}) {
   if (!names.length) return { logins: [], wait: null };
   const { logins, refused } = thirdPartyReviewers(names, await own());
   if (refused.length) log(`third_party_reviewers: ${refused.join(", ")} left out (no login, or Factory's own)`);
@@ -208,15 +214,15 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
   }
   const record = waitOf(comments, issue);
   const current = record?.sha === sha ? record : null;
-  const passed = current && now() >= waitUntil(current);
+  const passed = current && now() >= current.since + waitMs;
   // Only this process's own record is rewritten; another writer's for this head gets a record of ours beside it.
   const mine = current?.own ? current : null;
   if (!seen.missing.length || passed) {
-    await progress(thirdPartyLine(seen, sha, THIRD_PARTY_WAIT_MS));
+    await progress(thirdPartyLine(seen, sha, waitMs));
     await dropWait(repo, record, opts);
     return { logins, wait: null };
   }
-  const body = waitBody(issue, { sha, logins: seen.missing, at: new Date(now()).toISOString() });
+  const body = waitBody(issue, { sha, logins: seen.missing, at: new Date(now()).toISOString(), waitMs });
   let since;
   try {
     if (mine) {
@@ -233,7 +239,7 @@ export async function thirdPartyStep({ repo, issue, prNumber, sha, names = [], o
     await progress(`third-party review: the wait could not be recorded on the PR (${String(e?.message || e).slice(0, 80)}); going on without ${seen.missing.join(", ")}`);
     return { logins, wait: null };
   }
-  const until = since + THIRD_PARTY_WAIT_MS;
+  const until = since + waitMs;
   await progress(`third-party review: waiting until ${new Date(until).toISOString().slice(11, 16)} UTC for ${seen.missing.join(", ")} to review ${head}; this stage ends here, holding no slot, and the review goes on once that review is posted or then`);
   return { logins, wait: { missing: seen.missing, until } };
 }

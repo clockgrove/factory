@@ -1063,6 +1063,28 @@ test("#332: a guess is remembered a day past its end, so a limit again within th
   assert.equal(holds.limit({ harness: "claude", account: "beta", reset: t + 2 * HOLD_FORGET_MS, now: t + 2 * HOLD_FORGET_MS }), t + 2 * HOLD_FORGET_MS + 2 * MIN);
 });
 
+test("#402: a usage limit with no reset passes its account over for machine.json's guess_hours, by how many in a row, in a stage's end and a paused stage's alike", async () => {
+  const h = fakeHome();
+  mkdirSync(join(h, ".cache", "factory"), { recursive: true });
+  writeFileSync(join(h, ".cache", "factory", "machine.json"), JSON.stringify({ stages: 8, guess_hours: [2, 6] }));
+  const gh = fakeGitHub();
+  let now = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => now);
+      loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 120 * MIN, "two hours, not the default's one");
+      // A second in a row, from a stage that ended paused on it: the setting's second step.
+      now += 121 * MIN;
+      await loop.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, pinned: true, usageLimit: { harness: "claude", reset: null, since: new Date(now).toISOString(), noReset: true } });
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 360 * MIN);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
 test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {
   const { localBaseEnv } = await import("../scripts/lib/local.mjs");
   const { FACTORY_CONTROL_KEYS } = await import("../scripts/lib/inputs.mjs");

@@ -988,7 +988,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       const reviewRunning = !!liveJobs && (!!liveJobs.failed || liveJobs.review.has(issue.number));
       if (liveJobs?.failed && reviewing && pr?.mergeable_state === "dirty") log(`#${issue.number}: live jobs unreadable (${String(liveJobs.failed.message).slice(0, 80)}); no send-back this tick`);
-      const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning });
+      const decision = staleDecision({ pr, rebases: recent, stuck, queue, reviewing, reviewRunning, limit: inputs.rebaseLimit });
       // A send-back that waited and now has nothing to rebase (it conflicts no more, a draft, or it Blocks below): its
       // record ends as `over` and its issue's note goes; a later conflict starts a bound of its own (overlap.mjs waitStart).
       if (!dryRun && rebaseWait && !rebaseWait.released && (pr?.draft || decision === "stuck" || decision === "limit" || (pr?.mergeable_state && !["dirty", "unknown"].includes(pr.mergeable_state))))
@@ -1020,14 +1020,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
               retry(`#${issue.number}'s update-branch`);
             } else {
               // GitHub refused: a worker rebases it instead, under the send-back's rules (staleDecision).
-              const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue });
+              const instead = staleDecision({ pr: { ...pr, mergeable_state: "dirty" }, rebases: recent, stuck, queue, limit: inputs.rebaseLimit });
               if (instead === "rebase") {
                 log(`  #${issue.number}: update-branch failed (${String(e.message).slice(0, 120)}); sending it back to a worker`);
                 sentBack.push(issue.number);
-                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${REBASE_LIMIT} in 24 h).`, opts);
+                if (!already) await prComment(repo, open.number, `${marker(issue.number, "rebase", pr.head.sha)}\nFactory: the branch is behind \`${pr.base?.ref}\` and GitHub could not update it; a worker rebases it (rebase ${recent + 1} of at most ${inputs.rebaseLimit ?? REBASE_LIMIT} in 24 h).`, opts);
               } else {
                 statuses[issue.number] = "Blocked";
-                await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+                await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: instead, record: stuck || record, since, notify: inputs.notify, stage: "dispatch", limit: inputs.rebaseLimit }), opts);
               }
             }
           }
@@ -1037,11 +1037,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (inputs.autoMerge) dirty.push({ issue, pr, open, recent, already, reviewWait, rebaseWait });
         else {
           sentBack.push(issue.number);
-          if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
+          if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
         }
       } else if (decision === "stuck" || decision === "limit") {
         statuses[issue.number] = "Blocked";
-        if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch" }), opts);
+        if (!dryRun) await applyExit(repo, rebaseBlock({ issue: issue.number, pr, why: decision, record: stuck || record, since, notify: inputs.notify, stage: "dispatch", limit: inputs.rebaseLimit }), opts);
       } else if (!dryRun && inputs.autoMerge && pr && !reviewing) {
         // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
         // green, with no unread maintainer decision. Nothing is armed between ticks.
@@ -1089,7 +1089,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       }
       sentBack.push(issue.number);
       if (!dryRun && rebaseWait && !rebaseWait.released) await clearRebaseWait(repo, { issue, prNumber: open.number, record: rebaseWait, how: Date.now() - since >= WAIT_MAX_MS ? "gaveUp" : "sent" }, opts, { log }).catch((e) => log(`  #${issue.number}: its rebase wait could not be released (${String(e.message).slice(0, 120)})`));
-      if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent), opts);
+      if (!dryRun && !already) await prComment(repo, open.number, rebaseNotice(issue.number, pr, recent, inputs.rebaseLimit), opts);
     }
   } finally {
     trialsTick?.close();

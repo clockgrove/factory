@@ -1512,7 +1512,7 @@ async function main() {
   // records the wait on the PR and ends `waiting`, its label off, holding no slot or runner; the dispatcher puts the
   // label back once that review exists or the bound has passed, and that review stage, with Factory's own review
   // already posted (reviewsCover), runs no reviewer pass and goes on from here.
-  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, ...token });
+  const third = await thirdPartyStep({ repo, issue, prNumber: pr.number, sha: pr.head.sha, names: inputs.thirdPartyReviewers, own: async () => [reviewerLogin, await progress.self()].filter(Boolean), skip: over() || overBudget, progress, waitMs: inputs.thirdPartyWaitMs, ...token });
   if (third.wait) {
     // A stop's end stands; otherwise the stage ends only where the dispatcher will resume it (third-party-review.mjs waitEnd).
     await holdIfStopped();

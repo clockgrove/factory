@@ -42,6 +42,7 @@ export const DEFAULTS = {
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
   max_concurrent: "3",
   sibling_hold: "on", // on | off: a hand-off to review waits for a sibling on the same files (lib/overlap.mjs)
+  rebase_limit: "5", // send-backs for a rebase one Objective gets in 24 h before it Blocks (logic.mjs staleDecision)
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
@@ -56,6 +57,7 @@ export const DEFAULTS = {
   protected_paths: "",
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
+  third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
@@ -168,7 +170,7 @@ export function workflowSettings(wf = {}) {
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
-    ...["THIRD_PARTY_REVIEWERS", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
+    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
   ].map((n) => `FACTORY_${n}`),
 );
@@ -221,6 +223,7 @@ const VALUE_RULES = (() => {
   return {
     FACTORY_HARNESS: oneOf("claude", "codex", "copilot"),
     FACTORY_MAX_CONCURRENT: whole,
+    FACTORY_REBASE_LIMIT: whole,
     FACTORY_LOCAL_MAX_CONCURRENT: whole,
     FACTORY_COMPACTION_WINDOW: whole,
     FACTORY_DAILY_USD: atLeast0,
@@ -229,6 +232,7 @@ const VALUE_RULES = (() => {
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
+    FACTORY_THIRD_PARTY_WAIT_MINUTES: above0,
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
@@ -465,6 +469,11 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
   };
+  // A limit that must be above 0: anything else is its default.
+  const above0 = (v, fallback) => {
+    const n = num(String(v).trim() || "x", fallback);
+    return n > 0 ? n : fallback;
+  };
   const list = (v) =>
     String(v || "")
       .split(/\r?\n|,/)
@@ -491,6 +500,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     credential: get("credential").toLowerCase(),
     maxConcurrent: num(get("max_concurrent"), 3),
     siblingHold: (get("sibling_hold") || "on").trim().toLowerCase() !== "off",
+    rebaseLimit: Math.floor(above0(get("rebase_limit"), 5)) || 5,
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
     timeoutMinutes: num(get("timeout_minutes"), 240),
@@ -507,6 +517,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     protectedAdditions: list(get("protected_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
+    thirdPartyWaitMs: above0(get("third_party_wait_minutes"), 20) * 60_000,
     harnessVersion: get("harness_version"),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),

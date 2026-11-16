@@ -39,7 +39,7 @@ import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
 import { TokenType } from "../vendor/@actions/expressions/dist/lexer.js";
 import { dropOwned } from "./lib/fsafe.mjs";
-import { loopCap, machineBudget, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
+import { limitsLine, loopCap, machineBudget, machineLimits, pressureLine, readPressure, saturation, slotHolders, slotsDir } from "./lib/machine.mjs";
 import { REFUSAL_TEXT, nameLabel, parseWorkerSecrets, refusedEntry, secretLabel, parseSecretValues, workerSecrets } from "./lib/worker-secrets.mjs";
 
 const check = (name, status, detail = "", fix = "") => ({ name, status, detail, fix });
@@ -1776,23 +1776,27 @@ export function localLoginChecks({ inputs, env = process.env, local, home = home
 }
 
 /**
- * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), who holds its slots (pid,
- * repository, issue and stage), and the machine's load now, with whether loops here hold new starts on it. A budget
- * setting that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the budget (`env`: this shell's over the workflow's)
- * and a saturated machine are WARNs. Read only: doctor removes no slot. `home` and `proc` are a test's own.
+ * Local mode: the machine's stage budget every Factory loop here shares (lib/machine.mjs), its limits in force
+ * (machineLimits), who holds its slots (pid, repository, issue and stage), and the machine's load now, with whether loops
+ * here hold new starts on it. A budget setting or limit that cannot be used, a FACTORY_LOCAL_MAX_CONCURRENT above the
+ * budget (`env`: this shell's over the workflow's) and a saturated machine are WARNs. Read only: doctor removes no slot. `home` and `proc` are a test's own.
  */
 export function machineChecks({ env = process.env, local, home = homedir(), proc = "/proc" }) {
   if (!local || env.GITHUB_ACTIONS) return [];
   const budget = machineBudget({ home });
   const holders = slotHolders(slotsDir(home), { reap: false });
   const pressure = readPressure({ root: proc });
-  const sat = saturation(pressure);
+  const limits = machineLimits({ home });
+  const sat = saturation(pressure, limits.pressure);
+  const problems = limits.problems.filter((p) => p !== budget.problem);
+  const set = [limits.from.pressure, limits.from.guess].includes("setting") ? `, from ${limits.file}` : `: Factory's defaults; set them in ${limits.file}`;
   const what = (h) => h.pid === undefined ? `a holder whose record cannot be read yet (${h.file})` : `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
   const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
   const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
   return [
     ...(cap > budget.stages ? [WARN("FACTORY_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Factory loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower FACTORY_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
     budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
+    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Factory's defaults stand for those; in force: ${limitsLine(limits)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0`) : PASS("machine limits", `${limitsLine(limits)}${set}`),
     PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
     sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
   ];

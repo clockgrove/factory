@@ -17,12 +17,12 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 - The harness's credential is present and is an API credential: Claude `ANTHROPIC_API_KEY` or workload identity federation (`id-token: write` on the job and the Anthropic organization linked); Codex `FACTORY_CODEX_GATEWAY_KEY` (a Vercel AI Gateway key; `--probe` checks it against the gateway's free model list) or `CODEX_API_KEY`; Copilot `copilot_github_token`, which a probe shows cannot write to the repository. Fix: add the secret the workflow names.
 - `credential: plan` runs Claude on `CLAUDE_CODE_OAUTH_TOKEN` alone, the user's subscription: a warning, as plan limits assume ordinary individual use on their own repository. Fix: the secret if missing.
-- Accounts: `FACTORY_ACCOUNTS` parses, matches the rendered workflow, and each account's secret exists; `FACTORY_AUTO_ACCOUNT` is `1` or `0`, and with it on, one locked holds issue; `--local`: one `account <name>` row per declared account. Fix: per row (docs/INSTALL.md, Several accounts).
+- Accounts: `FACTORY_ACCOUNTS` parses, matches the rendered workflow, and each account's secret exists; `FACTORY_AUTO_ACCOUNT` is `1` or `0`, and with it on, one locked holds issue; `--local`: one `account <name>` row per declared account. Fix: per row (factory-setup's reference.md, Several accounts).
 - With `--probe`, a one-call probe through the worker's harness command reports the resolved model and that usage output is present. Fix: install or log in to the CLI; for Codex confirm the key is on the step, not the job.
 
 ## GitHub
 
-- The App's installation token mints with its permission list on this repository (README; a missing read FAILs) and nothing more. Fix: create or reinstall the App (`/factory:factory-setup`).
+- The App's installation token mints with factory-setup's permission list on this repository (a missing read FAILs) and nothing more. Fix: create or reinstall the App (`/factory:factory-setup`).
 - The workflow checks read the default branch's `.github/workflows/factory.yml` on GitHub, as runs do; a differing local copy is a warning. Fix: pull the default branch.
 - The job token is read-only on code (`permissions: contents: read`, plus `actions: read` for the usage artifacts). Fix: edit the workflow's `permissions:`.
 - No `secrets[...]` lookup, which sends the runner every secret. Fix: re-render.

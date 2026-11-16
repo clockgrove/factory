@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { DIFF_FILE, checkFile, inFiles } from "../scripts/lib/handoff.mjs";
 import { decideExit, setSelf } from "../scripts/lib/logic.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
-import { allOnBase, baseEvidence, baseFailureReason, capped, evidenceText, jobsToDetail, lastGreenHead, leadJobs, steadyOnBase } from "../scripts/lib/reds.mjs";
+import { allOnBase, baseEvidence, baseFailureReason, capped, evidenceText, jobsToDetail, lastGreenHead, leadJobs, baseMatch } from "../scripts/lib/reds.mjs";
 import { failureLead, mirrorDiff } from "../scripts/lib/session.mjs";
 import { MAX_JOBS, failureSignature } from "../scripts/lib/triage.mjs";
 
@@ -26,24 +26,27 @@ test("lastGreenHead: the newest validated marker Factory itself wrote on the PR"
   setSelf(null);
 });
 
-test("steadyOnBase: the base's newest run of the job and at least one more fail the same way; one red run is not enough", () => {
+// The base-failure rule by signature alone (baseMatch with no same-failure check).
+const steadyOnBase = async (sig, runs) => (await baseMatch({ name: "test", sig }, runs)).base;
+
+test("baseMatch: the base's newest run of the job and at least one more fail the same way; one red run is not enough", async () => {
   const pr = failureSignature("test", fixture("node-test-assert.txt"));
   const same = { run: { conclusion: "failure" }, sig: failureSignature("test", fixture("node-test-assert.txt").replace(/0\.847209ms/g, "2.5ms")) };
   const other = { run: { conclusion: "failure" }, sig: failureSignature("test", fixture("node-test-typeerror.txt")) };
   const green = { run: { conclusion: "success" } };
-  assert.equal(steadyOnBase(pr, [same, same]), true);
-  assert.equal(steadyOnBase(pr, [same, green, same]), true);
-  assert.equal(steadyOnBase(pr, [same]), false, "one red run on the base (a flake, an outage) hands nothing back");
-  assert.equal(steadyOnBase(pr, [same, green, green]), false);
-  assert.equal(steadyOnBase(pr, [green, same, same]), false, "the base's newest run is green: fixed there");
-  assert.equal(steadyOnBase(pr, [other, other]), false, "red on the base for another reason");
-  assert.equal(steadyOnBase(pr, []), false);
+  assert.equal(await steadyOnBase(pr, [same, same]), true);
+  assert.equal(await steadyOnBase(pr, [same, green, same]), true);
+  assert.equal(await steadyOnBase(pr, [same]), false, "one red run on the base (a flake, an outage) hands nothing back");
+  assert.equal(await steadyOnBase(pr, [same, green, green]), false);
+  assert.equal(await steadyOnBase(pr, [green, same, same]), false, "the base's newest run is green: fixed there");
+  assert.equal(await steadyOnBase(pr, [other, other]), false, "red on the base for another reason");
+  assert.equal(await steadyOnBase(pr, []), false);
   // Different failures behind the same npm and exit-code wrappers are not the same failure.
   const jest = failureSignature("test", fixture("jest-npm-math.txt"));
   const jestOther = { run: { conclusion: "failure" }, sig: failureSignature("test", fixture("jest-npm-users.txt")) };
-  assert.equal(steadyOnBase(jest, [jestOther, jestOther]), false);
+  assert.equal(await steadyOnBase(jest, [jestOther, jestOther]), false);
   const bare = failureSignature("test", "npm error code 1\n##[error]Process completed with exit code 1.");
-  assert.equal(steadyOnBase(bare, [{ run: { conclusion: "failure" }, sig: bare }, { run: { conclusion: "failure" }, sig: bare }]), false, "no signature never matches");
+  assert.equal(await steadyOnBase(bare, [{ run: { conclusion: "failure" }, sig: bare }, { run: { conclusion: "failure" }, sig: bare }]), false, "no signature never matches");
 });
 
 test("jobsToDetail: required jobs first and never dropped for optional ones; past MAX_JOBS the red is truncated", () => {
@@ -62,7 +65,7 @@ test("jobsToDetail: required jobs first and never dropped for optional ones; pas
   assert.deepEqual(jobsToDetail([lint, queued, quality], ["test", "quality"]).jobs.map((r) => r.name), ["test", "quality", "lint"]);
 });
 
-test("base evidence is information for the fix pass, never an instruction", () => {
+test("base evidence is information for the fix pass, never an instruction", async () => {
   const sig = failureSignature("test", fixture("mocha-math.txt"));
   const red = (sha, f) => ({ sha, run: { conclusion: "failure" }, sig: failureSignature("test", fixture(f)) });
   const green = { sha: A, run: { conclusion: "success" } };
@@ -73,8 +76,8 @@ test("base evidence is information for the fix pass, never an instruction", () =
   assert.match(text, /^main@bbbbbbb's latest runs of test are also red \(2 of 3\) with these failure lines:\n {4}1\) totals the invoice with tax/);
   assert.match(text, /Compare with this run's failure lines:\n {4}1\) adds/);
   assert.doesNotMatch(text, /not yours|leave it|do not fix|ignore/i);
-  assert.equal(steadyOnBase(sig, [red(B, "mocha-invoice.txt"), red(A, "mocha-invoice.txt")]), false, "red on the base for another test: a fix pass, with the evidence");
-  assert.equal(steadyOnBase(sig, [red(B, "mocha-math.txt"), red(A, "mocha-math.txt")]), true, "the exact failure, steadily: handed back");
+  assert.equal(await steadyOnBase(sig, [red(B, "mocha-invoice.txt"), red(A, "mocha-invoice.txt")]), false, "red on the base for another test: a fix pass, with the evidence");
+  assert.equal(await steadyOnBase(sig, [red(B, "mocha-math.txt"), red(A, "mocha-math.txt")]), true, "the exact failure, steadily: handed back");
 });
 
 test("a red is handed back only when every failing job is a steady base failure", () => {

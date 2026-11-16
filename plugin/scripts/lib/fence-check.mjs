@@ -3,16 +3,16 @@
 // refused, unless the decision model judges that file's change part of fixing the red or answering the comment. It is
 // asked only about the files logic.mjs fenceDecidable allows, a lockfile or a plain version pin that no program setup or
 // install runs reads; everything else (CI files, containers, package-manager configuration, a protected path, what the
-// setup or install command names or runs) stays refused with no question. Only `fix` at MIN_CONFIDENCE or more
+// setup or install command names or runs) stays refused with no question. Only `fix` at the confidence floor or more
 // lets the file go; anything else, and no decider, refuses it as before. The decision model sits behind the one decision
-// interface (decider.mjs, docs/ADAPTERS.md), with red-check triage's key, model setting and confidence floor. This runs
+// interface (decider.mjs, docs/ADAPTERS.md), with red-check triage's key, model setting and confidence floor (triage.mjs confidenceFloor). This runs
 // in Factory's own process, never in a harness. The diff, the failure lines, the plan and the comments are the worker's,
 // its CI's and reviewers' text: they go in delimited, as data the model is told not to follow.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question asked about each fenced file. */
 export const FENCE_QUESTION = {
@@ -62,14 +62,14 @@ export function fenceInput({ path, diff, lead = "", comments = [], plan = "" }, 
  * The fence check: `{model, off, judge}`, through the one decision interface (decider.mjs openDecider): the AI Gateway's
  * `triage_model` with a key, else the stage's own harness (`stage`). With neither, `off` is why (the key's code, or
  * `route-off`), and judge lets nothing go. judge({path, diff, lead, comments, plan}) resolves {allow, why, told} and
- * never throws: `fix` at `min` or more allows; `weakens`, `unrelated` or `fix` under `min` does not, nor does a diff
+ * never throws: `fix` at the floor (`min`, else confidenceFloor) or more allows; `weakens`, `unrelated` or `fix` under it does not, nor does a diff
  * with no textual change (never asked), nor the model refusing to answer (`refused`: the diff, the agent's text, can
  * cause that, so it is the work's). `why` is Factory's record, with the model's confidence; `told` the same for the
  * worker, without it. Any other missing answer is `undecided`, with the Block's `cause` (`outage` for the vendor's
  * outage, else `factory`), and `limited` when the stage harness's usage limit stopped the question: the caller ends the
  * stage on it (harness.mjs UsageLimitReached).
  */
-export function openFenceCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = MIN_CONFIDENCE } = {}) {
+export function openFenceCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
   const no = (path, said, conf = "") => ({ allow: false, why: `${path}: ${said}${conf}`, told: `${path}: ${said}` });
@@ -80,8 +80,10 @@ export function openFenceCheck({ inputs = {}, env = process.env, home = homedir(
     const sure = typeof a?.confidence === "number";
     const conf = sure ? a.confidence.toFixed(2) : "";
     log(`fence check (${model}): ${item.path}: ${a?.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a?.error || "no_answer"})`}`);
-    if (a?.verdict === "fix" && sure && a.confidence >= min) return { allow: true, why: `${item.path}: the decision model (${model}) judged it part of the fix at ${conf}`, told: "" };
-    if (a?.verdict === "fix") return no(item.path, "not judged surely enough part of the fix", ` (at ${conf || "no stated confidence"}, under ${min})`);
+    // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
+    const floor = min ?? confidenceFloor(inputs, ask).min;
+    if (a?.verdict === "fix" && sure && a.confidence >= floor) return { allow: true, why: `${item.path}: the decision model (${model}) judged it part of the fix at ${conf}`, told: "" };
+    if (a?.verdict === "fix") return no(item.path, "not judged surely enough part of the fix", ` (at ${conf || "no stated confidence"}, under ${floor})`);
     if (a?.verdict === "weakens") return no(item.path, "judged to weaken or sidestep the check", conf ? ` at ${conf}` : "");
     if (a?.verdict === "unrelated") return no(item.path, "judged not called for by the failure or the comment", conf ? ` at ${conf}` : "");
     if (a?.error === "refused") return no(item.path, `the decision model (${model}) refused to judge its change`);

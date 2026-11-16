@@ -417,10 +417,11 @@ async function trial(trials, head, theirs, skip = []) {
  * merge against the default branch (siblingTrials), and that is ahead of it: `{on, files, cause, unread}` (`files` the
  * paths the merge conflicts in), or null. `others` are the other Objectives In review or Running, `stateOf(s)` the state
  * of one, `key` this Objective's place in the release order (keyOf), `stuck(s)` whether one can run no stage now (two
- * account labels, as Blocked), and a sibling whose own review waits now (waitingCause: a third-party reviewer, an
- * account label) will not merge soon: neither is ahead. `trials` a siblingTrials, `skip` a sibling head this Objective's record says could not be
- * fetched before. Ahead is: In review with no record (in review or in the merge queue); Running the send-back rebase of
- * an open ready PR it handed to review before; a record whose wait is over, on an open ready PR (In review, or Running
+ * account labels, as Blocked) or will not merge soon (a person took it out of the merge queue), and a sibling whose own
+ * review waits now (waitingCause: a third-party reviewer, an account label) will not merge soon either: neither is
+ * ahead. `trials` a siblingTrials, `skip` a sibling head this Objective's record says could not be fetched before.
+ * Ahead is: In review with no record (in review or in the merge queue); Running the send-back rebase of an open ready
+ * PR it handed to review before; a record whose wait is over, on an open ready PR (In review, or Running
  * its rebase after the wait); a record still waiting, In review, earlier in the release order. A Running sibling that
  * has not handed off is not ahead: the first to hand off goes first. A sibling with no open ready PR has no head to
  * merge: it is not ahead. One ahead whose head cannot be fetched is taken as conflicting once (`unread` its head, for
@@ -604,8 +605,8 @@ export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMe
 /**
  * The dispatcher's half (dispatch.mjs, an In-review Objective `issue` whose PR `pr` is unlabelled with a waiting record
  * `wait`): `issues` and `statuses` the tick's Objectives, `landed` those whose PR the tick merged, `memo` the siblings
- * this tick read (siblingState), `stuck(s)` whether a sibling can run no stage now (aheadOf), `trials` the tick's
- * siblingTrials. Returns, writing nothing when `dryRun`:
+ * this tick read (siblingState), `stuck(s)` whether a sibling can run no stage now or will not merge soon (aheadOf),
+ * `trials` the tick's siblingTrials. Returns, writing nothing when `dryRun`:
  * - "draft": the PR went back to a draft (a stop, a Block); the record goes and no label goes on;
  * - "stale": the review label went on after the record (a person, or a review resumed): the record is released and the
  *   PR handled as any In-review PR;

@@ -16,6 +16,7 @@ import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion,
 import { WORKFLOWS_DIR, WORKSPACE_FILES, fenceDecidable, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, guardLinks, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
+import { UsageLimitReached } from "./harness.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
 import { commandFailed, gitError, heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
@@ -1206,7 +1207,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * ([] unfenced). What the fence check said of them is box.fenceVerdict().
    */
   box.outside = async ({ head = null } = {}) => {
-    verdict = { judged: [], undecided: [], cause: null, limited: null };
+    verdict = { judged: [], told: [], undecided: [], cause: null, limited: null };
     if (!fence) return [];
     if (fence.broken) throw new Error(fence.broken);
     const h = head || (await take());
@@ -1219,17 +1220,35 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     return fenceJudged([...(await outsideFiles(mine, h)), ...moved], h);
   };
 
-  // The fence check's verdicts, by file and its diff (a later change to the file is asked about again), and what it said
-  // in the last reading of the fence: {judged: ["<path>: <why>"], undecided: [paths], cause, limited}.
-  const verdicts = new Map();
-  let verdict = { judged: [], undecided: [], cause: null, limited: null };
+  // The fence check's verdicts in this stage: a yes by file, diff and what the question was given (the failure lines, the
+  // comments, the plan), so another red or comment asks again; a no by file and diff, so the same change is not asked
+  // again; and how many noes each file had (after two, a new change to it is not asked about). What it said in the last
+  // reading of the fence: {judged: ["<path>: <why>"] (Factory's record), told: [...] (the same for the worker, without
+  // the model's confidence), undecided: [paths], cause, limited}.
+  const allowed = new Set();
+  const denied = new Map();
+  const denials = new Map();
+  let verdict = { judged: [], told: [], undecided: [], cause: null, limited: null };
   box.fenceVerdict = () => verdict;
+  const hashOf = (...parts) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+  // A path's entry at `rev` as git's literal pathspec reads it: its mode, null when `rev` has no such path.
+  const modeAt = async (rev, path) => {
+    const r = await git(["--literal-pathspecs", "ls-tree", "-z", rev, "--", path]);
+    if (r.code !== 0) return undefined;
+    const lines = r.stdout.split("\0").filter(Boolean);
+    if (!lines.length) return null;
+    const m = /^(\d+) \w+ [0-9a-f]+\t(.*)$/s.exec(lines[0]);
+    return lines.length === 1 && m && m[2] === path ? m[1] : undefined;
+  };
+  const regular = (mode) => mode === null || mode === "100644" || mode === "100755";
   /**
    * `refused` (fixScopeRefused's) less the files the fence check (box.fenceCheck) judges part of the fix: only those
-   * logic.mjs fenceDecidable allows (never the checks' own configuration, a protected path, or what setup or install
-   * names or runs, as the setup guard reads it on the default branch), FENCE_MAX_PATHS at most, each by the pass's diff
-   * to it from where the fence starts, given in full (a diff over FENCE_DIFF_MAX, or one that cannot be read, is not
-   * judged). No check, and anything but its yes, keeps the file refused. A stage harness's usage limit stops the asking.
+   * logic.mjs fenceDecidable allows (a lockfile, or a version pin that no program setup or install runs reads; never a
+   * protected path, or what setup or install names or runs, as the setup guard reads it on the default branch),
+   * FENCE_MAX_PATHS at most, each a regular file where the fence starts and at the head (or absent at one of them), by
+   * the pass's textual diff to it from where the fence starts, given in full. A diff over FENCE_DIFF_MAX, a binary or
+   * empty one, or one that cannot be read is not judged. No check, and anything but its yes, keeps the file refused. The
+   * stage harness's usage limit stops the asking.
    */
   const fenceJudged = async (refused, h) => {
     const check = box.fenceCheck;
@@ -1237,20 +1256,47 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const guard = await box.setupFiles().catch(() => undefined);
     // A setup whose guard cannot be read: nothing is judged.
     if (guard === undefined) return refused;
-    const ctx = { paths: fence.paths, extra: fence.extra, unknown: fence.unknown, protectedList, guarded: guard?.files ?? [] };
-    const asked = refused.filter((p) => fenceDecidable(p, ctx)).slice(0, FENCE_MAX_PATHS);
+    const ctx = { extra: fence.extra, unknown: fence.unknown, protectedList, guarded: guard?.files ?? [], programs: [...(toolchain.programs ?? []), ...(guard?.programs ?? [])], opaque: !!toolchain.opaque || !!guard?.opaque };
+    const decidable = refused.filter((p) => fenceDecidable(p, ctx));
+    for (const path of decidable.slice(FENCE_MAX_PATHS)) verdict.judged.push(`${path}: not judged (over the cap of ${FENCE_MAX_PATHS} files)`);
     const goes = new Set();
-    for (const path of asked) {
-      const r = await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", fence.since, h, "--", path], { maxBytes: FENCE_DIFF_MAX });
-      if (r.code !== 0 || r.truncated) {
-        verdict.judged.push(`${path}: not judged (${r.truncated ? `a change over ${FENCE_DIFF_MAX / 1024} KiB` : "its change could not be read"})`);
+    const not = (path, why) => {
+      verdict.judged.push(`${path}: not judged (${why})`);
+      verdict.told.push(`${path}: not judged (${why})`);
+    };
+    for (const path of decidable.slice(0, FENCE_MAX_PATHS)) {
+      const modes = await Promise.all([fence.since, h].map((rev) => modeAt(rev, path)));
+      if (!modes.every((m) => m !== undefined && regular(m)) || modes.every((m) => m === null)) {
+        not(path, "not a regular file");
         continue;
       }
-      const key = `${path}\0${createHash("sha256").update(r.stdout).digest("hex")}`;
-      let v = verdicts.get(key);
+      const r = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", fence.since, h, "--", path], { maxBytes: FENCE_DIFF_MAX });
+      if (r.code !== 0 && !r.truncated) {
+        not(path, "its change could not be read");
+        continue;
+      }
+      if (r.truncated) {
+        not(path, `a change over ${FENCE_DIFF_MAX / 1024} KiB`);
+        continue;
+      }
+      if (!/^@@ /m.test(r.stdout) || /^(Binary files |GIT binary patch)/m.test(r.stdout)) {
+        not(path, "no textual change to read");
+        continue;
+      }
+      const change = hashOf(path, r.stdout);
+      const asked = hashOf(path, r.stdout, fence.lead, fence.comments, fence.plan);
+      let v = denied.get(change) ?? (allowed.has(asked) ? { allow: true, why: `${path}: judged part of the fix before`, told: "" } : null);
+      if (!v && (denials.get(path) ?? 0) >= 2) {
+        not(path, "judged twice already in this stage");
+        continue;
+      }
       if (!v) {
         v = await check.judge({ path, diff: r.stdout, lead: fence.lead, comments: fence.comments, plan: fence.plan });
-        if (!v.undecided) verdicts.set(key, v);
+        if (v.allow) allowed.add(asked);
+        else if (!v.undecided) {
+          denied.set(change, v);
+          denials.set(path, (denials.get(path) ?? 0) + 1);
+        }
       }
       if (v.allow) {
         goes.add(path);
@@ -1258,6 +1304,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         continue;
       }
       verdict.judged.push(v.why);
+      verdict.told.push(v.told || v.why);
       if (v.undecided) {
         verdict.undecided.push(path);
         verdict.cause = verdict.cause === "factory" || v.cause === "factory" ? "factory" : v.cause;
@@ -1269,6 +1316,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     return refused.filter((p) => !goes.has(p));
   };
+  /** The Block's cause for `out`, still refused: the fence check's (`factory`, `outage`) when it gave no answer on every one of them, else null (the work's). */
+  const undecidedCause = (out) => (verdict.cause && out.length && out.every((p) => verdict.undecided.includes(p)) ? verdict.cause : null);
+  box.fenceCause = undecidedCause;
   /** box.outside's toolchain files among `mine`, the branch's own changes since the fence started, to the head `h`. */
   const outsideFiles = async (mine, h) => {
     let refused = fixScopeRefused(mine, fence);
@@ -1396,11 +1446,17 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (leak) return refuse(leak);
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
-    if (outside.length) {
-      // A refusal that stands only because the fence check gave no answer is Factory's (or its vendor's outage), not the work's.
-      const { judged, undecided, cause } = box.fenceVerdict();
-      return refuse(fixScopeReason(outside, toolchain.unresolved, judged), { kind: "fix-scope", cause: undecided.some((p) => outside.includes(p)) ? cause : null });
+    // The stage harness's usage limit stopped the fence check's questions: nothing goes out, and the stage ends on it as a
+    // pass meeting the limit does (paused locally until the reset), never as a refusal of the work.
+    if (verdict.limited) {
+      const why = `the fence check met ${verdict.limited.harness}'s usage limit; nothing of the fix pass was pushed, and it is checked again after the reset`;
+      refuse(why);
+      log(why);
+      throw new UsageLimitReached(verdict.limited, { since: Date.now(), label: "fence check" });
     }
+    // A refusal that stands only because the fence check gave no answer on every file still refused is Factory's (or its
+    // vendor's outage), not the work's.
+    if (outside.length) return refuse(fixScopeReason(outside, toolchain.unresolved, verdict.judged), { kind: "fix-scope", cause: undecidedCause(outside) });
     const plain = await plainLfsBlobs(mirror, base, { source: "HEAD", env: gitEnv() }).catch(() => []);
     if (plain.length) return refuse(`committed as plain git blobs though .gitattributes routes them to Git LFS: ${plain.slice(0, 5).join(", ")}`, { lfs: true });
     const media = await lfsMedia(head);

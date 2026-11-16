@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, checkConfigFile, clip, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
-import { exitRecord } from "../scripts/lib/session.mjs";
+import { exitRecord, scopeRefusal } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 
@@ -1126,7 +1126,7 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.deepEqual(commandPaths("sh configure; bash -e bootstrap; bash -c run.sh; python -m tools.gen"), ["configure", "bootstrap", "run.sh", "tools.gen"], "an interpreter's script operand is a path; every path-looking word of the text too");
   assert.ok(setupPaths({ setup: "python -m tools.gen" }).paths.includes("tools/gen.py"), "the files a module runs are toolchain");
   assert.deepEqual(setupPaths({ setup: "", install: "bash tools/install-deps.sh" }).paths, ["tools/install-deps.sh"]);
-  assert.deepEqual(setupPaths({ setup: "", install: "none" }), { paths: [], named: [], scripts: [], unresolved: [] });
+  assert.deepEqual(setupPaths({ setup: "", install: "none" }), { paths: [], named: [], scripts: [], unresolved: [], programs: [], opaque: false });
   // A dependency list the install command reads is not toolchain: a fix pass that adds a dependency may change it.
   assert.deepEqual(setupPaths({ install: "pip install -r requirements.txt" }).paths, []);
   assert.deepEqual(setupPaths({ install: "pip install -r requirements-dev.txt -c constraints.txt && npm ci --prefix web/package.json" }).paths.filter((p) => /requirements|constraints|package\.json$/.test(p)), []);
@@ -1157,21 +1157,36 @@ test("#414: toolchain by exact lists and the toolchain_paths setting, never by a
   assert.equal(toolchainFile("a/scripts/install-toolchain.sh", paths), false, "a leading / matches at the root only");
   assert.deepEqual(resolveInputs({ env: {} }).toolchainPaths, [], "empty by default: the exact lists only");
   assert.deepEqual(resolveInputs({ env: { FACTORY_TOOLCHAIN_PATHS: "toolchain/, scripts/zig.sh" } }).toolchainPaths, ["toolchain/", "scripts/zig.sh"]);
-  // What the fence check may let go: a toolchain file by the lists or the setting; never the checks' own configuration,
-  // a protected path, what setup or install names or runs, a script entry, or anything while a command cannot be named.
-  for (const p of ["package-lock.json", "web/yarn.lock", ".nvmrc", ".npmrc", "pnpm-workspace.yaml", "Dockerfile", ".devcontainer/devcontainer.json"]) assert.equal(fenceDecidable(p), true, p);
-  assert.equal(fenceDecidable("toolchain/fetch.sh", { paths }), true, "on the setting");
-  for (const p of [".github/workflows/ci.yml", ".gitlab-ci.yml", ".circleci/config.yml", "ci/.buildkite/pipeline.yml", ".husky/pre-commit", ".pre-commit-config.yaml", "lefthook.yml", "Jenkinsfile"]) {
-    assert.equal(checkConfigFile(p), true, p);
-    assert.equal(toolchainFile(p), true, `${p} is fenced`);
-    assert.equal(fenceDecidable(p), false, `${p}: the checks' own configuration, never judged`);
-  }
+  // What the fence check may let go: a lockfile, or a plain version pin no program of setup or install reads.
+  for (const p of ["package-lock.json", "web/yarn.lock", "Cargo.lock", ".nvmrc", ".node-version", ".tool-versions", ".python-version", "rust-toolchain", "rust-toolchain.toml", "global.json"]) assert.equal(fenceDecidable(p), true, p);
+  // Never: CI and hooks, containers, wrappers, mise.toml, package-manager configuration that can run code, the setting's files.
+  for (const p of [".gitlab-ci.yml", ".circleci/config.yml", "ci/.buildkite/pipeline.yml", ".husky/pre-commit", ".pre-commit-config.yaml", "lefthook.yml", "Jenkinsfile", "Dockerfile", "docker/api.Containerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".mvn/wrapper/maven-wrapper.properties", "mise.toml", ".mise.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", "bunfig.toml", "pnpm-workspace.yaml", ".ruby-version"]) assert.equal(fenceDecidable(p), false, p);
+  assert.equal(fenceDecidable("toolchain/fetch.sh", { paths }), false, "a toolchain_paths file: refused unless in scope");
   assert.equal(fenceDecidable("src/app.ts"), false, "not toolchain: nothing to judge");
+  // A pin a program setup or install runs reads, or any pin while they run a repository file: never judged.
+  assert.equal(fenceDecidable(".nvmrc", { programs: ["bash", "npm"] }), true, "npm does not read .nvmrc");
+  for (const [pin, tool] of [[".nvmrc", "nvm"], [".node-version", "fnm"], [".tool-versions", "asdf"], [".python-version", "uv"], ["rust-toolchain.toml", "cargo"], ["global.json", "dotnet"], [".nvmrc", "mise"]]) assert.equal(fenceDecidable(pin, { programs: ["bash", tool] }), false, `${pin} read by ${tool}`);
+  assert.equal(fenceDecidable(".nvmrc", { opaque: true }), false, "setup runs a repository file: it may read any pin");
+  assert.equal(fenceDecidable("package-lock.json", { programs: ["nvm"], opaque: true }), true, "a lockfile is no pin");
+  // The programs, by the commands' own words: setup, an explicit install, an automatic one, a script setup runs.
+  assert.ok(setupPaths({ setup: "source ~/.nvm/nvm.sh && nvm install", install: "none" }).programs.includes("nvm"));
+  assert.ok(setupPaths({ setup: "sudo env FOO=1 /usr/local/bin/fnm use", install: "none" }).programs.includes("fnm"), "a wrapped command, by its file name");
+  assert.ok(["uv", "cargo", "npm", "pnpm"].every((x) => setupPaths({}).programs.includes(x)), "install: auto may run any of AUTO_INSTALLS");
+  assert.equal(setupPaths({ install: "none" }).programs.includes("uv"), false);
+  assert.equal(setupPaths({ setup: "bash scripts/setup.sh", install: "none" }).opaque, true, "a repository file setup runs");
+  assert.equal(setupPaths({ setup: "", install: "npm run boot" }).opaque, true, "a script the explicit install runs");
+  assert.equal(setupPaths({ setup: "corepack enable", install: "none" }).opaque, false);
+  // Never: a protected path, what setup or install names or runs (with what is under it), the guard's files, a script entry.
   assert.equal(fenceDecidable(".nvmrc", { protectedList: protectedPaths(["/.nvmrc"]) }), false, "a protected path");
-  assert.equal(fenceDecidable("tools/.npmrc", { extra: ["tools/.npmrc"] }), false, "what setup or install names");
-  assert.equal(fenceDecidable("tools/.npmrc", { guarded: ["tools"] }), false, "what the setup guard covers, under a guarded directory");
+  assert.equal(fenceDecidable("tools/yarn.lock", { extra: ["tools/yarn.lock"] }), false, "what setup or install names");
+  assert.equal(fenceDecidable("web/package-lock.json", { extra: ["web"] }), false, "under a directory an explicit install names (guardCovers)");
+  assert.equal(fenceDecidable("tools/yarn.lock", { guarded: ["tools"] }), false, "what the setup guard covers, under a guarded directory");
   assert.equal(fenceDecidable("package-lock.json", { unknown: ["$SCRIPT"] }), false, "a command that may run a file Factory cannot name");
-  assert.equal(fenceDecidable("package.json scripts.build"), false, "a script setup or install runs");
+  assert.equal(fenceDecidable("package.json scripts.x/yarn.lock"), false, "a script entry, even one named like a lockfile");
+  // Every still-refused file undecided: Factory's or the outage's Block; any other among them: the work's.
+  const undecided = { cause: "outage", undecided: ["a.lock"], judged: ["a.lock: the decision model (m) gave no answer (unavailable)"] };
+  assert.equal(scopeRefusal(["a.lock"], undecided).cause, "outage");
+  assert.equal(scopeRefusal(["a.lock", ".npmrc"], undecided).cause, undefined, "a file never asked about makes it the work's");
   // The Block names what the fence check said; its cause is the work's unless it gave no answer.
   const reason = fixScopeReason(["package-lock.json"], [], ["package-lock.json: judged to weaken or sidestep the check at 0.91"]);
   assert.match(reason, /\(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: package-lock\.json: judged to weaken/);

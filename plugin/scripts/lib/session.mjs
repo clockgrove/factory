@@ -784,9 +784,10 @@ export async function holdScope({ outbox, session, harness, model, effort = null
   if (remainingMs(deadlineAt) > 120_000 && !(maxUsd > 0 && left <= 0)) {
     if (progress) await progress(`${label}: ${out.length} toolchain file(s) outside the plan and the red; one turn to put them back`);
     const since = outbox.fenceStart();
-    const judged = verdict?.judged ?? [];
+    // What the fence check said, without the model's confidence: the worker is told the verdict, never how near it was.
+    const told = verdict?.told ?? [];
     const ask = [
-      `Factory will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.${judged.length ? ` Factory's fence check: ${judged.join("; ")}.` : ""}`,
+      `Factory will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.${told.length ? ` Factory's fence check: ${told.join("; ")}.` : ""}`,
       `Put each of those files back as it was at ${since} (\`git checkout ${since} -- <file>\`, or \`git rm\` a file that commit lacks) and commit; keep the rest of the fix. If the fix cannot work without that change, put the files back anyway, say so in \`$FACTORY_OUT/pr.md\`, and your exit record asks that Question, naming each file and why. Change nothing else.`,
     ].join("\n\n");
     const resume = session?.canResume ? session.id : null;
@@ -807,11 +808,11 @@ export async function holdScope({ outbox, session, harness, model, effort = null
 
 /**
  * The refusal of the files still `out` of a fix pass's scope, with what the fence check said of them (`verdict`,
- * outbox.mjs box.fenceVerdict): {refused, cause?}, `cause` its Block's when one of them stands only because the check
- * gave no answer.
+ * outbox.mjs box.fenceVerdict): {refused, cause?}, `cause` its Block's when every one of them stands only because the
+ * check gave no answer; one it refused, or never asked about, makes the Block the work's.
  */
 export function scopeRefusal(out, verdict = null) {
-  const cause = verdict?.cause && (verdict.undecided ?? []).some((p) => out.includes(p)) ? verdict.cause : null;
+  const cause = verdict?.cause && out.length && out.every((p) => (verdict.undecided ?? []).includes(p)) ? verdict.cause : null;
   return { refused: fixScopeReason(out, [], verdict?.judged ?? []), ...(cause ? { cause } : {}) };
 }
 

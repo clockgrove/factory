@@ -189,38 +189,24 @@ const TOOLCHAIN_FILES = new Set([
   // pnpm 10's settings (overrides, onlyBuiltDependencies, catalogs, patchedDependencies) live here; a change to its
   // `packages` list alone is workspace membership, not toolchain (membershipOnly, fixScopeRefused `membership`)
   "pnpm-workspace.yaml",
+  // CI outside .github/, and the hooks git runs
+  ".gitlab-ci.yml", ".travis.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", "Jenkinsfile", "appveyor.yml", ".drone.yml", ".woodpecker.yml", ".pre-commit-config.yaml", "lefthook.yml",
 ]);
-const TOOLCHAIN_DIRS = [".devcontainer/"];
-// The configuration of the checks themselves: CI outside .github/ and the hooks git runs. A fix pass's change to one is
-// refused unless its scope reaches it, and no decision call lets it go (checkConfigFile): a check the worker may loosen
-// no longer judges it.
-const CHECK_FILES = new Set([".gitlab-ci.yml", ".travis.yml", "azure-pipelines.yml", "bitbucket-pipelines.yml", "Jenkinsfile", "appveyor.yml", ".drone.yml", ".woodpecker.yml", ".pre-commit-config.yaml", "lefthook.yml"]);
-const CHECK_DIRS = [".circleci/", ".buildkite/", ".woodpecker/", ".husky/"];
+const TOOLCHAIN_DIRS = [".devcontainer/", ".circleci/", ".buildkite/", ".woodpecker/", ".husky/"];
 const fileName = (p) => p.split("/").at(-1);
 const dirOf = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "");
-const underDir = (p, dirs) => dirs.some((d) => p.startsWith(d) || p.includes(`/${d}`));
 
 /**
- * Whether a path is the configuration of the checks: CI files outside `.github/` (`.gitlab-ci.yml`, `.circleci/`, …),
- * the git hook managers' (`.husky/`, `.pre-commit-config.yaml`, `lefthook.yml`), and the workflows under
- * `.github/workflows/` (protected besides). The fence check never lets a fix pass's change to one go.
- */
-export function checkConfigFile(path) {
-  const p = String(path).replace(/^\.\//, "");
-  return p.startsWith(WORKFLOWS_DIR) || CHECK_FILES.has(fileName(p)) || underDir(p, CHECK_DIRS);
-}
-
-/**
- * Whether a path is toolchain, lockfile or CI configuration: a version pin or package-manager configuration, a
- * lockfile, a container or devcontainer, the checks' configuration (checkConfigFile), or a path the repository's
- * `toolchain_paths` setting covers (`paths`, each matched as a protected path is: protectedCovers). Exact lists only.
+ * Whether a path is toolchain, lockfile or CI configuration (a pin, a lockfile, a CI file, a container), by the exact
+ * lists, or a path the repository's `toolchain_paths` setting covers (`paths`, each matched as a protected path is:
+ * protectedCovers).
  */
 export function toolchainFile(path, paths = []) {
   const p = String(path).replace(/^\.\//, "");
   const name = fileName(p);
-  if (LOCKFILES.has(name) || TOOLCHAIN_FILES.has(name) || checkConfigFile(p)) return true;
+  if (LOCKFILES.has(name) || TOOLCHAIN_FILES.has(name)) return true;
   if (/^(Dockerfile|Containerfile)(\..+)?$|\.(Dockerfile|Containerfile)$/.test(name)) return true;
-  if (underDir(p, TOOLCHAIN_DIRS)) return true;
+  if (TOOLCHAIN_DIRS.some((d) => p.startsWith(d) || p.includes(`/${d}`))) return true;
   return paths.some((rule) => protectedCovers(rule, p));
 }
 
@@ -284,13 +270,40 @@ export function simpleCommands(command) {
 }
 
 /**
+ * The install command `install: auto` runs, by the first lockfile present (checkout.mjs installCommand). npm, pnpm and
+ * yarn run no install scripts (--ignore-scripts); poetry and uv run a source package's build.
+ */
+export const AUTO_INSTALLS = Object.freeze([
+  ["pnpm-lock.yaml", "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts"],
+  ["package-lock.json", "npm ci --ignore-scripts"],
+  ["yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"],
+  ["Cargo.lock", "cargo fetch --locked"],
+  ["poetry.lock", "poetry install --no-root"],
+  ["uv.lock", "uv sync --frozen"],
+  ["go.sum", "go mod download"],
+]);
+
+/**
  * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
- * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name), scripts, unresolved}.
+ * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name),
+ * scripts, unresolved, programs, opaque}. `programs`: every fixed command word either runs, and with `install: auto`
+ * each one an automatic install may run (AUTO_INSTALLS). `opaque`: whether they run more than those words show: a
+ * repository file either names, or a package.json script the explicit install runs (setup's scripts the setup guard
+ * reads: setupGuard `programs`).
  */
 export function setupPaths({ setup = "", install = "auto" } = {}, ctx = {}) {
-  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], guarded: [], scripts: [], unresolved: [] }];
+  const explicit = install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : null;
+  const all = [commandRefs(setup, ctx), explicit ?? { paths: [], guarded: [], scripts: [], unresolved: [], programs: [] }];
+  const auto = install === "auto" || !install ? AUTO_INSTALLS.flatMap(([, c]) => commandRefs(c).programs) : [];
   const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, { pkg: x.pkg, name: x.name }]));
-  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))], named: [...new Set(all.flatMap((r) => r.paths))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
+  return {
+    paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))],
+    named: [...new Set(all.flatMap((r) => r.paths))],
+    scripts: [...scripts.values()],
+    unresolved: [...new Set(all.flatMap((r) => r.unresolved))],
+    programs: [...new Set([...all.flatMap((r) => r.programs ?? []), ...auto])],
+    opaque: all.some((r) => r.paths.length > 0) || (explicit?.scripts.length ?? 0) > 0,
+  };
 }
 
 /**
@@ -345,12 +358,16 @@ export async function guardLinks(paths, io) {
  *   its symlinks followed (guardLinks), beside the path itself.
  * - `scripts`: {pkg, name}, each package.json entry it runs (`pkg` `*`: in any package.json), which no push may change.
  * - `unresolved`: what may run and cannot be named, in the command or a script it runs (`<pkg> scripts.<name>: …`).
+ * - `programs`: every fixed command word the command and the scripts it runs run (commandRefs `programs`); `opaque`
+ *   whether they also run a repository file, whose own commands these words do not show.
  */
 export async function setupGuard(setup, io) {
   const ctx = { env: io.env ?? null, roots: io.roots ?? [] };
   const refs = commandRefs(setup, ctx);
   const files = new Set([...refs.paths, ...refs.guarded]);
   const unresolved = [...refs.unresolved];
+  const programs = new Set(refs.programs ?? []);
+  let opaque = refs.paths.length > 0;
   const scripts = new Map();
   // An install's lifecycle scripts run unless scripts are off: for npm and pnpm, by `ignore-scripts` in the .npmrc they
   // read, the nearest one up from the install's directory that sets it (the root's last). Yarn Berry reads no .npmrc
@@ -404,6 +421,8 @@ export async function setupGuard(setup, io) {
       const value = doc.scripts && typeof doc.scripts === "object" ? doc.scripts[name] : undefined;
       if (typeof value !== "string") continue;
       const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
+      for (const x of sub.programs ?? []) programs.add(x);
+      if (sub.paths.length) opaque = true;
       for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
       unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
       for (const x of sub.scripts) if (!(x.lifecycle && (await scriptsOff(x)))) queue.push(x);
@@ -430,7 +449,7 @@ export async function setupGuard(setup, io) {
   const links = await guardLinks([...files], io);
   for (const p of links.paths) files.add(p);
   unresolved.push(...links.unresolved);
-  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)] };
+  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)], programs: [...programs], opaque };
 }
 /** `dir` + `rel` as a path from the root, or null when it leaves the root or is absolute. */
 const posixJoin = (dir, rel) => {
@@ -674,21 +693,40 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], n
   return [...now].filter((p) => (toolchainFile(p, paths) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
 }
 
+// The plain version-pin files the fence check may judge, each with the programs that read it: a version manager, or a
+// tool that reads the pin itself (uv, cargo and rustc through rustup, dotnet). Any other pin or configuration file (a
+// container, a devcontainer, a build-tool wrapper, mise.toml, package-manager configuration that can run code) is
+// never judged.
+const NODE_PINS = ["nvm", "fnm", "n", "nodenv", "volta", "nodeenv", "asdf", "mise", "rtx"];
+const PYTHON_PINS = ["pyenv", "uv", "uvx", "rye", "asdf", "mise", "rtx"];
+const RUST_PINS = ["rustup", "cargo", "rustc", "asdf", "mise", "rtx"];
+const PIN_READERS = Object.freeze({
+  ".nvmrc": NODE_PINS,
+  ".node-version": NODE_PINS,
+  ".tool-versions": ["asdf", "mise", "rtx"],
+  ".python-version": PYTHON_PINS,
+  "rust-toolchain": RUST_PINS,
+  "rust-toolchain.toml": RUST_PINS,
+  "global.json": ["dotnet", "asdf", "mise", "rtx"],
+});
+
 /**
  * Whether the fence check (fence-check.mjs) may be asked about `entry`, one of fixScopeRefused's (or a package.json
- * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go: only a toolchain file by the
- * exact lists or the repository's `toolchain_paths` (`paths`), never the checks' own configuration (checkConfigFile), a
- * protected path, what the `setup` or `install` command names or runs (`extra`), a script either runs, what the setup
- * guard covers (`guarded`, setupGuard `files`, each with what is under and above it: guardCovers), nor anything while
+ * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go. Only a lockfile, or a plain
+ * version pin (PIN_READERS) that the `setup` and `install` commands read through no program of theirs (`programs`,
+ * setupPaths' and setupGuard's) and while those commands run no repository file whose commands Factory cannot see
+ * (`opaque`). Never a script entry, a protected path, what either command names or runs (`extra`, each with what is
+ * under and above it: guardCovers), what the setup guard covers (`guarded`, setupGuard `files`), nor anything while
  * either command may run a file Factory cannot name (`unknown`). Everything else stays refused as the fence found it.
  */
-export function fenceDecidable(entry, { paths = [], extra = [], unknown = [], protectedList = [], guarded = [] } = {}) {
+export function fenceDecidable(entry, { extra = [], unknown = [], protectedList = [], guarded = [], programs = [], opaque = false } = {}) {
   const p = String(entry).replace(/^\.\//, "");
   if (unknown.length || / scripts\./.test(p)) return false;
-  if (!toolchainFile(p, paths) || checkConfigFile(p)) return false;
+  const name = fileName(p);
+  const pin = Object.hasOwn(PIN_READERS, name) ? PIN_READERS[name] : null;
+  if (!LOCKFILES.has(name) && !(pin && !opaque && !programs.some((x) => pin.includes(x)))) return false;
   if (protectedTouched([p], protectedList).length) return false;
-  if (extra.some((x) => String(x).replace(/^\.\//, "") === p)) return false;
-  return !guarded.some((g) => guardCovers(g, p));
+  return ![...extra, ...guarded].some((g) => guardCovers(String(g).replace(/^\.\//, ""), p));
 }
 
 /**

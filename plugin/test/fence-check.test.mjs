@@ -4,13 +4,13 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { FENCE_QUESTION, fenceInput, openFenceCheck } from "../scripts/lib/fence-check.mjs";
 import { USAGE_LIMIT } from "../scripts/lib/harness.mjs";
-import { decideExit, setupPaths } from "../scripts/lib/logic.mjs";
+import { decideExit, fixScopeReason, setupPaths } from "../scripts/lib/logic.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
 import { holdScope } from "../scripts/lib/session.mjs";
 
@@ -77,68 +77,201 @@ test("#414: a fenced toolchain change the fence check judges part of the fix goe
   assert.equal(await box.push(), false);
   assert.match(box.error, /^a fix pass changed \.nvmrc \(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: \.nvmrc: judged to weaken or sidestep the check at 0\.95/);
   assert.equal(box.errorCause, null);
+  assert.deepEqual(box.fenceVerdict().told, [".nvmrc: judged to weaken or sidestep the check"], "the worker is told the verdict, not the confidence");
   assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim(), before);
 });
 
-test("#414: the checks' configuration, a protected path and what setup runs are refused with no question; `fix` under the floor is no", async () => {
+test("#414: only a lockfile or a pin no setup program reads is asked about; CI, containers, package-manager configuration, protected and setup files never are", async () => {
   const setup = "bash scripts/setup.sh";
-  const r = repos({ "scripts/setup.sh": "echo ok\n", ".gitlab-ci.yml": "test: {}\n", ".npmrc": "\n", "package-lock.json": "{}\n", "toolchain/zig.sh": "zig\n" });
-  const v = vendor((input) => (input.includes("toolchain/zig.sh") ? { verdict: "fix", confidence: 0.5 } : { verdict: "fix", confidence: 1 }));
-  const box = await fenced(r, { setup, toolchain: setupPaths({ setup }), protectedList: [".github/", "/.npmrc"], toolchainPaths: ["toolchain/"] });
+  const r = repos({ "scripts/setup.sh": "echo ok\n", ".gitlab-ci.yml": "test: {}\n", ".npmrc": "\n", "Dockerfile": "FROM node:22\n", ".nvmrc": "22\n", "package-lock.json": "{}\n", "toolchain/zig.sh": "zig\n" });
+  const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  const box = await fenced(r, { setup, toolchain: setupPaths({ setup, install: "none" }), protectedList: [".github/", "/.npmrc"], toolchainPaths: ["toolchain/"] });
   box.fenceCheck = openFenceCheck({ decider: v.decider });
-  r.commit({ "app.txt": "v3\n", ".gitlab-ci.yml": "test: { allow_failure: true }\n", ".npmrc": "ignore-scripts=true\n", "scripts/setup.sh": "true\n", "package-lock.json": '{"v":2}\n', "toolchain/zig.sh": "zig 0.14\n" }, "fix");
-  assert.deepEqual(await box.outside(), [".gitlab-ci.yml", ".npmrc", "scripts/setup.sh", "toolchain/zig.sh"], "the lockfile goes on its yes; the rest stays");
-  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["package-lock.json", "toolchain/zig.sh"], "asked only about the lockfile and the file on toolchain_paths");
-  assert.match(box.fenceVerdict().judged.join("\n"), /toolchain\/zig\.sh: judged part of the fix at 0\.50, under 0\.7/);
+  r.commit({ "app.txt": "v3\n", ".gitlab-ci.yml": "test: { allow_failure: true }\n", ".npmrc": "ignore-scripts=true\n", "Dockerfile": "FROM node:18\n", ".nvmrc": "18\n", "scripts/setup.sh": "true\n", "package-lock.json": '{"v":2}\n', "toolchain/zig.sh": "zig 0.14\n" }, "fix");
+  assert.deepEqual(await box.outside(), [".gitlab-ci.yml", ".npmrc", ".nvmrc", "Dockerfile", "scripts/setup.sh", "toolchain/zig.sh"], "the lockfile goes on its yes; the rest stays");
+  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["package-lock.json"], "the pin too: setup runs a repository file, which may read it");
   // At the push the setup guard refuses first, as hard as before.
   assert.equal(await box.push(), false);
   assert.equal(box.errorKind, "protected");
 });
 
-test("#414: no answer from the fence check refuses the file as Factory's or an outage's Block, asked again at the push; a change over the bound is not judged", async () => {
-  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "yarn.lock": "#\n" });
-  const v = vendor(() => ({ verdict: null, confidence: null, error: "unavailable" }));
+test("#414: a pin a program of setup reads, through a package.json script setup runs, is never asked about; one no program reads is", async () => {
+  const setup = "npm run boot";
+  const r = repos({ "package.json": '{"scripts":{"boot":"fnm use"}}\n', ".nvmrc": "22\n", "global.json": "{}\n" });
+  const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  const box = await fenced(r, { setup, toolchain: setupPaths({ setup, install: "none" }) });
+  box.fenceCheck = openFenceCheck({ decider: v.decider });
+  r.commit({ ".nvmrc": "18\n", "global.json": '{"sdk":{"version":"9.0.100"}}\n' }, "pins");
+  assert.deepEqual(await box.outside(), [".nvmrc"]);
+  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["global.json"]);
+});
+
+test("#414: no answer refuses as Factory's or an outage's Block only when every refused file is undecided; a refusal to judge is the work's", async () => {
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "a/yarn.lock": "#\n", "b/yarn.lock": "#\n" });
+  const v = vendor((input) => (input.includes("b/yarn.lock") ? { verdict: "weakens", confidence: 0.9 } : input.includes("a/yarn.lock") ? { verdict: null, confidence: null, error: "refused" } : { verdict: null, confidence: null, error: "unavailable" }));
   const box = await fenced(r);
   box.fenceCheck = openFenceCheck({ decider: v.decider });
   r.commit({ "app.txt": "v3\n", "package-lock.json": '{"v":2}\n' }, "fix");
   assert.deepEqual(await box.outside(), ["package-lock.json"]);
   assert.deepEqual(box.fenceVerdict().undecided, ["package-lock.json"]);
+  assert.equal(box.fenceCause(["package-lock.json"]), "outage");
+  // Mixed with a file judged to weaken the check, or one the model refused to judge: the work's.
+  r.commit({ "b/yarn.lock": "# b\n" }, "b");
+  assert.deepEqual(await box.outside(), ["b/yarn.lock", "package-lock.json"]);
+  assert.equal(box.fenceCause(["b/yarn.lock", "package-lock.json"]), null);
+  r.commit({ "b/yarn.lock": "#\n", "a/yarn.lock": "# a\n" }, "a");
+  assert.deepEqual(await box.outside(), ["a/yarn.lock", "package-lock.json"]);
+  assert.match(box.fenceVerdict().judged.join("\n"), /a\/yarn\.lock: the decision model \(.*\) refused to judge its change/);
+  assert.equal(box.fenceCause(["a/yarn.lock", "package-lock.json"]), null);
   assert.equal(await box.push(), false);
-  assert.equal(v.asked.length, 2, "no verdict is kept: the push asks again");
-  assert.equal(box.errorKind, "fix-scope");
-  assert.equal(box.errorCause, "outage");
-  assert.equal(decideExit({ harness: { ok: true }, pr: { exists: true }, commits: 2, pushRejected: box.error, pushCause: box.errorCause }).cause, "outage");
-
+  assert.equal(box.errorCause, null);
+  assert.equal(decideExit({ harness: { ok: true }, pr: { exists: true }, commits: 2, pushRejected: box.error, pushCause: box.errorCause }).cause, "work");
+  // Undecided alone at the push: asked again (no answer is kept), and the Block is the outage's.
   const r2 = repos({ "package.json": "{}\n", "package-lock.json": "{}\n" });
-  const v2 = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  const v2 = vendor(() => ({ verdict: null, confidence: null, error: "unavailable" }));
   const box2 = await fenced(r2);
   box2.fenceCheck = openFenceCheck({ decider: v2.decider });
-  r2.commit({ "package-lock.json": `${"x".repeat(40 * 1024)}\n` }, "relock");
+  r2.commit({ "package-lock.json": '{"v":2}\n' }, "relock");
   assert.deepEqual(await box2.outside(), ["package-lock.json"]);
-  assert.equal(v2.asked.length, 0);
-  assert.deepEqual(box2.fenceVerdict().judged, ["package-lock.json: not judged (a change over 32 KiB)"]);
+  assert.equal(await box2.push(), false);
+  assert.equal(v2.asked.length, 2, "no verdict is kept: the push asks again");
+  assert.equal(box2.errorCause, "outage");
+  assert.equal(decideExit({ harness: { ok: true }, pr: { exists: true }, commits: 2, pushRejected: box2.error, pushCause: box2.errorCause }).cause, "outage");
 });
 
-test("#414: the stage harness's usage limit in the fence check ends the stage through UsageLimitReached, with nothing of the pass pushed and no corrective turn", async () => {
+test("#414: what is not judged: a change over the bound, a binary or empty change, a symlink, past the cap of 10 files, an unreadable setup guard", async () => {
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "bun.lockb": "a\n", "web/package-lock.json": "{}\n" });
+  const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  const box = await fenced(r);
+  box.fenceCheck = openFenceCheck({ decider: v.decider });
+  r.commit({ "package-lock.json": `${"x".repeat(40 * 1024)}\n`, "bun.lockb": "\u0000\u0001binary\n" }, "relock");
+  r.run("rm", "-q", "web/package-lock.json");
+  mkdirSync(join(r.work, "web"), { recursive: true });
+  symlinkSync("../package-lock.json", join(r.work, "web/package-lock.json"));
+  r.run("add", "web/package-lock.json");
+  r.run("commit", "-q", "-m", "link");
+  assert.deepEqual(await box.outside(), ["bun.lockb", "package-lock.json", "web/package-lock.json"]);
+  assert.equal(v.asked.length, 0);
+  assert.deepEqual(box.fenceVerdict().judged, ["bun.lockb: not judged (no textual change to read)", "package-lock.json: not judged (a change over 32 KiB)", "web/package-lock.json: not judged (not a regular file)"]);
+  // The cap: ten files asked about, the rest not judged.
+  const r2 = repos({ "package.json": "{}\n", ...Object.fromEntries(Array.from({ length: 12 }, (_, k) => [`d${String(k).padStart(2, "0")}/yarn.lock`, "#\n"])) });
+  const v2 = vendor(() => ({ verdict: "weakens", confidence: 1 }));
+  const box2 = await fenced(r2);
+  box2.fenceCheck = openFenceCheck({ decider: v2.decider });
+  r2.commit(Object.fromEntries(Array.from({ length: 12 }, (_, k) => [`d${String(k).padStart(2, "0")}/yarn.lock`, "# relocked\n"])), "relock all");
+  assert.equal((await box2.outside()).length, 12);
+  assert.equal(v2.asked.length, 10);
+  assert.deepEqual(box2.fenceVerdict().judged.filter((j) => j.includes("over the cap")), ["d10/yarn.lock: not judged (over the cap of 10 files)", "d11/yarn.lock: not judged (over the cap of 10 files)"]);
+  assert.match(fixScopeReason(["d10/yarn.lock", "d11/yarn.lock"], [], box2.fenceVerdict().judged), /the fence check: d10\/yarn\.lock: not judged \(over the cap of 10 files\); d11\/yarn\.lock: not judged \(over the cap of 10 files\);/);
+  // A setup guard that cannot be read: nothing is judged.
+  const r3 = repos({ "package.json": "{}\n", "package-lock.json": "{}\n" });
+  const v3 = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  const box3 = await fenced(r3, { setup: "npm ci" });
+  box3.fenceCheck = openFenceCheck({ decider: v3.decider });
+  box3.setupFiles = async () => {
+    throw new Error("tree unreadable");
+  };
+  r3.commit({ "package-lock.json": '{"v":2}\n' }, "relock");
+  assert.deepEqual(await box3.outside(), ["package-lock.json"]);
+  assert.equal(v3.asked.length, 0);
+});
+
+test("#414: a path is read literally: pathspec magic in a file name shows the decider that file's change alone", async () => {
+  const r = repos({ "package.json": "{}\n" });
+  const name = ":!x/yarn.lock";
+  mkdirSync(join(r.work, ":!x"));
+  writeFileSync(join(r.work, name), "#\n");
+  r.run("add", "-A");
+  r.run("commit", "-q", "-m", "magic name");
+  r.run("push", "-q", "origin", "HEAD:main");
+  const v = vendor(() => ({ verdict: "weakens", confidence: 1 }));
+  const box = await fenced(r);
+  box.fenceCheck = openFenceCheck({ decider: v.decider });
+  writeFileSync(join(r.work, name), "# relocked\n");
+  writeFileSync(join(r.work, "app.txt"), "SECRET-OTHER-CHANGE\n");
+  r.run("add", "-A");
+  r.run("commit", "-q", "-m", "fix");
+  assert.deepEqual(await box.outside(), [name]);
+  assert.equal(v.asked.length, 1);
+  assert.ok(v.asked[0].input.includes("+# relocked"));
+  assert.ok(!v.asked[0].input.includes("SECRET-OTHER-CHANGE"), "no other file's change");
+});
+
+test("#414: a yes holds for that change and that question; a changed file or another red asks again; a file refused twice is not asked again", async () => {
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "yarn.lock": "#\n" });
+  // The lockfile beside package.json is judged part of the fix; yarn.lock not.
+  const v = vendor((input) => (input.includes("yarn.lock") ? { verdict: "unrelated", confidence: 1 } : { verdict: "fix", confidence: 1 }));
+  const yarn = () => v.asked.filter((a) => a.input.includes("yarn.lock")).length;
+  const box = await fenced(r);
+  box.fenceCheck = openFenceCheck({ decider: v.decider });
+  r.commit({ "package-lock.json": '{"v":2}\n' }, "a");
+  assert.deepEqual(await box.outside(), []);
+  assert.deepEqual(await box.outside(), []);
+  assert.equal(v.asked.length, 1, "the same change and question: asked once");
+  r.commit({ "package-lock.json": '{"v":3}\n' }, "b");
+  assert.deepEqual(await box.outside(), []);
+  assert.equal(v.asked.length, 2, "a changed file is asked about again");
+  await box.fence({ lead: "--- test: another red" });
+  assert.deepEqual(await box.outside(), []);
+  assert.equal(v.asked.length, 3, "another red asks again");
+  // Refused: the same change is not asked again; a new one once more; after two refusals, none.
+  r.commit({ "yarn.lock": "# 1\n" }, "y1");
+  assert.deepEqual(await box.outside(), ["yarn.lock"]);
+  assert.deepEqual(await box.outside(), ["yarn.lock"]);
+  await box.fence({ lead: "--- test: a third red" });
+  assert.deepEqual(await box.outside(), ["yarn.lock"]);
+  assert.equal(yarn(), 1, "a refused change is not asked again, whatever the red");
+  r.commit({ "yarn.lock": "# 2\n" }, "y2");
+  assert.deepEqual(await box.outside(), ["yarn.lock"]);
+  assert.equal(yarn(), 2);
+  r.commit({ "yarn.lock": "# 3\n" }, "y3");
+  assert.deepEqual(await box.outside(), ["yarn.lock"]);
+  assert.equal(yarn(), 2);
+  assert.deepEqual(box.fenceVerdict().judged, ["yarn.lock: not judged (judged twice already in this stage)"]);
+});
+
+/** A stage whose harness (a fake claude on PATH) answers every call with its usage limit; `calls()` counts its runs. */
+function limitedStage() {
   const bin = mkdtempSync(join(tmpdir(), "factory-fence-claude-"));
   const fixture = join(import.meta.dirname, "fixtures", "claude-2.1.323-usage-limit.jsonl");
   const log = join(bin, "calls");
   writeFileSync(join(bin, "claude"), `#!/bin/sh\necho call >> '${log}'\ncat >/dev/null\ncat '${fixture}'\nexit 1\n`, { mode: 0o755 });
   const stage = { harness: "claude", model: "m-1", env: { HOME: homedir(), PATH: `${bin}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy" }, record: () => {} };
+  return { stage, calls: () => readFileSync(log, "utf8").trim().split("\n").length };
+}
+
+test("#414: the stage harness's usage limit in the fence check ends the stage through UsageLimitReached, with nothing of the pass pushed and no corrective turn", async () => {
+  const { stage, calls } = limitedStage();
   const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n" });
   const box = await fenced(r);
   box.fenceCheck = openFenceCheck({ inputs: {}, env: {}, stage });
   r.commit({ "app.txt": "v3\n", "package-lock.json": '{"v":2}\n' }, "fix");
   const pass = { outbox: box, session: { id: null, canResume: false }, harness: "claude", model: "m-1", taskCard: "card", cwd: r.work, env: stage.env, eventsFile: join(r.root, "events.jsonl"), deadlineAt: Date.now() + 3_600_000, maxUsd: 0, label: "validation-scope-1" };
   await assert.rejects(holdScope(pass), (e) => e.code === USAGE_LIMIT && e.refusal.harness === "claude");
-  assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 1, "the decision call only: no corrective turn ran");
+  assert.equal(calls(), 1, "the decision call only: no corrective turn ran");
   assert.equal(box.failed, true);
   assert.match(box.error, /^the fence check met claude's usage limit; nothing of the fix pass was pushed/);
   assert.equal(await box.push(), false, "nothing goes out after it");
 });
 
-test("#414: the question's input is redacted and fenced; a missing diff, failure or comment says so", () => {
-  const input = fenceInput({ path: ".nvmrc", diff: "", lead: "", comments: [], plan: "" }, "abc");
-  for (const s of ["(no change shown)", "(none: the pass answers review comments)", "The review comments the pass answers:\n<<<BEGIN abc>>>\n(none)"]) assert.ok(input.includes(s), s);
+test("#414: a usage limit met in the fence check at the push pauses the stage the same way, never a refusal of the work", async () => {
+  const { stage } = limitedStage();
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n" });
+  const box = await fenced(r);
+  box.fenceCheck = openFenceCheck({ inputs: {}, env: {}, stage });
+  r.commit({ "app.txt": "v3\n", "package-lock.json": '{"v":2}\n' }, "fix");
+  const before = execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim();
+  await assert.rejects(box.push(), (e) => e.code === USAGE_LIMIT);
+  assert.equal(box.errorKind, "");
+  assert.match(box.error, /^the fence check met claude's usage limit/);
+  assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim(), before);
+});
+
+test("#414: the question's input is fenced; a missing failure or comment says so; an empty change is never asked about", async () => {
+  const input = fenceInput({ path: ".nvmrc", diff: "@@ -1 +1 @@\n-22\n+18", lead: "", comments: [], plan: "" }, "abc");
+  for (const s of ["(none: the pass answers review comments)", "The review comments the pass answers:\n<<<BEGIN abc>>>\n(none)", "+18"]) assert.ok(input.includes(s), s);
+  const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
+  assert.deepEqual(await openFenceCheck({ decider: v.decider }).judge({ path: ".nvmrc", diff: " \n" }), { allow: false, why: ".nvmrc: not judged (no textual change to read)", told: ".nvmrc: not judged (no textual change to read)" });
+  assert.equal(v.asked.length, 0);
   assert.equal(openFenceCheck({ inputs: { decisionRoute: "off" } }).off, "route-off");
 });

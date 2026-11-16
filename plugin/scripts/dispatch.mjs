@@ -32,7 +32,7 @@ import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
-import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, outageBlockOf, personStart, relaunchDecision, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
@@ -531,9 +531,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
   // `{block, tries}` (relaunchDecision).
-  const decideLost = (n, events, { lost, key }) => {
+  const decideLost = (n, events, { lost, key, setup = null }) => {
     const comments = commentsOf(events);
-    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null });
+    return relaunchDecision({ record: relaunchRecordOf(comments, n), start: personStart(events, comments, inputs.objectiveLabel), key, lost, at: new Date().toISOString(), run: process.env.GITHUB_RUN_ID || null, setup });
   };
   // The relaunch: its count recorded first (a relaunch the record does not hold could repeat without end), then a new
   // Running stint. False when a write failed: the next tick tries again, never a Block (that would be a write too).
@@ -725,9 +725,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           continue;
         }
         // A runner job or sandbox stage gone with no exit (its runner or sandbox could not report): relaunched first,
-        // unless it left a sign its network was not what ended it (a cancelled job, a sandbox stage that recorded its end).
+        // unless it left a sign its network was not what ended it (relaunch.mjs endedNotLost: a cancelled job, a step
+        // that failed before Factory's own, a sandbox stage that recorded its end).
         // The decision and the day's cap come first, so a held one costs no Actions reads (the job token's hourly budget).
         let note = "";
+        let notLost = null;
         if (relaunches && !hold && !local && !restarting[issue.number]) {
           const n = issue.number;
           const d = decideLost(n, events, { lost: "vanished", key: stintKey(since) });
@@ -735,7 +737,19 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           else if (capHold(n)) continue;
           else {
             const job = sandbox ? null : await stintWorkJob(repo, n, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), n)) }).catch(() => null);
-            if (endedNotLost({ record: boxRecord, job })) log(`  #${n}: its ${sandbox ? "sandbox stage recorded its end" : "work job was cancelled"}; not a network loss, so not relaunched`);
+            // A failed step after GitHub's set-up is placed against Factory's own step in the workflow file at the job's commit.
+            const workStep = needsWorkStep(job) ? await stintWorkStep(repo, job, opts) : null;
+            if (needsWorkStep(job) && workStep === null) log(`  #${n}: its work job failed at step "${String(job.steps?.find((x) => x?.conclusion === "failure")?.name ?? "").slice(0, 120)}", but its workflow file at ${String(job.head_sha ?? "its commit").slice(0, 12)} could not be read or names no Factory work step, so that step cannot be placed: taken as lost`);
+            notLost = endedNotLost({ record: boxRecord, job, workStep });
+            // One set-up failure may pass (a 5xx on the checkout, a runner not acquired): relaunched once, its step on the
+            // record; the same step failing again on the relaunch's job is a set-up that fails every time, and Blocks.
+            const comments = commentsOf(events);
+            if (notLost?.by === "setup" && !setupAgain(relaunchRecordOf(comments, n), personStart(events, comments, inputs.objectiveLabel), notLost)) {
+              log(`  #${n}: its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : " (GitHub never started it)"}, the first time at that step; relaunched once to tell a passing failure from one that fails every time`);
+              await relaunchLost(issue, decideLost(n, events, { lost: "vanished", key: stintKey(since), setup: notLost }), "vanished");
+              continue;
+            }
+            if (notLost) log(`  #${n}: ${notLost.by === "sandbox" ? "its sandbox stage recorded its end" : notLost.by === "cancelled" ? "its work job was cancelled" : `its work job failed in set-up${notLost.step ? ` (step "${notLost.step}")` : ""}`}; not a network loss, so not relaunched`);
             else {
               await relaunchLost(issue, d, "vanished");
               continue;
@@ -746,7 +760,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         statuses[issue.number] = "Blocked";
         issue.labels = [...(issue.labels || []).filter((l) => (typeof l === "string" ? l : l.name) !== "factory:running"), { name: "factory:blocked" }];
         // A machine not running `factory serve` is a setup gap; a runner job that vanished is Factory's own.
-        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : `worker job vanished: Running with no job in progress${note}`, hold || local ? "setup" : "factory");
+        const lostEnd = notLostBlock(notLost, note);
+        if (!dryRun) await blockLocalWait(issue.number, hold, local ? `Running with no local loop holding it for over a day (no claim); ${SERVE_FIX}` : lostEnd.reason, hold || local ? "setup" : lostEnd.cause);
       }
     }
   }

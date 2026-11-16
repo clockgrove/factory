@@ -374,9 +374,10 @@ async function installGaps(checkout, opts) {
  * or a host it needs that does not answer a probe right after. It waits for the network first (networkBack: the stage's
  * own bounded wait, as its GitHub calls wait, which throws NetworkDown past it, so the stage ends on the outage).
  * `hosts(result)`: the origins the step needs, decided on what it said and did (an URL its output names, its package
- * manager's registry), never guessed; with none known, GitHub's, the probe the stages already make. A failure with the
- * network up comes back with `up`, the origins that answered. In a process that does not wait outages out (no stage),
- * the step runs once, as it is.
+ * manager's registry), never guessed; with none known, GitHub's, the probe the stages already make. One of those hosts
+ * not answering while GitHub's does is that host's trouble, not this machine's network: no wait. A failure with the
+ * network up comes back with `up`, the origins that answered, and `unanswered` ({origin, code}), the host that did not.
+ * In a process that does not wait outages out (no stage), the step runs once, as it is.
  */
 export async function throughOutages(what, run, { hosts = async (r) => namedOrigins(r.output), deadlineAt = Infinity } = {}) {
   // The ended outages a run already went again for: each is answered once, never a loop on the same one.
@@ -387,8 +388,8 @@ export async function throughOutages(what, run, { hosts = async (r) => namedOrig
     if (r.ok || r.timedOut || !(waitingOutages() || stoppedWaiting())) return r;
     const needed = await hosts(r);
     const probed = needed.length ? needed : [githubOrigin()];
-    const cut = await stepCutOff(probed, { startedMs, seen });
-    if (!cut) return { ...r, up: probed };
+    const { cut, answered, unanswered = null } = await stepCutOff(probed, { startedMs, seen });
+    if (!cut) return { ...r, up: answered, unanswered };
     // Stopped waiting (the stage is ending on an outage): the step's failure is that outage's, never a Block of its own.
     if (stoppedWaiting()) throw downFor(cut.origin) ?? new NetworkDown(cut);
     log(`${what}: failed while this machine could not reach ${new URL(cut.origin).host} (${cut.code}); ${cut.ongoing ? "waiting for the network, then running it again" : "the network is back, running it again"}`);
@@ -397,8 +398,15 @@ export async function throughOutages(what, run, { hosts = async (r) => namedOrig
   }
 }
 
-/** How a step's failure with the network up reads in its Block: the hosts that answered (throughOutages `up`). */
-export const upText = (up) => (up?.length ? `; the network was up (${up.map((o) => new URL(o).host).join(", ")} answered right after)` : "");
+/**
+ * How a step's failure with the network up reads in its Block (a throughOutages result): the hosts that answered right
+ * after, and the host it needs that did not, if any.
+ */
+export const upText = ({ up = null, unanswered = null } = {}) => {
+  if (!up?.length) return "";
+  const hosts = up.map((o) => new URL(o).host).join(", ");
+  return unanswered ? `; the network was up (${hosts} answered right after), but ${new URL(unanswered.origin).host} did not answer (${unanswered.code})` : `; the network was up (${hosts} answered right after)`;
+};
 
 // Each lockfile's package manager, asked for the registry it installs from (read from its own configuration, no network).
 const REGISTRY_OF = [
@@ -439,7 +447,7 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
   };
   const attempt = async () => {
     const r = await throughOutages("install", () => sh(checkout, command, { env, timeoutMs: left() }), { hosts, deadlineAt });
-    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, missing: [], up: r.up };
+    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, missing: [], up: r.up, unanswered: r.unanswered };
     const missing = await installGaps(checkout, { env, timeoutMs: left() });
     return { ok: !missing.length, code: 0, timedOut: false, missing };
   };
@@ -451,7 +459,7 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
   const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" clear', { env, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
   const second = await attempt();
   if (second.ok) return { ok: true, repaired: true, first: what(first) };
-  return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}${upText(second.up)}`), missing: second.missing };
+  return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}${upText(second)}`), missing: second.missing };
 }
 
 /**

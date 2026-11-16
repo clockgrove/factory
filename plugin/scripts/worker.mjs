@@ -626,7 +626,7 @@ async function main() {
     const setupOpts = access.agent ? { env: { ...childBase, TMPDIR: tmp.factory }, asRunner: true } : { env: childBase };
     const s = await throughOutages("setup", () => sh(tree, inputs.setup, { ...setupOpts, timeoutMs: remainingMs(deadlineAt) }), { deadlineAt });
     if (!s.ok) {
-      const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}${upText(s.up)}`;
+      const reason = `setup failed: ${inputs.setup} exited ${s.timedOut ? "by timeout" : s.code}${upText(s)}`;
       await applyExit(repo, { issue, pr: null, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "setup" }, token);
       await finish("blocked", reason);
       return;

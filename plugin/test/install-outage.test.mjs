@@ -14,6 +14,7 @@ import { NetworkDown, OUTAGE, networkBack, resetNetwork, unreachable, waitOutage
 import { installDeps, sh, throughOutages, upText } from "../scripts/lib/checkout.mjs";
 
 const REGISTRY = "https://registry.test";
+const GITHUB = "https://api.github.test";
 const dns = (host) => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`getaddrinfo EAI_AGAIN ${host}`), { code: "EAI_AGAIN" }) });
 
 /** The outage's clock and fetch faked (probes answer `answer(origin)`), every log line kept; a stage's wait is on. */
@@ -65,17 +66,18 @@ const netLines = (lines) => lines.filter((l) => /\[factory\] network: /.test(l))
 test("install: a failure while the host its output names does not answer waits for the network and runs again, no Block and no reinstall", async () => {
   const c = checkout();
   await offline(
+    // The whole network down for the first two probes: the host the install named, then the general check.
     (origin, probes) => {
-      assert.equal(origin, REGISTRY, "the host the install named, not a guess");
-      if (probes.length === 1) return Promise.reject(dns("registry.test"));
+      if (probes.length <= 2) return Promise.reject(dns(new URL(origin).host));
       rmSync(c.down);
       return up();
     },
-    async ({ lines }) => {
+    async ({ lines, probes }) => {
       const r = await installDeps(c.dir, c.command, { env: process.env });
       assert.equal(r.ok, true, r.reason);
       assert.equal(r.repaired, false, "the outage's failure is no try: no clean reinstall");
       assert.equal(c.runs(), 2);
+      assert.deepEqual(probes, [REGISTRY, GITHUB, REGISTRY], "the host the install named (not a guess), the general check, then the wait's probe");
       assert.ok(lines.some((l) => /\[factory\] install: failed while this machine could not reach registry\.test \(EAI_AGAIN\); waiting for the network, then running it again/.test(l)), lines.join(""));
       assert.equal(netLines(lines).length, 2, "one line lost, one back");
     },
@@ -109,6 +111,21 @@ test("install: a host that stays unreachable past the stage's wait ends the stag
   );
 });
 
+test("install: only the host its output names not answering, while the general check does, is that host's trouble: no wait, the Block names it", async () => {
+  const c = checkout();
+  await offline(
+    (origin) => (origin === REGISTRY ? Promise.reject(dns("registry.test")) : up()),
+    async ({ probes, lines }) => {
+      const r = await installDeps(c.dir, c.command, { env: process.env });
+      assert.equal(r.ok, false);
+      assert.equal(c.runs(), 2, "the first run and the clean reinstall, no run for an outage");
+      assert.match(r.reason, /exited 1, and again after a clean reinstall: exited 1; the network was up \(api\.github\.test answered right after\), but registry\.test did not answer \(EAI_AGAIN\)$/);
+      assert.deepEqual(probes, [REGISTRY, GITHUB, REGISTRY, GITHUB], "each failure: the named host, then the general check; never a wait's probe");
+      assert.equal(netLines(lines).length, 0, "no wait");
+    },
+  );
+});
+
 test("install: an outage this stage met while the install ran (GitHub lost and back meanwhile) runs it again, though every host answers after", async () => {
   const c = checkout({ names: false });
   // It fails its first run only: the run the outage met.
@@ -137,16 +154,16 @@ test("install: with no host named, the package manager's own registry is probed"
   chmodSync(join(bin, "pnpm"), 0o755);
   await offline(
     (origin, probes) => {
-      assert.equal(origin, REGISTRY);
-      if (probes.length === 1) return Promise.reject(dns("registry.test"));
+      if (probes.length <= 2) return Promise.reject(dns(new URL(origin).host));
       rmSync(c.down);
       return up();
     },
-    async () => {
+    async ({ probes }) => {
       const r = await installDeps(c.dir, c.command, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
       assert.equal(r.ok, true, r.reason);
       assert.equal(r.repaired, false);
       assert.equal(c.runs(), 2);
+      assert.deepEqual(probes, [REGISTRY, GITHUB, REGISTRY]);
     },
   );
 });
@@ -155,7 +172,7 @@ test("setup: the repository's setup through the real shell waits out an outage o
   const c = checkout();
   await offline(
     (origin, probes) => {
-      if (probes.length === 1) return Promise.reject(dns("registry.test"));
+      if (probes.length <= 2) return Promise.reject(dns(new URL(origin).host));
       rmSync(c.down, { force: true });
       return up();
     },
@@ -170,7 +187,7 @@ test("setup: the repository's setup through the real shell waits out an outage o
       assert.equal(failed.ok, false);
       assert.deepEqual(failed.up, [REGISTRY]);
       assert.equal(c.runs(), 3);
-      assert.equal(upText(failed.up), "; the network was up (registry.test answered right after)");
+      assert.equal(upText(failed), "; the network was up (registry.test answered right after)");
     },
   );
 });
@@ -179,7 +196,7 @@ test("the work and review stages run their setup through the outage wait and nam
   for (const file of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", file), "utf8");
     assert.match(src, /const s = await throughOutages\("setup", \(\) => sh\(tree, inputs\.setup, /, file);
-    assert.match(src, /setup failed[^`]*\$\{inputs\.setup\}[^`]*\$\{upText\(s\.up\)\}`/, file);
+    assert.match(src, /setup failed[^`]*\$\{inputs\.setup\}[^`]*\$\{upText\(s\)\}`/, file);
   }
 });
 

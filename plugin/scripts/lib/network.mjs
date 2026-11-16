@@ -532,15 +532,20 @@ export function namedOrigins(text) {
 
 /**
  * Whether a set-up step that needs the network (the repository's install or setup), run from `startedMs` to `endedMs`
- * and failed, met this machine's network down: an outage this process recorded meanwhile (lostDuring), else the first of
- * `origins` (the hosts the step needs) that does not answer a probe now. An ended outage in `seen` (pastKey) was answered
- * by a run since: it counts no more. {origin, code, since, ongoing}, or null: the network was up.
+ * and failed, met this machine's network down. `cut` ({origin, code, since, ongoing}) when it did: an outage this
+ * process recorded meanwhile (lostDuring), or the first of `origins` (the hosts the step needs) not answering a probe
+ * now while `general` (this machine's reachability check, GitHub's origin) does not answer either. An ended outage in
+ * `seen` (pastKey) was answered by a run since: it counts no more. Else `cut` is null and the network was up:
+ * `answered`, the origins that answered, and `unanswered` ({origin, code}), the one host the step needs that did not
+ * while the general check did, if any (that host's own trouble, never the machine's outage).
  */
-export async function stepCutOff(origins, { startedMs, endedMs = OUTAGE.now(), seen = new Set() }) {
+export async function stepCutOff(origins, { startedMs, endedMs = OUTAGE.now(), seen = new Set(), general = githubOrigin() }) {
   const met = lostDuring(startedMs, endedMs, seen);
-  if (met) return met;
+  if (met) return { cut: met };
   const down = await unreachableNow(origins);
-  return down ? { ...down, since: OUTAGE.now(), ongoing: true } : null;
+  if (!down) return { cut: null, answered: origins };
+  if (down.origin !== general && (await probe(general)) === null) return { cut: null, answered: [general], unanswered: down };
+  return { cut: { ...down, since: OUTAGE.now(), ongoing: true } };
 }
 
 /**

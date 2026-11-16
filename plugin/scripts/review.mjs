@@ -1060,7 +1060,7 @@ async function main() {
     const s = await throughOutages("setup", () => sh(tree, inputs.setup, { ...setupOpts, timeoutMs: remainingMs(deadlineAt) }), { deadlineAt });
     if (!s.ok) {
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}${upText(s.up)}`, cause: "setup", notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: `setup failed before review: ${inputs.setup}${upText(s)}`, cause: "setup", notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", "setup failed");
       return;
     }

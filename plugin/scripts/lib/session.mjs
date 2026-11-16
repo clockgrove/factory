@@ -1077,17 +1077,17 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, seen = [], onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
   // The decision calls' spend during this loop (triage, the drift advisory: decisionSpend) is taken off what is left too.
   const decisionsAtStart = decisionSpend();
   const usage = [];
   let passes = 0;
   let last = null;
-  // The red the last fix pass was handed, as the progress check reads it (redShape), every red the loop has seen (one
-  // seen again after a committed pass is no progress), and why the loop stopped without progress. No progressCheck (no
-  // decider wired): only the exact checks decide, and what they cannot is no progress.
+  // The red the last fix pass was handed, as the progress check reads it (redShape), and why the loop stopped without
+  // progress. `seen`: every red the stage has seen, this loop's added as it goes (one seen again after a committed pass
+  // is no progress); a stage that runs several loops passes them one list. No progressCheck (no decider wired): only
+  // the exact checks decide, and what they cannot is no progress.
   let handed = null;
-  const seen = [];
   let stalled = "";
   const judgeProgress = progressCheck?.judge ?? exactJudge;
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
@@ -1295,7 +1295,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       ? (v.failedRuns?.length ? v.failedRuns : [{ name: `required checks ${checks.names.join(", ")}` }]).map((r) => ({ name: r.name, sig: sigs.get(r.id) ?? null }))
       : failures.map((f) => ({ name: f.command, sig: failureSignature(f.command, f.full || f.output || "") }));
     const head = v.sha || v.head || "";
-    return { head, at: `pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
+    return { head, at: `${label} pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
   };
   // What the fix pass between two reds changed, as git's --stat (null when it cannot be read).
   const diffStat = async (from, to) => {
@@ -2634,7 +2634,8 @@ const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocke
  * The comment for one red queue drop (queueRedMarker): a record line (`{at, state, head, kind, sigs, jobs}` as JSON, read back
  * by queueRedRecords) and one line for a person. `head`: the PR head the drop was of; `after`: no merge-group run created
  * before it is the drop's (the removal before it, or the drop count's bound); `tries`: the review stages that started its
- * fix pass; `reads`: the stages that found no run of it yet. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
+ * fix pass; `ends`: how each of those tries ended that recorded an end (queueTryEnd: `committed`, or `idle` when it ran
+ * and committed nothing; a try with none recorded ended early: a crash, a stop, a pause, a cap or a limit); `reads`: the stages that found no run of it yet. `state`: `handed` (the merge pass gave it to the review stage; it stays so until a stage has
  * decided it, or its fix pass has committed), `fixed` (the PR's own change, and its fix pass
  * committed: `sigs` its failure classes, `jobs` its failing jobs as [name, signature id]), `requeued` (not the PR's change, or not known to be: `kind` which; enqueued again
  * as any drop), `blocked` (the PR's own change, its fix pass before it making no progress) or `superseded` (the PR's head moved on before a stage read it).
@@ -2648,7 +2649,7 @@ export function queueRedBody(issue, prNumber, rec) {
     blocked: "the PR's own change, past its fix passes: Blocked",
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
-  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
+  const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(Array.isArray(rec.ends) ? { ends: rec.ends } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
   return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
@@ -2666,10 +2667,10 @@ export function queueRedRecords(comments, issue) {
       const v = JSON.parse(line.slice(QUEUE_RED_RECORD(issue).length, -4));
       if (!Number.isFinite(Date.parse(v?.at)) || typeof v?.state !== "string") continue;
       const count = (x) => (Number.isInteger(x) && x > 0 ? x : 0);
-      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id]) => [name, typeof id === "string" ? id : null]) : null, tries: count(v.tries), reads: count(v.reads) };
+      const rec = { at: v.at, state: v.state, head: typeof v.head === "string" ? v.head : null, after: Number.isFinite(Date.parse(v.after)) ? v.after : null, kind: v.kind ?? null, sigs: Array.isArray(v.sigs) ? v.sigs.map(String) : [], jobs: Array.isArray(v.jobs) ? v.jobs.filter((j) => Array.isArray(j) && typeof j[0] === "string").map(([name, id]) => [name, typeof id === "string" ? id : null]) : null, tries: count(v.tries), ends: Array.isArray(v.ends) ? v.ends.filter((e) => QUEUE_TRY_ENDS.includes(e)) : null, reads: count(v.reads) };
       const key = new Date(Date.parse(v.at)).toISOString();
       const had = byAt.get(key);
-      const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 10_000 + r.tries * 100 + r.reads;
+      const rank = (r) => (QUEUE_RED_RANK[r.state] ?? 1) * 1_000_000 + r.tries * 10_000 + (r.ends?.length ?? 0) * 100 + r.reads;
       if (!had || rank(rec) >= rank(had)) byAt.set(key, rec);
     } catch {
       // not a record
@@ -2752,7 +2753,8 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
  * progress on the red it was handed: fix-progress.mjs, `progressCheck`'s judge, with every red fixed since the re-entry
  * as the ones seen; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
  * answer pass gets `red`; the record stays `handed`, its `tries` counted, until recordQueueFix writes `fixed` once that
- * pass has committed, so a stage that ends before then leaves it for the next; two tries that committed nothing Block). Null when nothing is pending. `names()` gives the required checks,
+ * pass has committed, so a stage that ends early leaves it for the next; a try that ran and committed nothing, recorded
+ * `idle` in `ends` (recordQueueIdle), Blocks, as no progress; a record without `ends` Blocks at two tries). Null when nothing is pending. `names()` gives the required checks,
  * read only then.
  */
 export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
@@ -2790,19 +2792,41 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   const p = last?.jobs?.length ? await judge({ before: shape(last, last.jobs), after: { ...shape(pending, q.jobs), lead: q.red.lead || "" }, seen: fixes.slice(0, -1).filter((r) => r.jobs?.length).map((r) => shape(r, r.jobs)) }) : null;
   // The stage harness's usage limit stopped the question: the drop stays handed, and the stage ends on the limit.
   if (p?.limited) throw new UsageLimitReached(p.limited, { since: Date.now(), label: "fix-progress check" });
-  const over = p && !p.progress ? `fix pass, which made no progress: ${p.why}` : pending.tries >= 2 ? `${pending.tries} fix passes that committed nothing for it` : "";
+  // A try that ran and committed nothing is no progress; one that ended early is not counted (the stage's own bounds,
+  // relaunches, usage holds and max_usd, cover those). A record from before `ends` was kept: two tries.
+  const idle = Array.isArray(pending.ends) ? pending.ends.includes("idle") : pending.tries >= 2;
+  const over = p && !p.progress ? `fix pass, which made no progress: ${p.why}` : idle ? (Array.isArray(pending.ends) ? "fix pass that ran and committed nothing for it" : `${pending.tries} fix passes that committed nothing for it`) : "";
   if (over) {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs }, { token });
     return { state: "blocked", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
-  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, tries: pending.tries + 1 };
+  const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, tries: pending.tries + 1, ends: pending.ends ?? [] };
   await writeQueueRed(repo, issue, prNumber, record, { token });
   return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; the PR's own change, one fix pass (the answer pass)`, red: q.red, record };
 }
 
 /** The fix pass for a red queue drop committed (readQueueRed `fixing`): its record is `fixed`, which counts toward the bound. */
-export const recordQueueFix = (repo, issue, prNumber, record, opts) => writeQueueRed(repo, issue, prNumber, { ...record, state: "fixed" }, opts);
+export const recordQueueFix = (repo, issue, prNumber, record, opts) => writeQueueRed(repo, issue, prNumber, { ...record, state: "fixed", ends: [...(record.ends ?? []), "committed"] }, opts);
+
+/** The fix pass for a red queue drop ran to its end and committed nothing: recorded `idle`, the drop still handed; the next read Blocks. */
+export const recordQueueIdle = (repo, issue, prNumber, record, opts) => writeQueueRed(repo, issue, prNumber, { ...record, state: "handed", ends: [...(record.ends ?? []), "idle"] }, opts);
+
+/** How a queue drop's fix-pass try can end on its record (queueRedBody `ends`). */
+export const QUEUE_TRY_ENDS = Object.freeze(["committed", "idle"]);
+
+/**
+ * How the queue's fix pass (review.mjs's answer pass) ended, from structure: `committed` when the checkout's HEAD moved
+ * (`before`, `after`) and the push went up; `idle` when it ran to its end (`rec` ok: no crash, error, stop, time or
+ * dollar cap, unmetered run or provider refusal, and no Question: `question`) with the HEAD where it was; else null, an early end recorded as
+ * nothing (a refused push, an unreadable HEAD included).
+ */
+export function queueTryEnd({ before, after, pushed, rec, question = false }) {
+  if (!before || !after) return null;
+  if (after !== before) return pushed ? "committed" : null;
+  const early = !rec?.ok || rec.stopped || rec.timedOut || rec.budgetExceeded || rec.unmetered || rec.refusal || question;
+  return early ? null : "idle";
+}
 
 /**
  * The failed jobs of the PR's newest failed merge-queue run since `since`, each with its first failure line (triage.mjs

@@ -98,6 +98,8 @@ import {
   headMarks,
   readQueueRed,
   recordQueueFix,
+  recordQueueIdle,
+  queueTryEnd,
   redLines,
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
@@ -1176,6 +1178,9 @@ async function main() {
 
   // A red the answer pass fixes with the review's comments (validationLoop `held`, or the merge queue's: readQueueRed), else null.
   let heldRed = null;
+  // Every red this stage's validation loops have seen, the pre-review loop's and the answer pass's: one red seen again
+  // after a committed fix pass is no progress across them too (fix-progress.mjs).
+  const seenReds = [];
   // The failures this stage's fix passes were given (their failure lines and output's end): what the answer gate asks
   // whether the passes' commits only answer, with the review's findings (answerGate).
   const fixTexts = [];
@@ -1246,7 +1251,7 @@ async function main() {
   else if (scope.since) log(`PR #${pr.number}: commits since the head Factory's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
-    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }), checksOnlyFirst: marks.handedOff };
+    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }), seen: seenReds, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
       overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
@@ -1674,9 +1679,10 @@ async function main() {
     const pushed = !outbox.failed;
     if (pushed) pr = await publish(pr);
     if (pushed) answerTo = outbox.expected() || answerFrom;
-    // The queue's fix pass committed and is on GitHub: its record counts toward the bound now. One that committed nothing
-    // leaves the drop handed, for the next stage.
-    if (queueFix && pushed && headBefore && answered && answered !== headBefore) {
+    // The queue's fix pass committed and is on GitHub: recorded `fixed`, the red it was handed the one the next is judged
+    // against. One that ran and committed nothing is recorded below, once its exit record is read; one that ended early
+    // records nothing and leaves the drop handed, for the next stage (session.mjs queueTryEnd).
+    if (queueFix && queueTryEnd({ before: headBefore, after: answered, pushed, rec }) === "committed") {
       await recordQueueFix(repo, issue, pr.number, queueFix, token).catch((e) => log(`queue fix record: ${e.message.slice(0, 120)}`));
       queueFix = null;
     }
@@ -1694,6 +1700,10 @@ async function main() {
     records.push(...asked.usage);
     for (const r of asked.usage) mark(r);
     answerRecord = asked.record;
+    if (queueFix && queueTryEnd({ before: headBefore, after: answered, pushed, rec, question: heldQuestion || answerRecord?.exit === "question" }) === "idle") {
+      await recordQueueIdle(repo, issue, pr.number, queueFix, token).catch((e) => log(`queue fix record: ${e.message.slice(0, 120)}`));
+      queueFix = null;
+    }
     // The question check may have turned QUESTION: items into assumptions: the PR body and plan comment follow pr.md and plan.md.
     if (asked.checked) {
       await io.collect();
@@ -1708,7 +1718,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }) })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: openProgressCheck({ inputs, stage: decisionStage }), seen: seenReds })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

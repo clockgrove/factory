@@ -50,10 +50,12 @@ test("the progress question: closer at the confidence floor or more is progress;
 /**
  * The real validationLoop on the commands route in a git checkout, with a fake Codex whose call n does `steps[n - 1]`:
  * writes its `write` files, deletes its `remove` files and, with `commit`, commits everything (git add -A). `base`: files
- * the first commit holds. Returns the result (or the error it rejected with, as `error`), the harness calls made and the
- * phase lines.
+ * the first commit holds. `seen`: the stage's reds, passed to the loop. `before(git, work)`: a loop of the same stage
+ * first, its first red held for the stage's next pass (holdRed), then `before` (that pass's commit). Returns the result
+ * (or the error it rejected with, as `error`), the earlier loop's result (`held`), the harness calls made and the phase
+ * lines.
  */
-async function commandsLoop({ commands, steps, progressCheck = null, base = {} }) {
+async function commandsLoop({ commands, steps, progressCheck = null, base = {}, seen = undefined, before = null }) {
   const root = mkdtempSync(join(tmpdir(), "fix-progress-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -91,12 +93,18 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   const phases = [];
   try {
     let error = null;
-    const result = await validationLoop({ checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, onPhase: async (l) => phases.push(l) }).catch((e) => ((error = e), null));
+    const args = { checkout: work, commands, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), progressCheck, ...(seen ? { seen } : {}), onPhase: async (l) => phases.push(l) };
+    let held = null;
+    if (before) {
+      held = await validationLoop({ ...args, label: "pre-review-validation", holdRed: () => true });
+      before(g, work);
+    }
+    const result = await validationLoop(args).catch((e) => ((error = e), null));
     let made = 0;
     try {
       made = readFileSync(calls, "utf8").length;
     } catch {}
-    return { result, error, calls: made, phases };
+    return { result, error, held, calls: made, phases };
   } finally {
     process.env.PATH = path;
     rmSync(root, { recursive: true, force: true });
@@ -180,8 +188,8 @@ test("validation loop: a red that flips back to one seen before (A, then B, then
   assert.equal(r.calls, 2, "no third fix pass");
   const [ca, cb] = commands.map((c) => c.replace(/^parallel: /, ""));
   assert.ok(r.phases.some((l) => l.startsWith("validation pass 2 red: ") && l.endsWith("(progress: a different set of jobs fails)")), r.phases.join("\n"));
-  const reason = `it brought back the red of pass 1 on ${"x".repeat(7)}: ${ca}, failing the same way, after the red it was handed (pass 2 on ${"y".repeat(7)}: ${cb})`;
-  const said = r.result.stalled.replace(/pass 1 on [0-9a-f]{7}/, `pass 1 on ${"x".repeat(7)}`).replace(/pass 2 on [0-9a-f]{7}/, `pass 2 on ${"y".repeat(7)}`);
+  const reason = `it brought back the red of validation pass 1 on ${"x".repeat(7)}: ${ca}, failing the same way, after the red it was handed (validation pass 2 on ${"y".repeat(7)}: ${cb})`;
+  const said = r.result.stalled.replace(/validation pass 1 on [0-9a-f]{7}/, `validation pass 1 on ${"x".repeat(7)}`).replace(/validation pass 2 on [0-9a-f]{7}/, `validation pass 2 on ${"y".repeat(7)}`);
   assert.ok(said.startsWith(`the fix pass before it made no progress: ${reason}; failing: ${ca} (`), said);
 });
 
@@ -204,4 +212,30 @@ test("validation loop: the stage harness's usage limit in the progress question 
   } finally {
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test("validation loops of one stage share their reds: A held by the first, B after the stage's own pass, then A again Blocks (#399)", async () => {
+  const commands = [needs("fa"), needs("fb")];
+  // The stage's answer pass between the loops fixes A and breaks B; the second loop's fix pass fixes B and breaks A.
+  const answer = (g, work) => {
+    writeFileSync(join(work, "fa"), "ok\n");
+    rmSync(join(work, "fb"));
+    g("add", "-A");
+    g("commit", "-q", "-m", "answer");
+  };
+  const steps = [{ write: { fb: "ok\n" }, remove: ["fa"], commit: true }, { write: { fa: "ok\n" }, commit: true }];
+  const shared = await commandsLoop({ commands, steps, base: { fb: "ok\n" }, seen: [], before: answer });
+  assert.ok(shared.held.held, "the first loop held its red for the stage's pass");
+  assert.equal(shared.calls, 1, "one fix pass in the second loop, then the Block");
+  assert.match(shared.result.stalled, /^the fix pass before it made no progress: it brought back the red of pre-review-validation pass 1 on [0-9a-f]{7}: test -f fa .*, failing the same way, after the red it was handed \(validation pass 1 on [0-9a-f]{7}: test -f fb /);
+  // Each loop on its own list: the second loop never saw A, so it reads as a new set and gets another pass.
+  const apart = await commandsLoop({ commands, steps, base: { fb: "ok\n" }, before: answer });
+  assert.equal(apart.calls, 2);
+});
+
+test("review.mjs passes one list of seen reds to its pre-review loop and its answer pass's loop", () => {
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  assert.equal(src.match(/const seenReds = \[\];/g)?.length, 1);
+  assert.match(src, /const preArgs = \{[^\n]*progressCheck: openProgressCheck\(\{ inputs, stage: decisionStage \}\), seen: seenReds,/);
+  assert.match(src, /\? await validationLoop\(\{[^\n]*label: "review-validation"[^\n]*progressCheck: openProgressCheck\(\{ inputs, stage: decisionStage \}\), seen: seenReds \}\)/);
 });

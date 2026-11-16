@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { watchQueue } from "../scripts/dispatch.mjs";
 import { approvalPolicyCheck, githubChecks } from "../scripts/doctor.mjs";
 import { HUNG_CODE, marker, setSelf } from "../scripts/lib/logic.mjs";
-import { mergeBlockCause, mergeBlockReason, mergeReadyOne, queueDropBlock, queueRedBody, queueRedMarker, queueRedRecords, readQueueRed, recordQueueFix } from "../scripts/lib/session.mjs";
+import { mergeBlockCause, mergeBlockReason, mergeReadyOne, queueDropBlock, queueRedBody, queueRedMarker, queueRedRecords, queueTryEnd, readQueueRed, recordQueueFix, recordQueueIdle, writeQueueRed } from "../scripts/lib/session.mjs";
 import { openTriage } from "../scripts/lib/triage.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -540,7 +540,8 @@ const records = (fake) => queueRedRecords(fake.s.comments[ISSUE] || [], ISSUE);
 
 /**
  * The review stage's step (session.mjs readQueueRed) on the fake, with triage's decider answering `verdict` (none: off),
- * on the PR's `head`. With `commit` its fix pass committed and pushed (review.mjs records it: recordQueueFix).
+ * on the PR's `head`. With `commit` its fix pass committed and pushed (review.mjs records it: recordQueueFix); with
+ * `commit: "idle"` it ran to its end and committed nothing (recordQueueIdle); false, it ended early (nothing recorded).
  * `progressCheck`: the fix-progress check (fix-progress.mjs); none judges by the exact checks alone.
  */
 async function reviewReads(fake, verdict = null, { head = HEAD, commit = true, progressCheck = null } = {}) {
@@ -548,7 +549,8 @@ async function reviewReads(fake, verdict = null, { head = HEAD, commit = true, p
   try {
     const triage = openTriage({ inputs: {}, env: {}, home, repo, issue: ISSUE, prNumber: PR, token: "t", actionsToken: "job", ...(verdict ? { decider: { decide: async () => verdict } } : {}) });
     const step = await readQueueRed({ repo, issue: ISSUE, prNumber: PR, base: "main", head, names: async () => ["Quality"], triage, progressCheck, token: "t", actionsToken: "job" });
-    if (step?.state === "fixing" && commit) await recordQueueFix(repo, ISSUE, PR, step.record, { token: "t" });
+    if (step?.state === "fixing" && commit === "idle") await recordQueueIdle(repo, ISSUE, PR, step.record, { token: "t" });
+    else if (step?.state === "fixing" && commit) await recordQueueFix(repo, ISSUE, PR, step.record, { token: "t" });
     return step;
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -783,22 +785,54 @@ test("queue red: with triage off, a red is the PR's own only when its failure na
   }
 });
 
-test("queue red: the fix pass is recorded only once it committed; a stage that ends first leaves the drop for the next, and two that commit nothing Block", async () => {
+test("queue red: each try's end is recorded; tries that ended early never count, one that ran and committed nothing Blocks (#399)", async () => {
   const fake = fakeGitHub();
   await withGitHub(fake, async () => {
     queueRed(fake, { id: 650, at: ago(20 * MIN) });
     fake.s.removals = [queueDrop(ago(18 * MIN))];
     assert.equal(await merge({}), "queue-red");
-    assert.equal((await reviewReads(fake, own, { commit: false })).state, "fixing");
-    assert.deepEqual(records(fake).map((r) => [r.state, r.tries]), [["handed", 1]], "still pending: no fix counted");
-    // The merge pass hands it again; the next stage takes it up and runs the fix pass once more.
-    assert.equal(await merge({}), "queue-red");
+    // Three stages in a row end early (a crash, a stop, a cap): nothing recorded as their end, and each takes it up again.
+    for (let i = 1; i <= 3; i++) {
+      assert.equal((await reviewReads(fake, own, { commit: false })).state, "fixing", `early end ${i}`);
+      assert.deepEqual(records(fake).map((r) => [r.state, r.tries, r.ends]), [["handed", i, []]]);
+      assert.equal(await merge({}), "queue-red", "handed again");
+    }
     assert.equal(fake.s.enqueued.length, 0);
-    assert.equal((await reviewReads(fake, own, { commit: false })).state, "fixing");
-    const third = await reviewReads(fake, own, { commit: false });
-    assert.equal(third.state, "blocked");
-    assert.match(third.reason, /after Factory's 2 fix passes that committed nothing for it/);
+    // The fourth runs to its end and commits nothing: recorded, and the next read Blocks as no progress.
+    assert.equal((await reviewReads(fake, own, { commit: "idle" })).state, "fixing");
+    assert.deepEqual(records(fake).map((r) => [r.state, r.tries, r.ends]), [["handed", 4, ["idle"]]]);
+    const blocked = await reviewReads(fake, own);
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.reason, /after Factory's fix pass that ran and committed nothing for it; fix it on the branch/);
   });
+});
+
+test("queue red: a record from before try ends were kept still Blocks at two tries", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    queueRed(fake, { id: 655, at: ago(20 * MIN) });
+    fake.s.removals = [queueDrop(ago(18 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const [rec] = records(fake);
+    // Written as an older review stage wrote it: two tries, no `ends`.
+    await writeQueueRed(repo, ISSUE, PR, { ...rec, kind: "own", tries: 2, ends: undefined }, { token: "t" });
+    assert.equal(records(fake)[0].ends, null);
+    const step = await reviewReads(fake, own);
+    assert.equal(step.state, "blocked");
+    assert.match(step.reason, /after Factory's 2 fix passes that committed nothing for it/);
+  });
+});
+
+test("queueTryEnd: committed only when the HEAD moved and went up; idle only for a pass that ran to its end; anything else is an early end", () => {
+  const ok = { ok: true };
+  assert.equal(queueTryEnd({ before: "a", after: "b", pushed: true, rec: ok }), "committed");
+  assert.equal(queueTryEnd({ before: "a", after: "b", pushed: false, rec: ok }), null, "a refused push");
+  assert.equal(queueTryEnd({ before: "a", after: "a", pushed: true, rec: ok }), "idle");
+  for (const rec of [{ ok: false, signal: "SIGKILL" }, { ok: false, error: "max turns" }, { ok: true, timedOut: true }, { ok: true, budgetExceeded: true }, { ok: true, unmetered: true }, { ok: false, refusal: { status: 429 } }, { ok: false, stopped: true }, null]) {
+    assert.equal(queueTryEnd({ before: "a", after: "a", pushed: true, rec }), null, JSON.stringify(rec));
+  }
+  assert.equal(queueTryEnd({ before: "a", after: "a", pushed: true, rec: ok, question: true }), null, "a Question");
+  assert.equal(queueTryEnd({ before: null, after: "a", pushed: true, rec: ok }), null, "a HEAD unread");
 });
 
 test("queue red: unreadable job logs on the queue's commit are no failure of the PR's own; a record of an older head is superseded", async () => {

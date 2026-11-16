@@ -43,10 +43,13 @@ export const transientError = (e) => !!e && (e.transport === true || e.rateLimit
 /**
  * `token` is a string or a getter (the TokenKeeper's, which re-mints during long jobs). Without one, a person's own
  * command on their machine (doctor, setup) reads GitHub as their gh login; inside Actions there is no such fallback.
+ * Anything else (a stage's request options, `{token, notice}`, passed as the token itself) is refused before any request:
+ * GitHub would read it as a bad credential (#405).
  */
 let LOGIN = undefined;
 const tokenOf = (token) => {
   const t = typeof token === "function" ? token() : token;
+  if (t && typeof t !== "string") throw new TypeError(`a GitHub call's token must be a string or a function giving one, not ${Array.isArray(t) ? "an array" : typeof t}`);
   if (t) return t;
   if (process.env.GITHUB_ACTIONS) return null;
   if (LOGIN === undefined) {
@@ -272,6 +275,91 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
   }
 }
 
+/**
+ * A refreshable token: a getter with `refresh()`, which gets a new App installation token (token-keeper.mjs, and local
+ * mode's notice token, session.mjs noticePost), and `mintedAt(token)`, when that token was minted (ms, this machine's
+ * clock, as GitHub answered the mint), or null. A fixed token (local mode's own, or one a launcher handed over) has none.
+ */
+const refreshable = (token) => typeof token === "function" && typeof token.refresh === "function";
+
+/** Why a refresh failed, for a log line: its message, cut. */
+const why = (e) => String(e?.message || e).slice(0, 160);
+
+/**
+ * `token.refresh()`, and whether the getter gives another token after it: a refresh that minted the token and then
+ * failed after (the agent's read-only token, its hand-over: token-keeper.mjs onRefresh) still replaced it. `failed` is
+ * the refresh's error, if any.
+ */
+async function refreshOf(token) {
+  const was = tokenOf(token);
+  let failed = null;
+  await token.refresh().catch((e) => {
+    failed = e;
+  });
+  return { replaced: tokenOf(token) !== was, failed };
+}
+
+/**
+ * The token a try sends: the getter's now, refreshed first when it says it is at its expiry (token-keeper.mjs `expired`),
+ * so no call goes with an expired App installation token. A refresh that fails leaves the call to GitHub's answer.
+ */
+async function currentToken(token) {
+  if (refreshable(token) && token.expired?.()) {
+    const { replaced, failed } = await refreshOf(token);
+    if (failed) log(`the App installation token was at its expiry; ${replaced ? "refreshed it, then" : "its refresh"} failed (${why(failed)})`);
+  }
+  return tokenOf(token);
+}
+
+/**
+ * GitHub can refuse an installation token with 401 for a few seconds after it made it, until the token has reached all
+ * its servers. @octokit/auth-app (8.3.1, its hook's sendRequestWithRetries) sends the same token again then: while the
+ * token was less than 5 s old when the request went, after 1 s, then 2 s, then 3 s, and the 401 stands after that.
+ * `tries` is that bound counted (the waits add to 6 s), so it holds whatever the clock does.
+ */
+export const PROPAGATION = { windowMs: 5_000, stepMs: 1_000, tries: 3 };
+
+/**
+ * `send()` (one call, its retries included) after a 401 on a refreshable token (`last()`: the token of its last try and
+ * when it went). GitHub refused an App installation token and did nothing, so any call may go again:
+ *  - the token was minted less than PROPAGATION.windowMs before the try: GitHub may not have it everywhere yet. The same
+ *    token goes again after PROPAGATION's waits, minting nothing (a burst of 401s on a new token mints no more);
+ *  - else, once per call: with the token the getter gives now when a refresh came between, else after one refresh. A
+ *    refresh counts when the getter gives a new token, even if what it does after the mint failed (logged).
+ * Each is logged by its cause, never with a token. A 401 past those, or a refresh that gave no new token, is the call's
+ * failure.
+ */
+async function refreshedOn401(what, token, last, send) {
+  let refreshed = false;
+  let waits = 0;
+  for (;;) {
+    try {
+      return await send();
+    } catch (e) {
+      if (e?.status !== 401 || !refreshable(token)) throw e;
+      const { token: was, at } = last();
+      const minted = token.mintedAt?.(was) ?? null;
+      const age = minted === null ? null : at - minted;
+      if (age !== null && age < PROPAGATION.windowMs && waits < PROPAGATION.tries) {
+        waits += 1;
+        const wait = waits * PROPAGATION.stepMs;
+        log(`GitHub ${what}: HTTP 401 on an App installation token minted ${(Math.max(0, age) / 1000).toFixed(1)} s before; GitHub may not have it everywhere yet, so the same token goes again in ${wait / 1000} s (wait ${waits} of ${PROPAGATION.tries})`);
+        await RETRY.sleep(wait);
+        continue;
+      }
+      if (refreshed || (age !== null && age < PROPAGATION.windowMs)) throw e;
+      refreshed = true;
+      const meanwhile = tokenOf(token) !== was;
+      const { replaced, failed } = meanwhile ? { replaced: true, failed: null } : await refreshOf(token);
+      if (!replaced) {
+        log(`GitHub ${what}: HTTP 401 on the App installation token, and its refresh failed (${why(failed)})`);
+        throw e;
+      }
+      log(`GitHub ${what}: HTTP 401 on the App installation token; ${meanwhile ? "it was refreshed meanwhile" : failed ? `refreshed it (what follows a mint failed: ${why(failed)})` : "refreshed it"}, trying once more`);
+    }
+  }
+}
+
 /** A 5xx: GitHub answered, and failed. */
 const serverError = (e) => Number.isInteger(e?.status) && e.status >= 500;
 
@@ -350,7 +438,8 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * A transient failure is sent again within RETRY's bound and before `deadlineAt` (ms) when the call may repeat
  * (repeatable); a create only as createAgain allows, with the caller's optional `landed` (for a comment with none,
  * commentLanded). A 5xx that outlasts the bound is thrown as GitHub's outage (outlasted). A DELETE whose retry finds
- * nothing (404) after a transient failure is done: the first try removed it. `noRateWait`: a rate limit is thrown at once,
+ * nothing (404) after a transient failure is done: the first try removed it. A 401 on a refreshable App installation
+ * token is sent again as refreshedOn401 says (GitHub's delay with a new token, else one refresh). `noRateWait`: a rate limit is thrown at once,
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
@@ -362,11 +451,14 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
   const quota = quotaKey(url, tokenOf(token));
   const conditional = cache && method === "GET" && !raw;
+  // The token each try carried and when it went: the getter is read per try, so a refresh between tries is the next try's.
+  let sent = { token: null, at: 0 };
   const one = async (n) => {
     const kept = conditional ? cache.get(url) : undefined;
+    sent = { token: await currentToken(token), at: Date.now() };
     let res;
     try {
-      res = await call(url, { method, body, token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
+      res = await call(url, { method, body, token: sent.token, accept, maxBytes: raw ? maxBytes : 0, etag: kept?.etag, signal });
     } catch (e) {
       throw transportError(`${method} ${path}`, e);
     }
@@ -395,7 +487,8 @@ export async function rest(path, { method = "GET", body, token, paginate = false
   };
   const pages = [];
   for (;;) {
-    const res = await withRetry(`${method} ${String(path).split("?")[0]}`, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota });
+    const what = `${method} ${String(path).split("?")[0]}`;
+    const res = await refreshedOn401(what, token, () => sent, () => withRetry(what, one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota }));
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
@@ -444,15 +537,17 @@ const isMutation = (query) => /^mutation\b/.test(String(query).replace(/#[^\n]*/
 
 /**
  * GraphQL call with fetch; `variables` are passed as JSON. A query is retried like a REST read; a mutation like a
- * create (createAgain, with the caller's optional `landed`). `deadlineAt` and `noRateWait` as for rest.
+ * create (createAgain, with the caller's optional `landed`). `deadlineAt`, `noRateWait` and a 401's refresh as for rest.
  */
 export async function graphql(query, variables = {}, { token, deadlineAt = Infinity, landed = null, noRateWait = false } = {}) {
   const url = process.env.GITHUB_GRAPHQL_URL || `${API()}/graphql`;
   const quota = quotaKey(url, tokenOf(token));
+  let sent = { token: null, at: 0 };
   const one = async () => {
+    sent = { token: await currentToken(token), at: Date.now() };
     let res;
     try {
-      res = await call(url, { method: "POST", body: { query, variables }, token });
+      res = await call(url, { method: "POST", body: { query, variables }, token: sent.token });
     } catch (e) {
       throw transportError("graphql", e);
     }
@@ -485,7 +580,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
     return { data: data?.data };
   };
   const again = isMutation(query) ? createAgain(landed) : async () => true;
-  const res = await withRetry("graphql", one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota });
+  const res = await refreshedOn401("graphql", token, () => sent, () => withRetry("graphql", one, again, { deadlineAt, noRateWait, origin: new URL(url).origin, quota }));
   return LANDED in res ? res[LANDED] : res.data;
 }
 

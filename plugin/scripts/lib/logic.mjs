@@ -69,14 +69,18 @@ export function setupFilesNote(guard, max = 25, width = 80) {
   return lines.join(" ");
 }
 
-/** The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote). */
-export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null }) {
+/**
+ * The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote).
+ * `maxParts`: the repository's max_parts (6 by default, handoff.mjs MAX_PARTS).
+ */
+export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null, maxParts = 6 }) {
   const hours = Math.round((Number(timeoutMinutes) / 60) * 10) / 10;
   const checks = (ciChecks || []).filter(Boolean);
   return {
     issue: String(issue),
     usd: String(maxUsd),
     hours: String(hours),
+    max_parts: String(maxParts),
     validation: (validation || []).length ? validation.map(commandText).join("; ") : "none",
     validation_note: checks.length
       ? `Factory's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head Factory pushes, run by CI in parallel; before you stop, run the tests your change touches, not the whole suite.`
@@ -215,7 +219,7 @@ export function toolchainFile(path, paths = []) {
 // named requirements or constraints (`requirements-dev.txt`, `dev-requirements.txt`, `test_constraints.in`) or under a
 // `requirements/` or `constraints/` directory (`requirements/dev.txt`).
 const DEPENDENCY_LIST = /^(?:[\w.-]*[-_.])?(?:requirements|constraints)(?:[-_.][\w.-]*)?\.(?:txt|in)$/;
-const dependencyFile = (path) => {
+export const dependencyFile = (path) => {
   const name = fileName(path);
   if (MANIFESTS.has(name) || LOCKFILES.has(name) || DEPENDENCY_LIST.test(name)) return true;
   return /\.(?:txt|in)$/.test(name) && path.split("/").slice(0, -1).some((d) => d === "requirements" || d === "constraints");
@@ -1927,7 +1931,10 @@ export function conflictsAt(pr, sha) {
 
 /** Times one reviewed PR is put in the merge queue: the first enqueue and one more after the queue drops it. */
 export const QUEUE_TRIES = 2;
-/** How long a merge queue commit may wait with no CI begun on it (gateStarted) before Factory reads it as stalled (#295). */
+/**
+ * How long a merge queue commit may wait with no CI begun on it (gateStarted) before Factory reads it as stalled (#295):
+ * the default of the repository's queue_stall_minutes (STALL_DEFAULTS `queueMs`).
+ */
 export const QUEUE_STALL_MS = 10 * 60_000;
 /** The code Factory gives a stalled queue entry it took out itself: GitHub started no check on the queue's commit. */
 export const STALL_CODE = "checks_never_started";
@@ -1954,12 +1961,21 @@ export const QUEUE_HUNG_MS = queueHungMs(null);
 
 /**
  * The margin over a step's normal duration: a step is stalled only past max(3 x its baseline, its baseline + this), so
- * never under this, whatever its history (a warm-cache baseline is too tight for an install or a build).
+ * never under this, whatever its history (a warm-cache baseline is too tight for an install or a build). The default of
+ * the repository's step_stall_floor_minutes (STALL_DEFAULTS `floorMs`).
  */
 export const STEP_STALL_FLOOR_MS = 15 * 60_000;
 
-/** How long a step with normal duration `baselineMs` may run before it is stalled: max(3 x it, it + 15 min). */
-export const stepStallMs = (baselineMs) => Math.max(3 * baselineMs, baselineMs + STEP_STALL_FLOOR_MS);
+/**
+ * When a check counts as hung, limits a person owns (#423): `factor` and `floorMs`, a step is stalled past
+ * max(factor x its normal duration, it + floorMs) (step_stall_factor, step_stall_floor_minutes); `queueMs`, a merge queue
+ * commit with no CI begun on it is stalled past this (queue_stall_minutes). Every function here and in session.mjs that
+ * judges a hang takes a `stall` of this shape (inputs.mjs resolveInputs `stall`), these by default.
+ */
+export const STALL_DEFAULTS = Object.freeze({ factor: 3, floorMs: STEP_STALL_FLOOR_MS, queueMs: QUEUE_STALL_MS });
+
+/** How long a step with normal duration `baselineMs` may run before it is stalled: max(factor x it, it + floorMs). */
+export const stepStallMs = (baselineMs, stall = STALL_DEFAULTS) => Math.max(stall.factor * baselineMs, baselineMs + stall.floorMs);
 /** How many recent green runs of the workflow give a step's normal duration. */
 export const STEP_BASELINE_RUNS = 15;
 
@@ -1970,7 +1986,8 @@ export function stepBaselineMs(durations) {
 }
 
 /**
- * Where a running Actions job is (`actions/jobs/{id}`): `{step, since}` for the step running now and its start, or
+ * Where a running Actions job is (`actions/jobs/{id}`): `{step, number, since}` for the step running now (its name and
+ * GitHub's step number) and its start, or
  * `{step: null, since}` between steps (the last step's start or end). Null for a job that is not running yet (queued or
  * waiting for a runner), has no steps yet, or is done: such a job is never stalled. Progress is a step completing or a
  * new step starting; the job's log is not read.
@@ -1981,31 +1998,31 @@ export function jobPosition(job) {
   if (!steps.length) return null;
   const cur = steps.find((x) => x?.status === "in_progress");
   // A running step with no start time has `since` NaN: jobStall then judges the job by the fallback bound.
-  if (cur) return { step: String(cur.name ?? ""), since: Date.parse(cur.started_at) };
+  if (cur) return { step: String(cur.name ?? ""), number: Number.isInteger(cur.number) ? cur.number : null, since: Date.parse(cur.started_at) };
   const times = steps.flatMap((x) => [x?.completed_at, x?.started_at]).map((t) => Date.parse(t)).filter(Number.isFinite);
   return { step: null, since: times.length ? Math.max(...times) : Date.parse(job.started_at) };
 }
 
 /**
  * Whether a running Actions job needs its step's baseline read: only once the step could be stalled by it (past
- * STEP_STALL_FLOOR_MS, the least stepStallMs gives) or the job is past the fallback bound, so a healthy queue reads no
+ * `stall.floorMs`, the least stepStallMs gives) or the job is past the fallback bound, so a healthy queue reads no
  * history. A step with no start time needs none: the fallback judges it.
  */
-export function needsBaseline(job, { fallbackMs = QUEUE_HUNG_MS, now = Date.now() }) {
+export function needsBaseline(job, { fallbackMs = QUEUE_HUNG_MS, now = Date.now(), stall = STALL_DEFAULTS }) {
   const pos = jobPosition(job);
   if (!pos?.step || !Number.isFinite(pos.since)) return false;
-  return now - pos.since > STEP_STALL_FLOOR_MS || now - Date.parse(job.started_at) > fallbackMs;
+  return now - pos.since > stall.floorMs || now - Date.parse(job.started_at) > fallbackMs;
 }
 
 /**
- * Whether a running Actions job is stalled (#2683): its current step has run past stepStallMs(`baselineMs`), that is
- * max(3 x the step's normal duration, it + 15 min), the normal duration from the workflow's recent green runs. With no
+ * Whether a running Actions job is stalled (#2683): its current step has run past stepStallMs(`baselineMs`, `stall`), that
+ * is max(3 x the step's normal duration, it + 15 min) by default, the normal duration from the workflow's recent green runs. With no
  * baseline (a new step, no history) the job is stalled once `fallbackMs` (queueHungMs) has passed since the job's own
  * start; between steps, once it has passed since the last step's progress. A step or job whose start GitHub does not
  * give is judged by the fallback from the check run's start (`checkStartedAt`), then the job's: never left unjudged.
  * Returns `{name, step, elapsedMs, baselineMs}` or null; a job not running yet is never stalled.
  */
-export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, now = Date.now(), checkStartedAt = null }) {
+export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, now = Date.now(), checkStartedAt = null, stall = STALL_DEFAULTS }) {
   const pos = jobPosition(job);
   if (!pos) return null;
   const name = String(job.name ?? "");
@@ -2015,7 +2032,7 @@ export function jobStall(job, { baselineMs = null, fallbackMs = QUEUE_HUNG_MS, n
     return now - from > fallbackMs ? { name, step: pos.step, elapsedMs: now - from, baselineMs: null } : null;
   }
   const elapsed = now - pos.since;
-  if (pos.step && Number.isFinite(baselineMs) && baselineMs >= 0) return elapsed > stepStallMs(baselineMs) ? { name, step: pos.step, elapsedMs: elapsed, baselineMs } : null;
+  if (pos.step && Number.isFinite(baselineMs) && baselineMs >= 0) return elapsed > stepStallMs(baselineMs, stall) ? { name, step: pos.step, elapsedMs: elapsed, baselineMs } : null;
   const from = pos.step ? [job.started_at, checkStartedAt].map((t) => Date.parse(t)).find(Number.isFinite) : pos.since;
   const total = now - (Number.isFinite(from) ? from : pos.since);
   return total > fallbackMs ? { name, step: pos.step, elapsedMs: pos.step ? elapsed : total, baselineMs: null } : null;
@@ -2050,17 +2067,19 @@ export function queueTargets(names, checks) {
  * `hungMs` has passed since its own start. A
  * check queued or waiting for a runner never is. A required check with no run at all, and nothing in progress or
  * waiting there, is hung once `hungMs` has passed since CI first started on the commit (`headAt` when nothing has).
- * Returns `[{name, step, elapsedMs, baselineMs}]`. Decided on statuses, names and times only.
+ * Returns `[{name, step, elapsedMs, baselineMs}]`, with `job` and `number` (the Actions job's id and GitHub's step
+ * number) for a stalled step of a job read. Decided on statuses, names and times only.
  */
-export function queueHangs({ names, checks, jobs = new Map(), baselines = new Map(), headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS }) {
+export function queueHangs({ names, checks, jobs = new Map(), baselines = new Map(), headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, stall = STALL_DEFAULTS }) {
   const { latest, missing, targets } = queueTargets(names, checks);
   const out = [];
   for (const t of targets) {
     const job = jobs.get(t.id);
     if (job) {
       const pos = jobPosition(job);
-      const stall = jobStall(job, { baselineMs: pos?.step ? (baselines.get(stepKey(job, pos.step)) ?? null) : null, fallbackMs: hungMs, now, checkStartedAt: t.started_at });
-      if (stall) out.push({ ...stall, name: String(t.name) });
+      const hang = jobStall(job, { baselineMs: pos?.step ? (baselines.get(stepKey(job, pos.step)) ?? null) : null, fallbackMs: hungMs, now, checkStartedAt: t.started_at, stall });
+      // A stalled step names its job and step number, so the removal's record can say later whether that step finished.
+      if (hang) out.push({ ...hang, name: String(t.name), ...(hang.step ? { job: job.id ?? t.id, number: pos.number ?? null } : {}) });
       continue;
     }
     const since = Date.parse(t.started_at);
@@ -2072,6 +2091,67 @@ export function queueHangs({ names, checks, jobs = new Map(), baselines = new Ma
   const first = starts.length ? Math.min(...starts) : Date.parse(headAt);
   if (!busy && Number.isFinite(first) && now - first > hungMs) for (const n of missing) out.push({ name: String(n), step: null, elapsedMs: now - first, baselineMs: null });
   return out;
+}
+
+/**
+ * When the merge queue's own check timeout (`timeoutMinutes`, the ruleset's `check_response_timeout_minutes`) ends for
+ * the queue commit made at `headAt`: the time a check on it had to report by. An ISO string, or null with no time or no
+ * timeout read: no deadline is assumed, so nothing is judged against one.
+ */
+export function queueDeadline(headAt, timeoutMinutes) {
+  const t = timeoutMinutes === null || timeoutMinutes === undefined ? NaN : Number(timeoutMinutes);
+  const at = Date.parse(headAt);
+  return Number.isFinite(at) && Number.isFinite(t) && t > 0 ? new Date(at + t * 60_000).toISOString() : null;
+}
+
+/** Hung removals at most cleared (hungOutcome "green") since queueRetry's `since`: past that, every hung removal counts. */
+export const QUEUE_CLEARED_MAX = 1;
+
+/**
+ * What became of the steps a HUNG_CODE removal judged hung (`hung`: its record's `{job, step, number, head, by}`, `head`
+ * the queue commit), read at `now` from their jobs (`jobs`, id -> actions/jobs record) and their queue commits' checks
+ * (`checks`, sha -> queueCommitChecks' list, with each check's conclusion and completion time); an id or sha missing is
+ * a read not made or failed. `names` are the required checks (every check on the commit when empty):
+ * - "green": each judged step and its job completed with `success`, and every required check on that queue commit
+ *   (the job's own, or an aggregate one that waits on it) concluded `success`, all by `by` (queueDeadline): the queue
+ *   would have taken that result, so the step was slow, not hung;
+ * - "pending": nothing says otherwise yet, and `now` is not past the `by` of a job or required check unread, still
+ *   running or not reported yet: the answer waits for it, never past `by`;
+ * - "counted": anything else: no job, queue commit or `by` recorded, a step, job or required check that failed, was
+ *   cancelled or skipped, or completed after `by`, or one still running, missing or unread once `by` has passed.
+ * Decided on ids, names, numbers, statuses, conclusions and times only.
+ */
+export function hungOutcome(hung, { jobs = new Map(), checks = new Map(), names = [] } = {}, now = Date.now()) {
+  if (!Array.isArray(hung) || !hung.length) return "counted";
+  let pending = false;
+  for (const e of hung) {
+    const by = Date.parse(e?.by);
+    if (!Number.isInteger(e?.job) || typeof e?.head !== "string" || !e.head || !Number.isFinite(by)) return "counted";
+    const ok = (x) => x?.status === "completed" && x.conclusion === "success" && Date.parse(x.completed_at) <= by;
+    // Not known yet: undecided until `by`, counted past it.
+    const unknown = () => {
+      pending = true;
+      return now > by;
+    };
+    const job = jobs.get(e.job);
+    if (!job || job.status !== "completed") {
+      if (unknown()) return "counted";
+    } else {
+      const step = (job.steps || []).find((x) => x?.name === e.step && (e.number ?? null) === (Number.isInteger(x?.number) ? x.number : null));
+      if (!ok(job) || !ok(step)) return "counted";
+    }
+    const runs = checks.get(e.head);
+    if (!runs) {
+      if (unknown()) return "counted";
+      continue;
+    }
+    const { latest } = queueTargets(names, runs);
+    for (const n of names?.length ? names : [...latest.keys()]) {
+      const c = latest.get(n);
+      if (c?.status === "completed" ? !ok(c) : unknown()) return "counted";
+    }
+  }
+  return pending ? "pending" : "green";
 }
 
 const QUEUE_BOT = "github-merge-queue";
@@ -2099,7 +2179,10 @@ export const CONFLICT_CODE = "merge_conflict";
  * the review the merge rests on, the head's push, the last re-entry or Block) count, and a removal because it merged is
  * none. Who removed it decides what it is:
  * - Factory (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
- *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE;
+ *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE. A
+ *   HUNG_CODE removal marked `cleared` (its hung step's job then concluded green in time: hungOutcome "green") is no
+ *   drop: it counts as `cleared`, never toward QUEUE_TRIES or as a hold. Only the first QUEUE_CLEARED_MAX of those
+ *   since `since` are cleared; any later one counts as a drop, so a step that is slow on every try still Blocks;
  * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
@@ -2107,33 +2190,42 @@ export const CONFLICT_CODE = "merge_conflict";
  *   sibling's merge resolves into the send-back's rebase (staleDecision), so it counts toward no Block here. When the
  *   newest removal is one, `{conflict: {at}}` says so: the caller re-enqueues it only once the queue it conflicted
  *   with has moved (session.mjs mergeReadyOne).
- * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop `{at, code}`); at
- * QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop codes); `last` has
- * `factory: true` when Factory made that removal. Codes are
+ * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop or cleared removal
+ * `{at, code}`); at QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop
+ * codes); `last` has `factory: true` when Factory made that removal, `cleared: true` when it is cleared, and either
+ * answer has `cleared`, their count, when there are any. Codes are
  * GitHub's (`checks_timed_out`, `failed_checks`, ...); anything else reads `unknown`.
  */
 export function queueRetry(removals, { since, self = null }) {
   const from = Date.parse(since);
   const me = botless(self);
+  let clears = 0;
   const after = (removals || [])
     .filter((r) => r && r.reason !== "merged" && Date.parse(r.at) > (Number.isFinite(from) ? from : -Infinity))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     .map((r) => {
       const who = botless(r.actor);
       // Factory's own removal names why: this pass's (`self`), or one read back from Factory's requeue record (`code`).
-      if (r.self === true || (me && who === me)) return { at: r.at, code: r.code ? queueCode(r.code) : STALL_CODE, drop: true, factory: true };
+      if (r.self === true || (me && who === me)) {
+        const code = r.code ? queueCode(r.code) : STALL_CODE;
+        const cleared = r.cleared === true && code === HUNG_CODE && clears++ < QUEUE_CLEARED_MAX;
+        return { at: r.at, code, drop: !cleared, factory: true, ...(cleared ? { cleared } : {}) };
+      }
       const drop = r.person !== true || who === QUEUE_BOT;
       const code = queueCode(r.reason);
       return drop && code === CONFLICT_CODE ? { at: r.at, code, drop: false, conflict: true } : { at: r.at, code, drop };
     });
   const newest = after.at(-1);
   if (newest?.conflict) return { conflict: { at: newest.at }, drops: after.filter((r) => r.drop).length };
-  if (newest && !newest.drop) return { hold: { at: newest.at, code: newest.code }, drops: after.filter((r) => r.drop).length };
+  if (newest && !newest.drop && !newest.cleared) return { hold: { at: newest.at, code: newest.code }, drops: after.filter((r) => r.drop).length };
   const drops = after.filter((r) => r.drop);
-  const last = drops.length ? { at: drops.at(-1).at, code: drops.at(-1).code, ...(drops.at(-1).factory ? { factory: true } : {}) } : null;
-  if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last };
+  const tried = after.filter((r) => r.drop || r.cleared);
+  const n = tried.at(-1);
+  const last = n ? { at: n.at, code: n.code, ...(n.factory ? { factory: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
+  const cleared = tried.length - drops.length ? { cleared: tried.length - drops.length } : {};
+  if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last, ...cleared };
   const codes = [...new Set(drops.map((d) => d.code))];
-  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Factory re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes };
+  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Factory re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
 }
 
 /** GitHub Actions' app id: a required check's integration when the ruleset names none. */
@@ -2174,26 +2266,26 @@ export const QUEUE_FRESH_MS = 2 * 60_000;
 
 /**
  * Whether a PR's merge queue entry is stalled: its merge_group commit exists (`entry.head`, made at `entry.headAt`) and
- * the entry waits on checks, and either CI did not begin on that commit (`started`: gateStarted) within QUEUE_STALL_MS,
- * or it began and a required check hung there (`hung`: queueHangs' entries, read once the commit is STEP_STALL_FLOOR_MS
+ * the entry waits on checks, and either CI did not begin on that commit (`started`: gateStarted) within `stall.queueMs`,
+ * or it began and a required check hung there (`hung`: queueHangs' entries, read once the commit is `stall.floorMs`
  * old, before which no step can be stalled). Returns `{stalled: true}` (no CI began), `{stalled: true, hung}`, `{waitMs}`
  * (read again then: no check yet, a started one too young to judge, or an entry enqueued under QUEUE_FRESH_MS ago with no
  * commit yet) or `{}` (nothing to decide now: the entry is past checks, waits its turn behind others, or nothing hung).
  * The queue watch keeps any PR still in the queue whatever this says; only the merge pass acts on `stalled`.
  */
-export function queueStall(entry, { started, now = Date.now(), hung = null }) {
+export function queueStall(entry, { started, now = Date.now(), hung = null, stall = STALL_DEFAULTS }) {
   if (entry && !entry.head && (!entry.state || entry.state === "QUEUED")) {
     const queuedAt = Date.parse(entry.enqueuedAt);
-    return Number.isFinite(queuedAt) && now - queuedAt < QUEUE_FRESH_MS ? { waitMs: QUEUE_STALL_MS } : {};
+    return Number.isFinite(queuedAt) && now - queuedAt < QUEUE_FRESH_MS ? { waitMs: stall.queueMs } : {};
   }
   if (!entry?.head || entry.state !== "AWAITING_CHECKS") return {};
   const at = Date.parse(entry.headAt ?? entry.enqueuedAt);
   if (!Number.isFinite(at)) return {};
   if (!started) {
-    const left = at + QUEUE_STALL_MS - now;
+    const left = at + stall.queueMs - now;
     return left <= 0 ? { stalled: true } : { waitMs: left };
   }
-  const left = at + STEP_STALL_FLOOR_MS - now;
+  const left = at + stall.floorMs - now;
   if (left > 0) return { waitMs: left };
   const named = new Map();
   for (const h of Array.isArray(hung) ? hung : []) {
@@ -2304,7 +2396,9 @@ export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !fac
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker
- * comment), oldest first. Who may decide is not read from author_association: an App's token sees an organization
+ * comment), oldest first, each with its `kind` (`comment`, `review` or `line`, an inline comment on the diff) and `state`
+ * (a review's GitHub state, an inline comment's the state of the review it was posted in, else null). Who may decide is
+ * not read from author_association: an App's token sees an organization
  * member whose membership is private as CONTRIBUTOR or NONE. objectiveDecisions checks each author's write access.
  */
 /**
@@ -2344,10 +2438,14 @@ export function maintainerDecisions(comments) {
     const root = lines.get(c.in_reply_to_id);
     return !!root && factoryReviews.has(root.pull_request_review_id) && factoryReviews.get(root.pull_request_review_id) === loginKey(c.user?.login);
   };
+  // Each review's state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED), its body empty or not: an inline comment
+  // carries the state of the review it was posted in.
+  const reviewStates = new Map(all.filter((c) => c?.kind === "review").map((r) => [r.id, r.state ?? null]));
+  const stateOf = (c) => (c.kind === "review" ? (c.state ?? null) : c.kind === "line" ? (reviewStates.get(c.pull_request_review_id) ?? null) : null);
   return all
     .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, seen: latest(c.created_at, c.updated_at) }));
+    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at) }));
 }
 const REVIEW_BODY = /<!-- factory:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
@@ -2893,8 +2991,46 @@ export const MAX_FAILED_STARTS = 3;
  * retried with a growing pause and never Block; a vendor's outage holds new picks instead (transientHold).
  */
 export const TRANSIENT_START = Object.freeze(["rate_limited", "unavailable", "timeout"]);
-/** A launch job's limit (5 minutes) plus its wait for a runner: a starting marker this old with no outcome was lost. */
-export const START_LOST_MS = 10 * 60_000;
+/** The launch job's own limit: workflow-template.yml's `launch` job's timeout-minutes (a test checks they agree). */
+export const LAUNCH_JOB_MS = 5 * 60_000;
+/** The name of a dispatcher run's launch job for Objective `n`: workflow-template.yml's `launch` matrix job. */
+export const launchJobName = (n) => `launch (${n})`;
+/**
+ * What became of the launch a dispatcher run named for Objective `n`, from that run's jobs as GitHub lists them and,
+ * when none of them is the launch job for `n`, the run itself (`run`, actions/runs/{run}): `{ended: iso}` once its
+ * launch job for `n` has completed (the latest attempt), at that completion, or once the run has completed with no launch
+ * job for `n` (the matrix never had it), at the run's end; else `{running: true, until}`, the job queued, waiting for a
+ * runner or its concurrency group, or running, `until` the moment its own limit ends it when it has started
+ * (LAUNCH_JOB_MS), null when it has not. GitHub lists a matrix job only once it expands the matrix, after the `dispatch`
+ * job it needs completes: until the run has completed, no launch job listed is one still to come. With no launch job
+ * listed and `run` not read, it says `unlisted: true` too: the run's own status decides.
+ */
+export function launchJobState(jobs, n, run = null) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const job = list.filter((j) => j?.name === launchJobName(n)).sort((a, b) => (b.run_attempt ?? 0) - (a.run_attempt ?? 0) || (b.id ?? 0) - (a.id ?? 0))[0];
+  if (job) return job.status === "completed" ? { ended: job.completed_at ?? null } : { running: true, until: Number.isFinite(Date.parse(job.started_at)) ? Date.parse(job.started_at) + LAUNCH_JOB_MS : null };
+  if (run?.status === "completed") return { ended: run.updated_at ?? null };
+  return run ? { running: true, until: null } : { running: true, until: null, unlisted: true };
+}
+/** A read of a dispatcher run (or its jobs) that failed because GitHub holds no such run any more (deleted, expired). */
+export const runGone = (e) => !!e && !e.rateLimited && (e.status === 404 || e.status === 410);
+/** The dispatcher's starting markers (`ok: null`) at or after `since` with no outcome yet, oldest first. */
+export function pendingMarkers(record, since) {
+  const t = Date.parse(since) - CLOCK_SKEW_MS;
+  return (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+}
+/**
+ * The record with the starting marker of dispatcher run `run` for `stage` stored as a lost start at `at` (its launch
+ * job ended with no outcome written, launchJobState), or null when the record holds no such marker any more (its
+ * launcher's claim or failure settled it).
+ */
+export function lostLaunch(record, { run, stage, at }) {
+  const launches = Array.isArray(record?.launches) ? record.launches : [];
+  const i = launches.findIndex((l) => l?.ok === null && l.run === run && l.stage === stage);
+  if (i < 0) return null;
+  const l = launches[i];
+  return { ...record, launches: launches.map((x, k) => (k === i ? { stage: l.stage, event: l.event, ok: false, run: l.run, at, code: "lost" } : x)) };
+}
 /**
  * `since` (the Running label, the review request) is GitHub's time, in whole seconds; a launch entry's `at` is the
  * writing runner's clock. A runner behind GitHub's by a few seconds writes its marker or failure "before" the stint it
@@ -2909,28 +3045,18 @@ export const START_RETRY_MAX_MS = 30 * 60_000;
 export const startBackoffMs = (n) => (n >= 5 ? START_RETRY_MAX_MS : Math.min(START_RETRY_MAX_MS, START_RETRY_MS * 2 ** Math.max(0, n - 1)));
 
 /**
- * The record with every launch attempt that ended unseen stored as a failed start: the one place a failure is read from
- * an absence. Every claim-comment write applies it first (launch.mjs writeSandboxRecord), and every reader counts
- * through it (startFailures), so a later write never erases an attempt and the count only grows:
- * - a starting marker (`ok: null`, the dispatcher's as it names a stage) older than START_LOST_MS is replaced by
- *   `{ok: false, code: "lost"}` at its expiry: its launch never ran its course;
- * - a claim (`running`, a launcher's nonce) whose lease ran out with no start since it was made gets
- *   `{ok: false, code: "timeout"}` at the lease's end, and the record says `failed`: its launcher was cut off.
+ * The record with a launcher's claim that ended unseen stored as a failed start. Every claim-comment write applies it
+ * first (launch.mjs writeSandboxRecord), and every reader counts through it (startFailures), so a later write never
+ * erases an attempt and the count only grows: a claim (`running`, a launcher's nonce) whose lease ran out with no start
+ * since it was made gets `{ok: false, code: "timeout"}` at the lease's end, and the record says `failed`: its launcher
+ * was cut off. A starting marker (`ok: null`, the dispatcher's as it names a stage) is stored as a `lost` start by the
+ * dispatcher once GitHub lists its launch job as ended (launchJobState, lostLaunch), never by its age.
  * Returns the same object when nothing was due.
  */
 export function settleStale(record, now = Date.now()) {
   if (!record) return record;
-  const launches = Array.isArray(record.launches) ? record.launches : [];
-  let changed = false;
-  const kept = [];
-  for (const l of launches) {
-    const at = Date.parse(l?.at);
-    if (l?.ok === null && Number.isFinite(at) && now - at > START_LOST_MS) {
-      kept.push({ stage: l.stage, event: l.event, ok: false, run: l.run, at: new Date(at + START_LOST_MS).toISOString(), code: "lost" });
-      changed = true;
-    } else kept.push(l);
-  }
-  let rec = changed ? { ...record, launches: kept } : record;
+  const kept = Array.isArray(record.launches) ? record.launches : [];
+  let rec = record;
   // "No start since the claim": by the launcher's claim time (`claimedAt`), never the merged record's `at`, which the
   // started stage's own beats override; for a claim written before `claimedAt` was, by its launch run (the start's
   // entry carries the claim's run).
@@ -2988,11 +3114,6 @@ export function startRetryAt(record, since, now = Date.now()) {
 }
 /** The vendor's own refusals: these alone hold a route's new picks (a cut-off launch says nothing about the vendor). */
 export const VENDOR_DOWN = Object.freeze(["rate_limited", "unavailable"]);
-/**
- * Vendor refusals in a row after which one Objective's failure looks like its own, not the vendor's: its retries go on
- * every 30 minutes, but it no longer holds the route (4 refusals: about 30 minutes of backoff).
- */
-export const VENDOR_HOLD_MAX = 4;
 /** How many of the latest failed starts since `since` in a row were the vendor refusing (VENDOR_DOWN). */
 export const refusalsInRow = (record, since, now = Date.now()) => {
   const fails = startFailures(record, since, now);
@@ -3000,22 +3121,29 @@ export const refusalsInRow = (record, since, now = Date.now()) => {
   for (let i = fails.length - 1; i >= 0 && VENDOR_DOWN.includes(fails[i].code); i -= 1) n += 1;
   return n;
 };
-/** Whether this stage's latest starts were refused by the vendor, at most VENDOR_HOLD_MAX in a row: the route's new picks wait. */
-export const transientHold = (record, since, now = Date.now()) => {
+/** Whether this stage's latest starts since `since` were refused by the vendor: whether it holds its route's new picks is vendorEvidence's. */
+export const transientHold = (record, since, now = Date.now()) => refusalsInRow(record, since, now) >= 1;
+/** When the first of this stage's latest vendor refusals in a row since `since` was (ms), or null when its latest failed start is none. */
+export function refusalStreakAt(record, since, now = Date.now()) {
   const n = refusalsInRow(record, since, now);
-  return n >= 1 && n <= VENDOR_HOLD_MAX;
-};
-/**
- * A launch the dispatcher named less than START_LOST_MS ago with no outcome yet: still in flight (its job may wait for
- * a runner, or threw before it could record anything). Returns when its marker turns into a `lost` failure, the
- * earliest moment it may be named again, or null when none is in flight since `since`.
- */
-export function inFlightUntil(record, since, now = Date.now()) {
-  const t = Date.parse(since) - CLOCK_SKEW_MS;
-  const young = (record?.launches || []).filter((l) => l?.ok === null && Date.parse(l.at) >= t && now - Date.parse(l.at) <= START_LOST_MS);
-  return young.length ? Math.max(...young.map((l) => Date.parse(l.at))) + START_LOST_MS + 1000 : null;
+  return n ? startFailures(record, since, now).at(-n).at : null;
 }
-
+/**
+ * What other Objectives' sandbox records (`others`, as sandboxRecord reads them) say of the vendor since `at` (ms, the
+ * first refusal of an Objective's streak, refusalStreakAt), from their launches: `up` when any started at or after `at`
+ * (the vendor serves others: the refusal is that Objective's own), else `trying` when a launch named since has no outcome
+ * yet (a try whose answer is coming), `refused` when any was refused by the vendor since, and `none` when no other
+ * Objective tried since. Runner clocks differ by a few seconds (CLOCK_SKEW_MS): the allowance widens only the evidence
+ * that holds picks (`trying`, `refused`), never `up`, so a start just before the outage never releases it.
+ */
+export function vendorEvidence(at, others = [], now = Date.now()) {
+  const launches = (others || []).flatMap((r) => (r ? settleStale(r, now).launches || [] : []));
+  if (launches.some((l) => l?.ok === true && Date.parse(l.at) >= at)) return "up";
+  const since = launches.filter((l) => Date.parse(l?.at) >= at - CLOCK_SKEW_MS);
+  if (since.some((l) => l.ok === null)) return "trying";
+  if (since.some((l) => l.ok === false && VENDOR_DOWN.includes(l.code))) return "refused";
+  return "none";
+}
 /**
  * The stage an Objective is due for, from its state alone: work for a Running Objective with no work start since it
  * became Running, review for a non-draft PR whose review was asked for (reviewRequestOf `since`) with no review start
@@ -3157,6 +3285,8 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
   return (decisions || []).find((d) => Date.parse(d.created_at ?? d.at) > since && (graceMs <= 0 || now - Date.parse(d.created_at ?? d.at) > graceMs)) ?? null;
 }
 
+/** How long the sweep leaves a sandbox whose stage ended moments ago to its launcher's end, which answers it first. */
+export const END_GRACE_MS = 10 * 60_000;
 /**
  * What the sweep does with one of Factory's Objective sandboxes (tags `factory=objective`, this repository's id;
  * the caller lists only those). `issue` is the Objective (null when GitHub has none by that number), `state` its
@@ -3167,7 +3297,7 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
  * sandbox's grace; a stopped one's idle days, `idle: true`), the sweep's own next run (sweep.mjs sweepWaits).
  * A sandbox no record names, younger than `graceMs`, is kept: a launcher may be between creating it and recording it.
  */
-export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = START_LOST_MS }) {
+export function sweepDecision({ sandbox, issue, state, record, holds, now = Date.now(), idleMs, graceMs, endGraceMs = END_GRACE_MS }) {
   if (holds) return { keep: "a stage holds it" };
   const mine = record?.id === sandbox.id;
   // A stage that said it ended moments ago: the launcher's end answers it (collects its usage, stops the sandbox, books

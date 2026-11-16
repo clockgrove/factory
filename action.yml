@@ -93,7 +93,7 @@ inputs:
     description: The repository's toolchain command, run in the checkout before the worker (for example `scripts/ci/toolchain.sh postgresql`). Empty runs nothing.
     required: false
   install:
-    description: '`auto` (default) installs the versions the lockfile found pins: `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci`, `yarn install --frozen-lockfile`, `cargo fetch --locked`, `poetry install --no-root`, `uv sync --frozen` or `go mod download`. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs.'
+    description: '`auto` (default) installs the versions each lockfile in the repository''s root pins, one install per ecosystem, all of them: Node.js `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci` or `yarn install --frozen-lockfile` (the one package.json''s `packageManager` names, else in that order); Rust `cargo fetch --locked`; Python `poetry install --no-root` or `uv sync --frozen` (in that order); Go `go mod download`. The list is closed: no file in the repository picks the command. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. Each install''s program (`cargo`, `uv`, `go` and the rest) must be on PATH where the stage runs: setup installs it otherwise, and doctor''s lockfile row warns when it is not found. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs. One whose program is not on PATH Blocks at once, naming the program.'
     required: false
   validation:
     description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
@@ -105,7 +105,7 @@ inputs:
     description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
     required: false
   toolchain_paths:
-    description: 'Repository-specific toolchain paths, comma-separated, beside Factory''s exact lists of lockfiles, version pins, package-manager configuration, containers and CI files: a fix pass (after a red, or the answer pass) may change one only when its scope names it. Matched as `protected_paths` entries are. Empty: the exact lists only.'
+    description: 'Repository-specific toolchain paths, comma-separated, beside Factory''s exact lists of lockfiles, version pins, package-manager configuration, containers and CI files: a fix pass (after a red, or the answer pass) may change one only when its scope names it, and a merge that changes one builds the sandbox image again. Matched as `protected_paths` entries are. Empty: the exact lists only.'
     required: false
   ci_checks:
     description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
@@ -124,6 +124,9 @@ inputs:
     required: false
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
+    required: false
+  project:
+    description: 'The node id of the repository''s Factory Project board, which setup records as it creates the board. Empty, Factory looks for the board linked to the repository titled exactly `Factory: <repository>`.'
     required: false
   app_id:
     description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
@@ -162,10 +165,13 @@ inputs:
     description: 'VERCEL_PROJECT_ID for `sandbox: vercel`: the Vercel project the sandboxes belong to.'
     required: false
   image_refresh:
-    description: '(image) `merge` (default) builds the sandbox image on every push to the default branch until today''s builds reach `image_daily_minutes`, then leaves the head to the next UTC day''s first dispatcher tick (`image_owed`; the nightly schedule is the backstop); `nightly` builds a head once a day, on that tick or the nightly schedule.'
+    description: '(image) `merge` (default) builds the sandbox image on a push to the default branch that changes what the image is made from (docs/ADAPTERS.md, Refresh) until today''s builds reach `image_daily_minutes`, then leaves the head to the next UTC day''s first dispatcher tick (`image_owed`; the nightly schedule is the backstop); `nightly` builds a head once a day, on that tick or the nightly schedule.'
     required: false
   image_daily_minutes:
     description: '(image) Build minutes a day the image may take on merges before refreshes move to the nightly build. Default 5.'
+    required: false
+  image_max_age_days:
+    description: '(image) Days the current image stands for later heads that change nothing it is made from; an older image is built again on the next merge, owed tick or nightly build. A whole number, 1 to 30. Default 7.'
     required: false
   image_owed:
     description: '(image) `true` builds the default branch''s head on an event other than a push, the nightly cron or `image: true`: the dispatcher''s `image_owed` output, when an earlier day left the head unbuilt and today''s turn allows a build.'
@@ -175,6 +181,39 @@ inputs:
     required: false
   sweep_max_destroys:
     description: '(sweep) Sandboxes one sweep run destroys at most. Default 5.'
+    required: false
+  usage_limit_waits:
+    description: How many times one harness pass waits in place for its subscription's usage limit to reset before the stage ends on it; 2 when empty. A whole number from 0 to 10. Scheduling only.
+    required: false
+  usage_limit_move_minutes:
+    description: On GitHub Actions and in the cloud sandbox with automatic account choice, a usage limit that resets further away than this many minutes, while another account is free, ends the stage so the Objective goes on there, starting afresh from its branch; 60 when empty. A number above 0, at most 1440. Scheduling only.
+    required: false
+  claim_pause_hours:
+    description: How long an Objective a local loop holds may stay paused while that loop is away (its machine asleep or off, serve stopped) before the dispatcher Blocks it, and how long a factory:local Objective no loop has claimed (Running, or In review with its review owed) or whose claim cannot be read waits for one; 24 when empty. A number from 2 (twice the hourly beat a loop writes on a paused claim, and twice the most a local stage waits in place) to 720 (30 days). Keep it above local mode's FACTORY_LOCAL_OUTAGE_HOURS, so an outage Blocks naming the outage first.
+    required: false
+  sibling_wait_hours:
+    description: The longest a hand-off to review, or a conflicting PR's rebase, waits for a sibling ahead of it that it conflicts with (sibling_hold), counted from its first wait; then it goes on beside the sibling. 6 when empty. A number above 0, at most 168 (7 days). Scheduling only.
+    required: false
+  max_parts:
+    description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend; each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top. 6 when empty. A whole number from 1 to 50.
+    required: false
+  step_stall_factor:
+    description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Factory then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.
+    required: false
+  step_stall_floor_minutes:
+    description: The least time over a step's longest recent green duration before it counts as hung on a merge queue commit (step_stall_factor), and how old the queue commit must be before its checks are judged; 15 when empty. A number from 1 (under a minute every queue commit would be judged at once) to 1440. Scheduling only.
+    required: false
+  queue_stall_minutes:
+    description: How long a merge queue commit may wait with no CI begun on it before Factory takes the PR out of the queue and puts it back once; 10 when empty. A number from 1 (under a minute every queue commit would be stalled as it is made) to 1440. Scheduling only.
+    required: false
+  relay_unknown_shut:
+    description: How many failed calls through the gateway relay whose cost cannot be known and that may have been billed shut the relay for the stage (the stage Blocks); 6 when empty. A whole number from 1 to 1000. Set in the workflow file only, since it bounds spend.
+    required: false
+  relay_unknown_floor_usd:
+    description: The least dollars a failed relayed call of unknown cost is booked at against max_usd (the dearest call priced so far when that is more); 0.25 when empty. A number above 0, at most 100. Set in the workflow file only, since it bounds spend.
+    required: false
+  relay_slow_floor_usd:
+    description: The least dollars a failed relayed call that ran over 30 seconds upstream is booked at against max_usd; 1 when empty. A number above 0, at most 100. Set in the workflow file only, since it bounds spend.
     required: false
   ai_gateway_api_key:
     description: 'A Vercel AI Gateway key (secret AI_GATEWAY_API_KEY) for Factory''s decision calls, which then ask the gateway''s decision models. Red-check triage: when a required check is red, each failing job is asked whether the change broke it or it is a flake; only when every failing job reads flaky at confidence 0.7 or more are the failed jobs rerun (once per head) instead of a fix pass. Each job''s log window and the PR''s file list go to the decision model. The drift advisory: while a worker''s harness runs, at most every two minutes, it is asked whether the agent is on task, drifting into scope creep or looping (the plan''s items, its last 12 activity entries and the files it edited go to the decision model); a drift label at confidence 0.7 or more writes one line on the progress comment, and never changes the run. The answer gate, on the triage model: whether what the answer and fix passes wrote after the review does only what its findings and the failing checks asked (that diff, the findings and the failures, up to 32 KiB in all, go to the decision model); anything else, or `only_asked` under confidence 0.7, gets a review pass. The finding check, on the triage model: whether each answer resolves its reviewer finding. The answer check, on the triage model: whether the writer comments since a Question give a decision on it (the Question''s notice and the comments go to the decision model); only `no_decision` at confidence 0.7 or more keeps the Question open; with a key the dispatcher and the launcher ask it before any stage starts, and each verdict is kept on the issue so no version of a comment is asked about twice. Empty: the stage''s own harness answers the same questions on its own credential, one short call with no tools per question (decision_route; docs/ADAPTERS.md, Decision model). Used by Factory''s own process only, never passed to the harness or any command.'
@@ -186,13 +225,13 @@ inputs:
     description: 'The values of the `worker_secrets` SOURCEs, one `SOURCE=value` line each: the template passes the secret FACTORY_WORKER_SECRET_VALUES (work, review and launch jobs). A line whose SOURCE `worker_secrets` does not name opts nothing in. Passed to the worker''s harness only (the work stage and the review stage''s fix and answer passes, never the reviewer), masked in the job log and the uploaded harness stream.'
     required: false
   decision_route:
-    description: 'Who answers Factory''s decision calls (red-check triage, the drift advisory, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check). `auto` (default): the AI Gateway''s decision models with `ai_gateway_api_key`, else the stage''s own harness on its own credential. `gateway`: the gateway only, so without a key no decision call runs. `off`: none run; every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass, a reply resolves its reviewer finding unjudged, a send-back''s conflict pass is checked by matching commits rather than by content, a writer''s comment on a Question resumes it unjudged, a red after a fix pass the exact checks cannot judge counts as no progress, which Blocks, and any edit to an Objective''s title, body or harness, model and host labels after its plan was made makes the plan and code stale. On the harness, each call is one short request on the stage''s model (the reviewer''s in the review stage) whose spend counts toward max_usd: one per failing CI job at a red, a drift check every two minutes while a worker runs, one answer-gate call per review stage whose passes committed, one per answered reviewer finding, one per file a send-back''s conflict pass left other than the branch''s, one per version of the newest writer comment on a Question, asked first thing in the work stage it resumes and never twice for one version; one per red after a fix pass whose progress the exact checks cannot tell; one per distinct text of an Objective edited after its plan; on Copilot each call is a premium request.'
+    description: 'Who answers Factory''s decision calls (red-check triage, the drift advisory, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check). `auto` (default): the AI Gateway''s decision models with `ai_gateway_api_key`, else the stage''s own harness on its own credential. `gateway`: the gateway only, so without a key no decision call runs. `off`: none run; every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass, a reply resolves its reviewer finding unjudged, a send-back''s conflict pass is checked by matching commits rather than by content, a writer''s comment on a Question resumes it unjudged, a red after a fix pass the exact checks cannot judge counts as no progress, which Blocks, any edit to an Objective''s title, body or harness, model and host labels after its plan was made makes the plan and code stale, a fix pass''s lockfile change outside its scope is refused unjudged, a writer''s comment no pass has read holds a reviewed PR''s merge unjudged until the review stage applies it, and a plan-time Question is answered only by a comment naming the repository. On the harness, each call is one short request on the stage''s model (the reviewer''s in the review stage) whose spend counts toward max_usd: one per failing CI job at a red, a drift check every two minutes while a worker runs, one answer-gate call per review stage whose passes committed, one per answered reviewer finding, one per file a send-back''s conflict pass left other than the branch''s, one per version of the newest writer comment on a Question, asked first thing in the work stage it resumes and never twice for one version; one per red after a fix pass whose progress the exact checks cannot tell; one per distinct text of an Objective edited after its plan; one per version of each lockfile a fix pass changed outside its scope; one per set of unread writer comments on a reviewed, green PR about to merge (on the gateway only where the merge pass runs outside a stage); one per repository a plan-time Question named that a maintainer commented on since; on Copilot each call is a premium request.'
     required: false
   triage_model:
-    description: The decision model red-check triage, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check and the edit check ask with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
+    description: The decision model red-check triage, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check and local mode's lapse check ask with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
     required: false
   triage_min_confidence:
-    description: 'The confidence floor, from 0 to 1, for the decision calls on `triage_model`: a verdict that acts (a flake to rerun, a red the default branch fails the same way, a rebuttal, a kept file, the answer gate''s `only_asked`, an open Question, a fix pass''s progress, a wording-only edit, the same failure, a fenced lockfile change) counts only at this confidence or more (the fence check never under 0.7). Empty: 0.7, the floor measured on `perplexity/pplx-decider-v1.2`. It is the floor of the AI Gateway''s `triage_model` only: whenever the stage''s own harness answers (no key, or after the gateway refused), the floor is 0.7. It goes with the model: a settings layer that names another `triage_model` (the default resolved) drops the floor of the layers below it, and one set lower down does not carry to another model a flag or this Action''s `triage_model` input names. The verdict, its confidence and the floor go on the progress line.'
+    description: 'The confidence floor, from 0 to 1, for the decision calls on `triage_model`: a verdict that acts (a flake to rerun, a red the default branch fails the same way, a rebuttal, a kept file, the answer gate''s `only_asked`, an open Question, a fix pass''s progress, a wording-only edit, the same failure, a fenced lockfile change, unread writer comments asking nothing, a plan-time Question answered or still open, a local lapse that will happen again or was transient) counts only at this confidence or more (the fence check never under 0.7). Empty: 0.7, the floor measured on `perplexity/pplx-decider-v1.2`. It is the floor of the AI Gateway''s `triage_model` only: whenever the stage''s own harness answers (no key, or after the gateway refused), the floor is 0.7. It goes with the model: a settings layer that names another `triage_model` (the default resolved) drops the floor of the layers below it, and one set lower down does not carry to another model a flag or this Action''s `triage_model` input names. The verdict, its confidence and the floor go on the progress line.'
     required: false
   drift_model:
     description: The decision model the drift advisory asks with an AI Gateway key (an AI Gateway decision model id); `baseten/elephant-1` when empty.
@@ -449,9 +488,21 @@ runs:
         FACTORY_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
         FACTORY_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
         FACTORY_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
+        FACTORY_INPUT_IMAGE_MAX_AGE_DAYS: ${{ inputs.image_max_age_days }}
         FACTORY_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
         FACTORY_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
         FACTORY_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
+        FACTORY_INPUT_USAGE_LIMIT_WAITS: ${{ inputs.usage_limit_waits }}
+        FACTORY_INPUT_USAGE_LIMIT_MOVE_MINUTES: ${{ inputs.usage_limit_move_minutes }}
+        FACTORY_INPUT_CLAIM_PAUSE_HOURS: ${{ inputs.claim_pause_hours }}
+        FACTORY_INPUT_SIBLING_WAIT_HOURS: ${{ inputs.sibling_wait_hours }}
+        FACTORY_INPUT_MAX_PARTS: ${{ inputs.max_parts }}
+        FACTORY_INPUT_STEP_STALL_FACTOR: ${{ inputs.step_stall_factor }}
+        FACTORY_INPUT_STEP_STALL_FLOOR_MINUTES: ${{ inputs.step_stall_floor_minutes }}
+        FACTORY_INPUT_QUEUE_STALL_MINUTES: ${{ inputs.queue_stall_minutes }}
+        FACTORY_INPUT_RELAY_UNKNOWN_SHUT: ${{ inputs.relay_unknown_shut }}
+        FACTORY_INPUT_RELAY_UNKNOWN_FLOOR_USD: ${{ inputs.relay_unknown_floor_usd }}
+        FACTORY_INPUT_RELAY_SLOW_FLOOR_USD: ${{ inputs.relay_slow_floor_usd }}
         # The harness the install step put in place (empty for the modes that install none): a stage that would run another Blocks.
         FACTORY_STAGE_HARNESS: ${{ steps.install.outputs.harness }}
         # The account the job's account step picked (#267), whose credential alone the workflow passed: a stage whose labels pick another Blocks.

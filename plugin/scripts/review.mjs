@@ -18,8 +18,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
@@ -106,6 +106,7 @@ import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, 
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
+import { openCommentCheck } from "./lib/comment-check.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -666,9 +667,11 @@ async function main() {
   const repo = repoOf(inputs.repo);
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const deadlineAt = deadline(startedAt, inputs.timeoutMinutes);
-  // This machine's network (lib/network.mjs), as for the worker: a wait in place, fifteen minutes on the local route
+  // This machine's network (lib/network.mjs), as for the worker: a wait in place, FACTORY_LOCAL_WAIT_MINUTES on the local route
   // (then paused, for serve to resume) and up to the work's deadline elsewhere; GitHub's spent rate limit too, to its reset.
   const local = backend().name === "local";
+  // The repository's usage-limit waits and, locally, the in-place bound (FACTORY_LOCAL_WAIT_MINUTES).
+  stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
@@ -1096,12 +1099,14 @@ async function main() {
     Object.assign(childBase, wrote);
     allowAgentEnv(Object.keys(wrote));
   }
-  const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // Which install runs is read from Factory's own checkout when the agent has a clone of its own.
+  const installTree = access.agent ? factoryTree : checkout;
+  const install = installCommand(installTree, inputs.install);
   if (install) {
     await progress("install");
     // An install that failed or left a dependency missing is not a red for the branch: what validation would say after
     // it is no verdict on the PR. installDeps repairs it once; still broken, the stage Blocks naming the install.
-    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     if (!i.ok) {
       log(i.reason);
@@ -1202,6 +1207,7 @@ async function main() {
     issueBody: issueData.body,
     decisions,
     maxUsd: inputs.maxUsd,
+    maxParts: inputs.maxParts,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
     ciChecks: inputs.ciChecks,
@@ -1304,7 +1310,7 @@ async function main() {
   else if (scope.since) log(`PR #${pr.number}: commits since the head Factory's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
-    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: stageProgress, checksOnlyFirst: marks.handedOff };
+    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, progressCheck: stageProgress, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
       overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
@@ -1761,7 +1767,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;
@@ -1899,8 +1905,8 @@ async function main() {
         await recordMergeable(repo, pr.number, issue, outbox.expected() || pr.head.sha, token);
         recorded = true;
         const report = {};
-        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, objectiveLabel: inputs.objectiveLabel, thirdParty, editCheck }, token);
-        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once that queue moves", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
+        const how = await mergeReadyOne(repo, { issue, prNumber: pr.number, queue: await hasMergeQueue(repo, token).catch(() => true), checkNames: inputs.ciChecks, report, actionsToken: inputs.githubToken || null, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, commentCheck: () => openCommentCheck({ inputs, stage: decisionStage }), thirdParty, editCheck }, token);
+        log(`PR #${pr.number}: ${{ merged: "merged", queued: "in the merge queue", pending: "its required checks are still running; the dispatcher merges it once they are green", "queue-wait": "the merge queue took it out for a conflict with a PR ahead of it; the dispatcher puts it back once no PR in the queue conflicts with it", "re-review": "its head moved; the review runs again", unread: "a maintainer commented; the review runs again", "code-scanning": "code scanning commented after the answer pass; the review runs again to answer it", held: "a person took it out of the merge queue; it stays out until they enqueue it again", "queue-red": "the merge queue's run failed; the review runs again to read the failure", "text-edit": "the Objective's text changed since its plan and the edit could not be judged here; the review runs again to judge it", stopped: "its Objective was stopped; nothing merges", conflict: `it conflicts with ${defaultBranch}; the dispatcher sends it back for a rebase` }[how] || how}`);
         const why = mergeBlockReason(how, report);
         // A sibling merged first (#2647): not a Block. Unlabelled and In review, the dispatcher sends it back to rebase
         // (dispatch.mjs, logic.mjs staleDecision), which Blocks only when rebasing cannot progress or at its bound.

@@ -15,8 +15,8 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
-import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -47,6 +47,7 @@ import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
+import { judgedAnswers, openPlanAnswerCheck } from "./lib/plan-answer.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 
@@ -152,11 +153,13 @@ async function main() {
   const eventsFile = join(usageDir, "events.jsonl");
   const deadlineAt = deadline(jobStartMs, inputs.timeoutMinutes);
   // This machine's network (lib/network.mjs): a GitHub call, a git command or a harness pass that cannot leave it waits
-  // in place for its host to answer, up to fifteen minutes on the local route (then the stage ends paused, for serve to
+  // in place for its host to answer, up to FACTORY_LOCAL_WAIT_MINUTES (fifteen by default) on the local route (then the stage ends paused, for serve to
   // resume) and up to the work's deadline elsewhere, where the dispatcher relaunches a stage the network ended. GitHub's
   // primary rate limit spent is the same wait, to its reset: one past that bound ends the stage at once (paused locally,
   // Blocked elsewhere).
   const local = backend().name === "local";
+  // The repository's usage-limit waits and, locally, the in-place bound (FACTORY_LOCAL_WAIT_MINUTES).
+  stageLimits(inputs, { local });
   waitOutages({ until: (since) => (local ? Math.min(since + OUTAGE.stageWaitMs, deadlineAt) : deadlineAt) });
   const protectedList = protectedPaths(inputs.protectedAdditions);
   const records = [];
@@ -663,13 +666,15 @@ async function main() {
     Object.assign(childBase, wrote);
     allowAgentEnv(Object.keys(wrote));
   }
-  const install = installCommand(access.agent ? factoryTree : checkout, inputs.install);
+  // Which install runs is read from Factory's own checkout when the agent has a clone of its own.
+  const installTree = access.agent ? factoryTree : checkout;
+  const install = installCommand(installTree, inputs.install);
   // A continued stage's install that failed on its kept checkout: the pass is told, and finishes it (continue.mjs installEnd).
   let installNote = "";
   if (install) {
     log(`install: ${install}`);
     await progress(first ? "install (first time on this machine)" : "install");
-    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt) });
+    const i = await installDeps(checkout, install, { env: childBase, timeoutMs: remainingMs(deadlineAt), tools: installTools(installTree, inputs.install) });
     if (i.repaired) log(`install: ${i.first} the first time; repaired by a clean reinstall`);
     const ended = installEnd(i, { continued: !!continued, command: install });
     if (ended.block) {
@@ -716,10 +721,10 @@ async function main() {
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   io.set({ decisions, prNumber: openPr?.number ?? null });
   // The plan-time Question (lib/one-repo.mjs): a repository other than this one that the plan needs, unless a maintainer
-  // has answered about it since a run asked (Factory's own record of the ask, in its progress comments). A rebase
-  // send-back changes no plan.
+  // has answered about it since a run asked (Factory's own record of the ask, in its progress comments), as the
+  // plan-answer check judges the comments since (lib/plan-answer.mjs). A rebase send-back changes no plan.
   const askedAt = rebaseMode ? {} : planAskedOf(await listComments(repo, issue, token).catch(() => []), { issue, self: await progress.self() });
-  const answered = answeredRepos(askedAt, decisions);
+  const answered = await judgedAnswers(askedAt, decisions, { source: repo, label: inputs.objectiveLabel, check: openPlanAnswerCheck({ inputs, stage: decisionStage }) });
   if (answered.size) log(`plan-time Question answered since it was asked: ${[...answered].join(", ")}`);
   // The mid-run stop counts any maintainer decision since the ask, naming the repository or not: until the harness has
   // re-planned with the answer, its plan.md (a copy of the plan comment, a first draft) may still carry the line, and
@@ -736,6 +741,7 @@ async function main() {
     issueBody: issueData.body,
     decisions,
     maxUsd: inputs.maxUsd,
+    maxParts: inputs.maxParts,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
     ciChecks: inputs.ciChecks,
@@ -968,7 +974,7 @@ async function main() {
     validation = await validationLoop({
       onPhase: progress,
       progress,
-      checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null,
+      checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null,
       outbox,
       checkout,
       commands: inputs.validation,
@@ -1122,7 +1128,7 @@ async function main() {
       // A head no review has seen (the one Factory pushed) waits, unlabelled, while a sibling it conflicts with is ahead
       // of it (overlap.mjs reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by
       // then. The rebase that follows such a wait goes to review: it is next.
-      const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed }, token, { log });
+      const held = await reviewHold(repo, { issue, pr, head: outbox?.expected() || pr.head?.sha, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed, waitMaxMs: inputs.siblingWaitMs }, token, { log });
       if (held) decision.reason = `PR #${pr.number} is ready; ${waitReason(held)}`;
       else await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }

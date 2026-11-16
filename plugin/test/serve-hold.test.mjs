@@ -339,7 +339,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
 /** A loop with this machine's holder id and no waits between claim reads. */
 async function claimLoop(holderPid = process.pid) {
   const { holderId, machineIdentity } = await import("../scripts/local.mjs");
-  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", dev: mkdtempSync(join(tmpdir(), "claims-")), opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, claimSettleMs: 0, baseEnv: () => ({}), holdOf: (account) => ({ key: account.name, shared: true }) });
+  return Object.assign(Object.create(Local.prototype), { repo: { owner: "acme", name: "app", full: "acme/app" }, repoFull: "acme/app", dev: mkdtempSync(join(tmpdir(), "claims-")), opts: { token: "t" }, holder: holderId(machineIdentity(), holderPid), stopping: false, claimRetryMs: 0, baseEnv: () => ({}), holdOf: (account) => ({ key: account.name, shared: true }) });
 }
 
 for (const [stage, end, how] of [
@@ -377,6 +377,65 @@ for (const [stage, end, how] of [
     }
   });
 }
+
+test("#421: the lapse check decides a stage's lapse: same_again Blocks at once naming the verdict; transient resumes, and the third lapse in a row Blocks", async () => {
+  const { writeFileSync } = await import("node:fs");
+  const { openLapseCheck } = await import("../scripts/lib/lapse-check.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    const log = join(loop.dev, "stage.log");
+    writeFileSync(log, `${Array.from({ length: 200 }, (_, i) => `[#7 work] line ${i}`).join("\n")}\n[#7 work] bash: pnpm: command not found\n`);
+    const asked = [];
+    let verdict = "same_again";
+    loop.lapseCheck = openLapseCheck({ decider: { name: "fake", decide: async (input, question) => (asked.push({ input, question }), { verdict, confidence: 0.9 }) } });
+    const died = async () => ({ code: 127, signal: null, exit: null, usd: null, stage: "work", log });
+    // The newest Blocked notice as it now reads: on Actions (GITHUB_RUN_ID) each Block updates the one notice in place.
+    const lastNotice = () => gh.comments.filter((c) => c.body.includes(":blocked:")).sort((a, b) => a.updated_at.localeCompare(b.updated_at) || a.id - b.id).at(-1).body;
+    // A cause that stays: Blocked on the first lapse, no resume spent on it.
+    await loop.withClaim(7, died);
+    assert.ok(gh.labels.has("factory:blocked"), "Blocked on the first lapse");
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.match(notice, /the work stage ended with no exit record \(exit code 127\) on this machine; the lapse check \(.*\) judged it likely to end the same way again; its log on this machine: /);
+    assert.equal(asked[0].question.name, "stage_lapse");
+    assert.match(asked[0].input, /Stage: work\nEnded with: exit code 127/);
+    assert.match(asked[0].input, /bash: pnpm: command not found/, "the end of its log");
+    assert.ok(!asked[0].input.includes("line 49\n"), "its last 150 lines only");
+    assert.match(asked[0].input, /Machine at the end: /);
+    assert.ok(!asked[0].input.includes("The time before"), "no lapse before it");
+    // A cause that passed (an out-of-memory kill under load): resumed, then resumed again; the third in a row Blocks.
+    gh.labels.delete("factory:blocked");
+    verdict = "transient";
+    const before = gh.writes.filter((w) => w.includes("factory:block")).length;
+    await loop.withClaim(7, died);
+    await loop.withClaim(7, died);
+    assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, before, "two transient lapses resume");
+    assert.equal(loop.lapsed.get(7).count, 2);
+    assert.match(asked.at(-1).input, /The time before \(resumed after it\):/, "the lapse before it is given too");
+    await loop.withClaim(7, died);
+    assert.ok(gh.labels.has("factory:blocked"));
+    assert.match(lastNotice(), /3 times in a row on this machine; the lapse check \(.*\) judged it transient/);
+    // A verdict under the floor is none: resumed once, the second Blocks (as with no key).
+    gh.labels.delete("factory:blocked");
+    loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict: "same_again", confidence: 0.5 }) } });
+    await loop.withClaim(7, died);
+    assert.equal(loop.lapsed.get(7).count, 1);
+    // FACTORY_LOCAL_LAPSE_MAX sets the transient lapse in a row that Blocks: 4 here, so the third resumes.
+    loop.lapsed.delete(7);
+    gh.labels.delete("factory:blocked");
+    loop.wf = { ...loop.wf, FACTORY_LOCAL_LAPSE_MAX: "4" };
+    verdict = "transient";
+    loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict, confidence: 0.9 }) } });
+    const blocks = gh.writes.filter((w) => w.includes("factory:block")).length;
+    for (let i = 0; i < 3; i += 1) await loop.withClaim(7, died);
+    assert.equal(loop.lapsed.get(7).count, 3);
+    assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, blocks);
+    await loop.withClaim(7, died);
+    assert.match(lastNotice(), /4 times in a row on this machine/);
+  } finally {
+    gh.restore();
+  }
+});
 
 test("outagePaused: pauses on GitHub's spent rate limit one after another count from the first, however long the runs between, so the 12-hour bound holds (#337)", async () => {
   const gh = claimGitHub();
@@ -444,6 +503,75 @@ test("withClaim: Factory's set-up of the review stage failing after the PR was d
     assert.ok(!notice.includes("gone-account"), "no path of this machine's set-up");
     assert.doesNotMatch(notice, /\(work\)|the work stage|draft with what exists/);
     assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#421: withClaim's heartbeat reads the claim before it writes: one another live loop now holds ends this loop's stage, with no lapse and its claim left alone", async () => {
+  const { spawn } = await import("node:child_process");
+  const { holderId, machineIdentity } = await import("../scripts/local.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    loop.heartbeatMs = 50;
+    loop.children = new Set();
+    // Another machine's loop, alive: its write landed after this loop read its own name back.
+    const other = holderId({ ...machineIdentity(), host: "other-box" }, 4242);
+    let stage = null;
+    // The stage process as stage() starts it: tagged with its Objective among the loop's children.
+    const fn = () =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 4000)"]);
+        child.issue = 7;
+        loop.children.add(child);
+        stage = child;
+        child.on("spawn", () => {
+          const c = gh.comments[0];
+          c.body = c.body.replaceAll(loop.holder, other);
+          c.updated_at = new Date().toISOString();
+        });
+        child.on("close", (code, signal) => (loop.children.delete(child), done({ code, signal, exit: null, stage: "work" })));
+      });
+    const at = Date.now();
+    const r = await loop.withClaim(7, fn);
+    assert.equal(stage.signalCode, "SIGTERM", "the stage was ended");
+    assert.ok(Date.now() - at < 3_000, "at the next heartbeat, not when the stage ended by itself");
+    assert.equal(r.exit, "skipped");
+    assert.ok(!loop.lapsed?.has(7), "no lapse");
+    assert.equal(gh.comments.length, 1);
+    assert.match(gh.comments[0].body, new RegExp(`holder: ${other}`), "the other loop's claim is not overwritten or dropped");
+    assert.ok(loop.ceded.has(7), "and this loop does not resume it from that claim");
+    // Its own claim, read: the heartbeat writes it in place.
+    const writes = gh.writes.length;
+    gh.comments[0].body = gh.comments[0].body.replaceAll(other, loop.holder);
+    const mine = await loop.withClaim(7, () => new Promise((done) => setTimeout(() => done({ exit: "delivered" }), 200)));
+    assert.equal(mine.exit, "delivered");
+    assert.ok(gh.writes.slice(writes).filter((w) => w.startsWith("PATCH /issues/comments/")).length >= 2, "the claim, then its heartbeats");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#421: a claim lost while withClaim's body runs no stage (a merge it follows) keeps the body's result: only a stage ended for it is skipped", async () => {
+  const { holderId, machineIdentity } = await import("../scripts/local.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    loop.heartbeatMs = 30;
+    loop.children = new Set();
+    const other = holderId({ ...machineIdentity(), host: "other-box" }, 4242);
+    // The merge it follows completes after another loop's claim landed and a heartbeat read it.
+    const r = await loop.withClaim(7, async () => {
+      const c = gh.comments[0];
+      c.body = c.body.replaceAll(loop.holder, other);
+      c.updated_at = new Date().toISOString();
+      await new Promise((ok) => setTimeout(ok, 300));
+      return { exit: "merged" };
+    });
+    assert.equal(r.exit, "merged", "the Objective was delivered: not reported skipped");
+    assert.ok(loop.ceded.has(7), "the claim is still the other loop's");
+    assert.match(gh.comments[0].body, new RegExp(`holder: ${other}`));
   } finally {
     gh.restore();
   }

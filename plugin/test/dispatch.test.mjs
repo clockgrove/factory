@@ -197,6 +197,73 @@ test("queueRetry: a PR the merge queue dropped goes back in once; dropped again 
   assert.deepEqual(queueRetry([stalled], { since }), { enqueue: true, drops: 1, last: { at: stalled.at, code: "dequeued" } }, "without Factory's login known, its App is still a bot: a drop, never a hold that leaves the PR out");
 });
 
+test("queueRetry: a hung removal of Factory's whose step then finished green in time counts toward no try; anything else counts (#437)", async () => {
+  const { HUNG_CODE, STALL_CODE, queueRetry } = await import("../scripts/lib/logic.mjs");
+  const since = "2026-11-09T09:30:00Z";
+  const self = "factory-app[bot]";
+  const hung = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE };
+  const again = { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true };
+  assert.ok(queueRetry([hung, again], { since, self }).block, "both count: two drops Block");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }, again], { since, self }), { enqueue: true, drops: 1, last: { at: again.at, code: HUNG_CODE, factory: true }, cleared: 1 }, "the slow step's removal leaves the tries as they were");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }], { since, self }), { enqueue: true, drops: 0, last: { at: hung.at, code: HUNG_CODE, factory: true, cleared: true }, cleared: 1 }, "a cleared removal is never a hold: the PR goes back");
+  assert.ok(queueRetry([{ ...hung, code: STALL_CODE, cleared: true }, again], { since, self }).block, "only a hung removal can be cleared");
+  const person = { at: "2026-11-09T09:40:00Z", reason: "dequeued", actor: "kirk", person: true, code: HUNG_CODE, cleared: true };
+  assert.deepEqual(queueRetry([person], { since, self }).hold, { at: person.at, code: "dequeued" }, "a person's removal stays a hold");
+  const queue = { at: "2026-11-09T09:50:00Z", reason: "checks_timed_out", actor: "github-merge-queue", code: HUNG_CODE, cleared: true };
+  assert.ok(queueRetry([queue, again], { since, self }).block, "the queue's own drop counts whatever it carries");
+  // A step slow on every try: one removal at most is cleared, so the third hung removal Blocks, never an endless loop.
+  const slow = (min) => ({ at: `2026-11-09T${String(9 + Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}:00Z`, reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE, cleared: true });
+  assert.deepEqual(queueRetry([slow(40), slow(80)], { since, self }), { enqueue: true, drops: 1, last: { at: slow(80).at, code: HUNG_CODE, factory: true }, cleared: 1 });
+  const thrice = queueRetry([slow(40), slow(80), slow(120)], { since, self });
+  assert.equal(thrice.drops, 2);
+  assert.equal(thrice.cleared, 1);
+  assert.ok(thrice.block, "three slow-but-green removals still Block");
+  assert.ok(queueRetry([slow(40), slow(80), slow(120), slow(160), slow(200), slow(240)], { since, self }).block, "and so do six");
+});
+
+test("hungOutcome: green only when each judged step, its job and the queue commit's required checks concluded success by the queue's deadline; undecided before it, counted after (#437)", async () => {
+  const { hungOutcome, queueDeadline } = await import("../scripts/lib/logic.mjs");
+  const by = queueDeadline("2026-11-10T05:00:00Z", 60);
+  assert.equal(by, "2026-11-10T06:00:00.000Z");
+  assert.equal(queueDeadline("2026-11-10T05:00:00Z", null), null, "the timeout unread: no deadline is assumed");
+  assert.equal(queueDeadline("2026-11-10T05:00:00Z", 30), "2026-11-10T05:30:00.000Z");
+  const before = Date.parse("2026-11-10T05:45:00Z");
+  const after = Date.parse("2026-11-10T06:05:00Z");
+  const head = "c".repeat(40);
+  const done = { status: "completed", conclusion: "success", completed_at: "2026-11-10T05:40:00Z" };
+  const running = { status: "in_progress", conclusion: null, completed_at: null };
+  const step = (extra) => ({ name: "Run npm ci", number: 4, ...done, completed_at: "2026-11-10T05:26:00Z", ...extra });
+  const read = (s, job = {}, check = job, more = []) => ({
+    jobs: new Map([[9, { id: 9, ...done, steps: [{ name: "Set up job", number: 1, ...done }, s], ...job }]]),
+    checks: new Map([[head, [{ id: 9, name: "Quality", ...done, ...check }, ...more]]]),
+    names: ["Quality"],
+  });
+  const rec = [{ name: "Quality", job: 9, step: "Run npm ci", number: 4, head, by }];
+  assert.equal(hungOutcome(rec, read(step()), after), "green", "slow, then the step, its job and the required check green in time");
+  assert.equal(hungOutcome(rec, read(step(), { conclusion: "failure" }), after), "counted", "the step green, then a later step of the job failed: the queue would have dropped it");
+  assert.equal(hungOutcome(rec, read(step(), { completed_at: "2026-11-10T06:00:01Z" }), after), "counted", "the job finished after the queue's own timeout");
+  assert.equal(hungOutcome(rec, read(step({ completed_at: "2026-11-10T06:00:01Z" })), after), "counted", "the step finished after the queue's own timeout");
+  assert.equal(hungOutcome(rec, read(step({ conclusion: "cancelled" }), { conclusion: "cancelled" }), after), "counted", "cancelled");
+  assert.equal(hungOutcome(rec, read(step({ number: 5 })), after), "counted", "another step of the same name");
+  assert.equal(hungOutcome(rec, read(step({ ...running }), running), before), "pending", "still running before the deadline: undecided");
+  assert.equal(hungOutcome(rec, read(step({ ...running }), running), after), "counted", "still running past the deadline");
+  assert.equal(hungOutcome(rec, { names: ["Quality"] }, before), "pending", "nothing read before the deadline: undecided");
+  assert.equal(hungOutcome(rec, { names: ["Quality"] }, after), "counted", "nothing read past the deadline");
+  assert.equal(hungOutcome([{ ...rec[0], job: null }], read(step()), before), "counted", "no job recorded (a check that is no Actions job)");
+  assert.equal(hungOutcome([{ ...rec[0], head: null }], read(step()), before), "counted", "no queue commit recorded");
+  assert.equal(hungOutcome([{ ...rec[0], by: null }], read(step()), before), "counted", "no deadline recorded (the queue's timeout unread)");
+  assert.equal(hungOutcome([...rec, { job: 10, step: "Run build", number: 2, head, by }], read(step()), before), "pending", "every step judged hung must be decided");
+  assert.equal(hungOutcome([...rec, { job: 10, step: "Run build", number: 2, head, by }], read(step(), { conclusion: "failure" }), before), "counted", "one counted step decides, whatever else waits");
+  // An aggregate required check (`CI`, behind `needs:`): the hung job is upstream of it, and the aggregate decides too.
+  const agg = (check) => ({ ...read(step(), {}, {}, [{ id: 11, name: "CI", ...done, ...check }]), names: ["CI"] });
+  assert.equal(hungOutcome(rec, agg({}), after), "green", "the upstream job and the aggregate check green in time");
+  assert.equal(hungOutcome(rec, agg({ conclusion: "failure" }), after), "counted", "another upstream job failed the aggregate");
+  assert.equal(hungOutcome(rec, agg({ completed_at: "2026-11-10T06:00:01Z" }), after), "counted", "the aggregate concluded after the deadline");
+  assert.equal(hungOutcome(rec, { ...read(step()), names: ["CI"] }, before), "pending", "the aggregate not reported yet: undecided before the deadline");
+  assert.equal(hungOutcome(rec, { ...read(step()), names: ["CI"] }, after), "counted", "and counted past it");
+  assert.equal(hungOutcome([], read(step()), after), "counted");
+});
+
 test("queueStall: a queue commit with no check run for QUEUE_STALL_MS is stalled; a fresh entry with no commit yet is watched", async () => {
   const { QUEUE_FRESH_MS, QUEUE_STALL_MS, queueStall } = await import("../scripts/lib/logic.mjs");
   const headAt = "2026-11-09T09:36:44Z";
@@ -529,7 +596,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
  * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
  * `writers`: the collaborators read, or a status to fail it with.
  */
-async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2 }) {
+async function localTick({ repo = "acme/app", open, timeline, comments = () => [], pulls = () => [], writers = [{ login: "maintainer" }], env = {}, maxConcurrent = 2, inputs = {} }) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -557,7 +624,7 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });
+    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t" });
     return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
   } finally {
     globalThis.fetch = realFetch;
@@ -655,6 +722,25 @@ test("local claim age: GitHub's update time, not the machine's clock in the body
   assert.ok(expired.writes.includes("DELETE /issues/comments/70"));
 });
 
+test("#423: claim_pause_hours is the dispatcher's bound for a quiet local claim: a loop away five hours Blocks at four, a run with no claim too, and both wait at the default day", async () => {
+  const { claimBody } = await import("../scripts/lib/local.mjs");
+  const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
+  const four = { claimPauseMs: resolveInputs({ env: { FACTORY_CLAIM_PAUSE_HOURS: "4" } }).claimPauseMs };
+  const claim = { id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 5 * HOUR))}`, updated_at: ago(5 * HOUR) };
+  const away = (inputs) => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(6 * HOUR)), comments: (n) => (n === 7 ? [claim] : []), inputs });
+  const day = await away({});
+  assert.deepEqual([day.r.paused, day.r.vanished], [[7], []]);
+  const blocked = await away(four);
+  assert.deepEqual(blocked.r.vanished, [7]);
+  assert.match(blocked.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over 4 h; start `factory serve`[^]*"cause":"setup"/);
+  // No claim at all, Running five hours: waits for the day by default, Blocks at four.
+  const bare = (inputs) => localTick({ open: [localIssue(8, "factory:running")], timeline: () => labelled("factory:running", ago(5 * HOUR)), inputs });
+  assert.deepEqual((await bare({})).r.vanished, []);
+  const none = await bare(four);
+  assert.deepEqual(none.r.vanished, [8]);
+  assert.match(none.blocked(8), /Running with no local loop holding it for over 4 h \(no claim\)/);
+});
+
 test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause factory); younger, or a marked comment updated within the day, waits (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const open = [localIssue(7, "factory:running")];
@@ -741,24 +827,25 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
 
 /**
  * One dispatcher tick on a repository whose workflow sets a cloud sandbox and which runs both routes (#235): #50 a
- * factory:local Objective Running on a live local claim, whose record holds three dispatch markers older than
- * START_LOST_MS (a local loop wrote them before #235: each reads as a `lost` start); #51 a factory:local Objective
+ * factory:local Objective Running on a live local claim, whose record holds three dispatch markers from 20 to 40
+ * minutes old naming no run (a local loop wrote them before #235); #51 a factory:local Objective
  * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
  * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
  */
-async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = {}) {
+async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra = () => ({}) } = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const { marker, sandboxMarkerLine, setSelf, START_LOST_MS } = await import("../scripts/lib/logic.mjs");
+  const { marker, sandboxMarkerLine, setSelf } = await import("../scripts/lib/logic.mjs");
   const { BASE, BOT, REPO, githubStore } = await import("./fixtures/github-records.mjs");
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
   const iss = (number, labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
-  // `extra`: more Objectives for one test, `{ open, comments, timeline }` from this tick's helpers.
+  // `extra`: more Objectives for one test, `{ open, comments, timeline, failComments }` from this tick's helpers;
+  // `failComments`: how many comment-list reads of an issue fail (502) before one answers.
   const more = extra({ now, iso, iss, marker, sandboxMarkerLine, BOT });
   const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, []), ...(more.open || [])];
   const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
-  const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(START_LOST_MS + 30 * 60_000), named(START_LOST_MS + 20 * 60_000), named(START_LOST_MS + 10 * 60_000)] };
+  const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(40 * 60_000), named(30 * 60_000), named(20 * 60_000)] };
   const comments = {
     50: [
       { id: 500, user: BOT, updated_at: iso(now), body: `${marker(50, "sandbox")}\n${sandboxMarkerLine(lostRecord)}` },
@@ -799,15 +886,21 @@ async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = 
     if (method === "GET" && p === `git/commits/${"c".repeat(40)}`) return json({ sha: "c".repeat(40), message: `${LOCK}\n\n0123`, author: { name: "Factory", email: "factory@users.noreply.github.com", date: iso(now - 60 * 60_000) } });
     if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
     if (method === "GET" && p === "issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
+    const one = /^issues\/(\d+)$/.exec(p) && open.find((i) => i.number === Number(p.slice(7)));
+    if (method === "GET" && one) return json(one);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
     if (method === "GET" && /^issues\/\d+\/timeline$/.test(p)) return json(timeline[n] || []);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && /comments$/.test(p) && more.failComments?.[n] > 0) {
+      more.failComments[n] -= 1;
+      return json({ message: "Bad Gateway" }, 502);
+    }
     if (method === "GET" && /comments$/.test(p)) return json(comments[n] || []);
     if (method !== "GET") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, recordWrites: { api: store.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, localLive, recordWrites: { api: store.api, base: BASE } });
     const markers = (k) => store.bodyOf(k, marker(k, "sandbox"));
     return { r, calls, refs, markers };
   } finally {
@@ -885,6 +978,27 @@ test("serve --all keeps a sandbox-route Objective whose stage holds a live lease
   assert.ok(all.r.deadlines.some((d) => d.issue === 62 && d.kind === "lease"), "looked at again when its lease ends");
   assert.equal(all.markers(62), null, "no record written for it here");
   assert.deepEqual(all.r.relaunch, []);
+});
+
+test("serve on a repository with a cloud sandbox: an unread sandbox record is no absent lease; the Objective is neither Blocked nor sent back to Queued that tick (#430)", async () => {
+  // #62: Running on the sandbox route for 20 minutes (serve --all routes it), and #63: relabelled factory:local mid-stage,
+  // Running for 20 minutes. Each stage holds a live lease and no local claim. The first comments read of each (the lease
+  // read, after its retries) fails; the reads after it answer, so the local claim read finds no claim.
+  const extra = (h) => ({
+    open: [h.iss(62, ["factory:running"]), h.iss(63, ["factory:local", "factory:running"])],
+    comments: { 62: leased(h, 62), 63: leased(h, 63) },
+    timeline: Object.fromEntries([62, 63].map((n) => [n, [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }]])),
+    failComments: { 62: RETRY.tries, 63: RETRY.tries },
+  });
+  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra });
+  assert.deepEqual(all.r.vanished, [], "a live sandbox stage is not Blocked as vanished");
+  assert.deepEqual(all.r.unclaimed, [], "nor sent back to Queued for a second stage here");
+  assert.ok(!all.r.ready.includes(62) && !all.r.ready.includes(63), "nor picked");
+  assert.ok(all.r.deadlines.some((d) => d.kind === "retry"), "read again soon");
+  // The next tick reads each record: its live lease holds the Objective until the lease ends.
+  const next = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra: (h) => ({ ...extra(h), failComments: {} }) });
+  assert.deepEqual([next.r.vanished, next.r.unclaimed], [[], []]);
+  for (const n of [62, 63]) assert.ok(next.r.deadlines.some((d) => d.issue === n && d.kind === "lease"), `#${n} looked at again when its lease ends`);
 });
 
 test("max_concurrent caps the repository as a whole: every route's Running Objectives count, each route picks only its own (#240)", async () => {

@@ -471,10 +471,10 @@ test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decis
   // #379: the decision calls' row says which decider judges the rebase check, and what runs with none.
   const on = deciderCheck({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true" } });
   assert.equal(on.status, "PASS");
-  assert.match(on.detail, /the stage's own harness \(claude\) on its login, one short call with no tools per question \(triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check\)/);
+  assert.match(on.detail, /the stage's own harness \(claude\) on its login, one short call with no tools per question \(triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check\)/);
   const off = deciderCheck({ inputs: { decisionRoute: "off" }, env: { GITHUB_ACTIONS: "true" } });
   assert.equal(off.status, "PASS");
-  assert.match(off.detail, /^off \(decision_route off\): .*a send-back's conflict pass is checked by matching commits, a writer's comment resumes a Question unjudged, a red after a fix pass the exact checks cannot judge Blocks, and any edit to an Objective's text after its plan makes it stale$/);
+  assert.match(off.detail, /^off \(decision_route off\): .*a send-back's conflict pass is checked by matching commits, a writer's comment resumes a Question unjudged, a red after a fix pass the exact checks cannot judge Blocks, any edit to an Objective's text after its plan makes it stale, a fix pass's lockfile change outside its scope is refused unjudged, and a writer's comment no pass has read holds a reviewed PR's merge until the review stage applies it$/);
 });
 
 test("doctor's CI row reads each workflow's parsed on: (workflowEvents), never its raw text (#386)", async () => {

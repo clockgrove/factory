@@ -7,7 +7,7 @@
 // rule: it counts once a person who can push applied it, and the plan's record covers it.
 import { DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
-import { isSandboxHost } from "./local.mjs";
+import { isSandboxHost, wildcardRefusal } from "./local.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
 /** Each choice's label prefix, keyed by the input it overrides; the rest of the name is the harness or the model id. */
@@ -71,14 +71,16 @@ export function choiceOf(names = []) {
 /**
  * The hosts the issue's host labels open for this Objective: {ok: true, hosts, labels} (`hosts` lower case, sorted, once
  * each; `labels` the host labels), or {ok: false, labels, reason, fix} for a label that names no host a sandbox enforces as
- * written (local.mjs isSandboxHost: a host name or `*.` and one; never an IP address, a port, a scheme or path, or
- * `localhost`). Decided on the names alone; who applied each is objective-trust.mjs choiceTrusted's check.
+ * written (local.mjs isSandboxHost: a host name or `*.` and one; never an IP address, a port, a scheme or path,
+ * `localhost`, or `*.` over a public suffix). Decided on the names alone; who applied each is objective-trust.mjs choiceTrusted's check.
  */
 export function hostsOf(names = []) {
   const labels = choiceLabels(names).filter(isHostLabel);
   const hosts = new Set();
   for (const l of labels) {
     const host = l.slice(HOST_PREFIX.length).trim().toLowerCase();
+    const refusal = host.startsWith("*.") && isSandboxHost(host.slice(2)) ? wildcardRefusal(host.slice(2)) : null;
+    if (refusal) return { ok: false, labels, reason: `${tick(l)} opens every site under \`${host.slice(2)}\`, and the Public Suffix List names \`${refusal.rule}\` there a public suffix anyone can register a name under`, fix: `Name each host it needs, as \`factory:host:app.${host.slice(2)}\`, or remove the label, then re-apply \`factory:objective\`.` };
     if (!isSandboxHost(host)) return { ok: false, labels, reason: `${tick(l)} names no host Factory's sandboxes can allow`, fix: `Name one host after the prefix, as \`factory:host:example.com\` or \`factory:host:*.example.com\` (no scheme, port, path, IP address or localhost), or remove the label, then re-apply \`factory:objective\`.` };
     hosts.add(host);
   }

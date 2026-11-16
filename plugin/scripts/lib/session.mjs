@@ -23,6 +23,7 @@ import {
   dequeuePr,
   inMergeQueue,
   mergeQueueEntry,
+  mergeQueueHeads,
   mergeGroupRuns,
   mergeQueueRemovals,
   mergeVerified,
@@ -57,7 +58,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -65,12 +66,14 @@ import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
-import { rebaseWaitOf, reviewWaitOf } from "./overlap.mjs";
+import { TrialCap, rebaseWaitOf, reviewWaitOf, siblingTrials } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
+import { versionKey } from "./answer-check.mjs";
+import { judgeUnread } from "./comment-check.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
-import { credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
+import { TrialUnread, credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
@@ -84,7 +87,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -338,6 +341,9 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   return savedRecord({ harness, sessionId, saved, checkout });
 }
 
+/** The usage artifacts a restore on Actions downloads at most, newest first: each is a download of up to two minutes. */
+export const ARTIFACT_LOOKS = 3;
+
 /**
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
@@ -351,9 +357,10 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
   const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
-  // newest first, to the most recent one that did.
+  // newest first, to the most recent one that did. Locally each is a file read: every stage directory is looked at. On
+  // Actions each is an artifact download: at most ARTIFACT_LOOKS of them.
   let last = "no earlier run saved a session";
-  for (const src of sources.slice(0, 3)) {
+  for (const src of fromStageDirs ? sources : sources.slice(0, ARTIFACT_LOOKS)) {
     const dir = await src.dir();
     if (!dir) {
       last = src.error || last;
@@ -661,9 +668,9 @@ export function fixClosingText({ commands = [], setupGuard = null } = {}) {
   return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null }) {
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null, maxParts = undefined }) {
   const template = readFileSync(templatePath, "utf8");
-  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard }));
+  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard, maxParts }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
   return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
@@ -1038,10 +1045,16 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /**
    * Record which maintainer decisions this run fed to a model (logic.mjs decisionsRead), so a later pass knows what
-   * has not reached the code yet. Written now; a failed write leaves them unread, which costs an answer pass, not a merge.
+   * has not reached the code yet. Written now, with `phase`'s line in the same write when given, so the record never
+   * lands without the line that explains it; a failed write leaves them unread, which costs an answer pass, not a merge.
    */
-  progress.decisionsRead = async (r) => {
+  progress.decisionsRead = async (r, phase = null) => {
     read = mergeRead(read, r);
+    if (phase) {
+      lines.push(`- ${clock(Date.now())} ${sanitize(phase, { max: 2000 })}`);
+      status = "";
+    }
+    await writing;
     await write();
   };
   /**
@@ -1236,7 +1249,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const running = queueTargets(checks.names, runs).targets.length > 0;
       if (!running) return { running, hung: [] };
       hungMs ??= await queueCheckTimeout(checks.repo, { token: checks.token, cache: rulesRead }).then((m) => (m ? m * 60_000 : Infinity), () => Infinity);
-      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache }, { token: checks.token });
+      const hung = await hangsOn(checks.repo, sha, { names: checks.names, checks: runs, headAt: new Date(waitedFrom).toISOString(), hungMs, actionsToken: backend().name === "local" ? null : checks.actionsToken || checks.token, cache: hangCache, stall: checks.stall ?? STALL_DEFAULTS }, { token: checks.token });
       if (hung.length && !waived.has(sha)) waived.set(sha, headMarks(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).then((m) => m.noProgress));
       return { running, hung: hung.length && !(await waived.get(sha)) ? hung : [] };
     };
@@ -2562,7 +2575,6 @@ export async function recordedMergeable(repo, prNumber, issue, opts) {
   return /^<!-- factory:\d+:mergeable:([0-9a-f]{40,64}) -->/.exec(mine?.body || "")?.[1] ?? null;
 }
 
-const QUEUE_STALL_MIN = QUEUE_STALL_MS / 60_000;
 const errCode = (e) => (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : e?.transport ? "network" : "error");
 
 /** A check's name as Factory quotes it in a notice: one line, no backticks, at most 80 characters. */
@@ -2589,8 +2601,9 @@ export const hungChecks = (hung) =>
 const REQUEUE_RECORD = (issue) => `<!-- factory:${issue}:requeue-drop `;
 
 /**
- * The issue's comment when Factory puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, read
- * back by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Factory itself for
+ * The issue's comment when Factory puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, with
+ * `hung` for a HUNG_CODE removal: each step it judged hung, `{name, job, step, number, head, elapsedMs, baselineMs, by}`; read back
+ * by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Factory itself for
  * a stalled entry) and, for a check that hung on the queue's commit (HUNG_CODE), the check's name.
  */
 export const requeueLine = (prNumber, last, tryNo, hung = null) => {
@@ -2601,12 +2614,34 @@ export const requeueLine = (prNumber, last, tryNo, hung = null) => {
   return `Factory: ${who} (${last.code}${named}) at ${at ?? "an unknown time"}; enqueued again (try ${Number(tryNo)}).`;
 };
 
+/**
+ * A hung step as the requeue record keeps it: its check's name, its job and step, the queue commit (`head`), its times,
+ * and the queue's deadline for it (`by`).
+ */
+const hungRecord = (h) => ({ name: typeof h?.name === "string" ? h.name : null, job: Number.isInteger(h?.job) ? h.job : null, step: typeof h?.step === "string" ? h.step : null, number: Number.isInteger(h?.number) ? h.number : null, head: typeof h?.head === "string" && /^[0-9a-f]{40}$/.test(h.head) ? h.head : null, elapsedMs: Number.isFinite(h?.elapsedMs) ? h.elapsedMs : null, baselineMs: Number.isFinite(h?.baselineMs) ? h.baselineMs : null, by: Number.isFinite(Date.parse(h?.by)) ? h.by : null });
+
+const requeueRecord = (issue, last, hung) => `${REQUEUE_RECORD(issue)}${JSON.stringify({ at: last.at, code: last.code, ...(last.code === HUNG_CODE && hung?.length ? { hung: hung.map(hungRecord) } : {}) })} -->`;
+
 /** The comment body for that notice: the record line, then requeueLine. */
-export const requeueBody = (issue, prNumber, last, tryNo, hung = null) => `${REQUEUE_RECORD(issue)}${JSON.stringify({ at: last.at, code: last.code })} -->\n${requeueLine(prNumber, last, tryNo, hung)}`;
+export const requeueBody = (issue, prNumber, last, tryNo, hung = null) => `${requeueRecord(issue, last, hung)}\n${requeueLine(prNumber, last, tryNo, hung)}`;
+
+/** The marker of the issue's one comment for a hung removal whose count waits on its step (requeueWaitBody). */
+export const requeueWaitMarker = (issue) => marker(issue, "requeue", "wait");
 
 /**
- * The drops Factory recorded in its own requeue comments on the issue (requeueBody): `{at, code}`. A removal Factory
- * made on an earlier pass reads its code from here, since GitHub's timeline cannot say why Factory removed it.
+ * The comment body when Factory took the PR out for a hung step (`removal`: `{at, code}`, `hung` its steps) and whether
+ * that removal counts as a try waits for the step's job, at the latest until `by`: the record line requeueRecords reads
+ * back, so the next pass knows what that removal judged hung, then one line saying so.
+ */
+export const requeueWaitBody = (issue, prNumber, removal, hung, by) => {
+  const at = (t) => (Number.isFinite(Date.parse(t)) ? new Date(Date.parse(t)).toISOString().replace(/\.\d{3}Z$/, "Z") : "an unknown time");
+  return `${requeueRecord(issue, removal, hung)}\nFactory: Factory took PR #${Number(prNumber)} out of the merge queue (${removal.code}; no progress: ${hungChecks(hung)}) at ${at(removal.at)}. Whether that counts as a try waits for the step's job to finish, at the latest until ${at(by)}, the queue's own deadline for it.`;
+};
+
+/**
+ * The drops Factory recorded in its own requeue comments on the issue (requeueBody): `{at, code}`, with `hung` when the
+ * record has it. A removal Factory made on an earlier pass reads its code from here, since GitHub's timeline cannot say
+ * why Factory removed it.
  */
 export function requeueRecords(comments, issue) {
   const out = [];
@@ -2615,7 +2650,7 @@ export function requeueRecords(comments, issue) {
     const line = (c.body || "").split("\n").find((l) => l.startsWith(REQUEUE_RECORD(issue)) && l.endsWith(" -->"));
     try {
       const v = JSON.parse(line.slice(REQUEUE_RECORD(issue).length, -4));
-      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.code === "string") out.push({ at: v.at, code: v.code });
+      if (Number.isFinite(Date.parse(v?.at)) && typeof v?.code === "string") out.push({ at: v.at, code: v.code, ...(Array.isArray(v.hung) ? { hung: v.hung.map(hungRecord) } : {}) });
     } catch {
       // no record (an older notice): the removal reads as STALL_CODE
     }
@@ -2623,9 +2658,12 @@ export function requeueRecords(comments, issue) {
   return out;
 }
 
+/** The merge queue's own check timeout in minutes (github.mjs queueCheckTimeout), or null when it cannot be read. */
+export const queueTimeoutMin = (repo, opts) => queueCheckTimeout(repo, opts).catch(() => null);
+
 /** The hung-check bound for this pass or watch (logic.mjs queueHungMs), from the queue's own timeout, read once. */
 export async function queueBoundMs(repo, opts) {
-  return queueHungMs(await queueCheckTimeout(repo, opts).catch(() => null));
+  return queueHungMs(await queueTimeoutMin(repo, opts));
 }
 
 /**
@@ -2635,22 +2673,23 @@ export async function queueBoundMs(repo, opts) {
  * `cache` (one merge pass, or one watch). Actions are read with `actionsToken` (the job token's `actions: read`); with
  * none (the local route, whose App has no Actions permission), or an unread job or history, a check is judged by the
  * time bound `hungMs` only. `checks` are the commit's checks when the caller has read them (awaitChecks' `progress`).
- * A job is read only once its check could be hung (past min(STEP_STALL_FLOOR_MS, `hungMs`)), and read again only when
+ * `stall`: when a step counts as hung (logic.mjs STALL_DEFAULTS, the repository's settings). A job is read only once its
+ * check could be hung (past min(`stall.floorMs`, `hungMs`)), and read again only when
  * its last reading in `cache` is that old, judges it stalled now, or is past `hungMs`: until then no step it moved on to
  * could be stalled, so that reading stands.
  */
-export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null }, opts) {
+export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, checks: given = null, stall = STALL_DEFAULTS }, opts) {
   const checks = given ?? (await queueCommitChecks(repo, sha, opts));
   const aopts = { ...opts, token: actionsToken || opts.token };
   const jobs = new Map();
   const baselines = new Map();
   cache.baselines ??= new Map();
   cache.read ??= new Map();
-  const soonest = Math.min(STEP_STALL_FLOOR_MS, hungMs);
+  const soonest = Math.min(stall.floorMs, hungMs);
   const within = (t, ms) => now - Date.parse(t) <= ms;
   // The step's baseline, read once per cache and only once the step could be stalled by it.
   const baseline = async (job) => {
-    if (!needsBaseline(job, { fallbackMs: hungMs, now })) return null;
+    if (!needsBaseline(job, { fallbackMs: hungMs, now, stall })) return null;
     const key = stepKey(job, jobPosition(job).step);
     if (!cache.baselines.has(key)) cache.baselines.set(key, stepDurations(repo, { runId: job.run_id, jobName: job.name, stepName: jobPosition(job).step }, aopts, cache).then(stepBaselineMs, () => null));
     const b = await cache.baselines.get(key);
@@ -2663,7 +2702,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     const kept = cache.read.get(t.id);
     // A job that could not be read is not read again sooner either: the time bound judges it meanwhile.
     if (kept && !kept.job && within(kept.at, soonest - 1)) continue;
-    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at }) ? kept.job : null;
+    let job = kept?.job && within(kept.at, soonest - 1) && within(kept.job.started_at, hungMs) && within(t.started_at, hungMs) && !jobStall(kept.job, { baselineMs: await baseline(kept.job), fallbackMs: hungMs, now, checkStartedAt: t.started_at, stall }) ? kept.job : null;
     if (!job) {
       job = await rest(`repos/${repo.full}/actions/jobs/${t.id}`, aopts).catch(() => null);
       cache.read.set(t.id, { job, at: new Date(now).toISOString() });
@@ -2672,7 +2711,53 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
     }
     jobs.set(t.id, job);
   }
-  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs });
+  return queueHangs({ names, checks, jobs, baselines, headAt, now, hungMs, stall });
+}
+
+/**
+ * Decides Factory's HUNG_CODE removals after `since` whose record names the steps they judged hung (logic.mjs
+ * hungOutcome, against the required checks `names`), oldest first, until QUEUE_CLEARED_MAX are cleared: a "green" one is
+ * marked `cleared` (queueRetry counts it toward no try). Each job (`actions/jobs/{id}`, with `actionsToken`; with none,
+ * as on the local route, nothing is read or cleared) and each queue commit's checks (queueCommitChecks) are read at most
+ * once. Returns `{cleared, pending, unread}`: `cleared` whether any was cleared;
+ * `pending` `{at, by}` for the oldest removal still undecided (a job of it unread or running before its `by`, the
+ * earliest of its steps' deadlines, when the wait ends), where deciding stops, since whether a later one may be cleared
+ * hangs on it; `unread` whether a job read failed.
+ * Decided on the jobs' recorded ids, step names and numbers, statuses, conclusions and times only.
+ */
+export async function clearSlowHangs(repo, { issue, prNumber, removals, since, names = [], actionsToken = null, now = Date.now() }, opts) {
+  const from = Date.parse(since);
+  const judged = (removals || []).filter((r) => r.code === HUNG_CODE && Array.isArray(r.hung) && r.hung.length && !(Date.parse(r.at) <= from)).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const out = { cleared: false, pending: null, unread: false };
+  if (!actionsToken || !judged.length) return out;
+  const aopts = { ...opts, token: actionsToken };
+  const jobs = new Map();
+  const checks = new Map();
+  let clears = 0;
+  for (const r of judged) {
+    if (clears >= QUEUE_CLEARED_MAX) break;
+    for (const id of new Set(r.hung.map((h) => h.job).filter(Number.isInteger))) {
+      if (jobs.has(id)) continue;
+      const job = await rest(`repos/${repo.full}/actions/jobs/${id}`, aopts).catch(() => ((out.unread = true), null));
+      if (job) jobs.set(id, job);
+    }
+    for (const sha of new Set(r.hung.map((h) => h.head).filter(Boolean))) {
+      if (checks.has(sha)) continue;
+      const list = await queueCommitChecks(repo, sha, opts).catch(() => ((out.unread = true), null));
+      if (list) checks.set(sha, list);
+    }
+    const what = hungOutcome(r.hung, { jobs, checks, names }, now);
+    if (what === "pending") {
+      out.pending = { at: r.at, by: r.hung.map((h) => h.by).sort()[0] };
+      return out;
+    }
+    if (what !== "green") continue;
+    r.cleared = true;
+    out.cleared = true;
+    clears += 1;
+    log(`#${issue}: the step Factory judged hung when it took PR #${prNumber} out of the merge queue at ${r.at} then finished green, and its job too, before the queue's own deadline; that removal counts toward no try`);
+  }
+  return out;
 }
 
 /**
@@ -2681,21 +2766,21 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
  * check that made no progress, or `waitMs` until it could be judged). `gate` is the required checks
  * (github.mjs requiredCheckSpecs): CI from their integration on the commit is the gate starting, code scanning's runs
  * are not (logic.mjs gateStarted). `hungMs` is the pass's or the watch's one fallback bound (queueBoundMs), `cache`
- * its one cache of step history (hangsOn), so both judge a check alike.
+ * its one cache of step history (hangsOn), so both judge a check alike; `stall` the repository's stall limits.
  */
-export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {} } = {}) {
+export async function queueEntryState(repo, prNumber, opts, now = Date.now(), gate = [], { hungMs = QUEUE_HUNG_MS, actionsToken = null, cache = {}, stall = STALL_DEFAULTS } = {}) {
   const entry = await mergeQueueEntry(repo, prNumber, opts);
   if (!entry) return null;
   const checking = !!entry.head && entry.state === "AWAITING_CHECKS";
   const started = checking ? await checksStarted(repo, entry.head, gate, opts) : true;
   let hung = null;
   const at = Date.parse(entry.headAt ?? entry.enqueuedAt);
-  // No step on the commit can be stalled before the commit is STEP_STALL_FLOOR_MS old: only then are its checks read.
-  if (checking && started && Number.isFinite(at) && now - at >= STEP_STALL_FLOOR_MS) {
+  // No step on the commit can be stalled before the commit is `stall.floorMs` old: only then are its checks read.
+  if (checking && started && Number.isFinite(at) && now - at >= stall.floorMs) {
     const names = (gate || []).map((g) => (typeof g === "string" ? g : g?.name)).filter(Boolean);
-    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache }, opts);
+    hung = await hangsOn(repo, entry.head, { names, headAt: entry.headAt ?? entry.enqueuedAt, now, hungMs, actionsToken, cache, stall }, opts);
   }
-  return { ...entry, ...queueStall(entry, { started, now, hung }) };
+  return { ...entry, ...queueStall(entry, { started, now, hung, stall }) };
 }
 
 /**
@@ -3102,51 +3187,74 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
-/** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
-export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
-
 const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
 
-/** Factory's record of the merge queue's last conflict removal of the Objective's PR (queueConflictWait), or null. */
+/**
+ * Factory's record of the last time a PR the queue took out for a conflict went back in (queueConflictWait), from the
+ * issue's comments: `{pr, head, removal, queue}`, `queue` the default branch's head and the queue's entries then
+ * (queueState), or null.
+ */
 export function queueConflictRecord(comments, issue) {
   const mark = marker(issue, "queue-conflict");
   const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
   try {
     const v = JSON.parse(QUEUE_CONFLICT_LINE.exec(c?.body || "")?.[1] || "null");
-    return v && typeof v.removal === "string" && typeof v.main === "string" && typeof v.seen === "string" ? v : null;
+    return v && Number.isInteger(v.pr) && typeof v.head === "string" && typeof v.removal === "string" && typeof v.queue === "string" ? v : null;
   } catch {
     return null;
   }
 }
 
+/** The merge queue's state as one string: the default branch's head and each entry's PR and head, in order. */
+export const queueState = ({ base, entries }) => [base ?? "", ...entries.map((e) => `${e.pr}:${e.head}`)].join(" ");
+
 /**
  * A PR the merge queue took out for a conflict (logic.mjs queueRetry `conflict`) and that does not conflict with the
- * default branch: the conflict was with a PR ahead of it. The first time the merge pass sees that removal, it records on
- * the issue the default branch's head then (a record Factory owns: a commit's date says nothing of when a queue merged
- * it). The PR goes back in once the head is another commit, the queue is empty, or QUEUE_CONFLICT_WAIT_MS has passed
- * since the record (read on the first tick after it: then the queue's next answer decides). Returns null to enqueue it
- * now, else "queue-wait", or "pending" when GitHub could not be read.
+ * default branch: the conflict was with a PR ahead of it. It goes back in when no PR in the queue now conflicts with it,
+ * by a trial merge of the two heads against the default branch (overlap.mjs siblingTrials, git merge-tree in a scratch
+ * mirror); a sibling's merge or drop ticks the dispatcher. Pairwise trials cannot see every conflict (one with the
+ * queue's merge group, or a trial that cannot be computed: then the queue itself answers), so each time it goes back in,
+ * Factory records on the issue the queue's state then (queueState: the default branch's head and every entry's head):
+ * taken out again for a conflict, it goes back in only once that state has changed, never on the same queue twice.
+ * Returns null to enqueue it now, "queue-wait" while it waits, or "pending" when the queue or the record could not be
+ * read or written.
  */
-export async function queueConflictWait(repo, { issue, prNumber, base, removal }, opts, now = Date.now()) {
-  const branch = await branchState(repo, base, opts).catch((e) => (log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`), null));
-  if (!branch) return "pending";
-  // Unread comments say nothing of the record: no new one (its `seen` would restart the wait), the next tick reads again.
+export async function queueConflictWait(repo, { issue, prNumber, head, base, removal }, opts) {
+  const queue = await mergeQueueHeads(repo, base, opts).catch((e) => (log(`#${issue}: ${base}'s merge queue could not be read (${errCode(e)}); next tick`), null));
+  if (!queue) return "pending";
   const comments = await listComments(repo, issue, opts).catch((e) => (log(`#${issue}: the queue-conflict record could not be read (${errCode(e)}); next tick`), null));
   if (!comments) return "pending";
-  let rec = queueConflictRecord(comments, issue);
-  if (rec?.removal !== removal) {
-    rec = { removal, main: branch.head, seen: new Date(now).toISOString() };
-    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it. It goes back in once \`${base}\` moves past ${branch.head.slice(0, 7)}, the queue empties, or ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h pass.`;
-    await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).catch((e) => log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); it is written again next tick`));
-  }
-  const moved = branch.head !== rec.main;
-  const late = now - Date.parse(rec.seen) >= QUEUE_CONFLICT_WAIT_MS;
-  if (!moved && branch.queued > 0 && !late) {
-    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it; it waits for the queue to move (${branch.queued} waiting, ${base} still ${branch.head.slice(0, 7)})`);
+  const ahead = queue.entries.filter((e) => e.pr !== prNumber);
+  const state = queueState({ base: queue.base, entries: ahead });
+  const last = queueConflictRecord(comments, issue);
+  if (last && last.pr === prNumber && last.head === head && last.removal !== removal && last.queue === state) {
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict again, with the queue as it was when it went back in at ${last.removal}; it waits for the queue to change`);
     return "queue-wait";
   }
-  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${moved ? `${base} has moved since` : branch.queued ? `${QUEUE_CONFLICT_WAIT_MS / 3600_000} h have passed` : "the queue is empty now"}, so it goes back in`);
-  return null;
+  const back = async (why) => {
+    const rec = { pr: prNumber, head, removal, queue: state };
+    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict; it goes back in (${why}). Taken out again for a conflict, it waits until the queue changes.`;
+    const ok = await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).then(() => true, (e) => (log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); next tick`), false));
+    if (!ok) return "pending";
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${why}, so it goes back in`);
+    return null;
+  };
+  if (!ahead.length) return back("the queue is empty now");
+  const trials = siblingTrials(repo, opts);
+  try {
+    for (const e of ahead) {
+      const { conflict, files } = await trials.conflicts(head, e.head);
+      if (!conflict) continue;
+      log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal}; it still conflicts with PR #${e.pr} in the queue (${files.slice(0, 5).join(", ") || "no file named"}), so it waits for that one to leave`);
+      return "queue-wait";
+    }
+  } catch (e) {
+    if (!(e instanceof TrialUnread || e instanceof TrialCap)) throw e;
+    return back(`no trial merge with the queue's PRs could be computed (${String(e.message).slice(0, 160)}): the queue answers`);
+  } finally {
+    trials.close();
+  }
+  return back("no PR in the queue now conflicts with it by a trial merge");
 }
 
 /**
@@ -3390,6 +3498,32 @@ async function conversationsGate(repo, ctx, report, opts) {
 const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, opts, { stage: "merge", soFar: null })(line);
 
 /**
+ * Whether the unread writer comments (`unread`) let the merge go on: the comment check (comment-check.mjs judgeUnread,
+ * on `check`) reads them as asking nothing, and a fresh read after its call finds nothing it did not judge (a comment
+ * posted or edited during the call) and the Objective not stopped (stop.mjs stopCause). Then they are recorded as read on
+ * a progress comment of the merge pass's own (stage `merge`, keyed by the newest comment's version, so no other write of
+ * the merge pass replaces it), written once with the line that says so; a record that is not written leaves them
+ * unread, which costs one more question, never a merge. Returns "clear", "unread" (the caller holds the merge for the
+ * review stage's answer pass), "stopped", or "pending" (the issue could not be read again: the caller tries again).
+ * Throws when the comments cannot be read again, as unreadNow does: the caller never merges.
+ */
+async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, check, objectiveLabel, self }, opts) {
+  const r = await judgeUnread({ check, repo, issue, issueData, pr, unread });
+  const held = (why) => (log(`#${issue}: ${unread.length} maintainer decision(s) no pass has read (${why}); the review runs again to apply them`), "unread");
+  if (!r.clear) return held(`${r.why}${r.limited ? `; ${r.limited}` : ""}`);
+  // The call took a while: a comment posted or edited meanwhile was never judged, and a stop may have come.
+  const judged = decisionsRead(unread);
+  const fresh = (await unreadNow(repo, { issue, prNumber, self }, opts)).unread.filter((d) => judged[d.key] !== (d.seen ?? d.at));
+  if (fresh.length) return held(`${fresh.length} arrived or changed while the comment check ran`);
+  const issueNow = await getIssue(repo, issue, opts).catch((e) => (log(`#${issue}: the issue could not be read after the comment check (${errCode(e)}); next try`), null));
+  if (!issueNow) return "pending";
+  if (stopCause(issueNow, objectiveLabel)) return "stopped";
+  const progress = progressReporter(repo, issue, opts, { stage: "merge", runId: `${progressRunId()}-${versionKey(unread.at(-1))}`, soFar: null });
+  await progress.decisionsRead(judged, r.line);
+  return "clear";
+}
+
+/**
  * An edit since the plan that the merge pass could not judge (objective-trust.mjs editedSincePlan "unjudged"): the
  * review label goes back on, so a review stage, whose start judges the edit with its own decider (planGate), decides
  * whether the PR still merges. Returns "text-edit".
@@ -3403,9 +3537,13 @@ async function textEdit(repo, issue, prNumber, opts) {
 
 /**
  * Merge the PR when, and only when, its head is the one recorded as mergeable (or GitHub's signed update-branch merge
- * of it), its required checks are green on that head, the review is done and no maintainer decision is unread. Returns
- * what happened: "merged", "queued", "pending" (checks not done yet), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
- * head: the review label goes back on), "unread" (a maintainer's comment: the review runs again to apply it),
+ * of it), its required checks are green on that head, the review is done and no maintainer decision is unread, or the
+ * unread ones ask for nothing (unreadCleared). Returns
+ * what happened: "merged", "queued", "pending" (checks not done yet, or the drops would Block and whether a hung removal
+ * counts waits for its step's job: clearSlowHangs; `report.retry` when a job read failed), "queue-wait" (the queue took it out for a conflict with a PR ahead of it: queueConflictWait), "in-queue", "not-recorded", "re-review" (a new
+ * head: the review label goes back on), "unread" (a maintainer's comment no pass has read that `commentCheck`, the
+ * comment check this process can ask (comment-check.mjs openCommentCheck), did not read as asking nothing: the review
+ * runs again to apply it),
  * "code-scanning" (code scanning commented after the answer pass: the review runs again to answer it), "threads" (an
  * unresolved review conversation the base's rules require resolved, read before the merge or after GitHub refused it:
  * conversationsGate, `thirdParty` the named reviewers whose answered threads it resolves; the caller Blocks),
@@ -3422,17 +3560,18 @@ async function textEdit(repo, issue, prNumber, opts) {
  * "held" (a person took it out of the queue: it stays out until they enqueue it again, or it is reviewed again, gets a new head or re-enters),
  * or "stopped" (its Objective is stopped or waits for its restart, read first, from `issueData` when the caller has it: nothing merges; the stop's
  * tidy takes the PR out of the queue; an issue that cannot be read is "pending"). In the
- * queue, an entry whose merge_group commit started no check run within QUEUE_STALL_MS, or whose required check started
+ * queue, an entry whose merge_group commit started no check run within `stall.queueMs`, or whose required check started
  * and made no progress (its current step far past its normal duration, or past the fallback bound `hungMs`, else
- * queueBoundMs read once; logic.mjs queueHangs), is taken out and counts
- * as a drop. A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
+ * queueHungMs of the queue's own timeout; logic.mjs queueHangs), is taken out and counts
+ * as a drop. `queueTimeout` is that timeout in minutes (null when unread) as the caller read it with `hungMs`, else it
+ * is read here once; it also sets the deadline a hung removal's record keeps (logic.mjs queueDeadline). A Block on drops whose merge_group jobs GitHub never started (queueNotStarted) says so, quoting GitHub's
  * annotation, as infrastructure. `report` gets `reason` for a Block whose words depend on what was read (mergeBlockReason),
  * `checks` (`{sha, pending, missing}`: the required checks not done on the recorded head) with a "pending" for them,
  * `entry` (`{state, head, position}`, or null when it could not be read) when the PR was read in the queue, and
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, actionsToken = null, cache = {}, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3448,12 +3587,15 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   let stalledAt = null;
   let hung = null;
   let bound = hungMs;
+  // The queue's own check timeout in minutes, null when unread: the caller's, read with its bound, else read here once.
+  let timeout = queueTimeout;
   if (queue && (await inMergeQueue(repo, prNumber, opts).catch(() => false))) {
     // The checks the queue itself waits on (the ruleset's) and their integration, as the queue watch reads them.
     const gate = await requiredCheckSpecs(repo, opts).catch(() => checkNames || []);
     // The pass's one bound: the caller's (the dispatcher reads it once per tick), else read here once.
-    bound ??= await queueBoundMs(repo, opts);
-    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache }).catch((e) => {
+    if (timeout === undefined) timeout = await queueTimeoutMin(repo, opts);
+    bound ??= queueHungMs(timeout);
+    const st = await queueEntryState(repo, prNumber, opts, Date.now(), gate, { hungMs: bound, actionsToken, cache, stall }).catch((e) => {
       log(`#${issue}: PR #${prNumber}'s merge queue entry is unreadable (${errCode(e)}); next tick`);
       return null;
     });
@@ -3474,7 +3616,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // GitHub made the queue's commit and started no check on it (#295), or a required check started there and made no
     // progress (#2683, logic.mjs queueHangs): out and back in once, as a drop (which restarts CI); the second
     // time it Blocks, rather than waiting out the ruleset's check timeout.
-    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(QUEUE_STALL_MIN)} min`;
+    const what = st.hung ? `has ${hungChecks(st.hung)}, with no progress` : `started no check run in ${Math.round(stall.queueMs / 60_000)} min`;
     try {
       await dequeuePr(repo, pr.node_id, opts);
     } catch (e) {
@@ -3484,6 +3626,12 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     }
     stalledAt = new Date().toISOString();
     hung = st.hung || null;
+    // A stalled step of a job read gets the queue's own deadline for its commit (none with the timeout unread), so a
+    // later pass can tell whether it then finished green in time (clearSlowHangs).
+    if (hung?.some((h) => h.job)) {
+      const by = queueDeadline(st.headAt ?? st.enqueuedAt, timeout);
+      hung = hung.map((h) => ({ ...h, head: st.head, by }));
+    }
     // Out of the queue now: until it is back in, a watch (whose first read sees it out and ticks) brings the next pass,
     // whatever this pass then returns or throws (#2683 F3).
     report.watch = true;
@@ -3516,12 +3664,15 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     report.checks = { sha, pending: state.pending, missing: state.missing };
     return "pending";
   }
-  const { unread } = await unreadNow(repo, { issue, prNumber, self: selfLogin() || (await primeSelf(opts)) }, opts);
-  if (unread.length) {
+  const self = selfLogin() || (await primeSelf(opts));
+  const { unread } = await unreadNow(repo, { issue, prNumber, self }, opts);
+  const cleared = unread.length ? await unreadCleared(repo, { issue, prNumber, pr, issueData: issueNow, unread, check: commentCheck, objectiveLabel, self }, opts) : "clear";
+  if (cleared === "unread") {
     await removeLabel(repo, prNumber, REVIEW_LABEL, opts).catch(() => {});
     await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
     return "unread";
   }
+  if (cleared !== "clear") return cleared;
   // The Objective's text changed since its plan was made (objective-trust.mjs editedSincePlan): code made for the
   // earlier text does not merge; the caller Blocks. An edit no decider here could judge goes to the review stage.
   const text = await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) });
@@ -3530,6 +3681,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   // A PR the queue dropped (its checks never ran on the queue's commit, or failed there) goes back in once; dropped
   // again, it Blocks with the queue's reasons rather than waiting with no notice. GitHub's timeline is the record.
   let retry = null;
+  let lastHung = null;
   if (queue) {
     const removals = await mergeQueueRemovals(repo, prNumber, opts).catch((e) => {
       log(`#${issue}: PR #${prNumber}'s merge queue history is unreadable (${errCode(e)}); next tick`);
@@ -3541,12 +3693,13 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     for (const r of removals) {
       const rec = records.find((x) => Math.abs(Date.parse(x.at) - Date.parse(r.at)) <= 60_000);
       if (rec && !r.code) r.code = rec.code;
+      if (rec?.hung && !r.hung) r.hung = rec.hung;
     }
     // Factory's own removal just now, which the timeline may not show yet, counts once and with its own code.
     if (stalledAt) {
       const recent = removals.filter((r) => Date.parse(r.at) >= Date.parse(stalledAt) - 60_000).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       if (recent.length) removals.splice(removals.indexOf(recent.at(-1)), 1);
-      removals.push({ at: stalledAt, reason: STALL_CODE, code: hung ? HUNG_CODE : STALL_CODE, self: true });
+      removals.push({ at: stalledAt, reason: STALL_CODE, code: hung ? HUNG_CODE : STALL_CODE, self: true, ...(hung ? { hung } : {}) });
     }
     // Drops count from the latest of the review, the head's commit (GitHub keeps no push time for a branch push, and a
     // push is never before its commit) and the issue's last re-entry or Block: a re-entry's new head, or a re-entry with
@@ -3562,16 +3715,38 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       }
       since = queueSince([reviewedAt, head?.commit?.committer?.date ?? null, marks]);
     }
-    retry = queueRetry(removals, { since, self: selfLogin() || (await primeSelf(opts)) });
+    const self = selfLogin() || (await primeSelf(opts));
+    retry = queueRetry(removals, { since, self });
+    // At the Block: a hung removal whose step and job then finished green in time was no hang, and counts toward no try.
+    if (retry.block) {
+      const slow = await clearSlowHangs(repo, { issue, prNumber, removals, since, names, actionsToken }, opts);
+      // A hung step's job still running, or unread, before the queue's own deadline for it: whether that removal counts
+      // is not known yet, so nothing Blocks and the PR stays out. The run's end ticks the dispatcher (its workflow_run),
+      // as the cron does; an unread job asks for a retry (`report.retry`). Never past that deadline: hungOutcome.
+      if (slow.pending) {
+        delete report.watch;
+        if (slow.unread) report.retry = true;
+        // This pass's own removal has no record yet: one goes on the issue, so the next pass knows what it judged hung.
+        if (stalledAt && hung?.length) {
+          const by = hung.map((h) => h.by).filter(Boolean).sort()[0] ?? null;
+          await upsertComment(repo, issue, requeueWaitMarker(issue), requeueWaitBody(issue, prNumber, { at: stalledAt, code: HUNG_CODE }, hung, by), opts).catch((e) => log(`#${issue}: hung removal record: ${errCode(e)}`));
+        }
+        log(`#${issue}: whether Factory's removal of PR #${prNumber} from the merge queue at ${slow.pending.at} counts as a try waits for its hung step's job, at the latest until ${slow.pending.by}; the PR stays out until then`);
+        return "pending";
+      }
+      if (slow.cleared) retry = queueRetry(removals, { since, self });
+    }
+    // The steps the newest removal judged hung, for its requeue record and a Block's words.
+    if (retry.last?.code === HUNG_CODE) lastHung = removals.find((r) => r.at === retry.last.at)?.hung ?? null;
     if (retry.hold) {
       log(`#${issue}: a person took PR #${prNumber} out of the merge queue at ${retry.hold.at} (${retry.hold.code}); it stays out until it is enqueued again, reviewed again, gets a new head or re-enters`);
       return "held";
     }
     // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or
-    // the send-back would have taken it): no drop. It waits for that queue to move (queueConflictWait) rather than
-    // bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
+    // the send-back would have taken it): no drop. It waits while a PR in the queue conflicts with it (queueConflictWait)
+    // rather than bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
     if (retry.conflict) {
-      const wait = await queueConflictWait(repo, { issue, prNumber, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
+      const wait = await queueConflictWait(repo, { issue, prNumber, head: pr.head.sha, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
       if (wait) return wait;
     }
     // The newest drop is a red run on the queue's commit (QUEUE_RED_CODE): the review stage reads it first, once per drop
@@ -3595,25 +3770,27 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     if (retry.block) {
       delete report.watch;
       // A drop whose merge_group jobs GitHub never started (a billing lock, a spending limit): infrastructure, not the checks.
-      const stuck = hung ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
+      // The hung steps the Block names: this pass's, or those of the newest removal's record (a Block whose decision waited).
+      const hungNow = hung ?? lastHung;
+      const stuck = hungNow ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
       // GitHub never started the queue's jobs, through Factory's re-enqueue: an outage handled by the rules.
-      if (!hung && stuck.length) report.cause = "outage";
+      if (!hungNow && stuck.length) report.cause = "outage";
       // The queue's jobs ran and failed: the Block names the failed jobs and their first failure lines, with the cause and
       // advice the review stage's reading of the red drops recorded (queueDropBlock).
-      const red = !hung && !stuck.length && retry.codes.includes(QUEUE_RED_CODE);
+      const red = !hungNow && !stuck.length && retry.codes.includes(QUEUE_RED_CODE);
       const kinds = red ? queueRedRecords(await listComments(repo, issue, opts).catch(() => []), issue).filter((r) => r.state === "requeued" && !(Date.parse(since) > Date.parse(r.at))).map((r) => r.kind) : [];
       const said = red ? queueDropBlock({ drops: retry.drops, codes: retry.codes, kinds, lines: await queueFailureLines(repo, { prNumber, base: pr.base?.ref, since, actionsToken }, opts) }) : null;
       if (said) report.cause = said.cause;
       report.reason = said
         ? said.reason
-        : hung
-        ? `a required check made no progress on the merge queue's commit (${hungChecks(hung)}), again after Factory re-enqueued the PR once (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
+        : hungNow
+        ? `a required check made no progress on the merge queue's commit (${hungChecks(hungNow)}), again after Factory re-enqueued the PR ${retry.cleared ? `${retry.cleared + 1} times (one removal was a step that proved slow, not hung)` : "once"} (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
         : stuck.length
           ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then re-apply the label`
           : retry.block;
       return "dropped";
     }
-    if (retry.drops) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + 1})`);
+    if (retry.drops || retry.cleared) log(`#${issue}: the merge queue dropped PR #${prNumber} since its review, head or re-entry; enqueuing it again (try ${retry.drops + (retry.cleared || 0) + 1})`);
   }
   // A review conversation the merge would be refused for, read structurally before the merge rather than from GitHub's
   // refusal: code scanning's comment goes to the answer pass, any other Blocks naming it (conversationsGate).
@@ -3654,9 +3831,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // The queue's commit is made in a moment: the caller has it watched for a check run to start.
     report.watch = true;
     // A re-enqueue is said on the issue (codes and times), so a drop is visible before any Block.
-    if (retry?.drops && retry.last) {
-      const tryNo = retry.drops + 1;
-      await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, retry.last.code === HUNG_CODE ? hung : null), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));
+    // Its try counts every removal Factory put it back after, a cleared one included, so no notice takes another's place.
+    if ((retry?.drops || retry?.cleared) && retry.last) {
+      const tryNo = retry.drops + (retry.cleared || 0) + 1;
+      await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, lastHung), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));
     }
   }
   return how;

@@ -32,6 +32,7 @@ import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/a
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey, triageKeyState } from "./lib/triage.mjs";
+import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.js";
@@ -528,6 +529,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   } else if (token) out.push(PASS("app token", backend().name === "local" ? "local mode's token for this repository; permissions not verified" : "FACTORY_APP_TOKEN supplied; permissions not verified"));
   // Local red-check triage (a usable gateway key) reruns flaky reds with this token: doctor checks it may (not in a stage).
   if (local && !job && token && triageKey({ inputs, env })) out.push(await probeRerun({ repo, token }));
+  if (local && !job) out.push(decisionKeyCheck({ inputs, env }));
   // Where the key is in reach (local mode's file, the job's input): whether reviewer findings are judged.
   if (local || job) out.push(findingCheckRow({ inputs, env }));
 
@@ -1295,9 +1297,34 @@ export async function runnerChecks({ inputs, env = process.env }) {
     const home = await agentHomeProblem();
     out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Factory wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
   }
-  out.push((await onPath("git")) ? PASS("git", "present") : FAIL("git", "git not on PATH", "install git"));
+  out.push(gitCheck(await onPath("git"), await gitVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
+}
+
+/**
+ * git where Factory runs: present, and at least MERGE_BASE_GIT, which `git merge-tree --merge-base` needs (the rebase
+ * check of a send-back's conflict pass, and what a review reads after a rebase). `version` from outbox.mjs gitVersion.
+ */
+export function gitCheck(present, version) {
+  if (!present) return FAIL("git", "git not on PATH", "install git");
+  const min = MERGE_BASE_GIT.join(".");
+  if (!version) return WARN("git", "present; its version could not be read", `use git ${min} or later`);
+  const v = version.join(".");
+  if (gitAtLeast(version, MERGE_BASE_GIT)) return PASS("git", v);
+  return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with an AI Gateway key every send-back's conflict pass Blocks (without one its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
+}
+
+/**
+ * The decision model's key, said by local mode's doctor (not in a stage): what it turns on, and what runs without it.
+ * Off (no key file) passes, as the key is optional; a key file Factory refuses warns with its code (LOCAL.md).
+ */
+export function decisionKeyCheck({ inputs, env = process.env }) {
+  const { key, code } = triageKeyState({ inputs, env });
+  if (key) return PASS("decision model", "an AI Gateway key: red-check triage, the drift advisory, and a content check of each send-back's conflict pass are on");
+  const without = "a red goes to the fix pass untriaged, and a send-back's conflict pass is checked by matching commits where a file is not exactly the branch's: a squashed or reworded rebase Blocks, and a change lost through a rename or a merge, or a commit kept by author, time and subject whose conflict was resolved to the default branch's side, can pass";
+  if (code === "no-key") return PASS("decision model", `off (no key): ${without}; a key in ~/.config/factory/ai-gateway-key turns the content check on (LOCAL.md)`);
+  return WARN("decision model", `the AI Gateway key is not used (${code}): ${without}`, "fix the key file as LOCAL.md says (step 4)");
 }
 
 /** Per harness with a sandbox on a runner: its name in the checks, and the binaries it needs where the job runs. */

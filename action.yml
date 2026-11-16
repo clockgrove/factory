@@ -191,6 +191,9 @@ inputs:
   triage_model:
     description: The decision model red-check triage, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check and the edit check ask with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
     required: false
+  triage_min_confidence:
+    description: 'The confidence floor, from 0 to 1, for the decision calls on `triage_model`: a verdict that acts (a flake to rerun, a red the default branch fails the same way, a rebuttal, a kept file, the answer gate''s `only_asked`, an open Question, a fix pass''s progress, a wording-only edit, the same failure) counts only at this confidence or more. Empty: 0.7, the floor measured on `perplexity/pplx-decider-v1.2`. It is the floor of the AI Gateway''s `triage_model` only: whenever the stage''s own harness answers (no key, or after the gateway refused), the floor is 0.7. It goes with the model: a settings layer that names another `triage_model` (the default resolved) drops the floor of the layers below it, and one set lower down does not carry to another model a flag or this Action''s `triage_model` input names. The verdict, its confidence and the floor go on the progress line.'
+    required: false
   drift_model:
     description: The decision model the drift advisory asks with an AI Gateway key (an AI Gateway decision model id); `baseten/elephant-1` when empty.
     required: false
@@ -434,6 +437,7 @@ runs:
         FACTORY_INPUT_WORKER_SECRETS: ${{ inputs.worker_secrets }}
         FACTORY_INPUT_WORKER_SECRET_VALUES: ${{ inputs.worker_secret_values }}
         FACTORY_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
+        FACTORY_INPUT_TRIAGE_MIN_CONFIDENCE: ${{ inputs.triage_min_confidence }}
         FACTORY_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
         FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
         # The repository's variables (lib/inputs.mjs applyVariables lays them over the env block, then drops this).

@@ -67,7 +67,7 @@ The `harness` vendor:
   - Claude Code gets two turns (`--max-turns`); Codex and Copilot, with no tool, answer in one.
   - A stage runs at most three calls at once (`HARNESS_CALLS`), each freed slot passing straight to the next in line.
 - **The prompt** holds the question, its choices and a strict JSON Schema (`choice` from the choices, `confidence` from 0 to 1, nothing else). The input sits between two lines with a random marker it cannot know, marked untrusted. Only a reply that is exactly that JSON object (one surrounding code fence allowed) is a verdict.
-- **Confidence is the model's own word.** On this route `confidence` is what the model says, not a calibrated score like the gateway decision models'. Callers keep the same floor (0.7), so a verdict counts only where the model states that much.
+- **Confidence is the model's own word.** On this route `confidence` is what the model says, not a calibrated score like the gateway decision models'. Callers keep the default floor (0.7: `triage_min_confidence` is the gateway's triage model's, never the harness's), so a verdict counts only where the model states that much.
 - **The stage's login:**
   - Locally: the account the stage runs on, in the harness's outer sandbox as the stage's passes run, in a temp directory of its own.
   - On Actions and in a cloud sandbox: as the agent, in a home of its own in the unit's private `/tmp`, with the stage's credential. There Codex runs on an API key, and its thread is ephemeral.

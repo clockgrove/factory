@@ -5,7 +5,7 @@
 // the same jobs failing with the same failure lines (folded, each as many times), or a red the stage has seen before
 // (by signature), is none; the jobs that failed now passing, with a different set or fewer failing, is progress. Anything else asks the decision model,
 // through the one decision interface (decider.mjs, docs/ADAPTERS.md), on red-check triage's key, model setting and
-// confidence floor: only `closer` at MIN_CONFIDENCE or more is progress, so a model that keeps answering `closer` is
+// confidence floor: only `closer` at the floor (confidenceFloor) or more is progress, so a model that keeps answering `closer` is
 // bounded by max_usd and the wall clock alone. No decider is no progress; a decider that gives no answer leaves the
 // judgement unmade, which ends the loop as Factory's (or the outage's), never as the work's. This runs in Factory's own
 // process, never in a harness. The failure lines and the diff go in delimited, as data.
@@ -13,7 +13,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, foldLine, sameFailure } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor, foldLine, sameFailure } from "./triage.mjs";
 
 /** The one question asked when the exact checks cannot tell. */
 export const PROGRESS_QUESTION = {
@@ -140,12 +140,12 @@ export function progressInput({ before, after, diff }, tag = randomBytes(8).toSt
  * Gateway's `triage_model` with a key, else the stage's own harness (`stage`). With neither, `off` is why (the key's code
  * or `route-off`). `seen`: the stage's reds, one list for every validation loop the check is passed to (validationLoop
  * adds each red it reads). judge({before, after, seen, diff}) resolves {progress, why} and never throws: the exact
- * checks (redProgress) first, then the question; with the check off, `not_closer`, or `closer` under MIN_CONFIDENCE, no
+ * checks (redProgress) first, then the question; with the check off, `not_closer`, or `closer` under the floor (`min`), no
  * progress. No answer is `undecided`, with the Block's `cause` (`outage` for the vendor's outage, else `factory`); the
  * stage harness's usage limit that stopped the question is `limited` too: the caller ends the stage on it
  * (harness.mjs UsageLimitReached).
  */
-export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = MIN_CONFIDENCE } = {}) {
+export function openProgressCheck({ inputs = {}, env = process.env, home = homedir(), stage = null, decider = null, min = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const { model } = ask;
   const judge = async ({ before, after, seen = [], diff = null }) => {
@@ -156,8 +156,10 @@ export function openProgressCheck({ inputs = {}, env = process.env, home = homed
     const sure = typeof a?.confidence === "number";
     const conf = sure ? a.confidence.toFixed(2) : "";
     log(`fix progress (${model}): ${a?.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a?.error || "no_answer"})`}`);
-    if (a?.verdict === "closer" && sure && a.confidence >= min) return { progress: true, why: `the decision model (${model}) judged it closer to green at ${conf}` };
-    if (a?.verdict === "closer") return { progress: false, why: `the decision model (${model}) judged it closer to green at ${conf || "no stated confidence"}, under ${min}` };
+    // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
+    const floor = min ?? confidenceFloor(inputs, ask).min;
+    if (a?.verdict === "closer" && sure && a.confidence >= floor) return { progress: true, why: `the decision model (${model}) judged it closer to green at ${conf}` };
+    if (a?.verdict === "closer") return { progress: false, why: `the decision model (${model}) judged it closer to green at ${conf || "no stated confidence"}, under ${floor}` };
     if (a?.verdict === "not_closer") return { progress: false, why: `the decision model (${model}) judged it no closer to green${conf ? ` at ${conf}` : ""}` };
     const limited = ask.limited?.() ?? null;
     const error = a?.error || "no_answer";

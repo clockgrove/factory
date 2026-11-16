@@ -31,7 +31,7 @@ Commit as you go on `factory/<issue>`, each message naming its checklist item. N
 
 If the checklist cannot finish within the hour and dollar budget on the task card, or the integrated diff would exceed what a reviewer can read in one pass, split it: finish the first self-contained group of items, deliver it as this part's PR through factory-prove-acceptance and factory-deliver-pr, mark in plan.md which items remain, and list them in your exit record as `"part": {"remaining": [...]}`. Once that PR merges, Factory starts the next part from the default branch, with the plan in `$FACTORY_IN/plan.md` and the merged parts in `$FACTORY_IN/parts.md`. Each PR stands alone: validation green, the acceptance entries it proves named in its body, nothing the next part needs left broken. The last part leaves `part` out; its PR closes the issue. Decide this early, from the plan.
 
-The task card caps the parts; each has its own budget, so the cap bounds the Objective's whole spend. When the plan needs more parts than that, stop before building: a `question` exit (test `decision`) naming the groups, so the owner raises the cap or narrows the issue.
+The task card caps the parts (`max_parts`): a count of PRs, not a spend bound, since each part's jobs have budgets of their own. When the plan needs more parts than that, stop before building: a `blocked` exit whose reason names `max_parts` and the groups, so the owner raises the cap or narrows the issue.
 
 ## Before leaving this step
 

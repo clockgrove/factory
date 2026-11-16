@@ -811,7 +811,7 @@ export async function postReplies(repo, prNumber, issue, text, allowed, opts) {
 
 /**
  * At most this many sequential PRs per Objective by default; a split that needs more Blocks. The repository's max_parts
- * (inputs.mjs resolveInputs `maxParts`): each part has its own max_usd, so it bounds one Objective's spend.
+ * (inputs.mjs resolveInputs `maxParts`): a count of PRs, not a spend bound (each part's jobs have their own max_usd).
  */
 export const MAX_PARTS = 6;
 const PARTS = (issue) => `<!-- factory:${issue}:parts `;

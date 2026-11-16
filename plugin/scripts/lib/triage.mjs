@@ -34,7 +34,7 @@ export const MIN_CONFIDENCE = 0.7;
 
 /**
  * The confidence floor of every decision call on the triage decider (triage, the same-failure check, the finding check,
- * the answer gate, the answer check, the rebase check, the progress check, the edit check): `triage_min_confidence`
+ * the answer gate, the answer check, the rebase check, the progress check, the edit check, the fence check): `triage_min_confidence`
  * (inputs.mjs triageFloorSetting: a number from 0 to 1, which goes with the `triage_model` it was set beside) while the
  * AI Gateway's `triage_model` answers (`ask`, the decider: decider.mjs openDecider `asked()`), else MIN_CONFIDENCE: the
  * stage's harness, also after the gateway refused, is another model the setting was not set for. Read when a verdict is

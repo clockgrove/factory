@@ -116,7 +116,8 @@ test("outbox: a fix pass's toolchain change outside its fence is refused; put ba
   r.put(r.work, "package-lock.json", "{}\n");
   r.run(r.work, "commit", "-q", "-m", "pins");
   r.run(r.work, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r);
+  // The download script is toolchain by the repository's toolchain_paths setting.
+  const box = await open(r, { toolchainPaths: ["scripts/get-toolchain.sh"] });
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box.push(), true, box.error);

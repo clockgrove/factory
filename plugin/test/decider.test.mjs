@@ -526,3 +526,25 @@ test("#379: the rebase check judges through the stage's harness without a key, a
   assert.equal(openKeptCheck({ inputs: {}, env: {} }), null, "no stage, no key");
   assert.equal(openKeptCheck({ inputs: { decisionRoute: "off" }, env: {}, stage }), null);
 });
+
+test("#379: a stage harness's usage limit in the rebase check ends the stage through UsageLimitReached: nothing pushed, never read as a change not kept", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
+  const { bin, calls } = fakeHarness("claude", LIMIT_RUN, { code: 1 });
+  const check = openKeptCheck({ inputs: {}, env: {}, stage: stageOf(bin, "claude").stage });
+  let blocked = null;
+  let verdict = null;
+  // The outbox's rebaseLeft asks the judge about one path, as outbox.mjs keptLeft does, and reads its answer as not kept.
+  const outbox = {
+    rebaseLeft: async ({ judge }) => {
+      verdict = await judge({ path: "src/a.ts", conflicted: true, branch: "+a", base: "+b", head: "+b" });
+      return verdict.kept ? null : `src/a.ts: ${verdict.why}`;
+    },
+    block: (why) => (blocked = why),
+  };
+  await assert.rejects(sendBackGuard({ outbox, onto: { from: "f", base: "b", files: ["src/a.ts"] }, defaultBranch: "main", judge: check.judge, limited: check.limited }), (e) => e.code === USAGE_LIMIT && e.refusal.code === "usage_limit_reached");
+  assert.equal(calls().length, 1);
+  assert.equal(verdict.kept, false);
+  assert.match(blocked, /^the rebase check met claude's usage limit; nothing of the send-back's conflict pass was pushed/);
+  assert.doesNotMatch(blocked, /could not resolve the conflict/);
+});

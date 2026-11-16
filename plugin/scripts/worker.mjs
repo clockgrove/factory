@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -60,10 +60,20 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
  * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
  * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a file not exactly the
  * branch's (kept.mjs openKeptCheck), null with no decider; `progress`: where the check's note goes (outbox rebaseNote).
+ * `limited()`: the stage harness's usage limit that stopped the check's questions (kept.mjs). Then nothing is pushed and
+ * it throws UsageLimitReached: the stage ends as a pass meeting the limit does (paused locally until the reset, held or
+ * Blocked `provider-quota` elsewhere), and an unanswered question never reads as a change not kept.
  */
-export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null }) {
+export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null }) {
   if (!onto) return "";
   const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
+  const limit = limited?.() ?? null;
+  if (limit) {
+    const why = `the rebase check met ${limit.harness}'s usage limit; nothing of the send-back's conflict pass was pushed, and it is checked again after the reset`;
+    outbox.block(why);
+    log(why);
+    throw new UsageLimitReached(limit, { since: Date.now(), label: "rebase check" });
+  }
   // A change the branch undid that the head carries anyway: said on the progress comment when the branch goes out.
   if (!left && outbox.rebaseNote) {
     log(`rebase check: ${outbox.rebaseNote}`);
@@ -788,7 +798,7 @@ async function main() {
   // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
   // branch's is judged by the decision model when there is a key (kept.mjs); without one the commits are matched.
   const keptCheck = rebaseOnto ? openKeptCheck({ inputs, stage: decisionStage }) : null;
-  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress });
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a

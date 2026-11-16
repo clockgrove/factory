@@ -62,5 +62,7 @@ export function openKeptCheck({ inputs, env = process.env, stage = null, decider
     if (a.verdict === "lost") return { kept: false, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
     return { kept: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
   };
-  return { model, judge };
+  // `limited()`: the stage harness's usage limit that stopped its questions (decider.mjs); the send-back then ends as a
+  // pass meeting the limit does (worker.mjs sendBackGuard), never on a "not kept" its unanswered question would read as.
+  return { model, judge, limited: () => ask.limited?.() ?? null };
 }

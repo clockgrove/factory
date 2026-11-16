@@ -1,6 +1,7 @@
 // Triage of a red required check before Factory spends a fix pass on it. Each failing CI job is asked, one question per
-// job, whether the change broke it or it is infrastructure or a flake; only when every failing job reads flaky at
-// MIN_CONFIDENCE or more, and no failure points at a file the PR changes, are the failed jobs rerun, once per head.
+// failure (jobs that fail the same way share one), whether the change broke it or it is infrastructure or a flake; only
+// when every failing job reads flaky at MIN_CONFIDENCE or more, and no failure points at a file the PR changes, are the
+// failed jobs rerun, once per head.
 // Anything else (a change verdict, a low confidence, an error, a refusal, a failure signature already rerun once, an
 // earlier refused rerun, no decider) goes to the fix pass exactly as before. Each triage line, and why triage is off at a
 // red, goes to the job log and the run's progress comment.
@@ -15,16 +16,18 @@ import { falsy } from "../../vendor/@actions/expressions/dist/result.js";
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import { deciderKeyState, openDecider } from "./decider.mjs";
-import { cleanLog, jobLog, listComments, logWindow, rest } from "./github.mjs";
+import { cleanLog, failingStep, jobLog, listComments, logWindow, rest } from "./github.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf } from "./logic.mjs";
 import { parseYaml } from "./yaml.mjs";
+
+export { failingStep };
 
 /** The default decision model: 23/23 single-job reds and every flaky one caught in Factory's offline replay (#2504). */
 export const TRIAGE_MODEL = "perplexity/pplx-decider-v1.2";
 /** A flaky verdict below this reruns nothing: on the replay set the hard change-caused reds scored 0.51 to 0.58. */
 export const MIN_CONFIDENCE = 0.7;
-/** More failing jobs than this are not triaged (and reds.mjs details no more): so wide a red is not one flake. */
+/** The most failing jobs whose logs reds.mjs details for a fix pass, and notStartedJobs reads. Triage asks of every one. */
 export const MAX_JOBS = 10;
 
 /** The one question each failing job is asked, as measured in the replay. */
@@ -173,24 +176,6 @@ export function repoRefs(line) {
     out.push(p);
   }
   return out;
-}
-
-/**
- * The lines of the step that failed: from the last `##[group]` (a step's header) before the first `##[error]` to the
- * next `##[group]` after it. Warnings and failure-shaped lines from steps that passed (setup, caches) stay out of the
- * signature. A log with no `##[error]`, or no group before it, is read whole.
- */
-export function failingStep(lines) {
-  const err = lines.findIndex((l) => l.startsWith("##[error]"));
-  if (err < 0) return lines;
-  let start = -1;
-  for (let i = err - 1; i >= 0; i -= 1) if (lines[i].startsWith("##[group]")) {
-    start = i;
-    break;
-  }
-  if (start < 0) return lines;
-  const next = lines.findIndex((l, i) => i > err && l.startsWith("##[group]"));
-  return lines.slice(start, next < 0 ? lines.length : next);
 }
 
 /**
@@ -921,7 +906,7 @@ export function triageLine({ sha, model, jobs, outcome }) {
   const each = jobs.map((j) => {
     const sig = j.sig.id ? `${j.sig.id}${j.repeat ? ", seen before" : ""}${j.sig.line ? ` \`${j.sig.line.replace(/`/g, "'")}\`` : ""}` : "no failure line found";
     if (j.infra) return `${j.name}: failed in its ${j.infra} step (${j.step}), no model asked [${sig}]`;
-    return `${j.name}: ${j.verdict ?? `no verdict (${j.error || "?"})`}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""} [${sig}]`;
+    return `${j.name}: ${j.verdict ?? `no verdict (${j.error || "?"})`}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""}${j.as ? ` (asked as ${j.as}: the same failure)` : ""} [${sig}]`;
   });
   return `triage of the red on ${String(sha).slice(0, 7)} (${model}): ${each.join("; ")} → ${outcome}`;
 }
@@ -1046,10 +1031,6 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       await record(`triage: the failed jobs on ${sha.slice(0, 7)} were already rerun once; fix pass`, {});
       return no;
     }
-    if (failedRuns.length > MAX_JOBS) {
-      await record(`triage: ${failedRuns.length} failing jobs on ${sha.slice(0, 7)}, more than ${MAX_JOBS}; fix pass`, {});
-      return no;
-    }
     const { notActions, jobs: actionsJob } = await actionsJobs(failedRuns);
     if (notActions) {
       await record(`triage: ${notActions} is not an Actions job, so it cannot be rerun; fix pass`, {});
@@ -1074,13 +1055,23 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
 
   // Each failing job's question (red(), classify()): its log and signature read, the model asked unless the failure
   // failed on GitHub's side, was already rerun once on the Objective, or points at a file the PR changes (changedPathIn).
-  // What else its lines name of the PR (changeMentions) is part of the question.
+  // What else its lines name of the PR (changeMentions) is part of the question. A red as wide as a matrix is asked once
+  // per failure, not once per job: jobs that fail the same way (failureSignature without the job's name: the same
+  // failure lines and files) share one question, asked of the first of them, so an outage hitting every leg is one
+  // question and many separate failures are many. A job with no failure line is a question of its own.
   const askJobs = async ({ sha, failedRuns, required, seen, actionsJob }) => {
     const files = (await rest(`repos/${repo.full}/pulls/${prNumber}/files?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
     const names = changedNames(files);
     const texts = new Map(await Promise.all(failedRuns.map(async (r) => [r.id, await jobLog(repo, r.id, actions).catch(() => "")])));
     const sigs = new Map(failedRuns.map((r) => [r.id, failureSignature(r.name, texts.get(r.id))]));
     const picked = jobsToTriage(failedRuns, required, sigs);
+    const questions = new Map();
+    const askOnce = (r, step, text, sig) => {
+      const key = sig.id ? failureSignature("", text).id : `job ${r.id}`;
+      if (!questions.has(key)) questions.set(key, { first: r.name, verdict: ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, step, excerpt: logWindow(text, 4000), files, mentions: changeMentions(sig, names) }), TRIAGE_QUESTION) });
+      const q = questions.get(key);
+      return q.verdict.then((v) => (q.first === r.name ? v : { ...v, as: q.first }));
+    };
     return Promise.all(
       picked.map(async (r) => {
         const text = texts.get(r.id);
@@ -1097,7 +1088,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
         // A failure in a file the PR changed could be the change's own intermittent defect: never rerun to green.
         const own = changedPathIn(sig, names);
         if (own) return { name: r.name, sig, repeat, step, verdict: null, confidence: null, error: `its failure points at ${own}, which the PR changes` };
-        const v = await ask.decide(triageInput({ repo: repo.full, prNumber, sha, job: r.name, step, excerpt: logWindow(cleanLog(text), 4000), files, mentions: changeMentions(sig, names) }), TRIAGE_QUESTION);
+        const v = await askOnce(r, step, text, sig);
         return { name: r.name, sig, repeat, step, ...v };
       }),
     );
@@ -1109,10 +1100,6 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // verdicts go to the log and the progress comment.
   const classify = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return { flaky: false };
-    if (failedRuns.length > MAX_JOBS) {
-      await record(`triage: ${failedRuns.length} failing jobs on ${sha.slice(0, 7)}, more than ${MAX_JOBS}; the change's`, {});
-      return { flaky: false };
-    }
     const { notActions, jobs: actionsJob } = await actionsJobs(failedRuns);
     if (notActions) {
       await record(`triage: ${notActions} is not an Actions job; the change's`, {});
@@ -1137,11 +1124,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // failed jobs are rerun once for that head (the same once-per-head record as red()), no model asked, only when nothing
   // says the change caused the red: no change_caused verdict on this head, no failure pointing at a file the PR changes, no
   // failure signature already rerun on the Objective, and each job either answered by the model on this head or failed
-  // on GitHub's side. Otherwise, or past MAX_JOBS, nothing is rerun ({skipped}).
+  // on GitHub's side. Otherwise nothing is rerun ({skipped}).
   const again = async ({ sha, failedRuns = [], until = 0 }) => {
     const short = String(sha).slice(0, 7);
     if (!failedRuns.length) return { rerun: false, skipped: "no failed job" };
-    if (failedRuns.length > MAX_JOBS) return { rerun: false, skipped: `${failedRuns.length} failing jobs, more than ${MAX_JOBS}` };
     const seen = await known();
     if (seen.refused) return { rerun: false, refused: { earlier: true, unchanged: true, where: env.GITHUB_ACTIONS ? "actions" : "local" } };
     if (seen.reruns.has(sha)) return { rerun: false, already: true };

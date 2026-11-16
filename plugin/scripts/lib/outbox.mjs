@@ -75,22 +75,26 @@ export const gitAtLeast = (v, min) => {
 };
 
 /**
- * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
- * Text is the only signal git gives here (no exit code tells a dropped connection from a refusal), so the list is kept
- * this short and in this one place. An HTTP 4xx other than 429 (GIT_REFUSED) is a refusal and wins over it.
+ * The HTTP status a remote refused a git or Git LFS request with, as git, curl and git-lfs print it (`The requested URL
+ * returned error: 403`, `RPC failed; HTTP 413`, LFS's `HTTP 404` / `Client error: … 403`): a 4xx is the remote's answer.
+ * 408 and 429 (a timeout, a rate limit) are no refusal of the request, and a 5xx is the remote failing, not answering.
  */
-const GIT_TRANSPORT = /returned error: (5\d\d|429)|RPC failed; (HTTP (5\d\d|429)|curl \d+)|Could not resolve host|Failed to connect to|Connection (timed out|reset|refused)|Operation timed out|Network is unreachable|the remote end hung up unexpectedly|unexpected disconnect|early EOF|gnutls_handshake|SSL_ERROR_SYSCALL|SSL_read|HTTP\/2 stream \d+ was not closed cleanly|dial tcp|connection reset by peer|i\/o timeout|TLS handshake timeout|no such host|Server error/i;
-const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4(?!29)\d\d\b/i;
+const GIT_REFUSED = /(returned error:|RPC failed; HTTP|HTTP|Client error:?.*?) 4(?!29|08)\d\d\b/i;
 
 /**
- * Whether a failed git network command (fetch, ls-remote, push, lfs push) failed in transport, so it may go again. A push
- * whose porcelain has a line for `ref` was answered (refused or done) and is never transport, whatever else it says.
+ * Whether a failed git network command (fetch, ls-remote, push, lfs push) got no answer from the remote, so it may go
+ * again: it ended with an exit code (not timed out or killed) and nothing in its output is the remote's answer. The
+ * answers: for a push, git's porcelain line for `ref` (done, or refused: rejected, a hook's decline), except git's
+ * `[remote failure]`, a remote that failed to report the ref's status; for any command, an HTTP 4xx refusal
+ * (GIT_REFUSED). Anything else (a dropped connection, DNS, TLS, a 5xx, a timeout of the remote) never completed. A
+ * refusal git reports without a status (a missing ref, a 401's `Authentication failed`) is tried again within
+ * GIT_RETRY's bound before it stands.
  */
 export function gitTransport(r, ref = null) {
   if (!r || r.code === 0 || r.timedOut || r.code == null) return false;
-  if (ref && String(r.stdout).split("\n").some((l) => l.split("\t")[1]?.endsWith(`:${ref}`))) return false;
-  const text = `${r.stdout}\n${r.stderr}`;
-  return !GIT_REFUSED.test(text) && GIT_TRANSPORT.test(text);
+  const line = ref ? String(r.stdout).split("\n").map((l) => l.split("\t")).find((f) => f[1]?.endsWith(`:${ref}`)) : null;
+  if (line) return /^\[remote failure\]/.test(String(line[2] || ""));
+  return !GIT_REFUSED.test(`${r.stdout}\n${r.stderr}`);
 }
 
 /**
@@ -290,7 +294,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       if (r.code === 0 || n >= GIT_RETRY.tries || !gitTransport(r, ref)) return r;
       const wait = Math.round(RETRY.baseMs * 2 ** (n - 1) * (0.7 + 0.6 * RETRY.random()));
       if (RETRY.now() + wait > end) return r;
-      log(`git ${what}: a network failure (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
+      log(`git ${what}: no answer from the remote (exit ${r.code}); try ${n + 1} of ${GIT_RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
       await RETRY.sleep(wait);
       if (landed && (await landed().catch(() => false))) return { ...r, code: 0, landed: true };
     }

@@ -359,6 +359,28 @@ test("failureSignature: only the failing step counts; setup noise and post-job l
   assert.deepEqual(failingStep(["x", "##[error]boom"]), ["x", "##[error]boom"]);
 });
 
+test("#420 logWindow: the failed step, cut at its ##[group] boundaries: no other step's output, its command kept when it is long", async () => {
+  const { logWindow } = await import("../scripts/lib/github.mjs");
+  const log = fixture("steps-mocha.txt");
+  const w = logWindow(log, 4000);
+  assert.equal(w.split("\n")[0], "##[group]Run npm test");
+  assert.equal(w.split("\n").at(-1), "##[error]Process completed with exit code 1.");
+  assert.match(w, /AssertionError/);
+  assert.doesNotMatch(w, /Cache service|npm warn deprecated|Post job cleanup|post-step/, "the set-up steps' and the post-job step's lines are not why it failed");
+  assert.doesNotMatch(w, /^\d{4}-\d{2}-\d{2}T/m, "cleaned of the runner's timestamps");
+  // A step longer than the window: its command and its end, whole lines, the cut counted; never the step before it.
+  const long = ["##[group]Run npm ci", ...Array.from({ length: 50 }, (_, i) => `npm warn deprecated pkg-${i}`), "##[group]Run npm test", "npm test", ...Array.from({ length: 400 }, (_, i) => `ok ${i + 1} - a passing check with a fairly long title number ${i}`), "not ok 401 - the failing check", "  AssertionError: expected 1 to equal 2", "##[error]Process completed with exit code 1.", "##[group]Post job cleanup.", "git config --unset-all http.extraheader"].join("\n");
+  const cut = logWindow(long, 1000);
+  const lines = cut.split("\n");
+  assert.ok(cut.length <= 1000, String(cut.length));
+  assert.equal(lines[0], "##[group]Run npm test");
+  assert.match(lines[1], /^\(\d+ lines of this step not shown\)$/);
+  assert.deepEqual(lines.slice(-3), ["not ok 401 - the failing check", "  AssertionError: expected 1 to equal 2", "##[error]Process completed with exit code 1."]);
+  assert.ok(lines.slice(2).every((l) => /^(ok \d+|not ok|  AssertionError|##\[error\])/.test(l)), "whole lines of the failed step only");
+  // No ##[error]: the log's end, whole.
+  assert.equal(logWindow("a\nb", 4000), "a\nb");
+});
+
 // ------------------------------------------------------------------ a required job GitHub never started (#2676)
 
 // The real one: clockgrove/clockgrove's `quality` job while its Actions were locked for billing (no step, no runner).
@@ -955,6 +977,34 @@ test("triage: a changed file's name in an unrelated stack frame is asked of the 
   }
 });
 
+test("#420 triage: a red as wide as a matrix is asked once per failure, not cut at a job count; each job gets its failure's verdict", async () => {
+  const legs = Array.from({ length: 12 }, (_, i) => ({ ...red41[0], id: 300 + i, name: `test (${i})` }));
+  const jobs = Object.fromEntries(legs.map((r) => [r.id, { ...testFailed, id: r.id, name: r.name }]));
+  // Eleven legs fail one way (one outage on every leg), one another way.
+  const logs = Object.fromEntries(legs.map((r, i) => [r.id, legLog(i === 11 ? MAC : LINUX)]));
+  const decider = asking({ verdict: "flaky_or_infra", confidence: 0.95 });
+  const lines = [];
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+    const r = await t.red({ sha: "d".repeat(40), failedRuns: legs, required: [] });
+    assert.equal(decider.asked.length, 2, "one question per failure");
+    assert.match(decider.asked[0], /^Failing CI job: test \(0\)$/m);
+    assert.match(decider.asked[1], /^Failing CI job: test \(11\)$/m);
+    assert.equal(r.rerun, true, lines.join("\n"));
+    assert.equal(seen.reruns, 1, "the legs' one workflow run");
+    assert.match(lines[0], /test \(5\): flaky_or_infra 0\.95 \(asked as test \(0\): the same failure\)/);
+    assert.match(lines[0], /test \(11\): flaky_or_infra 0\.95 \[/);
+  });
+  // One failure the change's: no rerun, whatever the others read.
+  const split = { asked: [], decide: async (input) => (split.asked.push(input), /test \(11\)/.test(input) ? { verdict: "change_caused", confidence: 0.9 } : { verdict: "flaky_or_infra", confidence: 0.95 }) };
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: split });
+    assert.equal((await t.red({ sha: "e".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(split.asked.length, 2);
+    assert.equal(seen.reruns, 0);
+  });
+});
+
 test("failureSignature: Git LFS's own failure lines are a signature, also behind a tool's prefix", () => {
   const sig = failureSignature("quality", lfsLog);
   assert.ok(sig.id);
@@ -993,9 +1043,6 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
     assert.equal((await t.again({ sha: "b".repeat(40), failedRuns })).rerun, true, "another head, flaky below the bar");
     assert.deepEqual([...recs.at(-1).sigs], [failureSignature("quality", failingLog).id]);
     assert.deepEqual((await t.again({ sha: "c".repeat(40), failedRuns })).skipped, "the failure of quality was already rerun once on this Objective");
-    // More failing jobs than MAX_JOBS: no rerun.
-    const many = Array.from({ length: 11 }, (_, i) => ({ ...red41[0], id: 100 + i }));
-    assert.equal((await t.again({ sha: "d".repeat(40), failedRuns: many })).skipped, "11 failing jobs, more than 10");
   });
   // No key: red() is off, but the unchanged head's rerun needs no model.
   const home = mkdtempSync(join(tmpdir(), "nokey-"));

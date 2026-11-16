@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, factoryReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -155,11 +155,15 @@ const notDone = (e) => e?.unsent === true || (e?.rateLimited === true && (e.stat
 const rateLimitOf = (status, headers, message) => status === 429 || (status === 403 && (headers.get("x-ratelimit-remaining") === "0" || headers.has("retry-after") || /secondary rate limit|abuse/i.test(String(message || ""))));
 
 /**
- * Mark a rate-limited GitHubError `err` as quota `quota`'s primary limit spent, when it is (network.mjs spentResetOf):
- * code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell, and the process's record of it (noteSpent).
+ * Mark a rate-limited GitHubError `err`, GitHub's answer to a request to `url` with `token`, as quota `quota`'s primary
+ * limit spent, when it is (network.mjs spentResetOf: GitHub's count of the quota, read with the same token from
+ * GET /rate_limit, which no limit counts, decides): code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell,
+ * and the process's record of it (noteSpent).
  */
-function markSpent(err, quota, status, headers, message) {
-  const resetAt = err.rateLimited ? spentResetOf(status, headers, message, RETRY.now()) : null;
+async function markSpent(err, quota, url, token, headers) {
+  if (!err.rateLimited || !spentCandidate(headers)) return;
+  const count = await call(`${API()}/rate_limit`, { token }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), quotaResource(url), r.headers.get("date")) : null)).catch(() => null);
+  const resetAt = spentResetOf(headers, count, RETRY.now());
   if (resetAt === null) return;
   err.code = RATE_LIMIT_SPENT;
   err.resetAt = resetAt;
@@ -482,7 +486,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited: limited });
     const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
     if (asked !== null) err.waitMs = asked;
-    markSpent(err, quota, r.status, r.headers, msg);
+    await markSpent(err, quota, url, sent.token, r.headers);
     throw err;
   };
   const pages = [];
@@ -563,7 +567,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
       const err = new GitHubError(`graphql failed (${r.status}): ${(data?.message || text).slice(0, 300)}`, r.status, text, { rateLimited: limited });
       const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
       if (asked !== null) err.waitMs = asked;
-      markSpent(err, quota, r.status, r.headers, data?.message);
+      await markSpent(err, quota, url, sent.token, r.headers);
       throw err;
     }
     if (data?.errors?.length) {
@@ -573,7 +577,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
         err.unsent = true;
         const asked = askedWaitMs(r.headers, RETRY.now());
         if (asked !== null) err.waitMs = asked;
-        markSpent(err, quota, r.status, r.headers, err.message);
+        await markSpent(err, quota, url, sent.token, r.headers);
       }
       throw err;
     }
@@ -968,14 +972,42 @@ export function cleanLog(raw) {
 }
 
 /**
- * About `chars` of a cleaned job log: the runner's own error annotations mark where the job failed, and the window
- * around them beats the tail (post-job cleanup); without one, the tail.
+ * The lines of the step that failed: from the last `##[group]` (a step's header) before the first `##[error]` to the
+ * next `##[group]` after it. Warnings and failure-shaped lines from steps that passed (setup, caches) stay out of the
+ * signature. A log with no `##[error]`, or no group before it, is read whole.
+ */
+export function failingStep(lines) {
+  const err = lines.findIndex((l) => l.startsWith("##[error]"));
+  if (err < 0) return lines;
+  let start = -1;
+  for (let i = err - 1; i >= 0; i -= 1) if (lines[i].startsWith("##[group]")) {
+    start = i;
+    break;
+  }
+  if (start < 0) return lines;
+  const next = lines.findIndex((l, i) => i > err && l.startsWith("##[group]"));
+  return lines.slice(start, next < 0 ? lines.length : next);
+}
+
+/**
+ * The lines of a job log that say why the job failed: the step that failed (failingStep, cut at its `##[group]`
+ * boundaries), so no other step's output (set-up warnings, caches, post-job cleanup) is in it. The log is cleaned
+ * (cleanLog) first. A step longer than `chars` (what a prompt holds) keeps its first line, the command it ran, and as
+ * many of its last whole lines as fit, where the runner reports the failure; the lines left out are counted.
  */
 export function logWindow(text, chars = 4000) {
-  const first = text.indexOf("##[error]");
-  if (first === -1) return text.slice(-chars);
-  const last = text.lastIndexOf("##[error]");
-  return text.slice(Math.max(0, first - Math.round(chars * 0.75)), Math.min(text.length, last + Math.round(chars * 0.25)));
+  const step = failingStep(cleanLog(text).split("\n"));
+  const whole = step.join("\n");
+  if (whole.length <= chars) return whole;
+  const kept = [];
+  let room = chars - step[0].length - 64;
+  for (let i = step.length - 1; i > 0 && step[i].length + 1 <= room; i -= 1) {
+    kept.unshift(step[i]);
+    room -= step[i].length + 1;
+  }
+  // One last line longer than all the room: its end.
+  if (!kept.length && step.length > 1) kept.push(step.at(-1).slice(-Math.max(0, room)));
+  return [step[0], `(${step.length - 1 - kept.length} lines of this step not shown)`, ...kept].join("\n");
 }
 
 /** The most of one job log Factory holds: past it the head is cut while reading and the end kept. */
@@ -984,8 +1016,9 @@ export const JOB_LOG_CAP = 8 * 1024 * 1024;
 const LOGS = new Map();
 
 /**
- * An Actions job's whole log (a check-run's id is the job's id) up to JOB_LOG_CAP bytes, its end kept. The red's own
- * jobs (at most MAX_JOBS, read by triage and again by the fix pass's detail) are kept; `cache: false` for a log read once.
+ * An Actions job's whole log (a check-run's id is the job's id) up to JOB_LOG_CAP bytes, its end kept. The twelve
+ * newest read are kept (a red's own jobs, read by triage and again by the fix pass's detail); `cache: false` for a log
+ * read once.
  */
 export async function jobLog(repo, jobId, opts, { cache = true } = {}) {
   const key = `${repo.full}#${jobId}`;
@@ -998,10 +1031,10 @@ export async function jobLog(repo, jobId, opts, { cache = true } = {}) {
   return text;
 }
 
-/** The window of an Actions job's log around its failure (logWindow); empty when unavailable. */
+/** The failed step of an Actions job's log (logWindow); empty when unavailable. */
 export async function jobLogTail(repo, jobId, opts, chars = 4000) {
   try {
-    return logWindow(cleanLog(await jobLog(repo, jobId, opts)), chars);
+    return logWindow(await jobLog(repo, jobId, opts), chars);
   } catch {
     return "";
   }

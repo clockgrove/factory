@@ -234,6 +234,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     if (!deadlines.some((d) => d.kind === "retry")) due(null, "retry", now.getTime() + RETRY_WAKE_MS);
     log(`${what} unread this tick; a retry is due`);
   };
+  // The sandbox record of Objective n, as `{ record }` (null: none written), or null when its comments could not be
+  // read: a failed read is no absent record, so the caller decides nothing on that Objective this tick (#430).
+  const recordRead = async (n) => {
+    const comments = await listComments(repo, n, opts).catch(() => null);
+    if (comments) return { record: sandboxRecord(comments, n) };
+    retry(`#${n}'s sandbox record`);
+    return null;
+  };
   // Markers and claims written by people are trusted by write access, which their association may not show this token.
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   const listed = await listIssuesByLabel(repo, inputs.objectiveLabel, opts);
@@ -727,16 +735,21 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         const timeline = async () => (events === undefined ? (events = await timelineOf(repo, issue.number, opts).catch(() => null)) : events);
         let boxRecord = null;
         // A local loop on a repository with a sandbox: a live lease holds the Objective (one serve --all routes, or one
-        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own.
+        // relabelled factory:local mid-stage). Read for liveness only; the sandbox route's own passes stay its own. An
+        // unread record may hold a live lease, so nothing is decided on the Objective this tick (#430).
         if (!sandbox && inputs.sandbox) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          const { record } = read;
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
             leaseDue(issue.number, record);
             continue;
           }
         }
         if (sandbox && backend().trigger.routes(issue)) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          const { record } = read;
           boxRecord = record;
           boxRecords.set(issue.number, record);
           if (stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000)) {
@@ -1091,10 +1104,17 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
           // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
         }
+        // The sandbox route's record of this Objective, read once for the two passes below.
+        let boxRecord = null;
+        if (sandbox) {
+          const read = await recordRead(issue.number);
+          if (!read) continue;
+          boxRecord = read.record;
+        }
         // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
         if (sandbox && reviewing && !pr.draft) {
           const labelledAt = await objectiveLabeledAt(repo, open.number, REVIEW_LABEL, opts).catch(() => null);
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const record = boxRecord;
           boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
@@ -1120,7 +1140,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // A fix pass in review that waits on CI for its head: the check event lost, the sweep names it once CI is done.
         if (sandbox && !relaunch.includes(issue.number)) {
-          const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+          const record = boxRecord;
           boxRecords.set(issue.number, record);
           const holds = stageHolds(record, Date.now(), inputs.timeoutMinutes * 60_000);
           if (holds) leaseDue(issue.number, record);
@@ -1299,7 +1319,10 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   if (sandbox && !inputs.issue) {
     await pooled(wanted, RELATION_READS, async (issue) => {
       if (NOT_READY_STATUSES.has(stateOf(issue, statuses[issue.number] ?? null))) return;
-      const record = sandboxRecord(await listComments(repo, issue.number, opts).catch(() => []), issue.number);
+      const read = await recordRead(issue.number);
+      // Unread: whether the vendor's quota still holds it is unknown, so it is not picked this tick.
+      if (!read) deferred[issue.number] = "its sandbox record could not be read; read again next tick";
+      const record = read?.record ?? null;
       if (quotaWaiting(record, now.getTime())) {
         deferred[issue.number] = `the sandbox vendor's quota refused its last start; next try after ${new Date(Date.parse(record.quota.retryAt)).toISOString().slice(11, 16)}Z`;
         due(issue.number, "quota", Date.parse(record.quota.retryAt));

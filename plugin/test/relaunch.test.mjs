@@ -21,8 +21,9 @@ const MIN = 60_000;
 /**
  * One repository on GitHub: issues with labels, their timelines and comments, kept across ticks. `runs` and `jobs`: the
  * workflow's runs (listed newest first within a `created` range, `per_page` at most) and each run's jobs; `spend`: the
- * day's spend comments; `failRecord`: the relaunch record's post fails. `cfg` is read at each request, so a test may
- * change it between ticks.
+ * day's spend comments; `failRecord`: the relaunch record's post fails; `failComments`: the issues whose comment list
+ * cannot be read (a network blip, 502); `prs`: an open PR per issue, `{ number, review }` (`review`: when the review
+ * label went on, or none). `cfg` is read at each request, so a test may change it between ticks.
  */
 function fakeGitHub(open, cfg = {}) {
   let last = 0;
@@ -65,7 +66,14 @@ function fakeGitHub(open, cfg = {}) {
     // The timeline carries the comments too, as `commented` events.
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(path) && one)
       return json([...one.timeline, ...one.comments.map((c) => ({ event: "commented", actor: c.user, ...c }))].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)));
+    if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path) && one && cfg.failComments?.includes(n)) return json({ message: "Bad Gateway" }, 502);
     if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path) && one) return json(one.comments);
+    // A PR is an issue too: its timeline holds the review label's start, its comments nothing.
+    const pr = Object.entries(cfg.prs || {}).find(([, p]) => p.number === n || p.number === Number(/^\/pulls\/(\d+)$/.exec(path)?.[1]));
+    const pull = pr && { number: pr[1].number, state: "open", draft: false, mergeable: true, mergeable_state: "clean", head: { ref: `factory/${pr[0]}`, sha: "a".repeat(40) }, base: { ref: "main" }, labels: pr[1].review ? [{ name: "factory:review" }] : [] };
+    if (method === "GET" && pr && /^\/issues\/\d+\/timeline$/.test(path)) return json(pr[1].review ? [{ event: "labeled", label: { name: "factory:review" }, actor: SELF, created_at: pr[1].review }] : []);
+    if (method === "GET" && pr && /^\/issues\/\d+\/comments$/.test(path)) return json([]);
+    if (method === "GET" && pr && /^\/pulls\/\d+$/.test(path)) return json(pull);
     if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one && cfg.failRecord && body.body.includes(":relaunch -->")) return json({ message: "Bad Gateway" }, 502);
     if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one) {
       const at = stamp();
@@ -95,7 +103,11 @@ function fakeGitHub(open, cfg = {}) {
       one.timeline.push({ event: "unlabeled", label: { name: off[1] }, actor: SELF, created_at: stamp() });
       return json({});
     }
-    if (method === "GET" && path === "/pulls") return json([]);
+    if (method === "GET" && path === "/pulls") {
+      const head = Number(/:factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
+      const p = cfg.prs?.[head];
+      return json(p ? [{ number: p.number, state: "open", head: { ref: `factory/${head}` } }] : []);
+    }
     if (method === "GET" && path === "/collaborators") return json([{ login: "maintainer" }]);
     if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) {
       const range = u.searchParams.get("created");
@@ -348,6 +360,39 @@ test("the cloud sandbox: a stage whose lease ran out after its start is relaunch
 
 const outageNotice = (n, extra = {}) => ({ body: `${marker(n, "blocked", "outage:601-1")}\nBlocked (outage): this machine could not reach api.github.com (EAI_AGAIN)\n<!-- factory:block {"cause":"outage"} -->`, ...extra });
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
+
+test("the cloud sandbox: a sandbox record that cannot be read is no absent record; that Objective waits for the next tick's read (#430)", async () => {
+  // #7 Running half an hour with no start recorded; #8 In review, its PR labelled for review half an hour ago with no
+  // review start recorded; #9 In review, no review label; #10 Queued. Each one's comments fail to read this tick.
+  const cfg = { failComments: [7, 8, 9, 10], prs: { 8: { number: 108, review: ago(30 * MIN) }, 9: { number: 109 } } };
+  const gh = fakeGitHub(
+    [
+      { number: 7, labels: [OBJ, "factory:running"], since: 30 * MIN },
+      { number: 8, labels: [OBJ, "factory:in-review"], since: 40 * MIN },
+      { number: 9, labels: [OBJ, "factory:in-review"], since: 40 * MIN },
+      { number: 10, labels: [OBJ], since: 40 * MIN },
+    ],
+    cfg,
+  );
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
+  let r;
+  try {
+    r = await tick(gh, { sandbox: "vercel" });
+  } finally {
+    process.stdout.write = write;
+  }
+  assert.deepEqual([r.relaunch, r.relaunched, r.ready, r.vanished], [[], [], [], []], "nothing relaunched, picked or Blocked");
+  assert.deepEqual(gh.writes, [], "nothing written");
+  assert.ok(r.deadlines.some((d) => d.kind === "retry"), "read again soon");
+  for (const n of [7, 8, 9, 10]) assert.equal(lines.filter((l) => l.includes(`#${n}'s sandbox record unread`)).length, 1, `#${n}'s failed read is named once`);
+  assert.equal(r.skipped.find((x) => x.number === 10)?.reason, "its sandbox record could not be read; read again next tick");
+  // The next tick reads them: the lost starts are named again and the Queued one is picked.
+  cfg.failComments = [];
+  const next = await tick(gh, { sandbox: "vercel" });
+  assert.deepEqual([next.relaunch, next.ready], [[7, 8], [10]]);
+});
 
 test("an outage notice counts only when written since the Objective last became Running: a later Block whose notice never landed is not relaunched", async () => {
   const gh = fakeGitHub([{ number: 8, labels: [OBJ, "factory:running"], since: 5 * MIN }]);

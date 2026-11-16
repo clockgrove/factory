@@ -765,7 +765,7 @@ test("local claim read: an unread claim Blocks only when Factory wrote nothing o
  * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
  * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
  */
-async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = {}) {
+async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra = () => ({}) } = {}) {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const { marker, sandboxMarkerLine, setSelf } = await import("../scripts/lib/logic.mjs");
@@ -773,7 +773,8 @@ async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = 
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
   const iss = (number, labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
-  // `extra`: more Objectives for one test, `{ open, comments, timeline }` from this tick's helpers.
+  // `extra`: more Objectives for one test, `{ open, comments, timeline, failComments }` from this tick's helpers;
+  // `failComments`: how many comment-list reads of an issue fail (502) before one answers.
   const more = extra({ now, iso, iss, marker, sandboxMarkerLine, BOT });
   const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, []), ...(more.open || [])];
   const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
@@ -818,15 +819,21 @@ async function sandboxRepoTick(env, { localSlots = null, extra = () => ({}) } = 
     if (method === "GET" && p === `git/commits/${"c".repeat(40)}`) return json({ sha: "c".repeat(40), message: `${LOCK}\n\n0123`, author: { name: "Factory", email: "factory@users.noreply.github.com", date: iso(now - 60 * 60_000) } });
     if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
     if (method === "GET" && p === "issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
+    const one = /^issues\/(\d+)$/.exec(p) && open.find((i) => i.number === Number(p.slice(7)));
+    if (method === "GET" && one) return json(one);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
     if (method === "GET" && /^issues\/\d+\/timeline$/.test(p)) return json(timeline[n] || []);
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
+    if (method === "GET" && /comments$/.test(p) && more.failComments?.[n] > 0) {
+      more.failComments[n] -= 1;
+      return json({ message: "Bad Gateway" }, 502);
+    }
     if (method === "GET" && /comments$/.test(p)) return json(comments[n] || []);
     if (method !== "GET") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, recordWrites: { api: store.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, localLive, recordWrites: { api: store.api, base: BASE } });
     const markers = (k) => store.bodyOf(k, marker(k, "sandbox"));
     return { r, calls, refs, markers };
   } finally {
@@ -904,6 +911,27 @@ test("serve --all keeps a sandbox-route Objective whose stage holds a live lease
   assert.ok(all.r.deadlines.some((d) => d.issue === 62 && d.kind === "lease"), "looked at again when its lease ends");
   assert.equal(all.markers(62), null, "no record written for it here");
   assert.deepEqual(all.r.relaunch, []);
+});
+
+test("serve on a repository with a cloud sandbox: an unread sandbox record is no absent lease; the Objective is neither Blocked nor sent back to Queued that tick (#430)", async () => {
+  // #62: Running on the sandbox route for 20 minutes (serve --all routes it), and #63: relabelled factory:local mid-stage,
+  // Running for 20 minutes. Each stage holds a live lease and no local claim. The first comments read of each (the lease
+  // read, after its retries) fails; the reads after it answer, so the local claim read finds no claim.
+  const extra = (h) => ({
+    open: [h.iss(62, ["factory:running"]), h.iss(63, ["factory:local", "factory:running"])],
+    comments: { 62: leased(h, 62), 63: leased(h, 63) },
+    timeline: Object.fromEntries([62, 63].map((n) => [n, [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }]])),
+    failComments: { 62: RETRY.tries, 63: RETRY.tries },
+  });
+  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra });
+  assert.deepEqual(all.r.vanished, [], "a live sandbox stage is not Blocked as vanished");
+  assert.deepEqual(all.r.unclaimed, [], "nor sent back to Queued for a second stage here");
+  assert.ok(!all.r.ready.includes(62) && !all.r.ready.includes(63), "nor picked");
+  assert.ok(all.r.deadlines.some((d) => d.kind === "retry"), "read again soon");
+  // The next tick reads each record: its live lease holds the Objective until the lease ends.
+  const next = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra: (h) => ({ ...extra(h), failComments: {} }) });
+  assert.deepEqual([next.r.vanished, next.r.unclaimed], [[], []]);
+  for (const n of [62, 63]) assert.ok(next.r.deadlines.some((d) => d.issue === n && d.kind === "lease"), `#${n} looked at again when its lease ends`);
 });
 
 test("max_concurrent caps the repository as a whole: every route's Running Objectives count, each route picks only its own (#240)", async () => {

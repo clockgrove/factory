@@ -254,7 +254,9 @@ export const OWNER_LIMITS = {
   FACTORY_RELAY_UNKNOWN_SHUT: { whole: true, from: 1, max: 1000 },
   FACTORY_RELAY_UNKNOWN_FLOOR_USD: { from: 0, above: true, max: 100 },
   FACTORY_RELAY_SLOW_FLOOR_USD: { from: 0, above: true, max: 100 },
-  FACTORY_LOCAL_WAIT_MINUTES: { from: 0, above: true, max: 24 * 60 },
+  // At most half the claim pause's least (two hours): a stage waiting in place writes no heartbeat while this machine's
+  // network is down, so its wait ends well before the dispatcher could take its quiet claim for a loop gone away.
+  FACTORY_LOCAL_WAIT_MINUTES: { from: 0, above: true, max: 60 },
   FACTORY_LOCAL_OUTAGE_HOURS: { from: 0, above: true, max: 30 * 24 },
 };
 /** Local mode's own limits (LOCAL_WORKFLOW_SETTINGS, no Action input): their defaults. */

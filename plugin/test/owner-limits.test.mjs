@@ -10,6 +10,7 @@ import { MAX_PARTS, nextPart } from "../scripts/lib/handoff.mjs";
 import { QUEUE_STALL_MS, STALL_DEFAULTS, STEP_STALL_FLOOR_MS, jobStall, queueStall, renderTaskCard, setSelf, stepStallMs, taskCardValues } from "../scripts/lib/logic.mjs";
 import { SLOW_UNKNOWN_FLOOR_USD, UNKNOWN_COST_FLOOR_USD, UNKNOWN_STAGE_SHUT } from "../scripts/lib/gateway-relay.mjs";
 import { ownerLimitChecks } from "../scripts/doctor.mjs";
+import { Local } from "../scripts/local.mjs";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
@@ -159,4 +160,33 @@ test("#423: doctor shows the limits in force, and warns when the local outage bo
   assert.equal(local[1].status, "WARN");
   assert.match(local[1].detail, /FACTORY_LOCAL_OUTAGE_HOURS \(10 h\) is not under claim_pause_hours \(8 h\)/);
   assert.equal(ownerLimitChecks({ inputs: resolveInputs({ env: {} }), local: true, stage: {} }).length, 1, "12 h under the default day: no warning");
+});
+
+test("#423: a local stage's in-place wait stays under the least claim pause, and doctor warns when it is not under the outage bound", () => {
+  // A stage waiting in place writes no heartbeat while the network is down: a wait past an hour reads as the default.
+  assert.equal(localLimits({ FACTORY_LOCAL_WAIT_MINUTES: "600" }).waitMs, OUTAGE.stageWaitMs);
+  assert.equal(localLimits({ FACTORY_LOCAL_WAIT_MINUTES: "60" }).waitMs, 60 * MIN);
+  assert.ok(OWNER_LIMITS.FACTORY_LOCAL_WAIT_MINUTES.max * MIN < OWNER_LIMITS.FACTORY_CLAIM_PAUSE_HOURS.from * HOUR);
+  const inputs = resolveInputs({ env: {} });
+  const rows = ownerLimitChecks({ inputs, local: true, stage: { FACTORY_LOCAL_WAIT_MINUTES: "45", FACTORY_LOCAL_OUTAGE_HOURS: "0.5" } });
+  assert.deepEqual(rows.map((r) => r.status), ["PASS", "WARN"]);
+  assert.match(rows[1].detail, /FACTORY_LOCAL_WAIT_MINUTES \(45 min\) is not under FACTORY_LOCAL_OUTAGE_HOURS \(0\.5 h\)/);
+});
+
+test("#423: serve takes its outage bounds as now set each tick, the defaults once a setting is gone", () => {
+  const saved = { blockMs: OUTAGE.blockMs, stageWaitMs: OUTAGE.stageWaitMs, env: Object.fromEntries(["FACTORY_LOCAL_WAIT_MINUTES", "FACTORY_LOCAL_OUTAGE_HOURS"].map((k) => [k, process.env[k]])) };
+  for (const k of Object.keys(saved.env)) delete process.env[k];
+  try {
+    const loop = Object.assign(Object.create(Local.prototype), { harness: "claude", wf: { FACTORY_LOCAL_WAIT_MINUTES: "30", FACTORY_LOCAL_OUTAGE_HOURS: "6" } });
+    loop.applyLocalLimits();
+    assert.deepEqual([OUTAGE.stageWaitMs, OUTAGE.blockMs], [30 * MIN, 6 * HOUR]);
+    loop.wf = {};
+    loop.applyLocalLimits();
+    assert.deepEqual([OUTAGE.stageWaitMs, OUTAGE.blockMs], [15 * MIN, 12 * HOUR]);
+    // The loop takes them each tick.
+    assert.match(readFileSync(join(PLUGIN_ROOT, "scripts", "local.mjs"), "utf8"), /await this\.refreshSettings\(\)[^\n]*\n\s*this\.applyLocalLimits\(\);/);
+  } finally {
+    Object.assign(OUTAGE, { blockMs: saved.blockMs, stageWaitMs: saved.stageWaitMs });
+    for (const [k, v] of Object.entries(saved.env)) if (v !== undefined) process.env[k] = v;
+  }
 });

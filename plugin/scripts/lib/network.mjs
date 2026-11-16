@@ -99,7 +99,8 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
  * to resume (fifteen minutes by default: a DNS flap or a router restart passes, and a longer outage costs the stage no
  * more of its wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS; the repository's or this machine's
- * FACTORY_LOCAL_WAIT_MINUTES, which a stage sets here when it starts, harness.mjs stageLimits). `blockMs`: how long an
+ * FACTORY_LOCAL_WAIT_MINUTES, at most an hour, which a stage sets here when it starts, harness.mjs stageLimits, and serve
+ * each tick for its own same-outage window, local.mjs applyLocalLimits). `blockMs`: how long an
  * Objective may stay paused on one outage before serve Blocks it with the External cause `outage` (twelve hours by
  * default: a night's outage, from late evening to the next morning, fits with room; FACTORY_LOCAL_OUTAGE_HOURS, which
  * serve sets here each tick). It stays under the dispatcher's bound for a claim gone quiet (claim_pause_hours, a day by

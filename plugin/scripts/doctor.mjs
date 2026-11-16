@@ -138,7 +138,9 @@ export function defaultsCheck(inputs) {
  * The limits a person owns in force (#423, inputs.mjs OWNER_LIMITS), from the settings as a stage reads them (`inputs`,
  * resolveInputs): one PASS; in local mode with the local stage's settings (`stage`, local.mjs baseEnv's) the two local
  * ones as well, and a WARN when the outage bound (FACTORY_LOCAL_OUTAGE_HOURS) is not under the claim pause
- * (claim_pause_hours), so the dispatcher's Block would come first and name a quiet claim rather than the outage.
+ * (claim_pause_hours), so the dispatcher's Block would come first and name a quiet claim rather than the outage, or when
+ * the in-place wait (FACTORY_LOCAL_WAIT_MINUTES) is not under the outage bound, so a stage that waits it out ends paused
+ * already past the bound and is Blocked at once. The wait's own maximum keeps it under the least claim pause.
  */
 export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
   const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
@@ -155,6 +157,7 @@ export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
   const own = local ? localLimits(stage) : null;
   if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);
   const rows = [PASS("owner limits", `${lines.join("; ")} (the settings in docs/INSTALL.md and docs/LOCAL.md)`)];
+  if (own && own.waitMs >= own.outageMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_WAIT_MINUTES (${min(own.waitMs)}) is not under FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}), so a stage that waits out an outage in place ends paused past the outage bound and is Blocked at once`, "lower FACTORY_LOCAL_WAIT_MINUTES under FACTORY_LOCAL_OUTAGE_HOURS, or raise FACTORY_LOCAL_OUTAGE_HOURS"));
   if (own && own.outageMs >= inputs.claimPauseMs) rows.push(WARN("owner limits", `FACTORY_LOCAL_OUTAGE_HOURS (${h(own.outageMs)}) is not under claim_pause_hours (${h(inputs.claimPauseMs)}), so a long outage meets the dispatcher's Block for a quiet claim first, which does not name the outage`, "lower FACTORY_LOCAL_OUTAGE_HOURS under claim_pause_hours, or raise claim_pause_hours"));
   return rows;
 }

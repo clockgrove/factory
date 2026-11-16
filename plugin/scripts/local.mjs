@@ -2984,6 +2984,17 @@ export class Local {
    * protected paths, the harness, setup) keeps its value from serve's start until serve starts again, said once. The
    * read also brings the workflow's Factory pin (followPin).
    */
+  /**
+   * Serve's own outage bounds as now set (localLimits over baseEnv, each its default when unset): how long an Objective
+   * stays paused on one outage before it Blocks (FACTORY_LOCAL_OUTAGE_HOURS, OUTAGE.blockMs), and the window in which a
+   * new outage after a resume is the same one (FACTORY_LOCAL_WAIT_MINUTES, OUTAGE.stageWaitMs). Taken each tick.
+   */
+  applyLocalLimits() {
+    const { waitMs, outageMs } = localLimits(this.baseEnv());
+    OUTAGE.blockMs = outageMs;
+    OUTAGE.stageWaitMs = waitMs;
+  }
+
   async refreshSettings() {
     if (!this.settingsBranch) return;
     // Fetched every SETTINGS_EVERY_MS; each tick between takes what the last read brought.
@@ -3320,9 +3331,7 @@ export class Local {
       }
       // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
       await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
-      // How long an Objective stays paused on one outage before it Blocks (FACTORY_LOCAL_OUTAGE_HOURS), as now set.
-      const base = this.baseEnv();
-      if (base.FACTORY_LOCAL_OUTAGE_HOURS) OUTAGE.blockMs = localLimits(base).outageMs;
+      this.applyLocalLimits();
       // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
       const switching = await this.followPin(running.size, { once }).catch((e) => {
         log(`pin: ${e.message.slice(0, 160)}`);

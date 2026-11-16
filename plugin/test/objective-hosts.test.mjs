@@ -73,8 +73,8 @@ test("a host label added, removed or changed after the plan is an edit", async (
   setSelf("factory-app[bot]");
   const plan = async () => ({ at: "2026-11-14T10:00:00Z", own: true, text: "## Plan", record: { sha256: plain, label: null } });
   const read = (labels) => ({ gh: { graphql: async () => ({ repository: { issue: { title: "Objective", body: "Build the thing.", labels: { nodes: labels.map((name) => ({ name })) } } } }) }, read: plan });
-  assert.equal(await editedSincePlan(repo, 7, {}, read(["factory:objective"])), false);
-  assert.equal(await editedSincePlan(repo, 7, {}, read(["factory:objective", HF])), true, "the merge's check sees it too");
+  assert.equal(await editedSincePlan(repo, 7, {}, read(["factory:objective"])), "same");
+  assert.equal(await editedSincePlan(repo, 7, {}, read(["factory:objective", HF])), "changed", "the merge's check sees it too");
 });
 
 test("choiceGate: the hosts the stage opens, and a Block when local mode set its sandboxes up for others", async () => {

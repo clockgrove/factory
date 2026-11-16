@@ -133,7 +133,7 @@ test("work stage, run for real: a wording-only edit is judged on the stage's har
     assert.equal(planOf(gh.comments, 7).record.sha256, A, "the plan's own text stays its record");
     // It went on past the plan check: the next thing that acts on the text, the one-repo Question, then nothing more.
     assert.match(out, /plan-time Question: the issue names acme\/other/, out);
-    assert.doesNotMatch(out, new RegExp(EDITED_REASON.slice(0, 40).replace(/[()]/g, "\\$&")));
+    assert.ok(!out.includes(EDITED_REASON.slice(0, 40)), out);
     assert.doesNotMatch(out, /git fetch|crashed/);
   } finally {
     gh.close();
@@ -180,7 +180,7 @@ for (const choice of ["wording", "requirement"]) {
         assert.match(progressLines(gh), /edit judged wording-only by the stage's harness .*; plan kept/, out);
         // Past the plan check: the stage's next read (its reviews, refused by the fake) ends it, before any checkout.
         assert.ok(gh.seen.includes("GET /repos/o/r/pulls/12/reviews"), out);
-        assert.doesNotMatch(out, new RegExp(EDITED_REASON.slice(0, 40).replace(/[()]/g, "\\$&")));
+        assert.ok(!out.includes(EDITED_REASON.slice(0, 40)), out);
       } else {
         assert.ok(out.includes(EDITED_REASON), out);
         assert.ok(!gh.seen.includes("GET /repos/o/r/pulls/12/reviews"), "Blocked before anything is set up");

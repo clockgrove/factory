@@ -55,6 +55,7 @@ import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveI
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
+import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
 import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, STAGE_AUTO_ENV, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
 import { lastStage } from "./lib/continue.mjs";
@@ -254,11 +255,11 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 /**
  * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
  * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
- * validation runs, how a session resumes and its cache. One this shell sets (inputs.mjs machineSettings) keeps the
+ * validation runs, how a session resumes and its cache, and whether hand-offs wait for siblings. One this shell sets (inputs.mjs machineSettings) keeps the
  * shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD"];
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
@@ -2216,8 +2217,11 @@ export class Local {
     return false;
   }
 
-  /** One Objective, start to delivered review (and, with `wait`, to merged). */
-  async runObjective(issue, { wait = false } = {}) {
+  /**
+   * One Objective, start to delivered review (and, with `wait`, to merged). `named`: a person named it (`factory run`),
+   * so its hand-off to review never waits for a sibling (work).
+   */
+  async runObjective(issue, { wait = false, named = false } = {}) {
     // A stage of this Objective still running on this machine (an earlier serve's, orphaned): never a second beside it,
     // and its claim stays as it is.
     this.reapHere(issue);
@@ -2227,7 +2231,7 @@ export class Local {
       return { exit: "skipped" };
     }
     try {
-      return await this.withClaim(issue, () => this.work(issue, { wait }), { onStop: () => this.unpickStopped(issue), stint: true });
+      return await this.withClaim(issue, () => this.work(issue, { wait, named }), { onStop: () => this.unpickStopped(issue), stint: true });
     } catch (e) {
       if (!e?.startFailed) throw e;
       return this.unstart(issue, e);
@@ -2376,10 +2380,20 @@ export class Local {
     if (next === "merge") {
       // Its review ended waiting for a third-party reviewer (a run stopped meanwhile, or a serve's): taken up here, the
       // label put back once the wait is over, then the review.
-      if (waitOf(await gh.listComments(this.repo, pr.number, this.opts).catch(() => []), issue)) {
+      const prComments = await gh.listComments(this.repo, pr.number, this.opts).catch(() => []);
+      if (waitOf(prComments, issue)) {
         log(`#${issue}: PR #${pr.number}'s review waits for a third-party reviewer; waiting here, then reviewing`);
         const resumed = await this.withClaim(issue, async () => ((await this.thirdPartyWait(issue, pr.number)) ? this.review(issue, pr.number, { wait }) : null));
         if (resumed) return resumed;
+      }
+      // Its hand-off to review waits for a sibling on the same files (overlap.mjs reviewHold): a run named by hand reviews now.
+      const held = reviewWaitOf(prComments, issue);
+      if (held && !held.released) {
+        log(`#${issue}: PR #${pr.number}'s review waits for #${held.on}; a run named by hand reviews it now`);
+        return this.withClaim(issue, async () => {
+          await reviewNow(this.repo, { issue, prNumber: pr.number, wait: held }, this.opts);
+          return this.review(issue, pr.number, { wait });
+        });
       }
       if (!wait) return { exit: "delivered" };
       return this.withClaim(issue, async () => {
@@ -2387,7 +2401,7 @@ export class Local {
         return { exit: merged ? "delivered" : null, next: merged === "next" };
       });
     }
-    return this.runObjective(issue, { wait });
+    return this.runObjective(issue, { wait, named: true });
   }
 
   /**
@@ -2402,8 +2416,11 @@ export class Local {
     return `#${issue}: PR #${pr.number} is not merged yet; ${local ? `nothing tends a local Objective while no factory serve runs for this repository: start \`factory serve\` (or \`factory run ${issue} --wait\`) to merge it` : "the Action's dispatcher tends its merge"}`;
   }
 
-  /** The work stage, then its review: in a claim this loop holds. */
-  async work(issue, { wait = false } = {}) {
+  /**
+   * The work stage, then its review: in a claim this loop holds. `named` (or `wait`): a run a person named, whose review
+   * starts now even when its hand-off waits for a sibling on the same files (overlap.mjs reviewHold, reviewNow).
+   */
+  async work(issue, { wait = false, named = false } = {}) {
     // The stage only rejects before its process starts: a failed start (runObjective).
     const work = await this.stage(issue, "work", "worker.mjs", ["--issue", String(issue)]).catch((e) => {
       throw Object.assign(e instanceof Error ? e : new Error(String(e)), { startFailed: "work" });
@@ -2413,9 +2430,20 @@ export class Local {
     log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
     if (work.exit !== "delivered") return work;
     const pr = await findPr(this.repo, `factory/${issue}`, this.opts).catch(() => null);
-    // A delivered PR without the review label conflicts with the default branch: the dispatcher's send-back takes it
-    // (`unreviewed` tells sendBack it conflicts again after its rebase).
-    return pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL) ? this.review(issue, pr.number, { wait }) : { ...work, unreviewed: true };
+    if (pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.review(issue, pr.number, { wait });
+    // A delivered PR without the review label conflicts with the default branch, so the dispatcher's send-back takes it
+    // (`unreviewed` tells sendBack it conflicts again after its rebase), or its review waits for a sibling on the same
+    // files, which the dispatcher ends; a run a person named reviews now.
+    const held = pr && (named || wait) ? reviewWaitOf(await listComments(this.repo, pr.number, this.opts).catch(() => []), issue) : null;
+    if (held && !held.released) {
+      log(`#${issue}: PR #${pr.number}'s review waits for #${held.on}; a run named by hand reviews it now`);
+      const now = await reviewNow(this.repo, { issue, prNumber: pr.number, wait: held }, this.opts).then(
+        () => true,
+        (e) => log(`#${issue}: its review could not be started (${String(e?.message || e).slice(0, 120)}); it waits for the dispatcher`),
+      );
+      if (now) return this.review(issue, pr.number, { wait });
+    }
+    return { ...work, unreviewed: true };
   }
 
   /**

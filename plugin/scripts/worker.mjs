@@ -28,6 +28,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { jobChecks } from "./doctor.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
+import { reviewHold, waitReason } from "./lib/overlap.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
@@ -982,7 +983,12 @@ async function main() {
     // Remove, then add: a label already present (a harness applied it early) fires no labeled event.
     if (decision.exit === "delivered") {
       if (!(rebaseMode && reviewed)) await removeLabel(repo, pr.number, REVIEW_LABEL, token).catch(() => {});
-      await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
+      // A head no review has seen waits, unlabelled, while a sibling on the same files is ahead of it (overlap.mjs
+      // reviewHold): the dispatcher labels it once none is, after its one rebase if it conflicts by then. The rebase
+      // that follows such a wait goes to review: it is next.
+      const held = await reviewHold(repo, { issue, pr, autoMerge: inputs.autoMerge, hold: inputs.siblingHold, objectiveLabel: inputs.objectiveLabel, rebaseMode, reviewed }, token, { log });
+      if (held) decision.reason = `PR #${pr.number} is ready; ${waitReason(held)}`;
+      else await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }
   }
   // The AI Gateway refused a relayed call for its own budget or credits, or the relay shut the gateway for calls it could

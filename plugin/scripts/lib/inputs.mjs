@@ -41,6 +41,7 @@ export const DEFAULTS = {
   reviewer_effort: "", // empty: MODEL_DEFAULTS for the harness (the reviewer's effort, on every reviewer call)
   credential: "api", // api | plan (your own repository) | login (a developer's machine only)
   max_concurrent: "3",
+  sibling_hold: "on", // on | off: a hand-off to review waits for a sibling on the same files (lib/overlap.mjs)
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
@@ -170,7 +171,7 @@ export const WORKFLOW_ONLY_SETTINGS = new Set(
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
   ].map((n) => `FACTORY_${n}`),
 );
-/** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, the harness, models, effort, validation, sweep. */
+/** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, the harness, models, effort, validation, sweep, scheduling. */
 export const VARIABLE_SETTINGS = new Set([...WORKFLOW_SETTINGS].filter((k) => !WORKFLOW_ONLY_SETTINGS.has(k)));
 /** The worker's harness, models and effort: a layer that sets another harness drops the lower layers' (settingLayers). */
 export const MODEL_SETTINGS = ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"];
@@ -230,6 +231,7 @@ const VALUE_RULES = (() => {
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
+    FACTORY_SIBLING_HOLD: oneOf("on", "off"),
     FACTORY_PROMPT_CACHE_TTL: oneOf("off", "auto", "1h", "5m"),
     FACTORY_IMAGE_REFRESH: oneOf("merge", "nightly"),
   };
@@ -487,6 +489,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     reviewerFallback: md.reviewer_fallback ? { model: md.reviewer_fallback, effort: md.reviewer_fallback_effort } : null,
     credential: get("credential").toLowerCase(),
     maxConcurrent: num(get("max_concurrent"), 3),
+    siblingHold: (get("sibling_hold") || "on").trim().toLowerCase() !== "off",
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
     timeoutMinutes: num(get("timeout_minutes"), 240),

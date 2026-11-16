@@ -32,6 +32,9 @@ inputs:
   effort:
     description: The worker session's effort level (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`; the levels each model supports); the harness default when empty. Pinned so a CLI default change cannot move cost silently.
     required: false
+  sibling_hold:
+    description: Whether a hand-off to review waits for a sibling Objective that changes many of the same files. `on` (default) holds a head no review has seen while such a sibling is ahead of it, then releases waiting PRs one at a time, each rebasing once; `off` holds nothing, and overlapping PRs rebase when they conflict. Scheduling only.
+    required: false
   resume_policy:
     description: Which re-entries resume the worker's saved session instead of starting fresh, on every harness. `fresh` (default) resumes none; `fix-passes` resumes the review job's fix and answer passes and a rebase send-back that conflicts. An answered Question always starts fresh.
     required: false
@@ -389,6 +392,7 @@ runs:
         FACTORY_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
         FACTORY_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
         FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
+        FACTORY_INPUT_SIBLING_HOLD: ${{ inputs.sibling_hold }}
         FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
         FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
         FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}

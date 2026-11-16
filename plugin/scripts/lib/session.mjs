@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
+import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -2433,7 +2433,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   const usage = [];
   // One more harness call, resumed where it can; a short refusal code when no time, budget or metering is left.
   const ask = async (prompt, label) => {
-    if (remainingMs(deadlineAt) < 60_000) return { refused: "time" };
+    if (remainingMs(deadlineAt) < EXIT_ASK_MIN_MS) return { refused: "time" };
     // A run that reported no priced AI credits left max_usd unenforceable: the harness is not asked again.
     if (unmetered) return { refused: "unmetered" };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;

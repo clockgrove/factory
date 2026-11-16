@@ -622,12 +622,12 @@ export function parseClaude(stdout, model) {
 
 /**
  * The worker's own background commands still running when its harness process ended, from the harness's stream:
- * `[{id, description, command}]` in start order, [] when there are none. Claude Code reports each command it runs as a
- * `local_bash` task: a `task_started` event (`is_backgrounded` when it runs in the background, set later by a
- * `task_updated` patch for a command moved there) and, when the command ends, a `task_notification` for the same
- * `task_id`; a `-p` session stays open while its background commands run and its model is woken when they end. A
- * backgrounded task with no notification in the stream was still running when the process ended, and was stopped with
- * it. `command` is the Bash call's own input (the task's `tool_use_id`), null when the stream does not have it. Codex
+ * `[{id, description, command}]`, [] when there are none. Claude Code reports the session's in-flight background work as
+ * a whole set on every change (`system` `background_tasks_changed`, its `tasks`): the last such set, its `local_bash`
+ * entries, is what was still running. A stream with no such event (an older Claude Code) falls back to pairing: a
+ * `local_bash` `task_started` with `is_backgrounded` (or moved there by a `task_updated` patch) and no
+ * `task_notification` for its `task_id`. `command` is the Bash call's own input (the task's `tool_use_id`, from its
+ * `task_started`), null when the stream does not have it; both it and `description` are the model's text. Codex
  * reports no background command (a command it starts with `&` is an item that completed), and Copilot's stream names a
  * still-running background shell's id in no start event, so for both this is [].
  */
@@ -635,19 +635,25 @@ export function backgroundJobs(harness, stdout) {
   if (harness !== "claude") return [];
   const calls = new Map();
   const tasks = new Map();
+  let live = null;
   for (const e of jsonLines(stdout)) {
     if (e?.type === "assistant") {
       for (const c of e.message?.content || []) if (c?.type === "tool_use" && typeof c.id === "string") calls.set(c.id, c.input);
       continue;
     }
-    if (e?.type !== "system" || typeof e.task_id !== "string") continue;
-    if (e.subtype === "task_started" && e.task_type === "local_bash") tasks.set(e.task_id, { id: e.task_id, call: e.tool_use_id ?? null, description: typeof e.description === "string" ? e.description : "", backgrounded: e.is_backgrounded === true });
+    if (e?.type !== "system") continue;
+    if (e.subtype === "background_tasks_changed" && Array.isArray(e.tasks)) live = e.tasks;
+    if (typeof e.task_id !== "string") continue;
+    if (e.subtype === "task_started" && e.task_type === "local_bash") tasks.set(e.task_id, { id: e.task_id, call: e.tool_use_id ?? null, description: typeof e.description === "string" ? e.description : "", backgrounded: e.is_backgrounded === true, ended: false });
     else if (e.subtype === "task_updated" && e.patch?.is_backgrounded === true && tasks.has(e.task_id)) tasks.get(e.task_id).backgrounded = true;
-    else if (e.subtype === "task_notification") tasks.delete(e.task_id);
+    else if (e.subtype === "task_notification" && tasks.has(e.task_id)) tasks.get(e.task_id).ended = true;
   }
-  return [...tasks.values()].filter((t) => t.backgrounded).map((t) => {
+  const running = live
+    ? live.filter((t) => t?.task_type === "local_bash" && typeof t.task_id === "string").map((t) => ({ ...tasks.get(t.task_id), id: t.task_id, description: typeof t.description === "string" ? t.description : tasks.get(t.task_id)?.description ?? "" }))
+    : [...tasks.values()].filter((t) => t.backgrounded && !t.ended);
+  return running.map((t) => {
     const command = calls.get(t.call)?.command;
-    return { id: t.id, description: t.description, command: typeof command === "string" ? command : null };
+    return { id: t.id, description: t.description || "", command: typeof command === "string" ? command : null };
   });
 }
 

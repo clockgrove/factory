@@ -857,7 +857,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       if (!reviewing && reviewWait && !reviewWait.released && pr) {
         let how;
         try {
-          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
+          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
         } catch (e) {
           log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
           retry(`#${issue.number}'s review wait`);
@@ -1065,7 +1065,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Siblings on the same files (#277, #340, lib/overlap.mjs): every pick starts, since each has work of its own to
   // write; one whose known files overlap an active sibling's gets a note saying so (announceStarts, below). What
   // waits is the hand-off to review (the In-review pass above).
-  const order = !inputs.issue && picked.ready.length ? await orderSiblings(repo, { issues, statuses, ready: picked.ready, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { log }) : null;
+  // With sibling_hold off nothing waits and nothing is said: overlapping PRs rebase when they conflict.
+  const order = !inputs.issue && picked.ready.length && inputs.siblingHold !== false ? await orderSiblings(repo, { issues, statuses, ready: picked.ready, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { log }) : null;
   // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);

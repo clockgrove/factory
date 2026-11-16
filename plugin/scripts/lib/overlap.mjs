@@ -330,12 +330,12 @@ export async function sayWaiting(repo, issue, prNumber, wait, since, opts, { log
  * off). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on the PR first, keeping the
  * Objective's first wait start when it waited before, then the note on the issue, and the review label stays off; the
  * stage ends delivered and the Objective In review, its slot free. Returns the wait (`{on, shared, of, cause}`) or null:
- * the caller puts the review label on. Nothing holds a reviewed head Factory rebased (`rebaseMode` and `reviewed`), nor
+ * the caller puts the review label on. With `hold` off (sibling_hold) nothing waits. Nothing holds a reviewed head Factory rebased (`rebaseMode` and `reviewed`), nor
  * the rebase of a hand-off whose wait is over (its record released): it goes next. A read that fails holds nothing (the
  * review goes on, as without siblings); a record that cannot be written holds nothing either.
  */
-export async function reviewHold(repo, { issue, pr, autoMerge, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false }, opts, { log = () => {}, now = Date.now() } = {}) {
-  if (!autoMerge || !pr || (rebaseMode && reviewed)) return null;
+export async function reviewHold(repo, { issue, pr, autoMerge, hold = true, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false }, opts, { log = () => {}, now = Date.now() } = {}) {
+  if (!autoMerge || !hold || !pr || (rebaseMode && reviewed)) return null;
   try {
     const has = (i, name) => (i.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
     const others = new Map();
@@ -368,10 +368,10 @@ export async function reviewHold(repo, { issue, pr, autoMerge, objectiveLabel = 
  * - "unsettled": GitHub has not worked out whether it conflicts; the next tick decides;
  * - "rebase": it conflicts, so its record is released and the send-back takes it, before any review;
  * - "released": the review label goes on, then the record is released.
- * Without `autoMerge` nothing waits for an In-review sibling, so a record found then is released at once. The issue's
+ * Without `autoMerge`, or with `hold` off (sibling_hold), nothing waits, so a record found then is released at once. The issue's
  * note says when the wait is over. A failed read or write throws (the next tick tries again).
  */
-export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, prOf, memo = new Map() }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
+export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses = {}, landed = [], autoMerge = true, hold = true, prOf, memo = new Map() }, opts, { dryRun = false, log = () => {}, now = Date.now() } = {}) {
   if (pr.draft) {
     if (!dryRun) await rest(`repos/${repo.full}/issues/comments/${wait.id}`, { ...opts, method: "DELETE" });
     return "draft";
@@ -380,7 +380,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   const labelledAt = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts);
   if (labelledAt && wait.at && Date.parse(labelledAt) > wait.at) return dryRun ? "stale" : release("stale", "Factory: the review label went on after this PR's wait began; it waits no more.");
   const gaveUp = now - wait.since >= WAIT_MAX_MS;
-  if (autoMerge && !gaveUp) {
+  if (autoMerge && hold && !gaveUp) {
     const others = issues.filter((i) => i.number !== issue.number && !landed.includes(i.number) && ["In review", "Running"].includes(stateOf(i, statuses[i.number] ?? null)));
     const on = await aheadOf(repo, { issue, key: keyOf(wait.since, issue), others, state: (s) => stateOf(s, statuses[s.number] ?? null) }, opts, prOf, memo, log);
     if (on) return { waiting: on };
@@ -395,7 +395,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   }
   await release(how, how === "rebase" ? `Factory: this PR's wait for #${wait.on} is over; it rebases, then goes to review.` : `Factory: this PR's wait for #${wait.on} is over; it goes to review.`);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
-  if (old?.kind === "waits") await say(repo, issue.number, old, "cleared", clearedNote(wait.on, gaveUp && autoMerge), opts, log);
+  if (old?.kind === "waits") await say(repo, issue.number, old, "cleared", clearedNote(wait.on, gaveUp && autoMerge && hold), opts, log);
   return how;
 }
 

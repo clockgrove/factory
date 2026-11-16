@@ -255,11 +255,11 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 /**
  * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
  * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
- * validation runs, how a session resumes and its cache. One this shell sets (inputs.mjs machineSettings) keeps the
+ * validation runs, how a session resumes and its cache, and whether hand-offs wait for siblings. One this shell sets (inputs.mjs machineSettings) keeps the
  * shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL"];
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD"];
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in

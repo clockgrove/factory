@@ -304,7 +304,7 @@ test("#340: the work stage's hand-off waits, unlabelled, while a sibling it over
 
   // The worker hands off through reviewHold with its rebase state, and labels only what it does not hold.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
-  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, autoMerge: inputs\.autoMerge, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
+  assert.match(src, /const held = await reviewHold\(repo, \{ issue, pr, autoMerge: inputs\.autoMerge, hold: inputs\.siblingHold, objectiveLabel: inputs\.objectiveLabel, rebaseMode, reviewed \}, token, \{ log \}\);\n\s*if \(held\) decision\.reason = [^\n]*\n\s*else await exitStep\(decision, "the review label could not be applied[^\n]*addLabels\(repo, pr\.number, \[REVIEW_LABEL\], token\)\);/);
 });
 
 /** The worker's rebase of a PR the dispatcher sent back, as far as GitHub sees it: a new head, no conflict, its hand-off. */
@@ -502,6 +502,33 @@ test("#340: `factory run` on an Objective whose hand-off waits reviews it now: t
   assert.deepEqual(seen, [["review", 8, 13, ["factory:review"]]]);
   assert.equal(reviewWaitOf(w.state.comments[13], 8)?.released, true);
   assert.ok(overlap(w, 8)[0].body.startsWith(marker(8, "overlap", "cleared")));
+});
+
+test("#340: sibling_hold off holds nothing and says nothing: a waiting PR gets its review label at the next tick, a hand-off reads nothing, a start gets no note; a repository variable sets it and serve takes it hot", async () => {
+  const { resolveInputs, variableSettings } = await import("../scripts/lib/inputs.mjs");
+  const { HOT_SETTINGS } = await import("../scripts/local.mjs");
+  assert.equal(resolveInputs({ env: {} }).siblingHold, true, "on by default");
+  assert.equal(resolveInputs({ env: { FACTORY_SIBLING_HOLD: "off" } }).siblingHold, false);
+  assert.deepEqual(variableSettings({ FACTORY_SIBLING_HOLD: "off" }).kept, { FACTORY_SIBLING_HOLD: "off" }, "scheduling only: a repository variable may set it");
+  assert.deepEqual(variableSettings({ FACTORY_SIBLING_HOLD: "no" }).invalid.map((x) => x.why), ["not on, off"]);
+  assert.ok(HOT_SETTINGS.includes("FACTORY_SIBLING_HOLD"));
+
+  forgetFiles();
+  const since = Date.now() - 60_000;
+  const w = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:in-review"], 2), issue(9, [], 1)], {
+    comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3), waitsComment(8, 7, since)], 9: [PLAN(9, SHARED3)], 13: [holdRecord(8, 7, since)] },
+    prs: { ...PR7(), 8: PR8() },
+  });
+  const r = await tick(w, { siblingHold: false });
+  assert.deepEqual([r.reviewHeld, r.reviewResumed, r.ready], [[], [8], [9]]);
+  assert.deepEqual(prLabels(w, 8), ["factory:review"]);
+  assert.equal(overlap(w, 9).length, 0, "no note on a start");
+  assert.match(overlap(w, 8)[0].body, /no longer waits for #7/);
+
+  forgetFiles();
+  const h = world([issue(7, ["factory:in-review"], 3), issue(8, ["factory:running"], 1)], { comments: { 7: [PLAN(7, SHARED3)], 8: [PLAN(8, SHARED3)] }, prs: { ...PR7(), 8: PR8() } });
+  assert.equal(await withWorld(h, () => reviewHold(repoOf(REPO), { issue: 8, pr: h.state.prs[8].pr, autoMerge: true, hold: false }, { token: "t" })), null);
+  assert.deepEqual(h.state.reads, []);
 });
 
 test("#277: a run named by hand gets no note; with no active sibling and one slot, no files are read", async () => {

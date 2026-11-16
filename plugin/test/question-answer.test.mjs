@@ -599,12 +599,9 @@ test("work stage: a comment judged no decision before, requeued anyway, puts the
   await onGitHub(gh, async () => {
     const decisions = await objectiveDecisions(REPO, { issue: 7 }, { token: "t" });
     const asked = gh.timeline(7).findLast((e) => e.label?.name === "factory:question").created_at;
-    gatewayKey(true);
-    try {
-      assert.equal((await screenAnswer({ check: openAnswerCheck({ inputs: {} }), repo: REPO, issue: 7, since: asked, comments: gh.comments(7), decisions, label: OBJ, opts: { token: "t" } })).requeue, false);
-    } finally {
-      gatewayKey(false);
-    }
+    // Its own env and home, not the test process's: on Actions (GITHUB_ACTIONS) the key would be read from inputs alone.
+    const check = openAnswerCheck({ inputs: {}, env: {}, home: stageHome("launcher-judged") });
+    assert.equal((await screenAnswer({ check, repo: REPO, issue: 7, since: asked, comments: gh.comments(7), decisions, label: OBJ, opts: { token: "t" } })).requeue, false);
   });
   const notice = unanswered(gh, 7)[0];
   const before = notice.updated_at;

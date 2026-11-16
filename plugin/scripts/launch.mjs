@@ -28,13 +28,14 @@ import { workflowTokenChecks } from "./doctor.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
-import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
+import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
-import { applyExit, doctorBlock } from "./lib/session.mjs";
+import { applyExit, doctorBlock, objectiveDecisions } from "./lib/session.mjs";
+import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
 import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
@@ -283,7 +284,7 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
     const names = inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     checksDone = head === record.head && names.length > 0 && !!(await checksOn(repo, head, names, opts).catch(() => null))?.done;
   }
-  return { labels, project, state, closed, issueClosed: issueData.state !== "open", record, runningSince: since, review, headSha: head, checksDone, eventAt: at };
+  return { labels, project, state, closed, issueClosed: issueData.state !== "open", record, runningSince: since, review, headSha: head, checksDone, eventAt: at, comments };
 }
 
 /**
@@ -745,6 +746,18 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   // `inputs`: for the stage's env (stageEnvironment) and the CLI version pin, however many starts this run makes.
   const run = { inputs, defaults: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]])), eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
   if (decision.block) return out(await block(run, `launcher: ${decision.block}`));
+  if (decision.requeue && ev.kind === "comment") {
+    // The answer check (lib/answer-check.mjs) on the AI Gateway, when this job has a key: a comment that gives no
+    // decision on the Question keeps it open, with one notice; one judged before never resumes it. The work stage it
+    // resumes judges it again at its start, on its own decider.
+    const asked = await objectiveLabeledAt(repo, n, "factory:question", opts).catch(() => null);
+    if (asked) {
+      const pr = await findPr(repo, `factory/${n}`, opts).catch(() => null);
+      const decisions = await objectiveDecisions(repo, { issue: n, prNumber: pr?.number ?? null }, opts, { quiet: true }).catch(() => []);
+      const screen = await screenAnswer({ check: openAnswerCheck({ inputs }), repo, issue: n, since: asked, comments: ctx.comments, decisions, label: inputs.objectiveLabel, opts });
+      if (!screen.requeue) return out({ exit: "skipped", reason: `#${n} (comment): the Question stays open: ${screen.why}` });
+    }
+  }
   if (decision.requeue) return out(await requeue(run, ctx.project, decision.requeue));
   if (decision.tick) return out({ exit: "tick", reason: `#${n}: ${decision.tick}` });
 

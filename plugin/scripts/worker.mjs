@@ -43,6 +43,7 @@ import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
+import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 
@@ -94,10 +95,14 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
 // `beforeExit`: the stage's last read of its issue (stop.mjs confirmRunning), once its watch runs. A stop racing an exit
 // already being applied ends nothing (stop.mjs commitExit); a state label that exit put back is the dispatcher's to tidy.
 let beforeExit = null;
-const applyExit = async (...args) => {
+// A stage's exit, once it is committed to (a stop that came first parks it).
+const settleExit = async () => {
   await holdIfStopped();
   await beforeExit?.();
   if (!commitExit()) await parked();
+};
+const applyExit = async (...args) => {
+  await settleExit();
   return applyExitNow(...args);
 };
 
@@ -622,6 +627,17 @@ async function main() {
   const drift = openDrift({ inputs, progress, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
+  // The answer check (lib/answer-check.mjs): a stint that resumes a Question goes on only when the writer comments since
+  // it give a decision, as this stage's decider reads them (the gateway with a key, else this harness); a confident no
+  // decision puts it back to Question before any pass reads them. A send-back or a continued pause resumes no Question.
+  const answer = rebaseMode || continued ? { open: null } : await answerAtStart({ repo, issue, check: openAnswerCheck({ inputs, stage: decisionStage }), decisions, label: inputs.objectiveLabel, opts: token });
+  if (answer.open) {
+    log(`answer check: ${answer.open}; the Question stays open`);
+    await settleExit();
+    await reopenQuestion(repo, { issue, notice: answer.notice, label: inputs.objectiveLabel }, token);
+    await finish("question", answer.open);
+    return;
+  }
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
   io.set({ decisions, prNumber: openPr?.number ?? null });
   // The plan-time Question (lib/one-repo.mjs): a repository other than this one that the plan needs, unless a maintainer

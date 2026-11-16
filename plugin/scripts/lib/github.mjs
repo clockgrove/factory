@@ -989,25 +989,103 @@ export function failingStep(lines) {
   return lines.slice(start, next < 0 ? lines.length : next);
 }
 
+/** The first failed step of an Actions job that ran ({name, number, conclusion, started_at, completed_at}, GitHub's `steps`), or null. */
+export const failedStep = (job) => (Array.isArray(job?.steps) ? (job.steps.find((x) => x?.conclusion === "failure") ?? null) : null);
+
+// A runner log line's own timestamp, to the second (ms), or NaN for a line without one.
+const lineSecond = (l) => {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z/.exec(l);
+  return m ? Date.parse(`${m[1]}Z`) : NaN;
+};
+
 /**
- * The lines of a job log that say why the job failed: the step that failed (failingStep, cut at its `##[group]`
- * boundaries), so no other step's output (set-up warnings, caches, post-job cleanup) is in it. The log is cleaned
- * (cleanLog) first. A step longer than `chars` (what a prompt holds) keeps its first line, the command it ran, and as
- * many of its last whole lines as fit, where the runner reports the failure; the lines left out are counted.
+ * The lines of `job`'s failed step (failedStep), cut from the raw log by time: every line the runner stamped within the
+ * step's started_at and completed_at, which GitHub states to the second, so both seconds are kept whole. At those two
+ * edges other steps can share a second: in the first, lines before the last `##[group]` opened in it (the header the
+ * runner opens for each step; short steps before it often start and end in that second) are earlier steps'; in the
+ * last, lines after the step's last `##[error]` (the runner's own last line of a failed step) are later steps'. Past its
+ * first second, a step's own `::group::` output is no boundary. Cleaned
+ * (cleanLog). null with no job, no failed step with both times, or no line stamped in that range: the caller cuts by
+ * structure (failingStep).
  */
-export function logWindow(text, chars = 4000) {
-  const step = failingStep(cleanLog(text).split("\n"));
+export function stepByTime(raw, job) {
+  const step = failedStep(job);
+  const from = Math.floor(Date.parse(step?.started_at) / 1000) * 1000;
+  const to = Math.floor(Date.parse(step?.completed_at) / 1000) * 1000;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return null;
+  const kept = [];
+  let sec = NaN;
+  for (const l of String(raw ?? "").split("\n")) {
+    const t = lineSecond(l);
+    // A line with no stamp of its own goes with the line before it.
+    if (Number.isFinite(t)) sec = t;
+    if (sec >= from && sec <= to) kept.push({ sec, line: cleanLog(l) });
+  }
+  if (!kept.length) return null;
+  let head = -1;
+  for (let i = 0; i < kept.length && kept[i].sec === from; i += 1) if (kept[i].line.startsWith("##[group]")) head = i;
+  let lastError = -1;
+  for (let i = kept.length - 1; i >= 0; i -= 1) if (kept[i].line.startsWith("##[error]")) {
+    lastError = i;
+    break;
+  }
+  const end = lastError >= 0 && kept[lastError].sec === to ? lastError + 1 : kept.length;
+  const lines = kept.slice(Math.max(0, head), end).map((x) => x.line);
+  return lines.length ? lines : null;
+}
+
+/** The failed step's lines of a job log: by time when `job` says when it ran (stepByTime), else by structure (failingStep). */
+export const stepLines = (text, job = null) => stepByTime(text, job) ?? failingStep(cleanLog(text).split("\n"));
+
+// What a count of lines left out takes in a window, at most: its own line and newline.
+const OMITTED = 48;
+const omitted = (n) => (n > 0 ? [`(${n} lines of this step not shown)`] : []);
+
+/**
+ * Whole lines of `lines` from index `to` back towards `from` (exclusive) while they fit in `room` characters, newlines
+ * counted: {start, kept, used}. When not even line `to` fits, its end (`cut` "end") or start ("start") as far as the
+ * room goes, nothing when there is none.
+ */
+function linesBack(lines, from, to, room, cut = "end") {
+  const kept = [];
+  let used = 0;
+  let i = to;
+  for (; i > from && used + lines[i].length + 1 <= room; i -= 1) {
+    kept.unshift(lines[i]);
+    used += lines[i].length + 1;
+  }
+  if (!kept.length && to > from && room > 1) {
+    const part = cut === "end" ? lines[to].slice(-(room - 1)) : lines[to].slice(0, room - 1);
+    return { start: to, kept: [part], used: part.length + 1 };
+  }
+  return { start: i + 1, kept, used };
+}
+
+/**
+ * The lines of a job log that say why the job failed, in at most `chars` characters: the step that failed (stepLines: by
+ * the job's step times when `job`, GitHub's job with its `steps`, is given, else at the step's `##[group]` boundaries),
+ * so no other step's output (set-up warnings, caches, post-job cleanup) is in it, cleaned of colour codes and
+ * timestamps. A step longer than `chars` (what a prompt holds) keeps the start of its first line (the command it ran,
+ * at most a quarter of the room), the step's first `##[error]` with the lines just before it (what explains the failure
+ * when the step goes on after it), and as many of its last whole lines as fit (where the runner reports how it ended);
+ * the lines left out are counted.
+ */
+export function logWindow(text, chars = 4000, job = null) {
+  const step = stepLines(text, job);
   const whole = step.join("\n");
   if (whole.length <= chars) return whole;
-  const kept = [];
-  let room = chars - step[0].length - 64;
-  for (let i = step.length - 1; i > 0 && step[i].length + 1 <= room; i -= 1) {
-    kept.unshift(step[i]);
-    room -= step[i].length + 1;
-  }
-  // One last line longer than all the room: its end.
-  if (!kept.length && step.length > 1) kept.push(step.at(-1).slice(-Math.max(0, room)));
-  return [step[0], `(${step.length - 1 - kept.length} lines of this step not shown)`, ...kept].join("\n");
+  const head = step[0].slice(0, Math.floor(chars / 4));
+  const room = chars - head.length - 2 * OMITTED;
+  const last = step.length - 1;
+  const firstError = step.findIndex((l, i) => i > 0 && l.startsWith("##[error]"));
+  const lead = Math.max(1, firstError - 3);
+  // The step's end, as far as all the room goes: enough when it reaches the first error's lead-in.
+  const tail = linesBack(step, 0, last, room);
+  if (firstError < 0 || tail.start <= lead) return [head, ...omitted(tail.start - 1), ...tail.kept].join("\n");
+  // Else the first error and the lines before it (the error line first), in up to half the room; the end in the rest.
+  const error = linesBack(step, lead - 1, firstError, Math.floor(room / 2), "start");
+  const end = firstError < last ? linesBack(step, firstError, last, room - error.used) : { start: last + 1, kept: [], used: 0 };
+  return [head, ...omitted(error.start - 1), ...error.kept, ...omitted(end.start - firstError - 1), ...end.kept].join("\n");
 }
 
 /** The most of one job log Factory holds: past it the head is cut while reading and the end kept. */

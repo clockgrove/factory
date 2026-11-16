@@ -98,6 +98,8 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
   for (const r of picked) {
     const log = await jobLog(repo, r.id, actions).catch(() => "");
     const sig = failureSignature(r.name, log);
+    // Its Actions job: when its failed step ran, so the window is that step's lines by time (github.mjs logWindow).
+    const job = log ? await rest(`repos/${repo.full}/actions/jobs/${r.id}`, actions).catch(() => null) : null;
     // The base's newest runs of the job; each red one's log is read once (not kept: no later step reads it again).
     const runs = await baseRunsOf(r.name);
     for (const x of runs) if (!PASSED.includes(x.run.conclusion)) x.sig = failureSignature(r.name, await jobLog(repo, x.run.id, actions, { cache: false }).catch(() => ""));
@@ -105,7 +107,7 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     const base = sig.id && steadyOnBase(sig, runs) ? { sha: runs[0].sha } : null;
     // A required check that only gathers the others (isAggregate) and printed no failure line of its own.
     const aggregate = isAggregate(r, failedRuns, required) && !sig.lines.length;
-    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000), sig, base, aggregate, evidence: baseEvidence(runs) });
+    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, aggregate, evidence: baseEvidence(runs) });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
   // needs and which may fail without failing the run (triage.mjs workflowJobs), so the Block's lead (leadJobs) quotes a

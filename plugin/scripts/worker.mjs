@@ -65,6 +65,8 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
  * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
  * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a file not exactly the
  * branch's (kept.mjs openKeptCheck), null with no decider; `progress`: where the check's note goes (outbox rebaseNote).
+ * In local mode a finished rebase the check stops is kept on a branch of the Objective's clone (outbox.mjs setAside),
+ * and the reason says how to deliver it.
  * `limited()`: the stage harness's usage limit that stopped the check's questions (kept.mjs). Then nothing is pushed and
  * it throws UsageLimitReached: the stage ends as a pass meeting the limit does (paused locally until the reset, held or
  * Blocked `provider-quota` elsewhere), and an unanswered question never reads as a change not kept.
@@ -89,7 +91,10 @@ export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null,
     }
   }
   if (!left) return "";
-  const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed`;
+  // Local mode keeps what the pass left in the Objective's clone (outbox.mjs setAside), and the Block says how to deliver it.
+  const kept = await Promise.resolve(outbox.setAside?.()).catch(() => null);
+  const resume = kept ? `; the conflict pass's result is kept as ${kept.sha.slice(0, 7)} on the branch \`${kept.name}\` in the Objective's local clone: if it keeps the change, force-push it to \`${kept.branch}\` and re-apply the Objective's label` : "";
+  const why = `the worker could not resolve the conflict with \`${defaultBranch}\` at ${onto.base.slice(0, 7)} in ${conflictFiles(onto.files)}: ${left}; nothing of it was pushed${resume}`;
   outbox.block(why);
   log(why);
   return why;

@@ -1383,7 +1383,7 @@ function fakeJudge(verdicts = {}, fallback = "kept") {
     name: "fake",
     model: "fake/model",
     async decide(input, question) {
-      const path = /\nFile:\n<<<BEGIN [0-9a-f]{16}>>>\n(.+)\n<<<END [0-9a-f]{16}>>>\n/.exec(input)[1];
+      const path = /^File:\n<<<BEGIN [0-9a-f]{16}>>>\n(.+)\n<<<END [0-9a-f]{16}>>>\n/.exec(input)[1];
       asked.push({ path, input, question });
       const v = verdicts[path] ?? fallback;
       if (v === "error") return { verdict: null, confidence: null, error: "unavailable" };
@@ -1437,7 +1437,7 @@ test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, 
   const lost = fakeJudge({ "app.txt": "lost" });
   const skipped = await conflictPass(skip, lost.judge);
   const c1 = skipped.r.run(skipped.r.work, "rev-parse", "--short=7", `${skipped.from}~2`);
-  assert.equal(skipped.left, `the branch it left drops the Objective's change to 1 path(s): app.txt (${c1}): the decision model (fake/model) judged it lost at 0.90`);
+  assert.equal(skipped.left, `the branch it left drops the Objective's change to 1 path(s): app.txt (${c1}): hunk 1 of 1 (@@ -1 +1 @@): the decision model (fake/model) judged it lost at 0.90`);
   // With no key, the commit match names c1 as before.
   const keyless = await conflictPass(skip);
   assert.match(keyless.left, /^the branch it left drops 1 of the Objective's commit\(s\) \([0-9a-f]{7}\); with an AI Gateway key Factory decides this on content$/);
@@ -1591,14 +1591,13 @@ test("outbox: a resolution that keeps a commit but takes main's side of its conf
   const { asked, judge } = fakeJudge({}, "lost");
   const lost = await rebasedBranch(takeMain, judge);
   const c1 = lost.r.run(lost.r.work, "rev-parse", "--short=7", `${lost.from}~1`);
-  assert.equal(lost.left, `the branch it left drops the Objective's change to 1 path(s): conf.txt (${c1}): the decision model (fake/model) judged it lost at 0.90`);
+  assert.equal(lost.left, `the branch it left drops the Objective's change to 1 path(s): conf.txt (${c1}): hunk 1 of 1 (@@ -1 +1 @@): the decision model (fake/model) judged it lost at 0.90`);
   assert.deepEqual(asked.map((a) => a.path), ["conf.txt"], "only conf.txt is not the branch's version");
   const { input, question } = asked[0];
   assert.equal(question, KEPT_QUESTION);
   const tag = /<<<BEGIN ([0-9a-f]{16})>>>/.exec(input)[1];
-  assert.match(input, new RegExp(`^The rebase conflicted on this file:\\nFile:\\n<<<BEGIN ${tag}>>>\\nconf\\.txt\\n<<<END ${tag}>>>\\n\\nThe branch's change before the rebase:\\n<<<BEGIN ${tag}>>>\\ndiff --git[\\s\\S]*\\+a=objective\\n<<<END ${tag}>>>\\n`));
-  assert.match(input, /The default branch's change since the branch split from it:\n<<<BEGIN [0-9a-f]{16}>>>\ndiff --git[\s\S]*\+a=main\n<<<END/);
-  assert.match(input, /The rebased branch's change against the default branch's head:\n<<<BEGIN [0-9a-f]{16}>>>\n\(no change\)\n<<<END [0-9a-f]{16}>>>$/, "the head has main's conf.txt");
+  // One hunk of the branch's change from the conflict's base, asked against the whole file as the head has it.
+  assert.equal(input, `File:\n<<<BEGIN ${tag}>>>\nconf.txt\n<<<END ${tag}>>>\n\nHunk 1 of 1 of the branch's change to the file:\n<<<BEGIN ${tag}>>>\n@@ -1 +1 @@\n-a=1\n+a=objective\n<<<END ${tag}>>>\n\nThe whole file as the rebased branch has it:\n<<<BEGIN ${tag}>>>\na=main\n<<<END ${tag}>>>`, "the head has main's conf.txt");
   // The worker's guard Blocks with it, and nothing goes out.
   const { sendBackGuard } = await import("../scripts/worker.mjs");
   const why = await sendBackGuard({ outbox: lost.box, onto: { from: lost.from, base: lost.onto, files: ["conf.txt", "old.txt"] }, defaultBranch: "main", judge });
@@ -1622,16 +1621,16 @@ test("outbox: a path the conflict reshaped goes to the decision model: kept at t
   const ok = await rebasedBranch(reshape, kept.judge);
   assert.equal(ok.left, "", ok.left);
   assert.deepEqual(kept.asked.map((a) => a.path), ["conf.txt"]);
-  assert.match(kept.asked[0].input, /rebased branch's change against the default branch's head:\n<<<BEGIN [0-9a-f]{16}>>>\ndiff --git[\s\S]*\+a=main-and-objective/);
+  assert.match(kept.asked[0].input, /The whole file as the rebased branch has it:\n<<<BEGIN [0-9a-f]{16}>>>\na=main-and-objective\n<<<END/);
 
   const unsure = await rebasedBranch(reshape, fakeJudge({ "conf.txt": 0.6 }).judge);
-  assert.match(unsure.left, /: conf\.txt \([0-9a-f]{7}\): the decision model \(fake\/model\) said kept at 0\.60, under 0\.7$/);
+  assert.match(unsure.left, /: conf\.txt \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -1 \+1 @@\): the decision model \(fake\/model\) said kept at 0\.60, under 0\.7$/);
   const unanswered = await rebasedBranch(reshape, fakeJudge({}, "error").judge);
-  assert.match(unanswered.left, /: conf\.txt \([0-9a-f]{7}\): the decision model gave no answer \(unavailable\)$/);
+  assert.match(unanswered.left, /: conf\.txt \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -1 \+1 @@\): the decision model gave no answer \(unavailable\)$/);
 
   // A decider that throws is no answer either; with no key there is no judge at all.
   const thrown = openKeptCheck({ inputs: {}, decider: { decide: async () => { throw new Error("boom"); } } });
-  assert.deepEqual(await thrown.judge({ path: "x", branch: "", base: "", head: "" }), { kept: false, why: "the decision model gave no answer (vendor)" });
+  assert.deepEqual(await thrown.judge({ path: "x", hunk: "@@ -0,0 +1 @@\n+x", file: "" }), { kept: false, why: "the decision model gave no answer (vendor)" });
   assert.equal(openKeptCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } }), null);
 });
 
@@ -1673,14 +1672,14 @@ test("outbox: a commit skipped under main's rename of its file is found in the f
   const one = fakeJudge({}, "lost");
   const single = await renamedUnder(false, one.judge);
   assert.equal(single.r.run(single.r.work, "rev-parse", "HEAD^{tree}"), single.r.run(single.r.work, "rev-parse", "origin/main^{tree}"), "the head is main");
-  assert.equal(single.left, "the branch it left drops the Objective's change to 1 path(s): b.txt: the decision model (fake/model) judged it lost at 0.90");
+  assert.equal(single.left, "the branch it left drops the Objective's change to 1 path(s): b.txt: hunk 1 of 1 (@@ -1,5 +1,5 @@): the decision model (fake/model) judged it lost at 0.90");
   assert.deepEqual(one.asked.map((a) => a.path), ["b.txt"]);
   assert.match(one.asked[0].input, /\+objective 2/, "the branch's change, followed across the rename");
 
   const two = fakeJudge({}, "lost");
   const both = await renamedUnder(true, two.judge);
   assert.match(both.r.run(both.r.work, "show", "HEAD:b.txt"), /objective 10/, "c2's line is in the head");
-  assert.match(both.left, /^the branch it left drops the Objective's change to 1 path\(s\): b\.txt: the decision model/);
+  assert.match(both.left, /^the branch it left drops the Objective's change to 1 path\(s\): b\.txt: hunk 1 of 2 \(@@ -1,5 \+1,5 @@\): the decision model/);
   assert.match(two.asked[0].input, /\+objective 2/);
 
   // No key: the commit match finds c1 missing.
@@ -1727,7 +1726,7 @@ test("outbox: a binary file the conflict left is decided exactly, never by the d
  * path to text, null to delete, or a function of the clone for a git step), and main then `main`. Returns the outbox,
  * the branch's head before (`from`), the base (`onto`) and the worker's git, with the default branch fetched.
  */
-async function sentBack({ base, commits, main }) {
+async function sentBack({ base, commits, main, outbox = {} }) {
   const r = repos();
   const apply = (cwd, files) => {
     if (typeof files === "function") return files(cwd, r);
@@ -1748,7 +1747,7 @@ async function sentBack({ base, commits, main }) {
   apply(r.other, main);
   r.run(r.other, "commit", "-q", "-m", "main");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  const box = await open(r);
+  const box = await open(r, outbox);
   const from = box.expected();
   assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
@@ -1770,10 +1769,10 @@ test("outbox: a file the worker renamed in the head, dropping the branch's edit,
   moved.go("commit", "-q", "-am", "move x.txt");
   const j = fakeJudge({ "conf.txt": "kept" }, "lost");
   const left = await moved.box.rebaseLeft({ from: moved.from, onto: moved.onto, judge: j.judge });
-  assert.match(left, /^the branch it left drops the Objective's change to 1 path\(s\): y\.txt: the decision model \(fake\/model\) judged it lost at 0\.90$/);
+  assert.match(left, /^the branch it left drops the Objective's change to 1 path\(s\): y\.txt: hunk 1 of 1 \(@@ [^)]* @@\): the decision model \(fake\/model\) judged it lost at 0\.90$/);
   const y = j.asked.find((a) => a.path === "y.txt").input;
-  assert.match(y, /^The rebase did not conflict on this file:/);
-  assert.match(y, /What merging the branch's change into the rebased branch would still change[^\n]*:\n<<<BEGIN [0-9a-f]{16}>>>\ndiff --git a\/y\.txt b\/y\.txt\n[\s\S]*-line 2\n\+objective 2\n/, "the model sees the edit the head lacks, under the file's name");
+  assert.match(y, /^File:\n<<<BEGIN [0-9a-f]{16}>>>\ny\.txt\n/);
+  assert.match(y, /\nHunk 1 of 1 of what merging the branch's change into the file would still change:\n<<<BEGIN [0-9a-f]{16}>>>\n@@ [^\n]*\n[\s\S]*-line 2\n\+objective 2\n/, "the model sees the edit the head lacks, under the file's name");
 
   // Rename against rename: the branch moves x.txt to z.txt with its edit; the worker's head moves it on to y.txt and
   // drops the edit. git cannot merge the branch's change into y.txt: Blocked exactly, never asked.
@@ -1922,8 +1921,8 @@ test("outbox: a file the branch added that the head dropped goes to the decision
   t.go("rm", "-q", "new.txt");
   t.go("commit", "-q", "-m", "drop new.txt");
   const j = fakeJudge({ "conf.txt": "kept" }, "lost");
-  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: j.judge }), /^the branch it left drops the Objective's change to 1 path\(s\): new\.txt \([0-9a-f]{7}\): the decision model \(fake\/model\) judged it lost at 0\.90$/);
-  assert.match(j.asked.find((x) => x.path === "new.txt").input, /would still change[^\n]*:\n<<<BEGIN [0-9a-f]{16}>>>\ndiff --git a\/new\.txt b\/new\.txt\n[\s\S]*\+brand new/);
+  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: j.judge }), /^the branch it left drops the Objective's change to 1 path\(s\): new\.txt \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -0,0 \+1 @@\): the decision model \(fake\/model\) judged it lost at 0\.90$/);
+  assert.match(j.asked.find((x) => x.path === "new.txt").input, /would still change:\n<<<BEGIN [0-9a-f]{16}>>>\n@@ -0,0 \+1 @@\n\+brand new\n<<<END [0-9a-f]{16}>>>\n\nThe whole file as the rebased branch has it:\n<<<BEGIN [0-9a-f]{16}>>>\n\(no such file in the rebased branch\)\n/);
 });
 
 test("outbox: under a rename against a rename, the branch's file kept at the default branch's name is no loss (#362)", async () => {
@@ -1998,4 +1997,133 @@ test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothi
   // The worker calls the guard for every send-back conflict, caps or not.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
   assert.match(src, /\n {2}const keptCheck = rebaseOnto \? openKeptCheck\(\{ inputs, stage: decisionStage \}\) : null;\n {2}const unresolved = await sendBackGuard\(\{ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck\?\.judge \?\? null, progress, limited: keptCheck\?\.limited \?\? null \}\);\n {2}let pushed = await outbox\.push\(\);/);
+});
+
+/**
+ * #452: a fake decision model that reads what it is given the way a model can be sure of: one hunk of the branch's
+ * change and the file it is judged against, `kept` when every line the hunk adds is in that file (other lines may be
+ * added around it), `lost` when one is not. Anything else, such as whole-file diffs of the branch, the default branch
+ * and the head interleaved, gets the unsure `kept` at 0.23 the real model gave in the issue.
+ */
+function hunkReader() {
+  const asked = [];
+  const decider = {
+    name: "fake",
+    model: "fake/model",
+    async decide(input, question) {
+      asked.push({ input, question });
+      const parts = [...input.matchAll(/<<<BEGIN ([0-9a-f]{16})>>>\n([\s\S]*?)\n<<<END \1>>>/g)].map((m) => m[2]);
+      if (question.name !== "hunk_kept" || parts.length !== 3) return { verdict: "kept", confidence: 0.23 };
+      const [, hunk, file] = parts;
+      const have = new Set(file.split("\n"));
+      const added = hunk.split("\n").filter((l) => l.startsWith("+")).map((l) => l.slice(1));
+      return added.every((l) => have.has(l)) ? { verdict: "kept", confidence: 0.95 } : { verdict: "lost", confidence: 0.95 };
+    },
+  };
+  return { asked, judge: openKeptCheck({ inputs: { triageModel: "fake/model" }, decider }).judge };
+}
+
+/**
+ * #452: the branch changes TTL and adds markStale after isStale; main changes TTL too and adds touch() at the same place,
+ * so the rebase conflicts on stale.ts. `resolve` writes the worker's resolution; with `adapt`, a second commit extends
+ * markStale to call main's touch().
+ */
+const staleBase = ["const TTL = 60;", "const LIMIT = 10;", "const UNIT = 1000;", "const NAME = \"stale\";", "const KIND = \"item\";", "", "export function isStale(item, now) {", "  return now - item.at > TTL;", "}", "", "// helpers", "// more helpers", "// end", ""];
+const markStale = ["export function markStale(items, now) {", "  return items.filter((i) => isStale(i, now)).map((i) => ({ ...i, stale: true }));", "}"];
+const touch = ["export function touch(item, now) {", "  return { ...item, at: now };", "}"];
+const staleFile = (ttl, ...adds) => [`const TTL = ${ttl};`, ...staleBase.slice(1, 10), ...adds.flatMap((a) => [...a, ""]), ...staleBase.slice(10)].join("\n");
+
+async function staleConflict(resolve, { adapt = false, outbox = {} } = {}) {
+  const t = await sentBack({ base: { "src/stale.ts": staleBase.join("\n") }, commits: [{ "src/stale.ts": staleFile(300, markStale) }], main: { "src/stale.ts": staleFile(120, touch) }, outbox });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  writeFileSync(join(t.r.work, "src/stale.ts"), resolve);
+  t.go("add", "src/stale.ts");
+  t.go("rebase", "--continue");
+  if (adapt) {
+    const text = readFileSync(join(t.r.work, "src/stale.ts"), "utf8").replace("  return items.filter", "  items = items.map((i) => touch(i, now));\n  return items.filter");
+    writeFileSync(join(t.r.work, "src/stale.ts"), text);
+    t.go("commit", "-q", "-am", "Adapt markStale to main's touch()");
+  }
+  return t;
+}
+
+test("#452: a conflict pass that keeps the branch's change and adapts it to main's new code is judged kept hunk by hunk, and pushed", async () => {
+  const t = await staleConflict(staleFile(300, touch, markStale), { adapt: true });
+  const { asked, judge } = hunkReader();
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  assert.equal(await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge }), "");
+  // One question per hunk of the branch's change (its TTL line, its markStale), each against the whole resolved file,
+  // which holds main's touch() and the worker's extra line beside the branch's lines.
+  assert.equal(asked.length, 2);
+  for (const { input, question } of asked) {
+    assert.equal(question, KEPT_QUESTION);
+    assert.match(input, /^File:\n<<<BEGIN [0-9a-f]{16}>>>\nsrc\/stale\.ts\n<<<END [0-9a-f]{16}>>>\n\nHunk [12] of 2 of the branch's change to the file:\n/);
+    assert.match(input, /\nThe whole file as the rebased branch has it:\n<<<BEGIN [0-9a-f]{16}>>>\nconst TTL = 300;\n[\s\S]*export function touch[\s\S]*items = items\.map\(\(i\) => touch\(i, now\)\);/);
+  }
+  assert.deepEqual(asked.map((a) => /\nHunk (\d) of 2/.exec(a.input)[1]).sort(), ["1", "2"]);
+  assert.equal(await t.box.push(), true, t.box.error);
+  assert.equal(t.r.run(t.r.origin, "rev-parse", "factory/1"), t.r.run(t.r.work, "rev-parse", "HEAD"));
+});
+
+test("#452: a conflict pass that drops the branch's addition, or keeps main's line where the branch changed it, is still Blocked, naming the hunk", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  // Dropped: main's file as it is, the branch's markStale gone.
+  const dropped = await staleConflict(staleFile(300, touch));
+  const d = hunkReader();
+  const why = await sendBackGuard({ outbox: dropped.box, onto: { from: dropped.from, base: dropped.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: d.judge });
+  assert.match(why, /: the branch it left drops the Objective's change to 1 path\(s\): src\/stale\.ts \([0-9a-f]{7}\): hunk 2 of 2 \(@@ -[0-9,]+ \+[0-9,]+ @@\): the decision model \(fake\/model\) judged it lost at 0\.95; nothing of it was pushed$/);
+  assert.equal(await dropped.box.push(), false);
+  // Replaced by main's version: markStale kept, main's TTL where the branch changed it.
+  const replaced = await staleConflict(staleFile(120, touch, markStale));
+  const r = hunkReader();
+  assert.match(await replaced.box.rebaseLeft({ from: replaced.from, onto: replaced.onto, judge: r.judge }), /: src\/stale\.ts \([0-9a-f]{7}\): hunk 1 of 2 \(@@ -1[0-9,]* \+1[0-9,]* @@\): the decision model \(fake\/model\) judged it lost at 0\.95$/);
+});
+
+test("#452: the rebase check shows a file over its limit as the lines around each hunk, carried to where the head has them", async () => {
+  const big = (edits = {}, top = []) => [...top, ...Array.from({ length: 2000 }, (_, i) => edits[i + 1] ?? `line ${i + 1} of the long module`)].join("\n") + "\n";
+  const shift = Array.from({ length: 100 }, (_, i) => `main's new line ${i + 1}`);
+  const t = await sentBack({ base: { "big.txt": big() }, commits: [{ "big.txt": big({ 1500: "objective line 1500" }) }], main: { "big.txt": big({ 1500: "main line 1500" }, shift) } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  writeFileSync(join(t.r.work, "big.txt"), big({ 1500: "objective line 1500\nmain line 1500" }, shift));
+  t.go("add", "big.txt");
+  t.go("rebase", "--continue");
+  const { asked, judge } = hunkReader();
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), "");
+  assert.equal(asked.length, 1);
+  // The hunk's base lines 1497 to 1503 are 1597 to 1604 of the head (main's 100 new lines above, its own line beside
+  // the branch's): 60 lines either side of them.
+  const m = /\nLines (\d+) to (\d+) of the (\d+) the file has in the rebased branch, around where the hunk applies:\n<<<BEGIN [0-9a-f]{16}>>>\n([\s\S]*?)\n<<<END/.exec(asked[0].input);
+  assert.ok(m, asked[0].input.slice(0, 400));
+  assert.deepEqual(m.slice(1, 4).map(Number), [1537, 1664, 2101]);
+  assert.match(m[4], /^line 1437 of the long module\n[\s\S]*\nobjective line 1500\nmain line 1500\n[\s\S]*\nline 1563 of the long module$/);
+
+  // The head with main's line only: the hunk's line is not in its window.
+  const lost = await sentBack({ base: { "big.txt": big() }, commits: [{ "big.txt": big({ 1500: "objective line 1500" }) }], main: { "big.txt": big({ 1500: "main line 1500" }, shift) } });
+  assert.throws(() => lost.go("rebase", "-q", "origin/main"));
+  lost.go("checkout", "-q", "--ours", "big.txt");
+  lost.go("add", "big.txt");
+  lost.go("-c", "core.editor=true", "rebase", "--continue");
+  assert.match(await lost.box.rebaseLeft({ from: lost.from, onto: lost.onto, judge: hunkReader().judge }), /: big\.txt \([0-9a-f]{7}\): hunk 1 of 1 \(@@ -1497,7 \+1497,7 @@\): the decision model \(fake\/model\) judged it lost at 0\.95$/);
+});
+
+test("#452: in local mode a conflict pass the check cannot pass is kept on a branch of the Objective's clone, and the Block says how to deliver it", async () => {
+  const { sendBackGuard } = await import("../scripts/worker.mjs");
+  for (const say of [0.23, "error"]) {
+    const t = await staleConflict(staleFile(300, touch, markStale), { adapt: true, outbox: { local: true } });
+    const head = t.r.run(t.r.work, "rev-parse", "HEAD");
+    const why = await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, say).judge });
+    assert.ok(why.endsWith(`; nothing of it was pushed; the conflict pass's result is kept as ${head.slice(0, 7)} on the branch \`factory/1-conflict-pass\` in the Objective's local clone: if it keeps the change, force-push it to \`factory/1\` and re-apply the Objective's label`), why);
+    assert.equal(await t.box.push(), false);
+    assert.equal(t.r.run(t.r.origin, "rev-parse", "factory/1"), t.from, "the branch on GitHub is as it was");
+    // The next stage puts the clone back on the branch as GitHub has it; the conflict pass's head stays on its branch.
+    t.r.run(t.r.work, "fetch", "-q", "origin", "factory/1:refs/remotes/origin/factory/1");
+    assert.equal((await t.box.putOn("refs/remotes/origin/factory/1")).code, 0);
+    assert.equal(t.r.run(t.r.work, "rev-parse", "HEAD"), t.from);
+    assert.equal(t.r.run(t.r.work, "rev-parse", "factory/1-conflict-pass"), head);
+  }
+  // On Actions the runner keeps nothing: no branch, and the Block says only that nothing was pushed.
+  const a = await staleConflict(staleFile(300, touch, markStale), { adapt: true });
+  const why = await sendBackGuard({ outbox: a.box, onto: { from: a.from, base: a.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge });
+  assert.ok(why.endsWith("; nothing of it was pushed"), why);
+  assert.throws(() => a.r.run(a.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
 });

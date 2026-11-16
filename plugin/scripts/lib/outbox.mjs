@@ -21,6 +21,7 @@ import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, un
 import { commandFailed, gitError, heldSecrets, log, secretForms } from "./inputs.mjs";
 import { untarAsAgent } from "./untar.mjs";
 import { entriesProblem, patchTextProblem, rawEntries } from "./handover.mjs";
+import { hunkView, hunksOf } from "./kept.mjs";
 
 /** Why a push that carries a held secret is refused: Factory's own words, never the value. */
 export const SECRET_PUSH_REASON = "the branch carries a worker secret's value (in a commit's change or message), so nothing was pushed: remove it from the branch's history and rotate the key (docs/PLAN.md, Worker secrets)";
@@ -50,8 +51,13 @@ const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The largest package.json whose `scripts` Factory compares (box.outside, the setup scripts' check on push); a larger one
 // cannot be read, so every script the commands run counts as changed.
 const PACKAGE_JSON_MAX = 1024 * 1024;
-/** The most of one diff the rebase check's decision model is given (box.rebaseLeft): a larger one is not judged. */
+/**
+ * The most of one diff, and of the file a hunk is judged against, the rebase check's decision model is given
+ * (box.rebaseLeft): a larger diff is not judged; a larger file is shown as the lines around the hunk, JUDGE_VIEW_LINES
+ * either side.
+ */
 export const JUDGE_MAX_BYTES = 32 * 1024;
+export const JUDGE_VIEW_LINES = 60;
 /** The most of one file's diff the fence check is given (box.outside): a larger change is not judged, and stays refused. */
 export const FENCE_DIFF_MAX = 32 * 1024;
 /** The most fenced files the fence check asks about in one reading of the fence; the rest stay refused. */
@@ -483,6 +489,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    */
   box.rebaseLeft = async ({ from, onto, judge = null }) => {
     box.rebaseNote = "";
+    box.rebaseHead = "";
     const busy = await box.inProgress();
     if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
     if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
@@ -493,6 +500,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return `the checkout's head could not be read: ${e.message}`;
     }
     if ((await git(["merge-base", "--is-ancestor", onto, head])).code !== 0) return "the branch it left is not rebased onto it";
+    // A finished rebase onto the base: what box.setAside keeps when the check stops it.
+    box.rebaseHead = head;
     let open;
     try {
       open = await unsettled({ from, onto, head });
@@ -572,12 +581,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * Each open path (unsettled) decided: kept when the head has exactly the branch's entry, blob and mode (a path the
    * replay conflicted on: as the branch left it; any other: as replayed). Exactly not kept: the same blob with another
    * mode, a binary or Git LFS file, or a path the head moved or removed where git cannot merge the branch's change into
-   * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE at a time, at most JUDGE_MAX_PATHS paths and
-   * JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES, it is not judged. The judge gets, for a
-   * replay conflict, the branch's and the default branch's sides from their base; for any other path, what merging the
-   * branch's change into the head would still change there; and the head's change from `onto`. Returns "" or why,
-   * naming each path not kept, the branch's commits that changed it, and why; null, with no `judge`, when a path is not
-   * exactly the branch's.
+   * it. Any other text file goes to `judge` (kept.mjs) one hunk of the branch's change at a time, JUDGE_AT_ONCE hunks
+   * at a time, at most JUDGE_MAX_PATHS paths and JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES,
+   * it is not judged. The branch's change is, for a replay conflict, its side from their base; for a path where merging
+   * the branch's change into the head conflicts, its side of that merge; for any other path, what that merge would still
+   * change there. Each hunk is judged against the head's file (kept.mjs hunkView), and a path is kept when every hunk of
+   * it is. Returns "" or why, naming each path not kept, the branch's commits that changed it, the first hunk not kept
+   * and why; null, with no `judge`, when a path is not exactly the branch's.
    */
   const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge }) => {
     const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
@@ -602,9 +612,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return b.includes(0) || !!parsePointer(b.toString("utf8"));
     };
     // git's diff of two blobs, its headers naming path `p` where git names the blob ids.
-    const diff = async (a, b, p) => {
+    const diff = async (a, b, p, { extra = [], max = JUDGE_MAX_BYTES } = {}) => {
       const ids = [oid(a) || none, oid(b) || none];
-      const r = await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", ...ids], { maxBytes: JUDGE_MAX_BYTES });
+      const r = await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", ...extra, ...ids], { maxBytes: max });
       if (r.code !== 0 && !r.truncated) throw new Error(`git diff exited ${r.code}`);
       if (r.truncated) return null;
       const head = (l) => /^(diff --git |--- |\+\+\+ )/.test(l);
@@ -615,7 +625,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     };
     // Each path decided exactly where it can be; the rest queued for the decision model.
     const verdicts = new Map();
-    const asks = [];
+    const prepare = new Map();
     // The head's entries at the replay's conflicted paths, read once when a rename conflict needs them.
     let held = null;
     for (const p of paths) {
@@ -648,36 +658,89 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (exact) verdicts.set(p, exact);
         continue;
       }
-      // A conflict of the replay: the branch's and the default branch's sides from its base. Any other path: what
-      // merging the branch's change into the head would still change there (wherever git's rename detection put it).
-      asks.push(async () => {
-        const diffs = st
-          ? { conflicted: true, branch: await diff(st[1], st[3], p), base: await diff(st[1], st[2], p), head: await diff(await entry(onto, p), now, p) }
-          : { conflicted: false, branch: await diff(now, await entry(merged.tree, p), p), base: "", head: await diff(await entry(onto, p), now, p) };
-        if ([diffs.branch, diffs.base, diffs.head].some((d) => d === null)) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
-        const said = await judge({ path: p, ...diffs });
-        return said.kept ? "" : said.why;
-      });
+      // The branch's change to the path, as two entries: for a conflict of the replay, its side from their base; for a
+      // conflict of merging it into the head, its side of that merge (wherever git's rename detection put it); for any
+      // other path, the head's file to what that merge leaves (`merged`: what it would still change).
+      const ms = !st && mergeConflicts.has(p) ? merged.stages.get(p) : null;
+      const change = st ? { before: st[1] || "", after: st[3] || "" } : ms ? { before: ms[1] || "", after: ms[3] || "" } : { before: now, after: await entry(merged.tree, p), merged: true };
+      prepare.set(p, { now, change });
       verdicts.set(p, null);
     }
     const queued = paths.filter((p) => verdicts.get(p) === null);
     queued.slice(JUDGE_MAX_PATHS).forEach((p) => verdicts.set(p, `not judged: the decision model is asked about ${JUDGE_MAX_PATHS} paths at most`));
     const out = `not judged: the check's ${JUDGE_MAX_MS / 60_000} minutes ran out`;
+    // Each judged path's hunks (kept.mjs hunksOf), each asked against the file as the head has it (kept.mjs hunkView),
+    // or why the path is not judged.
+    const items = [];
+    const hunks = new Map();
+    const ready = async (p) => {
+      const { now, change } = prepare.get(p);
+      const branchDiff = await diff(change.before, change.after, p);
+      if (branchDiff === null) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
+      const list = hunksOf(branchDiff);
+      // No hunk: the branch changes no line of the file under this name (one side of a rename conflict, whose other
+      // names are checked on their own); its file mode was checked exactly above.
+      if (!list.length) return [];
+      let file = "";
+      if (oid(now)) {
+        const r = await git(["cat-file", "blob", oid(now)], { maxBytes: readMaxBytes });
+        if (r.code !== 0 && !r.truncated) throw new Error(`git cat-file exited ${r.code}`);
+        if (r.truncated) return `not judged: the file is over ${readMaxBytes} bytes`;
+        file = r.stdout;
+      }
+      // Where the change's lines are in the head's file, read only when the file is shown in part.
+      let moves = [];
+      if (!change.merged && Buffer.byteLength(file) > JUDGE_MAX_BYTES) {
+        const d = await diff(change.before, now, p, { extra: ["-U0"], max: readMaxBytes });
+        if (d === null) return `not judged: the file is over ${readMaxBytes} bytes`;
+        moves = hunksOf(d);
+      }
+      const asks = [];
+      for (const [i, h] of list.entries()) {
+        const view = hunkView({ file: oid(now) ? file : null, hunk: h, moves, max: JUDGE_MAX_BYTES, context: JUDGE_VIEW_LINES });
+        if (!view) return `not judged: the lines around hunk ${i + 1} of ${list.length} are over ${JUDGE_MAX_BYTES / 1024} KiB`;
+        asks.push({ path: p, hunk: h.text, header: h.header, at: i + 1, of: list.length, merged: !!change.merged, file: oid(now) ? view.file : null, lines: view.lines });
+      }
+      return asks;
+    };
     let timer;
     const deadline = new Promise((done) => (timer = setTimeout(done, JUDGE_MAX_MS)));
-    const work = queued.slice(0, JUDGE_MAX_PATHS).map((p, i) => [p, asks[i]]);
-    let next = 0;
     let over = false;
+    // A path is decided once a hunk of it is not kept, or every hunk of it is: what is left of it is not asked.
+    const failed = new Map();
+    const settle = (p) => {
+      const h = hunks.get(p);
+      const bad = [...(failed.get(p) || [])].sort((a, b) => a.at - b.at)[0];
+      if (bad) verdicts.set(p, `hunk ${bad.at} of ${bad.of} (${bad.header}): ${bad.why}`);
+      else if (h && h.done === h.of) verdicts.set(p, "");
+    };
+    let next = 0;
     const lane = async () => {
-      while (!over && next < work.length) {
-        const [p, ask] = work[next++];
-        const why = await ask();
-        if (!over) verdicts.set(p, why);
+      while (!over && next < items.length) {
+        const item = items[next++];
+        if (failed.has(item.path)) continue;
+        const said = await judge(item);
+        if (over) return;
+        hunks.get(item.path).done += 1;
+        if (!said.kept) failed.set(item.path, [...(failed.get(item.path) || []), { ...item, why: said.why }]);
+        settle(item.path);
       }
+    };
+    const run = async () => {
+      for (const p of queued.slice(0, JUDGE_MAX_PATHS)) {
+        if (over) return;
+        const asks = await ready(p);
+        if (typeof asks === "string" || !asks.length) verdicts.set(p, typeof asks === "string" ? asks : "");
+        else {
+          hunks.set(p, { of: asks.length, done: 0 });
+          items.push(...asks);
+        }
+      }
+      await Promise.all(Array.from({ length: JUDGE_AT_ONCE }, lane));
     };
     try {
       await Promise.race([
-        Promise.all(Array.from({ length: JUDGE_AT_ONCE }, lane)),
+        run(),
         deadline.then(() => {
           over = true;
         }),
@@ -685,7 +748,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     } finally {
       clearTimeout(timer);
     }
-    for (const [p] of work) if (verdicts.get(p) === null) verdicts.set(p, out);
+    for (const p of queued.slice(0, JUDGE_MAX_PATHS)) if (verdicts.get(p) === null) verdicts.set(p, out);
     const lost = [];
     for (const p of paths) {
       const why = verdicts.get(p);
@@ -747,6 +810,23 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return "Factory could not compare the rebased branch with the branch before it";
     }
     return "";
+  };
+
+  /**
+   * Local mode: keep the head rebaseLeft read last (a finished rebase onto the base) on the branch `<branch>-conflict-pass`
+   * of the agent's checkout, the Objective's local clone, which a Blocked Objective keeps and the next stage's putOn
+   * leaves alone, so a conflict pass the check stopped is not lost. Written as the agent, in its sandbox, with no hooks.
+   * {name, sha, branch}, or null elsewhere (an Actions runner keeps nothing), with no such head, or when git failed.
+   */
+  box.setAside = async () => {
+    if (!local || !box.rebaseHead) return null;
+    const name = `${branch}-conflict-pass`;
+    const r = await box.agentGit(["-c", "core.hooksPath=/dev/null", "branch", "-f", name, box.rebaseHead]);
+    if (r.code !== 0) {
+      log(`the conflict pass's head could not be kept on ${name}: ${gitError(r.stderr) || `exit ${r.code}`}`);
+      return null;
+    }
+    return { name, sha: box.rebaseHead, branch };
   };
 
   /** Refuse every later push with `reason` (fixed text): the caller found the branch must not go out as it stands. */

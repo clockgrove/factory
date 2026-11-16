@@ -15,7 +15,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, relabeledIn, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, collaboratorPermission, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -30,7 +30,7 @@ import { accountPin, routeAccounts, routeAutoAccounts, routeTwoLine } from "./li
 import { choiceOf } from "./lib/choice.mjs";
 import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
@@ -412,7 +412,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     let again = inputs.issue === issue.number;
     if (!again) {
       timelines[issue.number] = await timelineOf(repo, issue.number, cached).catch(() => null);
-      again = !!timelines[issue.number] && relabeledIn(timelines[issue.number], inputs.objectiveLabel, ["factory:blocked", "factory:question", "factory:in-review"], [DRAFT_LABEL]);
+      again = !!timelines[issue.number] && requeuedIn(timelines[issue.number], inputs.objectiveLabel);
     }
     if (!again) continue;
     reset.push(issue.number);

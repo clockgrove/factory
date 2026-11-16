@@ -1746,8 +1746,12 @@ export async function issueTextChangedAt(repo, number, opts, labelled = () => fa
 
 /** When `label` (one name, or any of several) was last applied (a human's recovery re-applies the Objective label), or null. */
 export async function objectiveLabeledAt(repo, number, label, opts) {
+  return labeledAtIn((await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label);
+}
+
+/** objectiveLabeledAt on timeline events already read. */
+export function labeledAtIn(events, label) {
   const names = [].concat(label);
-  const events = (await rest(`repos/${repo.full}/issues/${number}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
   let last = null;
   for (const e of events) if (e.event === "labeled" && names.includes(e.label?.name) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
   return last;

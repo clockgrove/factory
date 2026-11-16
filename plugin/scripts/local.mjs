@@ -32,7 +32,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -59,7 +59,7 @@ import { SKIP_SMUDGE_ENV, lfsPinEnv } from "./lib/lfs.mjs";
 import { EDITED_REASON, authorGate, foundationTrusted, labelsVouched, objectiveInputs, planStateNow, recordText, settled, startedAt, trustedIssue } from "./lib/objective-trust.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
-import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
+import { DRAFT_LABEL, isDraft, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -2952,8 +2952,9 @@ export class Local {
    * Open PRs labelled factory:review whose Objective is routed here and held by no loop: the label is the review trigger,
    * as on Actions. Not a draft PR (a Question or a Block: the reviewer waits for a person) nor a Blocked Objective's.
    * A Question's PR a person marked ready (#339) is one too, as the Action's ready_for_review event makes it: out of
-   * draft, its issue still a Question, marked ready after the Question was asked (readyAfter). The review applies the
-   * answer; with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
+   * draft, its issue still a Question, marked ready after the Question was asked (readyAfter), and its Objective label
+   * not re-applied since (that reruns its work stage instead: the dispatcher's recovery). The review applies the answer;
+   * with none since the Question, a body still asking a `QUESTION:` makes it a Question again (review.mjs readyMark).
    */
   async pendingReviews() {
     const prs = (await rest(`repos/${this.repo.full}/pulls?state=open&per_page=100`, { ...this.opts, paginate: true }).catch(() => [])) || [];
@@ -2969,7 +2970,11 @@ export class Local {
       // A stopped Objective (its label removed, its issue closed: stop.mjs) gets no review.
       if (!data || isBlocked(data) || stopCause(data, this.objectiveLabel()) || !BACKENDS.local.trigger.routes(data, this.baseEnv())) continue;
       if (asked) {
-        const askedAt = await objectiveLabeledAt(this.repo, issue, "factory:question", cached).catch(() => null);
+        const events = await timelineOf(this.repo, issue, cached).catch(() => null);
+        // The Objective label re-applied since the Question (requeuedIn) is the go to run its work stage again: this
+        // tick's dispatch puts it back to Queued and picks it, so a ready mark beside it starts no review.
+        if (!events || requeuedIn(events, this.objectiveLabel())) continue;
+        const askedAt = labeledAtIn(events, "factory:question");
         if (!readyAfter(askedAt ? await timelineOf(this.repo, pr.number, cached).catch(() => []) : [], askedAt)) continue;
       }
       if ((await localClaim(this.repo, issue, this.opts).catch(() => null))?.fresh) continue;

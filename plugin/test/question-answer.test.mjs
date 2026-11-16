@@ -7,8 +7,8 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
@@ -82,6 +82,11 @@ function fakeGitHub(open, { self = BOT } = {}) {
     }
     if (method === "GET" && /^\/issues\/\d+$/.test(path) && one) return json({ ...one.issue, labels: one.issue.labels.map((name) => ({ name })) });
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(path) && one) return json(one.timeline);
+    const prLine = /^\/issues\/(\d+)\/timeline$/.exec(path);
+    if (method === "GET" && prLine) {
+      const p = [...issues.values()].map((i) => i.pr).find((x) => x?.number === Number(prLine[1]));
+      if (p) return json(p.events || []);
+    }
     if (method === "GET" && /^\/issues\/\d+\/comments$/.test(path) && one) return json(one.comments);
     if ((method === "POST" || method === "PATCH") && fail.writes.some((re) => re.test(body?.body || ""))) return json({ message: "Server Error" }, 500);
     if (method === "POST" && /^\/issues\/\d+\/comments$/.test(path) && one) {
@@ -154,6 +159,19 @@ function fakeGitHub(open, { self = BOT } = {}) {
       one.timeline.push({ event: "labeled", label: { name }, actor: PERSON, created_at: stamp() });
     },
     labels: (n) => [...issues.get(n).issue.labels].sort(),
+    /** A person marking the PR of `n` ready for review now. */
+    ready(n) {
+      const p = issues.get(n).pr;
+      p.draft = false;
+      (p.events ??= []).push({ event: "ready_for_review", actor: PERSON, created_at: stamp() });
+    },
+    /** Every time on the issue so far moved `ms` into the past, as if it all happened that long ago. */
+    age(n, ms) {
+      const one = issues.get(n);
+      const back = (t) => new Date(Date.parse(t) - ms).toISOString();
+      for (const e of one.timeline) e.created_at = back(e.created_at);
+      for (const c of one.comments) Object.assign(c, { created_at: back(c.created_at), updated_at: back(c.updated_at) });
+    },
     pr: (n) => issues.get(n).pr,
     /** A comment on the issue, `ago` ms back (0: now, after every write so far). */
     comment(n, user, text, ago = 0) {
@@ -164,14 +182,14 @@ function fakeGitHub(open, { self = BOT } = {}) {
 }
 
 /** A stage's Question exit on `gh`, as the worker applies it (session.mjs applyExit): its PR, if any, and its form. */
-async function ask(gh, n, { askOnIssue = false, pr = null, self = BOT } = {}) {
+async function ask(gh, n, { askOnIssue = false, pr = null, self = BOT, stage = "work" } = {}) {
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   globalThis.fetch = gh.fetch;
   setSelf(self.login);
   try {
-    await applyExit(REPO, { issue: n, pr, exit: "question", reason: "question: which one?", notify: "kirk", stage: "work", askOnIssue }, { token: "t" });
+    await applyExit(REPO, { issue: n, pr, exit: "question", reason: "question: which one?", notify: "kirk", stage, askOnIssue }, { token: "t" });
   } finally {
     globalThis.fetch = realFetch;
     setSelf(null);
@@ -708,4 +726,73 @@ test("launcher (the cloud sandbox route) with an AI Gateway key: a comment that 
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+});
+
+
+/**
+ * One tick of the real serve (local.mjs) on `gh`, as the person's login: its own pendingReviews and dispatch, with a stage
+ * recorded instead of run (`started`: each stage it starts, `work` or `review`, by issue).
+ */
+async function serveTick(gh) {
+  const { Local } = await import("../scripts/local.mjs");
+  const { fakeProc } = await import("./fixtures/machine.mjs");
+  const realFetch = globalThis.fetch;
+  const keys = ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL", "GITHUB_RUN_ID", "GITHUB_ACTIONS"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { GITHUB_API_URL: "https://github.test", FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" });
+  delete process.env.GITHUB_RUN_ID;
+  delete process.env.GITHUB_ACTIONS;
+  gatewayKey(false);
+  globalThis.fetch = gh.fetch;
+  setSelf(PERSON.login);
+  const started = [];
+  const scratch = mkdtempSync(join(tmpdir(), "serve-"));
+  const loop = Object.assign(Object.create(Local.prototype), {
+    repo: REPO,
+    repoFull: REPO.full,
+    token: "t",
+    notice: null,
+    wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2" },
+    machine: { home: join(scratch, "home"), proc: fakeProc(join(scratch, "proc")) },
+    opts: { token: "t" },
+    children: new Set(),
+    baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "2" }),
+    cleanup: async () => {},
+    pausedHere: async () => [],
+    withClaim: (n, fn) => fn(),
+    runObjective: async (n) => (started.push({ n, stage: "work" }), { exit: "delivered" }),
+    review: async (n) => (started.push({ n, stage: "review" }), { exit: "delivered" }),
+  });
+  try {
+    await loop.serve({ once: true, intervalMs: 5 });
+  } finally {
+    globalThis.fetch = realFetch;
+    setSelf(null);
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  return started;
+}
+
+test("#446 local loop: a review-stage Question answered, its PR marked ready and its label re-applied 36 s later runs its work stage at the next tick, its Question label off; no review beside it", async () => {
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }], { self: PERSON });
+  gh.label(7, "factory:in-review");
+  await ask(gh, 7, { pr: gh.pr(7), self: PERSON, stage: "review" });
+  assert.ok(gh.labels(7).includes("factory:question"));
+  // The Question 36 s ago; the person answers, marks the PR ready, and takes the Objective label off and on again.
+  gh.age(7, 36_000);
+  gh.comment(7, PERSON, "hand it off, marked", 6_000);
+  gh.ready(7);
+  gh.unlabel(7, OBJ);
+  gh.label(7, OBJ);
+  assert.deepEqual(await serveTick(gh), [{ n: 7, stage: "work" }], "the work stage reruns, and no review of the ready mark holds it");
+  assert.ok(!gh.labels(7).includes("factory:question"), "the stale Question label is off");
+
+  // A ready mark with the writer's answer and no re-applied label is the review's to answer (#339), as before.
+  const ready = fakeGitHub([{ number: 8, pr: PR_BODY }], { self: PERSON });
+  ready.label(8, "factory:in-review");
+  await ask(ready, 8, { pr: ready.pr(8), self: PERSON, stage: "review" });
+  ready.comment(8, PERSON, "hand it off, marked");
+  ready.ready(8);
+  assert.deepEqual(await serveTick(ready), [{ n: 8, stage: "review" }]);
 });

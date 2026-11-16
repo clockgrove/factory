@@ -7,8 +7,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, isDraft, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
-import { RETRY, relabeledAfter } from "../scripts/lib/github.mjs";
+import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, isDraft, requeuedIn, stopCause, stopText, watchObjective } from "../scripts/lib/stop.mjs";
+import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
 import { humanActions, labelTime, scoreObjective } from "../../bench/lib/objective.mjs";
 import { loadPrices } from "../../bench/lib/cost.mjs";
@@ -17,6 +17,8 @@ import { cleanMerge } from "../../bench/test/fixtures/github.mjs";
 RETRY.sleep = async () => {};
 
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
+// The repository's writer (its collaborators list names it).
+const MAINTAINER = { login: "maintainer", type: "User" };
 const OBJ = "factory:objective";
 const issue = (labels, state = "open", number = 7, extra = {}) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" }, ...extra });
 
@@ -259,10 +261,10 @@ test("a draft edited after its plan and started by taking its draft label off is
   // draft label off (factory:objective stayed on).
   const T0 = "2031-03-02T01:00:00Z";
   const timeline = [
-    { event: "labeled", label: { name: OBJ }, created_at: T0 },
+    { event: "labeled", label: { name: OBJ }, actor: MAINTAINER, created_at: T0 },
     { event: "labeled", label: { name: "factory:running" }, created_at: "2031-03-02T01:01:00Z" },
-    { event: "labeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:10:00Z" },
-    { event: "unlabeled", label: { name: DRAFT_LABEL }, created_at: "2031-03-02T01:30:00Z" },
+    { event: "labeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:10:00Z" },
+    { event: "unlabeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:30:00Z" },
   ];
   await withApi({}, async () => {
     setSelf("factory-app[bot]");
@@ -300,25 +302,13 @@ test("the dispatcher's report of a tick named for a draft, or for an issue that 
 
 test("a Blocked or Question Objective made a draft and started by taking the draft label off counts as re-applied, so the dispatcher queues it again", async () => {
   const at = (m) => `2031-03-02T0${m}:00:00Z`;
-  const ev = (event, name, t) => ({ event, label: { name }, created_at: t });
-  const realFetch = globalThis.fetch;
-  const run = (events) => {
-    globalThis.fetch = async () => new Response(JSON.stringify(events), { status: 200, headers: { "content-type": "application/json" } });
-    return relabeledAfter(REPO, 7, OBJ, ["factory:blocked", "factory:question", "factory:in-review"], { token: "t" }, [DRAFT_LABEL]);
-  };
-  const saved = process.env.GITHUB_API_URL;
-  process.env.GITHUB_API_URL = "https://github.test";
-  try {
-    for (const state of ["factory:blocked", "factory:question"]) {
-      const base = [ev("labeled", OBJ, at(1)), ev("labeled", "factory:running", at(2)), ev("labeled", state, at(3)), ev("labeled", DRAFT_LABEL, at(4))];
-      assert.equal(await run([...base, ev("unlabeled", DRAFT_LABEL, at(5))]), true, `${state}: started`);
-      assert.equal(await run(base), false, `${state}: still a draft`);
-    }
-    // A draft removal from before the Block is no restart of the Blocked run.
-    assert.equal(await run([ev("labeled", DRAFT_LABEL, at(1)), ev("labeled", OBJ, at(1)), ev("unlabeled", DRAFT_LABEL, at(2)), ev("labeled", "factory:blocked", at(3))]), false);
-  } finally {
-    globalThis.fetch = realFetch;
-    if (saved === undefined) delete process.env.GITHUB_API_URL;
-    else process.env.GITHUB_API_URL = saved;
+  const ev = (event, name, t) => ({ event, label: { name }, actor: { login: "maintainer", type: "User" }, created_at: t });
+  const run = async (events) => (await requeuedIn(events, OBJ, async () => true)).requeued;
+  for (const state of ["factory:blocked", "factory:question"]) {
+    const base = [ev("labeled", OBJ, at(1)), ev("labeled", "factory:running", at(2)), ev("labeled", state, at(3)), ev("labeled", DRAFT_LABEL, at(4))];
+    assert.equal(await run([...base, ev("unlabeled", DRAFT_LABEL, at(5))]), true, `${state}: started`);
+    assert.equal(await run(base), false, `${state}: still a draft`);
   }
+  // A draft removal from before the Block is no restart of the Blocked run.
+  assert.equal(await run([ev("labeled", DRAFT_LABEL, at(1)), ev("labeled", OBJ, at(1)), ev("unlabeled", DRAFT_LABEL, at(2)), ev("labeled", "factory:blocked", at(3))]), false);
 });

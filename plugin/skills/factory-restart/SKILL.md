@@ -21,7 +21,7 @@ Show the issue's number, title and state, and say what the restart does:
 - Then the dispatcher closes the earlier pull request with a comment linking the restart (its commits and review stay readable there), deletes the `factory/<issue>` branch, sets the earlier plan aside, and queues the Objective again. The restarted run starts from the default branch and the issue's current text; comments made before the label was applied do not feed it.
 - The restart record on the issue names the deleted branch's last commit, so the branch can be restored. The retry and rebase counts start over. The scorecard counts the restart as a human action.
 
-Ask for a yes, saying that a repository set up before the label existed gets it created first. Factory restarts an Objective only for someone who can push to the repository or is a maintainer its workflow names; anyone else's label is taken off with a comment.
+Ask for a yes, saying that a repository set up before the label existed gets it created first. Factory restarts an Objective only for a person who can push to the repository or is a maintainer its workflow names; anyone else's label, an App's own token's included, is taken off with a comment.
 
 ## Restart it
 

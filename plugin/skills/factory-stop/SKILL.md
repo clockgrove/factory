@@ -20,7 +20,7 @@ Show the issue's number, title and state, and say what the stop does:
 - Nothing picks it up again until the label is re-applied, which continues from its branch and pull request. To start over from the issue's current text instead, the factory-restart skill applies `factory:restart`.
 - Closing the issue stops it too, and is the way to drop it for good.
 
-Ask for a yes. Removing a label needs triage or write access to the repository; when `gh` reports no access, say a maintainer has to do it.
+Ask for a yes. Removing a label needs triage or write access to the repository; when `gh` reports no access, say a maintainer has to do it. Starting it again is not the same: Factory takes the re-applied label only from someone who can push or a maintainer its workflow names, so a triager's re-apply on a Blocked or Question Objective, or on a stopped one, is refused with a comment.
 
 ## Stop it
 

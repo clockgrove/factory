@@ -61,9 +61,9 @@
       "words": 699
     },
     "factory-restart": {
-      "sha256": "75499bca33d3adc97bee4a13d7e92c714cce986d7318c53bbc11e7949c5cdf41",
+      "sha256": "48b63572d5a72cddc4c63ad60f1c005ac8a336dd66a0f24678ef7176de7f0bad",
       "lines": 31,
-      "words": 489
+      "words": 495
     },
     "factory-review": {
       "sha256": "b6409c7f1f29837a65ac5d76861f5ceb8bddf70a8f8d172858f40e0695f9d49b",
@@ -127,9 +127,9 @@
       "words": 589
     },
     "factory-stop": {
-      "sha256": "36724ef090d73d875cf52bc9e95fee837380991cded993807bc706e588372c10",
+      "sha256": "a5fdb7d58f6cee8c04d11a47d6d8555e2a98438ca27af80acac7cae6e82bef28",
       "lines": 30,
-      "words": 361
+      "words": 405
     }
   }
 }

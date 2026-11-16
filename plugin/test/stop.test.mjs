@@ -173,7 +173,7 @@ test("dispatcher: a stopped Objective In review is left a draft and Queued at on
         // #12 closed by a person while In review, its PR still open.
         closed: [issue(["factory:objective", "factory:in-review"], "closed", 12)],
         pr: (n) => (n === 7 || n === 9 || n === 12 ? { number: n * 10, draft: false, node_id: `PR_${n * 10}` } : null),
-        timeline: (n) => [{ event: "labeled", label: { name: "factory:objective" }, created_at: ago(3 * 3600_000) }, { event: "unlabeled", label: { name: "factory:objective" }, created_at: n === 9 || n === 11 ? ago(STOP_GRACE_MS + 60_000) : ago(60_000) }],
+        timeline: (n) => [{ event: "labeled", label: { name: "factory:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(3 * 3600_000) }, { event: "unlabeled", label: { name: "factory:objective" }, created_at: n === 9 || n === 11 ? ago(STOP_GRACE_MS + 60_000) : ago(60_000) }],
       });
       try {
         const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t" });

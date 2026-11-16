@@ -18,6 +18,9 @@ import { accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
 // fails every one of its tries.
 RETRY.sleep = async () => {};
 
+/** The repository's one writer, who answers a Question by re-applying the Objective label. */
+const MAINTAINER = { login: "maintainer", type: "User" };
+
 /**
  * A GitHub that keeps one Objective's labels and can show the issues listing a stale view of them (a read from before a
  * stage's exit labels landed). `view(read, labels)` is the listing's labels on its read-th call; `onList(read)` runs
@@ -62,6 +65,7 @@ async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => fals
         return onList(reads, { labels, timeline });
       }
       if (url.pathname === "/graphql") return send(200, { data: {} });
+      if (url.pathname === "/repos/o/r/collaborators") return send(200, [{ login: MAINTAINER.login }]);
       if (req.method !== "GET") return send(200, {});
       return send(200, []);
     });
@@ -80,8 +84,8 @@ function heldOn(account) {
 /** The labels a listing from before the stage's exit labels landed shows: no state label at all. */
 const stopLabels = (all) => all.filter((l) => !l.startsWith("factory:") || l === "factory:objective");
 const answerAt = (read, at, timeline) => {
-  // A maintainer answers by re-applying the Objective label.
-  if (read === at) timeline.push({ event: "labeled", label: { name: "factory:objective" }, created_at: new Date().toISOString() });
+  // A maintainer answers by re-applying the Objective label: a writer the repository lists (MAINTAINER).
+  if (read === at) timeline.push({ event: "labeled", label: { name: "factory:objective" }, actor: MAINTAINER, created_at: new Date().toISOString() });
 };
 
 /**

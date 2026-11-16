@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { log } from "./inputs.mjs";
 import { keptLine } from "./edit-check.mjs";
-import { DRAFT_LABEL } from "./stop.mjs";
+import { DRAFT_LABEL, goTrust, labelTrust } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
 import { planComment, planTextMarker, stampPlan } from "./handoff.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
@@ -141,22 +141,28 @@ export async function knowSelf(opts) {
   if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Factory's own login could not be read, so its plan comment cannot be told from anyone else's");
 }
 
+const isStart = (e, label) => ((e?.event === "labeled" && e.label?.name === label) || (e?.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && Number.isFinite(Date.parse(e.created_at));
+
 /**
- * When the Objective was last started, from its timeline events: the later of its label's last application and the
- * draft label's last removal (a draft is started by taking that label off, its Objective label on or not), or null.
+ * The Objective's start events on its timeline, newest first: its label applied, and the draft label taken off (a draft
+ * is started by taking that label off, its Objective label on or not).
  */
-export function startTime(events, label) {
-  let last = null;
-  for (const e of events || []) {
-    const start = (e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL);
-    if (start && Number.isFinite(Date.parse(e.created_at)) && (!last || Date.parse(e.created_at) > Date.parse(last))) last = e.created_at;
-  }
-  return last;
+export const startsOf = (events, label) => (events || []).filter((e) => isStart(e, label)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+
+/**
+ * When a person last started the Objective, from its timeline events: the latest start (startsOf) whose actor `trusted`
+ * (stop.mjs labelTrust, goTrust) takes as a person's go, or null. A start anyone else made, or one whose actor could not
+ * be checked for now, is passed over.
+ */
+export async function startTime(events, label, trusted) {
+  for (const e of startsOf(events, label)) if ((await trusted(e.actor ?? null, e)) === true) return e.created_at;
+  return null;
 }
 
 /** When the issue's Objective was last started (startTime), read from its timeline: the label time a work stage plans by. */
 export async function startedAt(repo, issue, label, opts) {
-  return startTime((await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true })) || [], label);
+  const events = (await rest(`repos/${repo.full}/issues/${issue}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
+  return startTime(events, label, goTrust(events, issue, labelTrust(repo, opts)));
 }
 
 /**

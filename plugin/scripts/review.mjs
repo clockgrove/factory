@@ -102,7 +102,8 @@ import {
   mirrorOwnStat,
   redLines,
 } from "./lib/session.mjs";
-import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
+import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
 import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
@@ -391,6 +392,23 @@ export function workOwnsBranch({ action = null, sender = null, issue = null }) {
   if (action !== "ready_for_review" || sender?.type === "Bot" || !issue) return null;
   const state = stateOf(issue, null);
   return state === "Queued" || state === "Running" ? `marked ready while the Objective is ${state}: its work stage owns factory/${issue.number}` : null;
+}
+
+/**
+ * Why a person's ready mark starts no review, or null, read on the issue's timeline too: workOwnsBranch, or a Question
+ * whose Objective `label` a person who can push re-applied since it was asked (stop.mjs requeuedIn, the dispatcher's own
+ * rule). That go wins over the mark beside it: the dispatcher puts the Objective back to Queued and starts its work
+ * stage, so this review ends at once. A re-apply by anyone else changes nothing, and one whose actor could not be
+ * checked for now, or a timeline that cannot be read, leaves the mark's review to run (the dispatcher waits for a
+ * Question's live review job before it requeues it). The timeline is read only for a person's mark on a Question.
+ */
+export async function readyOwner({ repo, action = null, sender = null, issue = null, label, opts }) {
+  const owned = workOwnsBranch({ action, sender, issue });
+  if (owned || action !== "ready_for_review" || sender?.type === "Bot" || !issue || stateOf(issue, null) !== "Question") return owned;
+  const events = await timelineOf(repo, issue.number, opts).catch(() => null);
+  if (!events) return null;
+  const go = await requeuedIn(events, label, goTrust(events, issue.number, labelTrust(repo, opts)));
+  return go.requeued ? `marked ready beside ${label} re-applied since the Question: its work stage runs again on factory/${issue.number}` : null;
 }
 
 /**
@@ -923,7 +941,7 @@ async function main() {
     await finish("skipped", `the Objective is stopped (${stopText(stopped, inputs.objectiveLabel)})`);
     return;
   }
-  const working = workOwnsBranch({ action: eventAction(), sender: eventSender(), issue: issueNow });
+  const working = await readyOwner({ repo, action: eventAction(), sender: eventSender(), issue: issueNow, label: inputs.objectiveLabel, opts: token });
   if (working) {
     log(`PR #${pr.number} ${working}; no review`);
     await finish("skipped", working);

@@ -2,12 +2,12 @@
 // exactly the branch's version, a decision model is asked whether the branch's change to it is kept. The decision
 // model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with the key, the model setting and
 // the confidence floor of red-check triage (triage.mjs). Only the typed label and its confidence reach code: `kept` at
-// MIN_CONFIDENCE or more keeps the path; anything else names it as dropped. This runs in Factory's own process, never
+// the confidence floor (triage.mjs confidenceFloor) or more keeps the path; anything else names it as dropped. This runs in Factory's own process, never
 // in a harness. The diffs are the worker's text: they go in delimited, as data the model is told not to follow.
 import { randomBytes } from "node:crypto";
 import { openDecider } from "./decider.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL } from "./triage.mjs";
+import { TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question asked about each path. */
 export const KEPT_QUESTION = {
@@ -41,7 +41,7 @@ export function keptInput({ path, conflicted = false, branch, base, head }, tag 
  * `stage`, or `decision_route` off; rebaseLeft then matches commits instead). judge(item) resolves {kept, why}: `why`
  * says, when not kept, what the model answered; it never throws.
  */
-export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = MIN_CONFIDENCE }) {
+export function openKeptCheck({ inputs, env = process.env, stage = null, decider = null, min = null }) {
   // The one decision interface (decider.mjs): the AI Gateway's `triage_model` with a key, else the stage's own harness.
   const ask = openDecider({ inputs, env, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   if (ask.off) return null;
@@ -57,8 +57,10 @@ export function openKeptCheck({ inputs, env = process.env, stage = null, decider
     const sure = typeof a.confidence === "number";
     const conf = sure ? a.confidence.toFixed(2) : "";
     log(`rebase check (${model}): ${item.path}: ${a.verdict ? `${a.verdict}${conf ? ` ${conf}` : ""}` : `no verdict (${a.error || "?"})`}`);
-    if (a.verdict === "kept" && sure && a.confidence >= min) return { kept: true, why: "" };
-    if (a.verdict === "kept") return { kept: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${min}` };
+    // The floor the verdict is read at: the one given, else who answered (triage.mjs confidenceFloor).
+    const floor = min ?? confidenceFloor(inputs, ask).min;
+    if (a.verdict === "kept" && sure && a.confidence >= floor) return { kept: true, why: "" };
+    if (a.verdict === "kept") return { kept: false, why: `the decision model (${model}) said kept at ${conf || "no stated confidence"}, under ${floor}` };
     if (a.verdict === "lost") return { kept: false, why: `the decision model (${model}) judged it lost${conf ? ` at ${conf}` : ""}` };
     return { kept: false, why: `the decision model gave no answer (${a.error || "no_answer"})` };
   };

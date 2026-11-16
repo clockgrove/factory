@@ -10,7 +10,7 @@ Run one reviewer pass on a PR in this session, exactly as the Action's reviewer 
 ## Gather
 
 1. `gh pr view <pr> --json number,title,body,headRefName,baseRefName,isDraft,headRefOid` and confirm the head is a `factory/<issue>` branch, or the user said to review it anyway.
-2. The Objective issue: the number from the branch, then `factory issue <issue> --out <file outside the clone>` (else `node <plugin root>/scripts/local.mjs issue <issue> --out <file>`) and read that file, never the issue from GitHub. It writes the issue only when its author and last editor can push or are pinned maintainers; if it refuses, stop and relay its message: the review job Blocks such an Objective, and `post-review` posts nothing for it.
+2. The Objective issue: the number from the branch, then `factory issue <issue> --out <file outside the clone>` (else `node <plugin root>/scripts/local.mjs issue <issue> --out <file>`) and read that file, never the issue from GitHub. It writes the issue only when its author, last editor and latest title renamer can push or are pinned maintainers; if it refuses, stop and relay its message: the review job Blocks such an Objective, and `post-review` posts nothing for it.
 3. The diff: `gh pr diff <pr>`.
 4. The validation state: `gh pr checks <pr>`. If validation has not passed, say so; the reviewer job runs after validation, and a review of a red PR is the user's choice.
 5. Whether a review body already carries `<!-- factory:<issue>:review -->`: if so, the one pass has run; say so and stop unless the user wants another. On a foundation Objective whose reviews lack `<!-- factory:<issue>:foundation -->`, the foundation pass has not: re-applying `factory:review` has the review job run it alone.

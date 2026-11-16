@@ -164,7 +164,7 @@ test("edit after plan: the merge Blocks on an edit, cause work, as every other m
   assert.equal(mergeBlockCause("edited"), "work");
   const src = readFileSync(join(SCRIPTS, "lib", "session.mjs"), "utf8");
   const merge = src.slice(src.indexOf("export async function mergeReadyOne("));
-  const at = merge.lastIndexOf("await editedSincePlan(repo, issue, opts)");
+  const at = merge.lastIndexOf("await editedSincePlan(repo, issue, opts, { check: editCheck, progress: keptSaid(repo, issue, opts) })");
   assert.ok(at > merge.indexOf('return "unread"'), "checked once the checks are green, before any merge");
   assert.ok(merge.indexOf("await mergeVerified(") > at, "the merge only after the check");
 });
@@ -316,7 +316,7 @@ test("edit after plan: another App's marker never hides Factory's plan comment o
     // The text edited (B) after the plan, before the App's comment: every check still sees the change.
     assert.equal((await gate(list, { sha: B, work: false, editedAt: L1 })).r.ok, false, `${name}: the review`);
     assert.equal((await gate(list, { sha: B, work: true, labeledAt: L0, editedAt: L1 })).r.ok, false, `${name}: the next work stage`);
-    assert.equal(await editedSincePlan(repo, 7, { token: "t" }, { ...issueNow, read }), true, `${name}: the merge and the queue`);
+    assert.equal(await editedSincePlan(repo, 7, { token: "t" }, { ...issueNow, read }), "changed", `${name}: the merge and the queue`);
     assert.equal((await planStateNow(repo, 7, { sha: B, editedAt: L1 }, { token: "t" }, { planComment: read, changedAt: async () => null })).state, "changed", `${name}: post-review`);
   }
   // With no plan comment of Factory's, an App's marker only makes the check stricter: its time, never its record.

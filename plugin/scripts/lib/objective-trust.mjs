@@ -5,12 +5,15 @@
 // worker and the review job check it before any harness (Actions, local mode, a cloud-sandbox stage), and a session's
 // route reads the issue only through it (local.mjs `issue`, `deliver`, `post-review`).
 // What text the plan was made from (planGate): a stage never goes on with a plan and code made from one text and an
-// Objective that now says another.
+// Objective that now says another. An edit by people who vouch for it is judged once per new text by the edit check
+// (edit-check.mjs): a wording-only edit keeps the plan; an edit anyone else made is never judged.
 import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
+import { log } from "./inputs.mjs";
+import { keptLine } from "./edit-check.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
-import { planComment, stampPlan } from "./handoff.mjs";
+import { planComment, planTextMarker, stampPlan } from "./handoff.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { ACCOUNT_LABEL_PREFIX, NO_ACCOUNT, accountLabelNote, routeAccount, routeAccounts, routeAutoAccounts, routeTwoLine } from "./accounts.mjs";
 import { pinnedMaintainer, selfLogin, writersRepo } from "./logic.mjs";
@@ -137,77 +140,178 @@ async function textEditedAt(repo, issue, lastEditedAt, opts, changed = issueText
   return times.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 }
 
+/** Whether time `t` is after `since` (none: any `t` is). */
+const after = (t, since) => !!t && (!since || Date.parse(t) > Date.parse(since));
+
 /**
  * The Objective's text against its plan comment (handoff.mjs planOf): "unplanned" (none: the work stage plans from this
  * text), "same", "replan" (the text changed, and a person applied the label after the work stage last started from the
  * plan's text, or after the edit when the plan's record cannot be read: only the work stage, which makes the plan
- * again) or "changed" (the stage Blocks). With a record, decided on its hash; a plan comment whose record cannot be read
- * (none, one that does not parse, another App's) is decided on `editedAt`, when the title or body last changed: after
- * the comment was posted is a change. Never on the words.
+ * again) or "changed" (the stage Blocks). With a record, decided on its hash; `kept` (judgedEdit: the edit check read
+ * the edit as wording only) is the same text, except that a label applied after the work stage last started is a
+ * person's own word and wins: the work stage plans again. A plan comment whose record cannot be read (none, one that
+ * does not parse, another App's) is decided on `editedAt`, when the title or body last changed: after the comment was
+ * posted is a change. Never on the words.
  */
-export function planTextState({ sha, plan, labeledAt = null, editedAt = null, work = false }) {
+export function planTextState({ sha, plan, labeledAt = null, editedAt = null, work = false, kept = false }) {
   if (!plan) return "unplanned";
-  const after = (t, since) => !!t && (!since || Date.parse(t) > Date.parse(since));
   if (plan.record) {
     if (plan.record.sha256 === sha) return "same";
-    return work && after(labeledAt, plan.record.label) ? "replan" : "changed";
+    if (work && after(labeledAt, plan.record.label)) return "replan";
+    return kept ? "same" : "changed";
   }
   if (!editedAt || (plan.at && Date.parse(editedAt) <= Date.parse(plan.at))) return "same";
   return work && after(labeledAt, editedAt) ? "replan" : "changed";
 }
 
+/** The Objective's text as a plan's record keeps it (handoff.mjs planTextMarker `text`): its title, body and choice labels. */
+export const recordText = ({ title = null, body = "", labels = [] } = {}) => ({ title: typeof title === "string" ? title : null, body: typeof body === "string" ? body : "", labels: choiceLabels(labels) });
+
 /**
- * Every stage's second check, after authorGate: the text it acts on (`sha` and `editedAt`, trustedIssue's) against the
- * text its plan was made from. "changed" Blocks (cause `work`: an edit is a person's action), through `apply` after
- * `before`, with the PR as a draft. Returns {ok, state, record}: `record` the plan-text record this stage writes with the
- * plan comment (handoff.mjs planSync). The work stage records this text with the latest label time, `labeledAt` read
- * before the text (an edit and a re-applied label between the two reads then count as after the plan), and writes it at
- * once on a plan made from the same text, so a later edit with no new label is told from one the person re-applied the
- * label after; the review stage keeps the plan's record. `read` (planComment, labeledAt, changedAt) is a test's own.
+ * Whether the person who changed the Objective's title from `before` to `after` vouches for it: the actor of the
+ * issue's latest rename, that rename naming the title now, who can push or is a pinned maintainer. No title change, no
+ * read. The body is the caller's: the text it passes was read with its author and last editor vouched for. `gh`
+ * (timeline, permission) is a test's own.
  */
-export async function planGate({ repo, issue, sha, editedAt = null, labeledAt, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, read = {} }) {
+async function titleVouched(repo, issue, before, after, opts, gh = {}) {
+  if (settled(before.title) === settled(after.title)) return true;
+  const events = (await (gh.timeline ?? ((r, n, o) => rest(`repos/${r.full}/issues/${n}/timeline?per_page=100`, { ...o, paginate: true })))(repo, issue, opts)) || [];
+  const r = events.filter((e) => e.event === "renamed").sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+  const a = r?.actor;
+  if (!a?.login || settled(r.rename?.to) !== settled(after.title)) return false;
+  return vouches(repo, { __typename: a.type === "User" ? "User" : a.type || "Unknown", login: a.login, databaseId: a.id }, opts, { permission: gh.permission ?? collaboratorPermission });
+}
+
+/**
+ * The edit check's answer for the Objective's text now (`now`: {sha, title, body, labels}, read with its author and last
+ * editor vouched for) against the plan's record (#400). Judged only when the record keeps the text it was made from
+ * (and that text is the one its hash names), the harness, model and host labels are the same (a change to one is a
+ * changed requirement as it stands), the title's change is vouched for (titleVouched), and `check` (edit-check.mjs
+ * openEditCheck, or a function returning one, opened only then) is not `route-off`: otherwise planTextState's rule as
+ * ever. A verdict the record already has for this text is used, never asked again. Returns {kept, record, unjudged,
+ * said}: `kept` for `wording`; `record` the record with a verdict newly asked (to be written with the plan); `unjudged`
+ * when no decider here could ask and another process may (the check's `elsewhere`); `said` the progress line of a kept
+ * edit newly judged (edit-check.mjs keptLine).
+ */
+export async function judgedEdit({ repo, issue, record, now, check = null, opts, gh = {} }) {
+  const none = { kept: false, record: null, unjudged: false, said: null };
+  if (!record || record.sha256 === now.sha || !record.text) return none;
+  const before = recordText(record.text);
+  if (objectiveSha(before.title, before.body, before.labels) !== record.sha256) return none;
+  const after = recordText(now);
+  if (JSON.stringify(before.labels) !== JSON.stringify(after.labels)) return none;
+  if (!(await titleVouched(repo, issue, before, after, opts, gh))) {
+    log(`#${issue}: the Objective's title was changed since its plan by someone who cannot push and is not a pinned maintainer, so the edit is not judged`);
+    return none;
+  }
+  const c = typeof check === "function" ? await check() : check;
+  // No decider at all (decision_route off): any edit is a change, a verdict stored before included.
+  if (!c || c.off === "route-off") return none;
+  const stored = record.verdicts?.[now.sha];
+  if (stored) return { ...none, kept: stored === "wording" };
+  if (!c.judge) return { ...none, unjudged: !!c.elsewhere };
+  const v = await c.judge(before, after);
+  if (!v?.verdict) {
+    log(`#${issue}: edit check (${c.model}): no verdict on the edit since the plan (${v?.error || "no_answer"})`);
+    return none;
+  }
+  const kept = v.verdict === "wording";
+  const said = kept ? keptLine({ asked: c.asked?.(), confidence: v.confidence }) : null;
+  log(`#${issue}: ${said ?? `edit check (${c.model}): the edit since the plan is a changed requirement`}`);
+  return { kept, record: { ...record, verdicts: { ...(record.verdicts || {}), [now.sha]: v.verdict } }, unjudged: false, said };
+}
+
+/** Whether two plan-text records are written alike (handoff.mjs planTextMarker). */
+const sameRecord = (a, b) => !!a && !!b && planTextMarker(a) === planTextMarker(b);
+
+/**
+ * Every stage's second check, after authorGate: the text it acts on (`sha`, `text` ({title, body, labels}) and
+ * `editedAt`, trustedIssue's) against the text its plan was made from, an edit judged by `check` (judgedEdit; the
+ * stage's edit check, opened only when a question is due), its verdict written on the plan comment and a kept edit's
+ * line through `progress`. A work stage started by a label applied after the plan's record asks nothing: it plans again.
+ * "changed" Blocks (cause `work`: an edit is a person's action), through `apply` after `before`, with the PR as a draft.
+ * Returns {ok, state, record}: `record` the plan-text record this stage writes with the plan comment (handoff.mjs
+ * planSync). The work stage records this text with the latest label time, `labeledAt` read before the text (an edit and
+ * a re-applied label between the two reads then count as after the plan), and writes it at once on a plan made from the
+ * same text (or an edit judged wording only, the record then keeping the plan's text), so a later edit with no new label
+ * is told from one the person re-applied the label after; the review stage keeps the plan's record. `read`
+ * (planComment, labeledAt, changedAt, timeline, permission) is a test's own.
+ */
+export async function planGate({ repo, issue, sha, text = null, editedAt = null, labeledAt, work = false, pr = null, objectiveLabel = "factory:objective", notify, opts, apply, before = null, stage, check = null, progress = null, read = {} }) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? startedAt)(repo, issue, objectiveLabel, opts)) : null;
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
-  const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work });
+  const relabeled = work && !!posted?.record && after(label, posted.record.label);
+  const judged = text && !relabeled ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, ...text }, check, opts, gh: read }) : { kept: false, record: null, said: null };
+  const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work, kept: judged.kept });
+  if (judged.said && progress) await progress(judged.said);
+  // The plan's record as it stands now: with a verdict newly asked, written with the plan's text.
+  const planned = judged.record ?? posted?.record ?? null;
+  const stamp = (record) => (posted?.text !== null && posted?.text !== undefined ? stampPlan(repo, issue, posted, record, opts) : null);
   if (state === "changed") {
+    if (judged.record) await stamp(judged.record);
     if (before) await before();
     await apply(repo, { issue, pr, exit: "blocked", reason: EDITED_REASON, fix: EDITED_FIX, cause: "work", notify, stage }, opts);
-    return { ok: false, state, reason: EDITED_REASON, record: posted.record };
+    return { ok: false, state, reason: EDITED_REASON, record: planned };
   }
-  if (!work) return { ok: true, state, record: posted?.record ?? null };
-  const record = { sha256: sha, label };
+  if (!work) {
+    if (judged.record) await stamp(judged.record);
+    return { ok: true, state, record: planned };
+  }
+  // The same text (or an edit judged wording only): the plan's record with this start's label time, its text kept (a
+  // record from before it kept its text gets this one, the same by its hash); else this text's own record.
+  const record = state === "same" && planned ? { ...planned, label, text: planned.text ?? (text ? recordText(text) : undefined) } : { sha256: sha, label, ...(text ? { text: recordText(text) } : {}) };
+  if (!record.text) delete record.text;
   // The same text: the record goes on this login's plan comment now, with this start's label time.
-  if (state === "same" && posted.text !== null && !(posted.own && posted.record?.sha256 === sha && posted.record.label === label)) await stampPlan(repo, issue, posted, record, opts);
+  if (state === "same" && !(posted.own && sameRecord(posted.record, record))) await stamp(record);
   return { ok: true, state, record };
 }
 
 /**
- * The plan comment and planTextState's answer for a stage that never plans again (a session's `factory issue` and
- * `post-review`): {posted, state}. `sha` and `editedAt` from trustedIssue; `read` (planComment, changedAt) a test's own.
+ * The plan comment and planTextState's answer for a stage that never plans again (a session's `factory issue`,
+ * `deliver` and `post-review`): {posted, state, record}. `sha`, `editedAt` and the text (`issueData`, `labels`) from
+ * trustedIssue; `check` the edit check (judgedEdit), whose verdict is not written here: `record` is the plan's record
+ * with it, for `deliver` to write with the plan. `read` (planComment, changedAt, timeline, permission) a test's own.
  */
-export async function planStateNow(repo, issue, { sha, editedAt = null }, opts, read = {}) {
+export async function planStateNow(repo, issue, { sha, editedAt = null, issueData = null, labels = [] }, opts, read = {}, check = null) {
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
-  return { posted, state: planTextState({ sha, plan: posted, editedAt: edited }) };
+  const judged = issueData ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check, opts, gh: read }) : { kept: false, record: null };
+  return { posted, state: planTextState({ sha, plan: posted, editedAt: edited, kept: judged.kept }), record: judged.record ?? posted?.record ?? null };
 }
 
 /**
  * Whether the Objective's text changed since its plan was made (the merge's check, session.mjs mergeReadyOne): its
- * title, body and harness and model labels now against the plan comment, as planTextState decides for a review. False
- * with no plan comment. `gh` (graphql), `read` and `changed` are a test's own.
+ * title, body and harness and model labels now against the plan comment, as planTextState decides for a review, an edit
+ * judged by `check` (judgedEdit: the merge pass's process has no stage harness, so the AI Gateway's model when this
+ * process holds the key and the route allows), its verdict written on the plan comment and a kept edit's line through
+ * `progress`. "same" (no plan comment, the same text, or an edit judged wording only), "changed", or "unjudged": an edit
+ * no decider here can judge and another process may (the caller hands it to a review stage, whose start judges it).
+ * `gh` (graphql, permission, timeline), `read` and `changed` are a test's own.
  */
-export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, read = planComment, changed = issueTextChangedAt } = {}) {
+export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, read = planComment, changed = issueTextChangedAt, check = null, progress = null } = {}) {
   await knowSelf(opts);
   const posted = await read(repo, issue, opts);
-  if (!posted) return false;
+  if (!posted) return "same";
   const node = (await gh.graphql(QUERY, { owner: repo.owner, name: repo.name, number: Number(issue) }, opts))?.repository?.issue;
   if (!node) throw new Error(`#${issue} could not be read`);
-  const sha = objectiveSha(typeof node.title === "string" ? node.title : null, typeof node.body === "string" ? node.body : "", labelNames(node));
+  let sha = objectiveSha(typeof node.title === "string" ? node.title : null, typeof node.body === "string" ? node.body : "", labelNames(node));
   const editedAt = posted.record ? null : await textEditedAt(repo, issue, node.lastEditedAt ?? null, opts, changed);
-  return planTextState({ sha, plan: posted, editedAt }) === "changed";
+  let judged = { kept: false, record: null, unjudged: false, said: null };
+  if (posted.record?.text && posted.record.sha256 !== sha) {
+    // Judged only on text read with its author and last editor vouched for (objectiveTrusted): else as ever.
+    const t = await objectiveTrusted(repo, issue, opts, { gh: { graphql: gh.graphql, permission: gh.permission ?? collaboratorPermission } });
+    if (t.ok) {
+      sha = t.sha;
+      judged = await judgedEdit({ repo, issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check, opts, gh });
+    }
+  }
+  if (judged.record && posted.text !== null) await stampPlan(repo, issue, posted, judged.record, opts);
+  if (judged.said && progress) await progress(judged.said);
+  if (planTextState({ sha, plan: posted, editedAt, kept: judged.kept }) !== "changed") return "same";
+  return judged.unjudged ? "unjudged" : "changed";
 }
 
 /** What a Blocked notice tells a person to do about a harness, model or foundation label Factory did not act on. */

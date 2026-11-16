@@ -103,7 +103,7 @@ test("#264: a usage limit holds only the account that met it, for every serve on
     t += 180 * MIN;
     const c = serveOn(h, () => t);
     assert.equal(c.limitHold(["factory:objective"]), null);
-    c.result = { exit: "delivered", tokens: { output: 10 } };
+    c.result = { exit: "delivered", tokens: { output: 10 }, servedPasses: 1 };
     assert.equal((await c.stage(8, "work", "worker.mjs", [])).exit, "delivered");
     assert.equal(c.ran(), 1);
   });

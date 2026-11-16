@@ -221,7 +221,7 @@ test("#264/#265: a hold keeps the limit's window, and the pause notice names the
 
 
 const reads = (gh) => gh.state.timelineReads;
-const delivered = { exit: "delivered", tokens: { output: 10 } };
+const delivered = { exit: "delivered", tokens: { output: 10 }, servedPasses: 1 };
 
 test("#265: a pause posts one notice, updated in place; a trusted label moves the paused Objective to a free account at once, read once per label change; a held pin waits for its reset; a removal by someone who can push goes back to the default", async () => {
   const h = fakeHome();

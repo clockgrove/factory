@@ -188,12 +188,21 @@ test("#391 holds: a served stage with no reading is recorded as such; the accoun
   const mem = accountHolds({ readings: [{ harness: "claude", account: "k", at: t, windows: {}, silentAt: t }, { harness: "claude", account: "k", at: t + 1, windows: { five_hour: { used: 0.1, resetsAt: t + H } } }] });
   assert.equal(mem.reportsNothing("k", t + 2), false);
   assert.equal(mem.reportsNothing("k", t + 2 * H), false, "its newest record was a reading, now stale: never measured again");
-  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 10 } }), true);
-  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 10 }, quota: { harness: "claude", windows: {} } }), false, "a reading reported");
-  assert.equal(servedSilent({ exit: "delivered", tokens: { output: 0 } }), false, "nothing served");
-  assert.equal(servedSilent({ exit: "paused", tokens: { output: 10 }, usageLimit: { harness: "claude" } }), false, "a limit is no served stage");
-  assert.equal(servedSilent({ exit: "blocked", tokens: { output: 10 }, limitRefused: { harness: "copilot" } }), false);
-  assert.equal(servedSilent({ exit: "delivered", tokens: { output: null }, aiCredits: 2 }), true, "Copilot's credits");
+  // servedSilent reads writeUsage's record: harness passes the provider served, never a decision call (#385).
+  const usage = (records, extra = {}) => writeUsage(join(mkdtempSync(join(tmpdir(), "quota-usage-")), "u"), { harness: "claude", model: null, records, passes: 1, exit: "delivered", reason: null, credentialBasis: null, ...extra });
+  const pass = { harness: "claude", usd: 0.1, tokens: { input: 5, output: 10, cached: 0, written: 0 }, ended: "2026-11-15T10:00:00.000Z", cacheWarmMs: H };
+  const decision = { harness: "claude", label: "decision", decision: true, ok: true, calls: 1, usd: 0.01, tokens: { input: 5, output: 7, cached: null, written: null }, started: "2026-11-15T10:05:00.000Z", ended: "2026-11-15T10:05:10.000Z" };
+  assert.equal(servedSilent(usage([pass])), true);
+  assert.equal(servedSilent(usage([{ ...pass, tokens: { ...pass.tokens, output: 0 } }, decision])), false, "only a decision call had output: no served pass");
+  assert.equal(servedSilent(usage([{ ...pass, quota: { harness: "claude", windows: { seven_day: { used: 0.2, resetsAt: Date.now() + H } } } }])), false, "a reading reported");
+  assert.equal(servedSilent(usage([pass], { exit: "paused", usageLimit: { harness: "claude" } })), false, "a limit is no served stage");
+  assert.equal(servedSilent(usage([{ ...pass, tokens: { ...pass.tokens, output: null }, aiu: 2 }])), true, "Copilot's credits");
+  // A decision record after the stage's passes leaves its quota reading and its cache's warmth to the passes.
+  const decisionQuota = { ...decision, quota: { harness: "claude", windows: { seven_day: { used: 0.99, resetsAt: Date.now() + H } } } };
+  const read = { ...pass, quota: { harness: "claude", windows: { seven_day: { used: 0.2, resetsAt: Date.now() + H } } } };
+  const both = usage([read, decisionQuota]);
+  assert.equal(both.quota.windows.seven_day.used, 0.2, "the decision record's is never read");
+  assert.equal(both.cacheWarmUntil, Date.parse(pass.ended) + H, "the last pass's end, not the decision call's");
 });
 
 test("#391 chooseAccount: within a group the fewest stages started since the account's reading first, so starts before the next reading spread; then the most left; the warm account (the previous stage's, its cache still warm) after the paused-on one and ahead of quota", () => {

@@ -20,12 +20,12 @@ export function gatewayDecider({ key, model, endpoint = GATEWAY_DECISIONS, timeo
   return {
     name: "ai-gateway",
     model,
-    async decide(input, question) {
+    async decide(input, question, { signal = null } = {}) {
       const body = JSON.stringify({ model, input, questions: [question] });
       let error = "vendor";
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
-          const res = await fetch(endpoint, { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body, signal: AbortSignal.timeout(timeoutMs) });
+          const res = await fetch(endpoint, { method: "POST", headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
           const text = await res.text();
           if (res.ok) {
             try {
@@ -39,6 +39,7 @@ export function gatewayDecider({ key, model, endpoint = GATEWAY_DECISIONS, timeo
         } catch {
           error = "unavailable";
         }
+        if (signal?.aborted) break;
         if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
       }
       return { verdict: null, confidence: null, error: DECIDER_ERRORS.includes(error) ? error : "vendor" };

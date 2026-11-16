@@ -260,25 +260,43 @@ test("#264: with no accounts declared, a hold is the login's: two serves on two 
   }
 });
 
-test("#421: pauses on GitHub's spent rate limit count from the first only while nothing is done between them: a stage whose provider served a pass counts afresh", async () => {
+test("#421: pauses on GitHub's spent rate limit count from the first only while nothing is done between them: a harness pass served counts afresh, a decision call alone does not", async () => {
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
+  const { keepDecision } = await import("../scripts/lib/harness.mjs");
   const h = fakeHome();
   let t = Date.parse("2026-11-14T08:00:00Z");
   await withHome(h, async () => {
     const loop = serveOn(h, () => t);
-    // As session.mjs outageExit writes a stage paused on the spent quota; `output`: what its provider served.
-    const quota = (output) => ({ exit: "paused", usd: 0.1, tokens: { output }, outage: { host: "api.github.com", origin: "https://api.github.com", code: "RATE_LIMIT_SPENT", since: new Date(t).toISOString(), reset: new Date(t + 60 * MIN).toISOString() } });
+    // The result.json a stage paused on the spent quota writes (the real writeUsage), from its records: `pass` a harness
+    // pass with `output` tokens served, `decision` a decision call made through the harness (harness.mjs keepDecision).
+    const quota = ({ pass = null, decision = false }) => {
+      const usage = mkdtempSync(join(h, "usage-"));
+      const ended = new Date(t).toISOString();
+      const records = [
+        ...(decision ? [keepDecision({ harness: "claude", model: "claude-haiku", usd: 0.01, tokens: { input: 900, output: 40, cached: 0, written: 0 }, basis: "reported", started: ended, ended })] : []),
+        ...(pass === null ? [] : [{ harness: "claude", model: "claude-opus-5-5", label: "work", usd: 0.1, tokens: { input: 1000, output: pass, cached: 0, written: 0 }, basis: "reported", started: ended, ended, ok: true }]),
+      ];
+      return writeUsage(usage, { harness: "claude", model: "claude-opus-5-5", records, passes: [], exit: "paused", reason: "GitHub's rate limit", outage: { host: "api.github.com", origin: "https://api.github.com", code: "RATE_LIMIT_SPENT", since: ended, reset: new Date(t + 60 * MIN).toISOString() } });
+    };
     const first = t;
-    loop.result = quota(0);
+    loop.result = quota({});
     await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
     t += 80 * MIN;
-    loop.result = quota(0);
+    loop.result = quota({ pass: 0 });
     await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
     assert.equal(loop.offline.get(8).since, first, "nothing served between: the same outage");
+    // A decision call through the harness (the plan-answer or edit check) before the quota ran out again: no progress.
     t += 80 * MIN;
-    loop.result = quota(1200);
+    loop.result = quota({ decision: true });
+    assert.equal(loop.result.tokens.output, 40, "the decision call's output is in the stage's totals");
+    assert.equal(loop.result.servedPasses, 0);
     await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
-    assert.equal(loop.offline.get(8).since, t, "a pass served since the last pause: counted from its own");
-    assert.equal(loop.ran(), 3);
+    assert.equal(loop.offline.get(8).since, first, "a decision call alone is no progress: still the first pause's");
+    t += 80 * MIN;
+    loop.result = quota({ pass: 1200, decision: true });
+    await loop.outagePaused(8, await loop.stage(8, "work", "worker.mjs", []));
+    assert.equal(loop.offline.get(8).since, t, "a harness pass served since the last pause: counted from its own");
+    assert.equal(loop.ran(), 4);
   });
 });
 

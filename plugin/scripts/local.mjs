@@ -1533,8 +1533,9 @@ export class Local {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
             log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
           }
-          // `served`: a pass the provider served in this stage (servedPass), the progress outagePaused reads between pauses.
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, served: !!result && servedPass(result), ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
+          // decision calls out), the progress outagePaused reads between pauses.
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1846,8 +1847,9 @@ export class Local {
    * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
    * the network. A pause on GitHub's spent rate limit after an earlier one, with no other end between, is the same however
    * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. Either holds only while
-   * nothing was done between them: a stage that paused after its provider served a pass (`result.served`, servedPass)
-   * made progress since the earlier pause, so its pause counts afresh from its own `since`. A pause on GitHub answering
+   * nothing was done between them: a stage that paused after its provider served a harness pass (`result.served`,
+   * result.json's servedPasses; a decision call is none) made progress since the earlier pause, so its pause counts
+   * afresh from its own `since`. A pause on GitHub answering
    * 5xx past the client's retries (network.mjs serverDown) is counted in `server` ({since, pauses, at, request,
    * requestSince, tried}: the request that failed, its first failure and whether its one more try was made) across
    * every pause of the Objective however far apart, until a stage ends any other way (withClaim): a probe of the host

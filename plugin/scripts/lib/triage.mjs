@@ -508,11 +508,18 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
     return { checks: [], filters: null, chained: false };
   }
   const checks = [];
+  // A reusable workflow called here that could not be read (`readLocal` gave null) may run anything: `chained`.
+  let unread = false;
   for (const [id, job] of Object.entries(doc?.jobs || {})) {
     const own = typeof job?.name === "string" ? job.name : id;
     const uses = typeof job?.uses === "string" ? job.uses.trim() : "";
     if (!uses) checks.push(own);
-    else if (uses.startsWith("./") && depth < 3) for (const c of (await workflowChecks(await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => ""), readLocal, depth + 1)).checks) checks.push(`${own} / ${c}`);
+    else if (uses.startsWith("./") && depth < 3) {
+      const text = await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => null);
+      const called = await workflowChecks(text, readLocal, depth + 1);
+      unread ||= text === null || called.chained;
+      for (const c of called.checks) checks.push(`${own} / ${c}`);
+    }
     else checks.push(`${own} / \${{ callee }}`);
   }
   const on = doc?.on && typeof doc.on === "object" && !Array.isArray(doc.on) ? doc.on : null;
@@ -523,7 +530,7 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
   const sole = !!on && Object.keys(on).every((t) => t === "pull_request" || NOT_ON_HEAD.includes(t));
   // `chained`: it runs on another workflow's run (`on: workflow_run`), so after the head's other runs completed.
   const triggers = typeof doc?.on === "string" ? [doc.on] : Array.isArray(doc?.on) ? doc.on : Object.keys(on || {});
-  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null, chained: triggers.includes("workflow_run") };
+  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null, chained: triggers.includes("workflow_run") || unread };
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);

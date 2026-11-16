@@ -545,6 +545,18 @@ test("a workflow file that cannot be read is no evidence against an `on: workflo
   assert.equal(r.result.stuck.kind, "unreported");
 });
 
+test("a reusable workflow called through `uses: ./…` that cannot be read is no evidence either: no early end, the not-started bound", async () => {
+  // ci.yml calls ./.github/workflows/q.yml, whose read fails (404 here).
+  const calling = { ".github/workflows/ci.yml": "jobs:\n  lint:\n    runs-on: x\n  call:\n    uses: ./.github/workflows/q.yml\n" };
+  const r = await virtual({ at: () => lint, workflowRuns: completedCi, files: calling, workflows: oneWorkflow, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(r.minutes, 61);
+  assert.equal(r.result.stuck.kind, "unreported");
+  // Read, and producing no `quality`: the wrong name Blocks at the first reading.
+  const read = await loop({ checkRuns: lint, workflowRuns: completedCi, files: { ...calling, ".github/workflows/q.yml": "on: workflow_call\njobs:\n  build:\n    runs-on: x\n" }, workflows: oneWorkflow, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(read.checkReads, 1);
+  assert.equal(read.result.stuck.kind, "unreported");
+});
+
 test("while a triage rerun is awaited a missing required check is not read as a wrong name", async () => {
   // quality failed; triage reruns it. GitHub's run list still shows the run completed, and the rerun's check is not listed yet.
   const failed = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: ago(10), completed_at: ago(5), app: ACTIONS };

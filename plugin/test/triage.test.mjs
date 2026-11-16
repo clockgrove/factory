@@ -1107,6 +1107,35 @@ test("#420 triage: the asking stops at the first answer that sends a wide red to
   });
 });
 
+test("#420 triage: an answer below the floor decides no reader of the verdicts, so the asking goes on and every job gets its verdict", async () => {
+  const legs = Array.from({ length: 2 }, (_, i) => ({ ...red41[0], id: 540 + i, name: `test (${i})` }));
+  const jobs = Object.fromEntries(legs.map((r) => [r.id, { ...testFailed, id: r.id, name: r.name }]));
+  const logs = Object.fromEntries(legs.map((r, i) => [r.id, legLog(i ? MAC : LINUX)]));
+  const inTurn = (...answers) => {
+    const d = { asked: [], decide: async (input) => (d.asked.push(input), answers[d.asked.length - 1]) };
+    return d;
+  };
+  // The change's below the floor, then flaky at it: the model may still judge a base red, and both jobs were asked.
+  const caused = inTurn({ verdict: "change_caused", confidence: 0.5 }, { verdict: "flaky_or_infra", confidence: 0.9 });
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: caused });
+    assert.equal((await t.red({ sha: "b".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(caused.asked.length, 2, "both jobs asked");
+    assert.equal(seen.reruns, 0);
+    assert.deepEqual(await t.modelBase({ sha: "b".repeat(40), failedRuns: legs }), { ok: true, why: "" });
+  });
+  // Flaky below the floor, then flaky at it: the red goes to the fix pass, and an unchanged head after it is rerun once.
+  const low = inTurn({ verdict: "flaky_or_infra", confidence: 0.5 }, { verdict: "flaky_or_infra", confidence: 0.9 });
+  await withHead({ runs: [], jobs, logs }, async (seen) => {
+    const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: low });
+    assert.equal((await t.red({ sha: "c".repeat(40), failedRuns: legs, required: [] })).rerun, false);
+    assert.equal(low.asked.length, 2, "both jobs asked");
+    const r = await t.again({ sha: "c".repeat(40), failedRuns: legs });
+    assert.equal(r.rerun, true, JSON.stringify(r));
+    assert.equal(seen.reruns, 1);
+  });
+});
+
 test("failureSignature: Git LFS's own failure lines are a signature, also behind a tool's prefix", () => {
   const sig = failureSignature("quality", lfsLog);
   assert.ok(sig.id);

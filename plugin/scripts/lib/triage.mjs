@@ -103,6 +103,11 @@ export function triageInput({ repo, prNumber, sha, job, step = "", excerpt, file
   ].join("\n");
 }
 
+/**
+ * Whether one job's answer settles a red whatever the other jobs read: it has no verdict (no rerun, no base judged by the
+ * model, no rerun of an unchanged head) or reads the change's at the floor. A verdict below the floor settles nothing.
+ */
+const decides = (v, min = MIN_CONFIDENCE) => !v.verdict || (v.verdict === "change_caused" && typeof v.confidence === "number" && v.confidence >= min);
 /** Rerun only when there is at least one verdict and every one is flaky at `min` (the floor) or more; a missing confidence is not enough. */
 export const rerunWanted = (verdicts, min = MIN_CONFIDENCE) => verdicts.length > 0 && verdicts.every((v) => v.verdict === "flaky_or_infra" && typeof v.confidence === "number" && v.confidence >= min);
 
@@ -1258,9 +1263,10 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // asked unless the failure failed on GitHub's side, was already rerun once on the Objective, or points at a file the PR
   // changes (changedPathIn). What else its lines name of the PR (changeMentions) is part of the question. The jobs go in
   // order, the required ones first and an aggregate of the others (isAggregate) last, and the asking stops at the first
-  // answer that already sends the red to the fix pass (a red reruns only when every job reads flaky: rerunWanted): the
-  // jobs after it are not read nor asked, and say so. A job that is no Actions job ends it too ({notActions}). Jobs that
-  // fail the same way (failureSignature without the job's name: the same failure lines and files) share one question,
+  // answer that decides the red for every reader of `asked` (decides: no verdict, or the change's at the floor; red(),
+  // modelBase and again() all send such a red to the fix pass): the jobs after it are not read nor asked, and say so. An
+  // answer below the floor decides no reader on its own, so the asking goes on past it. A job that is no Actions job
+  // ends it too ({notActions}). Jobs that fail the same way (failureSignature without the job's name: the same failure lines and files) share one question,
   // asked of the first of them; a job with no failure line is a question of its own. A structural aggregate whose own log
   // has no failure line is left out (jobsToTriage). Returns {jobs, runIds} (the asked jobs' workflow runs), or
   // {notActions}.
@@ -1287,7 +1293,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       if (!jobsToTriage(runs, required, sigs).includes(r)) continue;
       const one = await askJob({ sha, r, job, text, sig, names, files, seen, questions });
       jobs.push(one);
-      if (!rerunWanted([one], floorNow().min)) decided = r.name;
+      if (decides(one, floorNow().min)) decided = r.name;
     }
     return { jobs, runIds };
   };

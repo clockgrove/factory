@@ -464,6 +464,48 @@ test("validation loop: a required job GitHub never started gets no triage and no
   assert.ok(real.phases.some((l) => /red: required checks quality on a{7}; fix run$/.test(l)), real.phases.join("\n"));
 });
 
+test("#402: validation loop: a triage rerun may wait for its workflow run as long as the checks' own wait, within the stage's wall clock less the guard", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const sha = "a".repeat(40);
+  const repo = { owner: "acme", name: "app", full: "acme/app" };
+  const checkRun = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: locked.job.started_at, completed_at: locked.job.completed_at };
+  const untilOf = async (checks, deadlineAt, readMs = 0) => {
+    const asked = [];
+    await withGitHub({ runs: [checkRun], jobs: { 1: ranAndFailed } }, () => {
+      // `readMs`: the checks' read takes this long, time the checks' one wait has spent before the triage.
+      const fetch = globalThis.fetch;
+      globalThis.fetch = async (url, init) => (/check-runs/.test(String(url)) && readMs ? await new Promise((r) => setTimeout(r, readMs)) : null, fetch(url, init));
+      return validationLoop({
+        checkout: "/nonexistent",
+        commands: [],
+        harness: "codex",
+        maxUsd: 0,
+        session: {},
+        taskCard: "",
+        env: process.env,
+        // Under a minute left: the fix pass after the triage is never started.
+        deadlineAt,
+        checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t", ...checks },
+        outbox: { push: async () => true, expected: () => sha },
+        triage: { red: async (r) => (asked.push({ until: r.until, at: Date.now() }), { rerun: false }) },
+      }).finally(() => (globalThis.fetch = fetch));
+    });
+    assert.equal(asked.length, 1);
+    return asked[0];
+  };
+  // The stage's wall clock less the guard binds first.
+  const deadlineAt = Date.now() + 50_000;
+  const clock = await untilOf({ guardMs: 20_000 }, deadlineAt);
+  assert.ok(clock.until <= deadlineAt - 20_000 && clock.until > deadlineAt - 20_000 - 5_000, `${clock.until - deadlineAt}`);
+  // The checks' own wait binds first.
+  const checks = await untilOf({ guardMs: 0, timeoutMs: 10_000 }, Date.now() + 50_000);
+  assert.ok(checks.until - checks.at <= 10_000 && checks.until - checks.at > 5_000, `${checks.until - checks.at}`);
+  // Time the checks' wait already spent comes off: the whole wait stays within its one wait.
+  const from = Date.now();
+  const spent = await untilOf({ guardMs: 0, timeoutMs: 3_000 }, Date.now() + 50_000, 1_500);
+  assert.ok(spent.until <= from + 3_100 && spent.until - spent.at <= 1_600, `${spent.until - from} ${spent.until - spent.at}`);
+});
+
 test("notStartedJobs: a required aggregate red from a gathered job that ran is the change's, never pinned on one that never started", async () => {
   const { notStartedJobs } = await import("../scripts/lib/triage.mjs");
   const repo = { full: "acme/app" };
@@ -777,7 +819,7 @@ const checkoutThenCancelled = { ...checkoutFailed, steps: [checkoutFailed.steps[
  * GitHub on fetch for one red head, before and after a rerun: `runs` the head's check runs (`rerunRuns` once a rerun was
  * accepted), `jobs` by id, `logs` by job id, the workflow file at the head, and the rerun's answer (`rerun`, a status).
  */
-async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow = CI_YML, rerun = 201, prFiles = [], heads = {}, base = null }, fn) {
+async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow = CI_YML, rerun = 201, prFiles = [], heads = {}, base = null, runStatus = () => "completed" }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -802,7 +844,7 @@ async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow
       seen.reruns += 1;
       return json({}, rerun);
     }
-    if (/\/actions\/runs\/\d+$/.test(p)) return json({ status: "completed", path: ".github/workflows/ci.yml" });
+    if (/\/actions\/runs\/\d+$/.test(p)) return json({ status: runStatus(), path: ".github/workflows/ci.yml" });
     if (/\/contents\/\.github\/workflows\/ci\.yml$/.test(p)) return (seen.contents += 1), new Response(workflow, { status: 200 });
     if (/\/pulls\/\d+\/files$/.test(p)) return json(prFiles.map((filename) => ({ filename })));
     // `base`: the default branch and its newest commits, newest first (their runs are in `heads`).
@@ -971,6 +1013,40 @@ test("again: the failed jobs of a head a fix pass left unchanged are rerun once,
     assert.equal((await t.again({ sha: "f".repeat(40), failedRuns: [{ ...red41[0], id: 48 }] })).refused.earlier, true, "refused once on the Objective: not asked again");
   });
   rmSync(home, { recursive: true, force: true });
+});
+
+test("#402: a flaky red's workflow run still in progress is waited for while it runs, up to the bound its caller gives, not a fixed ten minutes", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.parse("2026-11-15T10:00:00Z") });
+  const MIN = 60_000;
+  const start = Date.now();
+  // The workflow run completes 15 minutes in; until then GitHub refuses to rerun its failed jobs.
+  const runStatus = () => (Date.now() - start >= 15 * MIN ? "completed" : "in_progress");
+  const drive = async (p) => {
+    let done = false;
+    p.finally(() => (done = true)).catch(() => {});
+    while (!done) {
+      await new Promise((r) => setImmediate(r));
+      t.mock.timers.tick(20_000);
+    }
+    return p;
+  };
+  await withHead({ runs: [], jobs: { 41: testFailed }, logs: { 41: failingLog }, runStatus }, async (seen) => {
+    const tr = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking(flaky(0.99)) });
+    const r = await drive(tr.red({ sha: "e".repeat(40), failedRuns: red41, required: ["quality"], until: start + 60 * MIN }));
+    assert.equal(r.rerun, true, "the run that took 15 minutes was waited for within the hour the caller allowed");
+    assert.equal(seen.reruns, 1);
+    assert.ok(Date.now() - start >= 15 * MIN && Date.now() - start < 17 * MIN, "and no longer than it ran");
+  });
+  await withHead({ runs: [], jobs: { 41: testFailed }, logs: { 41: failingLog }, runStatus: () => "in_progress" }, async (seen) => {
+    // Flaky below the bar on this head: no rerun then, and the head the fix pass leaves unchanged is rerun (again).
+    const tr = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider: asking(flaky(0.55)) });
+    assert.equal((await drive(tr.red({ sha: "f".repeat(40), failedRuns: red41, required: ["quality"], until: Date.now() + 60 * MIN }))).rerun, false);
+    const from = Date.now();
+    const r = await drive(tr.again({ sha: "f".repeat(40), failedRuns: red41, until: from + 3 * MIN }));
+    assert.deepEqual(r, { rerun: false, skipped: `workflow run ${testFailed.run_id} did not complete` });
+    assert.equal(seen.reruns, 0);
+    assert.ok(Date.now() - from < 4 * MIN, "a run still going at the bound is left alone then");
+  });
 });
 
 /**

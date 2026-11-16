@@ -1062,7 +1062,8 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
 
 /**
  * Factory's validation of the branch (the commands, or the required checks on the head it pushed), each red handed to a
- * fix pass until green or the passes run out. Three options let a stage take the checks' wait apart from the fix passes:
+ * fix pass until green or the passes run out; a green result's `given` is each red a fix pass was handed (its `tail`).
+ * Three options let a stage take the checks' wait apart from the fix passes:
  * - `handOff`: with required checks, the first head whose local part is green (the commands first on the local route)
  *   is pushed and not waited for: the result is `{handedOff: sha}` (worker.mjs hands it to the review stage, which waits
  *   for its checks beside the reviewer).
@@ -1093,6 +1094,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   const freshHeads = new Map();
   // The last fix pass's red: what it was handed (failures, detail, fence) and its run, for a fresh worker pass.
   let lastFix = null;
+  // Each red a fix pass was handed, as its failure lines and output's end (`tail`): what those passes were asked to fix
+  // (review.mjs answerGate), returned as `given` once the checks are green.
+  const given = [];
   // With required checks configured, the repository's CI is Factory's validation: the head is
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
@@ -1420,7 +1424,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
     last = v;
     // `sha`: the head the required checks were green on (the caller's validated marker goes on it), when they were read.
-    if (v.green) return { green: true, passes, lastOutput: "", usage, sha: v.sha ?? null };
+    if (v.green) return { green: true, passes, lastOutput: "", usage, sha: v.sha ?? null, given };
     const failed = v.failed;
     const { detail, failures, lead, tail } = await redOf(v);
     // Every failing job fails the same way on the default branch: not this change's, so no fix pass; handed back.
@@ -1455,6 +1459,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const fenced = { plan: scope.plan, texts: [...scope.texts, ...failures.map((f) => f.output || "")] };
     if (outbox?.fence) await outbox.fence(fenced).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     lastFix = { passes, sha: v.sha, failures, detail, tail, command: failed.command, checksMs: v.waitedMs ?? 0, rec: null };
+    given.push(tail);
     const ended = await fixPass(lastFix);
     if (ended) return ended;
   }
@@ -1579,7 +1584,7 @@ async function mirrorCommit(mgit, sha) {
  * The head Factory's review covers (#350): the later, by GitHub's times, of the head its last review read (the review's
  * `commit_id`; reviews from Factory or someone who can push, carrying the review marker) and Factory's own covered record
  * (recordCovered). `{sha, at, answer}`, or null with neither. `answer`: the record says the commits after it are an
- * answer pass's that went over the answer bound (review.mjs answerGate): the pass that reads them is that answer's review.
+ * answer pass's that the answer gate held for review (review.mjs answerGate): the pass that reads them is that answer's review.
  */
 export function coveredHead({ reviews = [], comments = [], issue }) {
   const seen = [];
@@ -1638,7 +1643,8 @@ export async function sinceReview(mgit, { base, covered, head, maxBytes = 16 * 1
 
 /**
  * What was written on the branch from `from` to `head`, the default branch's changes left out (replayOnto), as git's own
- * count: `{files: [{path, lines}], lines}` (lines added and removed; a binary file counts none), or null when it cannot
+ * count: `{files: [{path, lines, binary?}], lines}` (lines added and removed; a file git counts as binary, its numstat
+ * `-`, counts none and is marked `binary`), or null when it cannot
  * be told (a conflicting replay, a commit that cannot be had).
  */
 export async function writtenSince(mgit, { base, from, head }) {
@@ -1652,7 +1658,7 @@ export async function writtenSince(mgit, { base, from, head }) {
     .filter(Boolean)
     .map((l) => /^(-|\d+)\t(-|\d+)\t(.+)$/s.exec(l))
     .filter(Boolean)
-    .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0) }));
+    .map(([, add, del, path]) => ({ path, lines: (Number(add) || 0) + (Number(del) || 0), ...(add === "-" || del === "-" ? { binary: true } : {}) }));
   return { files, lines: files.reduce((n, f) => n + f.lines, 0) };
 }
 
@@ -1677,7 +1683,7 @@ export async function answerDiff(mgit, { base, from, head, maxBytes = 1024 * 102
  * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Factory review yet), `covered`
  * (the head is the head Factory's review covers, or only a rebase of it: no second pass), or neither, when commits were
  * written after it (the work stage answering a Question, a maintainer's push, an answer pass that applied maintainers'
- * decisions or went over the answer bound): then `since` is the covered head and `diff` the changes since it
+ * decisions or that the answer gate held): then `since` is the covered head and `diff` the changes since it
  * (sinceReview), or null for the whole PR. `head`: the head it was decided for; `answer`: coveredHead's.
  */
 export async function reviewScope(mgit, { reviews, comments, issue, base, head, maxBytes }) {
@@ -2293,11 +2299,11 @@ const COVERED_RE = /^<!-- factory:(\d+):covered:([0-9a-f]{40,64})(:answer)? -->/
  * Record on the PR the head Factory's review covers (#350, coveredHead): the head its review stage leaves after its own
  * answer and fix passes, which answer the reviewer's findings and the red checks and get no review of their own. A
  * later commit beyond a rebase of it gets a review pass before the merge (reviewScope). `answer`: the commits after `sha`
- * are an answer pass's over the answer bound (review.mjs answerGate), which the next pass reads. One comment, edited in place.
+ * are an answer pass's that the answer gate held for review (review.mjs answerGate), which the next pass reads. One comment, edited in place.
  */
 export async function recordCovered(repo, prNumber, issue, sha, opts, { answer = false } = {}) {
   const said = answer
-    ? `Factory: ${sha.slice(0, 7)} is covered by Factory's review; the answer pass's commits after it go over the answer bound and get a review pass before the merge.`
+    ? `Factory: ${sha.slice(0, 7)} is covered by Factory's review; the answer and fix passes' commits after it do more than the review's findings and the failing checks asked (or that could not be told), so they get a review pass before the merge.`
     : `Factory: ${sha.slice(0, 7)} is covered by Factory's review (its reviewed head with the answer and fix passes that followed); later commits beyond a rebase get a review pass before the merge.`;
   await upsertComment(repo, prNumber, COVERED(issue), said, opts, { head: `${sha}${answer ? ":answer" : ""} -->` });
 }

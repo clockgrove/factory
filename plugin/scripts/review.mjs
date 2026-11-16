@@ -64,6 +64,7 @@ import {
   stageThreads,
   answerFreshAfter,
   crashed,
+  doctorBlock,
   holdScope,
   observe,
   postValidated,
@@ -709,8 +710,9 @@ async function main() {
   async function run() {
   if (agentError) {
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason: agentError, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
-    await finish("blocked", agentError);
+    const block = doctorBlock([agentError]);
+    await applyExit(repo, { issue, pr, exit: "blocked", ...block, notify: inputs.notify }, token);
+    await finish("blocked", block.reason);
     return;
   }
   if (pr.draft) {
@@ -829,11 +831,11 @@ async function main() {
   // with its fix before anything is set up, never a crash at the first harness pass.
   const credFails = (await credentialChecks({ inputs })).filter((c) => c.status === "FAIL");
   if (credFails.length) {
-    const reason = `doctor: ${credFails.map((c) => `${c.name} (${c.fix || c.detail})`).join("; ")}`;
-    log(reason);
+    const block = doctorBlock(credFails);
+    log(`doctor: ${block.reason}`);
     await dropLabel();
-    await applyExit(repo, { issue, pr, exit: "blocked", reason, cause: "setup", notify: inputs.notify, stage: "doctor" }, token);
-    await finish("blocked", reason);
+    await applyExit(repo, { issue, pr, exit: "blocked", ...block, notify: inputs.notify }, token);
+    await finish("blocked", block.reason);
     return;
   }
   // What Factory's reviews on the PR cover (handoff.mjs reviewsCover): the first pass, and the foundation pass. Whether

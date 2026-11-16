@@ -1823,7 +1823,19 @@ export const nextOf = (cause) => (cause === "work" ? "work" : "resume");
  * restart (nextStep; `next` defaults to the cause's, nextOf).
  */
 export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false, cause = "factory", next = null }) =>
-  `Blocked (${stage}): ${reason}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
+  `Blocked (${stage}): ${reason}${pr || /[.!?]$/.test(reason) ? "" : "."}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
+
+/**
+ * The Block doctor's FAIL rows (doctor.mjs: name, detail, fix) make, cause `setup`: the reason names each failing check
+ * once with what it found, and the fix is the step each row names, then the re-applied label. A push or an edit to the
+ * issue fixes no secret or setting, so the generic fix line never stands for it.
+ */
+export function doctorBlock(rows) {
+  const reason = rows.map((c) => (c.detail ? `${c.name}: ${c.detail}` : c.name)).join("; ");
+  const steps = rows.map((c) => String(c.fix || "").trim().replace(/[.\s]+$/, "")).filter(Boolean);
+  const fix = `Fix: ${steps.length ? steps.join("; ") : "the step `/factory:factory-doctor` names"}; then re-apply \`factory:objective\`.`;
+  return { reason, fix, cause: "setup", stage: "doctor" };
+}
 
 /**
  * Apply an exit to GitHub: card, fallback label, draft state, the one comment,

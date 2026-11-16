@@ -427,7 +427,7 @@ test("the review job checks the chosen harness's credential and Blocks with its 
   const check = at("await credentialChecks({ inputs })");
   assert.ok(check > at("Object.assign(inputs, chosen.inputs)"), "for the chosen harness");
   for (const later of ["openOutbox(", "installPlugin(", "credentialEnv("]) assert.ok(at(later) > check, later);
-  assert.match(src.slice(check, check + 700), /status === "FAIL"[\s\S]*exit: "blocked", reason, cause: "setup"[\s\S]*await finish\("blocked", reason\);\n\s+return;/);
+  assert.match(src.slice(check, check + 700), /status === "FAIL"[\s\S]*const block = doctorBlock\(credFails\);[\s\S]*exit: "blocked", \.\.\.block,[\s\S]*await finish\("blocked", block\.reason\);\n\s+return;/);
   const { credentialChecks } = await import("../scripts/doctor.mjs");
   const fails = (await credentialChecks({ inputs: { ...resolveInputs({ env: { GITHUB_REPOSITORY: "acme/app" } }), ...chosenInputs({ env: ENV, choice: { harness: "codex" } }).inputs, codexApiKey: "", codexGatewayKey: "" }, env: { GITHUB_ACTIONS: "true" } })).filter((c) => c.status === "FAIL");
   assert.match(fails[0]?.fix ?? "", /gh secret set FACTORY_CODEX_GATEWAY_KEY/, "the fix names the secret");

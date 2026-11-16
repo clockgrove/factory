@@ -34,7 +34,7 @@ import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, se
 import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, transientHold, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
-import { applyExit } from "./lib/session.mjs";
+import { applyExit, doctorBlock } from "./lib/session.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
 import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
@@ -1064,7 +1064,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
     const plugin = pluginPackage();
     const failed = (await ciToken).filter((c) => c.status === "FAIL");
     watch.mark("doctor");
-    if (failed.length) throw Object.assign(new Error(`doctor: ${failed.map((c) => c.name).join(", ")}`), { code: "doctor", blocks: true });
+    if (failed.length) throw Object.assign(new Error(`doctor: ${failed.map((c) => c.name).join(", ")}`), { code: "doctor", rows: failed });
     // Stopped since the earlier stage's end when the record says it stopped then; its storage is this stage's to book.
     const stoppedAt = prior?.state === "stopped" && !prior.stopError ? (prior.stoppedAt ?? null) : null;
     const handoff = { progress: stageProgressKey(runId, claim), launch: startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }) };
@@ -1108,6 +1108,11 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
         await upsertComment(repo, n, marker(n, "deferred"), deferredNote({ stage, vendor: inputs.sandbox, code: error.code, tries, next, holds: rec ? transientHold(rec, since) : true }), opts).catch((x) => log(`#${n}: the deferral note was not written (${x.status ?? "error"})`));
       }
       return out({ exit: "deferred", stage, reason: `#${n}: ${why}` });
+    }
+    // Doctor's FAIL rows Block with their own fix (session.mjs doctorBlock), never a push or an edit, which fixes no setting.
+    if (error.code === "doctor" && e.rows?.length) {
+      const d = doctorBlock(e.rows);
+      return out({ ...(await block(run, d.reason, d.cause, d.fix)), stage });
     }
     return out({ ...(await block(run, `launcher: the ${stage} stage did not start (${error.code}${error.status ? `, HTTP ${error.status}` : ""})${failures >= MAX_FAILED_STARTS ? `; ${failures} failed starts since it became Running` : ""}`, failedStartCause(startFailure(error)))), stage });
   }

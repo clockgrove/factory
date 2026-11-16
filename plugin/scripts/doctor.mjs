@@ -114,7 +114,7 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
   }
   if (h === "copilot") {
     const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN;
-    if (!tok) out.push(FAIL("copilot credential", "no token for Copilot", "set copilot_github_token: a fine-grained token with only the Copilot Requests permission (gh secret set COPILOT_GITHUB_TOKEN); the job's own token is never used, since it can write"));
+    if (!tok) out.push(FAIL("copilot credential", "no token for Copilot", "gh secret set COPILOT_GITHUB_TOKEN to a fine-grained token with only the Copilot Requests permission (the job's own token can write, so it is never used)"));
     else out.push(await copilotWriteProbe({ repo: inputs.repo, token: tok }));
   }
   if (probe) out.push(await probeHarness({ inputs, env: given }));

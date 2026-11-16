@@ -328,6 +328,38 @@ test("sessions: a Codex rollout is saved into the usage directory and restored l
   }
 });
 
+test("sessions: locally the restore reads every earlier stage directory, past any number of stages that saved none", async () => {
+  const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
+  const { utimesSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "sess-"));
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  process.env.CODEX_HOME = join(root, "codex");
+  process.env.FACTORY_LOCAL = "1";
+  try {
+    const rel = join("2026", "11", "15", "rollout-2026-11-15T08-00-00-w1.jsonl");
+    mkdirSync(join(root, "codex", "sessions", "2026", "11", "15"), { recursive: true });
+    writeFileSync(join(root, "codex", "sessions", rel), '{"id":"w1"}\n');
+    const ws = join(root, "ws");
+    const work = join(ws, "usage-work-1");
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, "result.json"), JSON.stringify({ session: saveTranscript({ harness: "codex", sessionId: "w1", usageDir: work, checkout: "/c", secrets: [] }) }));
+    utimesSync(join(work, "result.json"), 1000, 1000);
+    rmSync(join(root, "codex", "sessions"), { recursive: true });
+    // Four later stages ran no harness (clean rebases, an already-reviewed head): none saved a session.
+    for (let i = 2; i <= 5; i += 1) {
+      const d = join(ws, `usage-review-${i}`);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "result.json"), JSON.stringify({ exit: "done" }));
+      utimesSync(join(d, "result.json"), 1000 + i, 1000 + i);
+    }
+    assert.deepEqual(await restoreTranscript({ checkout: "/c", workDir: ws, harness: "codex" }), { id: "w1", from: "usage-work-1", reason: "" });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sessions: a stage saves every session it ran (the reviewer's own too), masked, and only the lineage's is restored", async () => {
   const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
   const root = mkdtempSync(join(tmpdir(), "sess-"));

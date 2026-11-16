@@ -8,7 +8,8 @@ import { parseUsage, providerRefusal } from "../scripts/lib/usage.mjs";
 import { BLOCK_CAUSES, blockMarker, decideExit, refusalCause, refusalReason } from "../scripts/lib/logic.mjs";
 import { crashed, usageLimitExit } from "../scripts/lib/session.mjs";
 import { reviewMissed, reviewRerun } from "../scripts/lib/handoff.mjs";
-import { LIMIT, LIMIT_PASS_PROMPT, USAGE_LIMIT, UsageLimitReached, codexPassRollout, runHarness } from "../scripts/lib/harness.mjs";
+import { LIMIT, LIMIT_PASS_PROMPT, USAGE_LIMIT, UsageLimitReached, codexPassRollout, runHarness, stageLimits } from "../scripts/lib/harness.mjs";
+import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { stageMoves } from "../scripts/lib/accounts.mjs";
 import { captureSession, dropSessions } from "../scripts/lib/claude-runner.mjs";
 import { codexRunnerLayout } from "../scripts/lib/codex-runner.mjs";
@@ -213,6 +214,47 @@ test("runHarness, real, fake claude: with another account free (automatic accoun
     });
   } finally {
     LIMIT.elsewhere = null;
+  }
+});
+
+test("#423 runHarness, real, fake claude: the stage's waits are the repository's: usage_limit_waits, usage_limit_move_minutes and, locally, FACTORY_LOCAL_WAIT_MINUTES", async () => {
+  const saved = { waits: LIMIT.waits, movePastMs: LIMIT.movePastMs, stageWaitMs: OUTAGE.stageWaitMs };
+  try {
+    // No wait in place at all: a reset ten minutes out ends the stage, nothing runs again.
+    stageLimits(resolveInputs({ env: { FACTORY_USAGE_LIMIT_WAITS: "0" } }));
+    const none = fakeClaude();
+    await inStage(none.bin, Date.parse(RESET) - 10 * 60_000, async ({ waits }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      await assert.rejects(runHarness(pass(none.bin)), (e) => e.code === USAGE_LIMIT);
+      assert.deepEqual([none.calls().length, waits], [1, []]);
+    });
+
+    // A move past thirty minutes: with another account free, a reset fifty minutes out (waited for at the default hour)
+    // ends the stage so the Objective goes on there.
+    stageLimits(resolveInputs({ env: { FACTORY_USAGE_LIMIT_MOVE_MINUTES: "30" } }));
+    assert.equal(LIMIT.waits, 2, "the default again");
+    LIMIT.elsewhere = async () => true;
+    const moved = fakeClaude();
+    await inStage(moved.bin, Date.parse(RESET) - 50 * 60_000, async () => {
+      waitOutages({ until: (since) => since + 3 * 60 * 60_000 });
+      await assert.rejects(runHarness(pass(moved.bin)), (e) => e.code === USAGE_LIMIT && e.resetAt === Date.parse(RESET));
+      assert.equal(moved.calls().length, 1);
+    });
+    LIMIT.elsewhere = null;
+
+    // Locally, an in-place bound of thirty minutes: a reset twenty minutes out (past the default fifteen) is waited for.
+    stageLimits(resolveInputs({ env: {} }), { local: true, env: { FACTORY_LOCAL_WAIT_MINUTES: "30" } });
+    assert.equal(OUTAGE.stageWaitMs, 30 * 60_000);
+    const near = fakeClaude();
+    await inStage(near.bin, Date.parse(RESET) - 20 * 60_000, async () => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      assert.equal((await runHarness(pass(near.bin))).ok, true);
+      assert.equal(near.calls().length, 2);
+    });
+  } finally {
+    LIMIT.elsewhere = null;
+    Object.assign(LIMIT, { waits: saved.waits, movePastMs: saved.movePastMs });
+    OUTAGE.stageWaitMs = saved.stageWaitMs;
   }
 });
 

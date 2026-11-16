@@ -34,15 +34,31 @@ const OWNED_PREFIX = /^(FACTORY|GITHUB|GH|ACTIONS|RUNNER|ANTHROPIC|CLAUDE|CODEX|
 export const PROCESS_NAMES = new Set(["PATH", "HOME", "TMPDIR", "SHELL", "USER", "LOGNAME", "PWD", "CI", "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "BUN_OPTIONS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PERL5LIB", "PERL5OPT", "RUBYOPT", "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]);
 const PROCESS_PREFIX = /^(LD_|DYLD_|GIT_|NPM_CONFIG_|SUDO_)/;
 
-/** The prefixes of well-known keys and tokens: a name that starts with one is a key pasted into the wrong place. */
-const KEY_PREFIX = /^(vck_|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk-|sk_|xox[a-z]?-|AKIA|AIza|glpat-|npm_)/i;
-/** A name the log, doctor or a GitHub comment may show: at most 40 characters and no key's prefix. */
-export const showable = (name) => typeof name === "string" && name.length > 0 && name.length <= 40 && !KEY_PREFIX.test(name);
+/**
+ * The shapes of well-known keys and tokens that are also valid variable names, each matched against the whole string
+ * and case-sensitively: a string of one of these shapes is a key pasted into the wrong place, never a name. Where the
+ * vendor publishes the body's length it is exact (GitHub, npm, AWS, Google); Vercel and Stripe publish the prefix and
+ * a base-62 body only. A key with a dash (OpenAI's `sk-`, Slack's `xox?-`, GitLab's `glpat-`) is no variable name, so
+ * ENV_NAME already refuses it.
+ */
+const KEY_SHAPES = [
+  /^gh[pousr]_[A-Za-z0-9]{36}$/, // GitHub classic, OAuth, user-to-server, server-to-server and refresh tokens
+  /^github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}$/, // GitHub fine-grained personal access token
+  /^npm_[A-Za-z0-9]{36}$/, // npm access token
+  /^(?:AKIA|ASIA)[A-Z0-9]{16}$/, // AWS access key id
+  /^AIza[A-Za-z0-9_-]{35}$/, // Google API key
+  /^vc[kpiar]_[A-Za-z0-9]+$/, // Vercel API key, personal, integration and app tokens
+  /^[sr]k_(?:live|test)_[A-Za-z0-9]+$/, // Stripe secret and restricted keys
+];
+/** Whether `s` has the shape of a well-known key or token (KEY_SHAPES). */
+export const keyShaped = (s) => typeof s === "string" && KEY_SHAPES.some((re) => re.test(s));
+/** A name the log, doctor or a GitHub comment may show: at most 40 characters and no key's shape. */
+export const showable = (name) => typeof name === "string" && name.length > 0 && name.length <= 40 && !keyShaped(name);
 
 /** Why `name` may not be a variable in the worker's shell, or null when it may. Case-insensitive. */
 export function shellNameRefusal(name) {
   if (!ENV_NAME.test(String(name || ""))) return "not-a-name";
-  if (KEY_PREFIX.test(name)) return "looks-like-key";
+  if (keyShaped(name)) return "looks-like-key";
   const up = name.toUpperCase();
   if (MODEL_SECRET_KEYS.includes(up)) return "model-credential";
   if (RUNNER_SECRET_KEYS.includes(up) || GITHUB_TOKEN_KEYS.includes(up)) return "factory-token";
@@ -82,7 +98,7 @@ export function parseWorkerSecrets(spec) {
     const source = parts.length === 2 && parts[1] ? parts[1] : name;
     const code = parts.length > 2 || (parts.length === 2 && !parts[1]) ? "not-a-name" : shellNameRefusal(name) || sourceRefusal(source) || (entries.some((e) => e.name === name) ? "duplicate" : null) || (entries.length >= WORKER_SECRETS_MAX ? "too-many" : null);
     // What the log and doctor may quote: a showable NAME, and a SOURCE only when it is refused as a well-known name. Never
-    // an entry that is no name, is long or carries a key's prefix, which could be a key pasted into the wrong setting.
+    // an entry that is no name, is long or has a key's shape, which could be a key pasted into the wrong setting.
     const wellKnown = (n) => !["not-a-name", "looks-like-key", null].includes(sourceRefusal(n));
     const shown = code === "not-a-name" || !ENV_NAME.test(name) || !showable(name) ? "" : source !== name && !shellNameRefusal(name) && wellKnown(source) && showable(source) ? `${name}=${source}` : name;
     if (code) refused.push({ entry: shown.length <= 40 ? shown : "", code });
@@ -222,7 +238,7 @@ export function openWorkerSecrets(inputs, { factoryKey }) {
 
 /**
  * An exit record's `missingSecrets`: its strings that are showable environment variable names, once each, at most ten.
- * Values are names, never secrets: a string that is not a name, is long, carries a key's prefix or is a held secret's
+ * Values are names, never secrets: a string that is not a name, is long, has a key's shape or is a held secret's
  * value (inputs.mjs holdSecrets) is dropped, so nothing else reaches a GitHub comment.
  */
 export const missingSecretsOf = (v) => {

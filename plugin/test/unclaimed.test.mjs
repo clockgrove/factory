@@ -107,7 +107,7 @@ function childServe(fake) {
     const loop = Object.assign(Object.create(Local.prototype), {
       dev: ${JSON.stringify(dev)}, repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", notice: null,
       harness: "claude", wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2", FACTORY_MAX_CONCURRENT: "2" }, opts: { token: "t" },
-      holder: holderId(machineIdentity()), children: new Set(), firstSetup: new Map(), claimRetryMs: 0, claimSettleMs: 0,
+      holder: holderId(machineIdentity()), children: new Set(), firstSetup: new Map(), claimRetryMs: 0,
     });
     await loop.serve({ intervalMs: 60_000 });
   `;
@@ -195,7 +195,7 @@ async function serveTicks(fake, { ticks = 1, live = false } = {}) {
     dev, repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", notice: null, harness: "claude",
     wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2", FACTORY_MAX_CONCURRENT: "2" }, opts: { token: "t" }, holder: holderId(machineIdentity()),
     machine: { home: budgetHome(), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
-    children: new Set(), firstSetup: new Map(), claimRetryMs: 0, claimSettleMs: 0,
+    children: new Set(), firstSetup: new Map(), claimRetryMs: 0,
     stopOnSignals: () => {},
     cleanup: async () => {},
     runObjective: async (n) => (picks.push(n), { exit: "skipped" }),
@@ -320,7 +320,7 @@ async function startLoop(fake) {
   const started = [];
   const loop = Object.assign(Object.create(Local.prototype), {
     dev: mkdtempSync(join(tmpdir(), "unclaimed-dev-")), repo: { owner: "o", name: "r", full: "o/r" }, repoFull: "o/r", token: "t", notice: null, harness: "claude",
-    wf: {}, opts: { token: "t" }, holder: holderId(machineIdentity()), children: new Set(), firstSetup: new Map(), claimRetryMs: 0, claimSettleMs: 0, stopping: false,
+    wf: {}, opts: { token: "t" }, holder: holderId(machineIdentity()), children: new Set(), firstSetup: new Map(), claimRetryMs: 0, stopping: false,
     work: async (n) => (started.push(n), { exit: "delivered" }),
   });
   const restore = () => {

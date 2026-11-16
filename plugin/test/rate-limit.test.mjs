@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { RETRY, rest } from "../scripts/lib/github.mjs";
-import { OUTAGE, RATE_LIMIT_SPENT, quotaKey, resetNetwork, spentUntil, waitOutages } from "../scripts/lib/network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, quotaKey, quotaResource, resetNetwork, spentUntil, waitOutages } from "../scripts/lib/network.mjs";
 
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 /** The REST quota running out mid-tick: from the read of today's local spend on, every REST read is refused. */
@@ -22,15 +22,37 @@ const restRunsOut = () => {
 };
 const json = (b, status = 200, headers = {}) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json", ...headers } });
 /** GitHub's answer for a spent primary limit, reset at `resetMs`. */
-const spentHeaders = (resetMs) => ({ "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.ceil(resetMs / 1000)), "x-ratelimit-resource": "core" });
+const spentHeaders = (resetMs) => ({ "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.ceil(resetMs / 1000)) });
 const spent = (resetMs, status = 403) => json({ message: "API rate limit exceeded for user ID 1." }, status, spentHeaders(resetMs));
+
+/**
+ * GitHub's GET /rate_limit as a fake answers it (#420): each token's quotas as its latest answer's headers left them,
+ * 5000 remaining before any. `note` records an answer to a request on `path` with Authorization `auth`; `answer` is the
+ * count for `auth`, {body, headers} (the Date of the answer it was read from).
+ */
+function rateLimitModel() {
+  const last = new Map();
+  const RESOURCES = ["core", "graphql", "search", "code_search"];
+  return {
+    note(auth, path, headers) {
+      const h = new Headers(headers || {});
+      if (h.has("x-ratelimit-remaining")) last.set(`${auth} ${h.get("x-ratelimit-resource") || quotaResource(`https://x${path}`)}`, { remaining: Number(h.get("x-ratelimit-remaining")), reset: Number(h.get("x-ratelimit-reset")), date: h.get("date") });
+    },
+    answer(auth) {
+      const of = (r) => last.get(`${auth} ${r}`) ?? { remaining: 5000, reset: 9_999_999_999 };
+      const date = RESOURCES.map(of).find((x) => x.date)?.date;
+      return { body: { resources: Object.fromEntries(RESOURCES.map((r) => [r, { limit: 5000, remaining: of(r).remaining, reset: of(r).reset }])) }, headers: date ? { date } : {} };
+    },
+  };
+}
 
 /**
  * Both clocks faked (the client's retries, the network waits). A sleep is held until `release()` moves `now` past it, so
  * a test can send more requests while one waits. `fetch` is `answer(req)` with req {method, path, at}; every request is
- * in `seen`. Log lines are in `lines`.
+ * in `seen`. Log lines are in `lines`. GET /rate_limit is answered by rateLimitModel, or by `count(auth)` ({body,
+ * headers}) when given, and is not in `seen`; `counts` lists its reads.
  */
-async function faked(answer, fn, { token = false } = {}) {
+async function faked(answer, fn, { token = false, count = null } = {}) {
   const saved = { fetch: globalThis.fetch, api: process.env.GITHUB_API_URL, graphqlUrl: process.env.GITHUB_GRAPHQL_URL, retry: { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random }, outage: { sleep: OUTAGE.sleep, now: OUTAGE.now, random: OUTAGE.random } };
   // Both: a runner sets GITHUB_GRAPHQL_URL to GitHub's own, which GraphQL calls would otherwise reach.
   process.env.GITHUB_API_URL = "https://api.github.test";
@@ -50,17 +72,29 @@ async function faked(answer, fn, { token = false } = {}) {
   Object.assign(RETRY, { sleep, now: () => t, random: () => 0.5 });
   Object.assign(OUTAGE, { sleep, now: () => t, random: () => 0.5 });
   const seen = [];
+  const counts = [];
+  const model = rateLimitModel();
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
-    const req = { method: init.method || "GET", path: u.pathname, at: t, ...(token ? { token: init.headers?.Authorization } : {}) };
+    const auth = init.headers?.Authorization;
+    if (u.pathname === "/rate_limit") {
+      counts.push({ auth, at: t, signal: init.signal ?? null });
+      const c = (count ?? model.answer)(auth);
+      return json(c.body, 200, c.headers);
+    }
+    const req = { method: init.method || "GET", path: u.pathname, at: t, ...(token ? { token: auth } : {}) };
     seen.push(req);
-    return answer(req, t);
+    const res = await answer(req, t);
+    // GitHub names the quota it counted the request on (GraphQL's for a GraphQL call), unless the answer names it.
+    if (res.headers.has("x-ratelimit-remaining") && !res.headers.has("x-ratelimit-resource")) res.headers.set("x-ratelimit-resource", quotaResource(url));
+    model.note(auth, u.pathname, res.headers);
+    return res;
   };
   const lines = [];
   const write = process.stdout.write;
   process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
   try {
-    return await fn({ seen, lines, held, release, now: () => t });
+    return await fn({ seen, counts, lines, held, release, now: () => t });
   } finally {
     process.stdout.write = write;
     resetNetwork();
@@ -152,15 +186,29 @@ test("a process that does not wait (dispatcher, doctor, setup, launcher) fails f
 });
 
 /** A fake GitHub on a port. `answer(req, body)` returns [status, body, headers] or null for the default (an empty list, else {}). */
-async function fakeGitHub(answer) {
+async function fakeGitHub(answer, { count = true } = {}) {
   const seen = [];
+  const model = rateLimitModel();
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      // GET /rate_limit: GitHub's count, as the token's latest answer left it (rateLimitModel); not in `seen`.
+      if (req.url === "/rate_limit" && !count) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "A JSON web token could not be decoded" }));
+        return;
+      }
+      if (req.url === "/rate_limit") {
+        const c = model.answer(req.headers.authorization);
+        res.writeHead(200, { "content-type": "application/json", ...c.headers });
+        res.end(JSON.stringify(c.body));
+        return;
+      }
       const r = { method: req.method, url: req.url, body };
       seen.push(r);
       const [status, data, headers] = answer(r) || [200, req.method === "GET" && /per_page=/.test(req.url) ? [] : { id: 1, user: { login: "me", type: "User" }, body: "" }, {}];
+      model.note(req.headers.authorization, new URL(req.url, "http://x").pathname, headers);
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(data));
     });
@@ -421,19 +469,45 @@ test("a clock ahead of GitHub's: the reset is read through the answer's Date, so
   );
 });
 
-test("a 403 on the last quota point that is no primary limit (no access, abuse detection) carries no RATE_LIMIT_SPENT", async () => {
+test("#420: GitHub's count of the quota (GET /rate_limit), not the answer's words, says a refusal is the primary limit spent", async () => {
   const start = Date.parse("2026-11-14T08:47:00Z");
+  const core = quotaKey("https://api.github.test/repos", "t");
+  const left = (remaining) => () => ({ body: { resources: { core: { limit: 5000, remaining, reset: Math.ceil((start + 20 * 60_000) / 1000) } } }, headers: {} });
+  // A 403 on the last quota point for another reason (no access, abuse detection), and a 429 with no Retry-After whose
+  // quota still has points (a secondary limit): the count has some left, so neither is the limit spent.
   await faked(
-    (req) => json({ message: req.path.endsWith("/denied") ? "Resource not accessible by integration" : "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again." }, 403, spentHeaders(start + 20 * 60_000)),
-    async () => {
-      const denied = await rest("repos/o/r/denied", { token: "t" }).then(() => null, (x) => x);
-      assert.equal(denied?.status, 403);
-      assert.notEqual(denied.code, RATE_LIMIT_SPENT);
-      const abuse = await rest("repos/o/r/abuse", { token: "t" }).then(() => null, (x) => x);
-      assert.equal(abuse?.rateLimited, true, "the secondary limit's older wording");
-      assert.notEqual(abuse.code, RATE_LIMIT_SPENT);
-      assert.equal(spentUntil(quotaKey("https://api.github.test/repos", "t")), null);
+    (req) => (req.path.endsWith("/busy") ? json({ message: "Too many requests." }, 429, spentHeaders(start + 20 * 60_000)) : json({ message: req.path.endsWith("/denied") ? "Resource not accessible by integration" : "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again." }, 403, spentHeaders(start + 20 * 60_000))),
+    async ({ counts }) => {
+      for (const path of ["denied", "abuse", "busy"]) {
+        const e = await rest(`repos/o/r/${path}`, { token: "t" }).then(() => null, (x) => x);
+        assert.ok(e?.status === 403 || e?.status === 429, path);
+        assert.equal(e.rateLimited, true, path);
+        assert.notEqual(e.code, RATE_LIMIT_SPENT, path);
+      }
+      assert.equal(spentUntil(core), null);
+      assert.ok(counts.length >= 3 && counts.every((c) => c.auth === "Bearer t"), "the count is read with the same token");
     },
+    { count: left(4999) },
+  );
+  // GitHub's primary limit in words the client has never seen: the count has none left, so it is spent until the count's reset.
+  await faked(
+    () => json({ message: "Quota for this token is used up." }, 403, spentHeaders(start + 20 * 60_000)),
+    async () => {
+      const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => null, (x) => x);
+      assert.equal(e?.code, RATE_LIMIT_SPENT, String(e));
+      assert.equal(e.resetAt, Math.ceil((start + 20 * 60_000) / 1000) * 1000);
+      assert.equal(spentUntil(core), e.resetAt);
+    },
+    { count: left(0) },
+  );
+  // No count to read (GET /rate_limit refused): the answer's own headers stand, as GitHub documents them.
+  await faked(
+    () => json({ message: "Quota for this token is used up." }, 403, spentHeaders(start + 20 * 60_000)),
+    async () => {
+      const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => null, (x) => x);
+      assert.equal(e?.code, RATE_LIMIT_SPENT, String(e));
+    },
+    { count: () => ({ body: { message: "Not Found" }, headers: {} }) },
   );
 });
 
@@ -454,6 +528,62 @@ test("the App token's mint carries RATE_LIMIT_SPENT and the reset", async () => 
     assert.equal(e.code, RATE_LIMIT_SPENT);
     assert.equal(e.status, 403);
     assert.ok(Math.abs(e.resetAt - reset) < 1500, out);
+  } finally {
+    gh.close();
+  }
+});
+
+test("#420: the count read is of the quota the answer names, ends with the caller's signal, and is not read again within a spent window this process holds", async () => {
+  const start = Date.parse("2026-11-14T08:47:00Z");
+  const reset = Math.ceil((start + 20 * 60_000) / 1000);
+  // A quota the path does not tell: GitHub's x-ratelimit-resource names it, and only that quota has none left.
+  await faked(
+    () => json({ message: "Quota used up." }, 403, { ...spentHeaders(start + 20 * 60_000), "x-ratelimit-resource": "dependency_snapshots" }),
+    async ({ counts }) => {
+      const ac = new AbortController();
+      const e = await rest("repos/o/r/dependency-graph/snapshots", { token: "t", method: "POST", body: {}, signal: ac.signal }).then(() => null, (x) => x);
+      assert.equal(e?.code, RATE_LIMIT_SPENT, String(e));
+      assert.equal(counts.length, 1);
+      assert.equal(counts[0].signal, ac.signal, "the count read ends with the caller's signal");
+    },
+    { count: () => ({ body: { resources: { core: { limit: 5000, remaining: 4000, reset }, dependency_snapshots: { limit: 100, remaining: 0, reset } } }, headers: {} }) },
+  );
+  // A second refusal within the spent window this process holds: no second count read, the answer's reset stands.
+  let later = false;
+  await faked(
+    () => spent(later ? start + 30 * 60_000 : start + 20 * 60_000),
+    async ({ counts }) => {
+      const core = quotaKey("https://api.github.test/repos", "t");
+      for (const n of [7, 8]) assert.equal((await rest(`repos/o/r/issues/${n}`, { token: "t" }).then(() => null, (x) => x))?.code, RATE_LIMIT_SPENT);
+      assert.equal(counts.length, 1, "one count for one spent window");
+      assert.equal(spentUntil(core), reset * 1000);
+      // A reset later than the one held is a new window: counted again.
+      later = true;
+      assert.equal((await rest("repos/o/r/issues/9", { token: "t" }).then(() => null, (x) => x))?.code, RATE_LIMIT_SPENT);
+      assert.equal(counts.length, 2);
+      assert.equal(spentUntil(core), Math.ceil((start + 30 * 60_000) / 1000) * 1000);
+    },
+  );
+});
+
+test("#420: the App token's mint, whose GET /rate_limit with the App's JWT gives no count, is a rate limit with no stated end, not the limit spent", async () => {
+  const { generateKeyPairSync } = await import("node:crypto");
+  const reset = Math.ceil((Date.now() + 20 * 60_000) / 1000) * 1000;
+  // A refusal of the mint (a suspended installation) that meets the last quota point.
+  const gh = await fakeGitHub(() => [403, { message: "This installation has been suspended" }, spentHeaders(reset)], { count: false });
+  try {
+    const key = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
+    const script = `import { mintInstallationToken } from ${JSON.stringify(pathToFileURL(join(SCRIPTS, "lib", "app-token.mjs")).href)};
+      try { await mintInstallationToken({ appId: "1", privateKey: process.env.KEY, owner: "o", repo: "r" }); } catch (e) { process.stdout.write(JSON.stringify({ code: e.code ?? null, rateLimited: e.rateLimited, status: e.status })); }`;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, KEY: key }, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (out += c));
+    await new Promise((r) => child.on("exit", r));
+    const e = JSON.parse(out);
+    assert.equal(e.status, 403);
+    assert.equal(e.rateLimited, true);
+    assert.notEqual(e.code, RATE_LIMIT_SPENT, out);
   } finally {
     gh.close();
   }

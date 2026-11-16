@@ -20,7 +20,7 @@
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
-import { constants as osConstants, homedir, hostname, platform, tmpdir, uptime } from "node:os";
+import { constants as osConstants, homedir, hostname, platform, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -32,17 +32,17 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
-import { GROUP_RECORD, STOP_SIGNALS, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim } from "./lib/local.mjs";
-import { REVIEW_LABEL, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
-import { HANDOVER_WRITERS, MAX_PARTS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
-import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueBoundMs, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
+import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
+import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
+import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
+import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
 import { HANDOVER_LABEL, WORKFLOWS_DIR, handoverBranch, handoverMarker, handoverOf, workflowName } from "./lib/handover.mjs";
 import { appendOwn, dropOwned, privateTmp } from "./lib/fsafe.mjs";
@@ -61,6 +61,7 @@ import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
 import { DRAFT_LABEL, isDraft, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
+import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
@@ -118,7 +119,7 @@ export function pauseNoticeBody({ stage = "work", harness, account, reset, windo
 
 /**
  * How often a loop writes again the claim of an Objective it holds paused (Local.beatPaused): well inside the dispatcher's
- * day for a claim gone quiet (lib/local.mjs CLAIM_PAUSE_MS), at one write an hour (the API quota is shared).
+ * bound for a claim gone quiet (claim_pause_hours, at least two hours), at one write an hour (the API quota is shared).
  */
 export const PAUSED_BEAT_MS = 60 * 60_000;
 
@@ -276,15 +277,19 @@ const readId = (file) => {
   }
 };
 
+/** This process's boot (proc.mjs bootId), read once: a boot cannot change while the process runs (macOS reads it with a subprocess). */
+let bootRead = null;
+export const thisBoot = () => (bootRead ??= { id: bootId() }).id;
+
 /**
  * Who this machine is and which boot it is on, for claim holders: a host name alone is not unique (a devcontainer on
  * host networking, two laptops called the same), and a pid is only meaningful within one boot. Linux gives both ids;
- * elsewhere the machine is its host name and the boot its start minute.
+ * elsewhere the machine is its host name and the boot is proc.mjs bootId's (macOS: the boot time's exact second, as
+ * liveStage and the slots read it), or none where that is unreadable: a holder's pid is then probed alone.
  */
-export function machineIdentity() {
+export function machineIdentity({ boot = thisBoot } = {}) {
   const machine = readId("/etc/machine-id") || readId("/var/lib/dbus/machine-id");
-  const boot = readId("/proc/sys/kernel/random/boot_id") || String(Math.round((Date.now() / 1000 - uptime()) / 60));
-  return { host: hostname(), machine, boot };
+  return { host: hostname(), machine, boot: String(boot() ?? "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12) };
 }
 
 /** A loop's claim holder: `host:pid:nonce:machine:boot`. */
@@ -447,22 +452,51 @@ export const REFUSED_PROBE = { ms: 60_000 };
 /** Where the local token comes from, to name in a log line: the variable or the file, never the value. */
 const tokenSource = (repoFull) => (process.env.FACTORY_LOCAL_TOKEN ? "FACTORY_LOCAL_TOKEN (then start serve again)" : tokenFile(repoFull));
 
+/** Whether a listed repository's `permissions` (its person's, as GitHub lists them) let that person push to it. */
+const personPushes = (p) => !!(p.push || p.maintain || p.admin);
+
 /**
- * The token can write to this repository and nothing else. A fine-grained token lists every public repository it
- * may read, and the listed permissions are the person's, not the token's, so write reach is probed instead: an
- * issue with no title is refused before anything is created, with 422 where the token may write and 403 or 404
- * where it may not.
+ * The token can write to this repository and nothing else. A fine-grained token lists another private repository only
+ * when it was granted it, so any listed private one but this refuses it outright, with no probe. It also lists every
+ * public repository it may read, with its person's permissions on each, not the token's. The token can push only where
+ * its person can, and can open issues on a public repository only when it was granted it, which needs that repository
+ * to share its resource owner with this one. So a listed public repository is probed when its person can push to it
+ * (push, maintain or admin), when this repository's owner owns it, or when it is listed with no permissions; others are
+ * out of its write reach. A probe is an issue with no title, refused before anything is created, with 422 where the token
+ * may write and 403 or 404 where it may not. A listing that fails, more than `max` repositories to probe
+ * (FACTORY_LOCAL_TOKEN_PROBE_MAX), or a probe that gets any other answer refuses the token, since its reach is then
+ * unknown; that error carries `again`, as a check worth making again later. GitHub's rate limit on a probe ends the
+ * check there: one probe at a time, each thrown at once rather than waited out, and no probe after it.
  */
-async function checkToken(repoFull, token) {
+export async function checkToken(repoFull, token, { max = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback } = {}) {
   if (!token.startsWith("github_pat_")) throw new Error("the local token must be a fine-grained token limited to this repository; a classic token or a gh login reaches every repository you can");
-  const reach = (await rest("user/repos?per_page=100", { token, paginate: true }).catch(() => [])) || [];
-  const others = reach.map((r) => r.full_name).filter((n) => n.toLowerCase() !== repoFull.toLowerCase()).slice(0, 20);
+  const unknownReach = (message) => Object.assign(new Error(message), { again: true });
+  let reach;
+  try {
+    reach = await rest("user/repos?per_page=100", { token, paginate: true });
+  } catch (e) {
+    throw unknownReach(`the repositories the local token can reach could not be listed (${e.rateLimited ? "GitHub's rate limit" : e.status || String(e.message).slice(0, 80)}), so its reach is not verified`);
+  }
+  const others = (Array.isArray(reach) ? reach : []).filter((r) => String(r?.full_name || "").toLowerCase() !== repoFull.toLowerCase());
+  const secret = others.filter((r) => r.private === true).map((r) => r.full_name);
+  if (secret.length) throw new Error(`the local token can reach ${secret.length} other private repositor${secret.length === 1 ? "y" : "ies"} (${secret.slice(0, 3).join(", ")}${secret.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
+  const owner = repoFull.split("/")[0].toLowerCase();
+  const sameOwner = (r) => String(r.full_name).split("/")[0].toLowerCase() === owner;
+  const toProbe = others.filter((r) => !r.permissions || typeof r.permissions !== "object" || personPushes(r.permissions) || sameOwner(r)).map((r) => r.full_name);
+  if (toProbe.length > max) throw new Error(`the local token lists ${toProbe.length} other repositories it could write to, more than the ${max} Factory probes for write access (FACTORY_LOCAL_TOKEN_PROBE_MAX); make a token whose repository access is limited to ${repoFull}, or raise the setting`);
   const writable = [];
-  for (const name of others) {
-    const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {} }).then(() => 201, (e) => e.status || 0);
+  const unknown = [];
+  for (const name of toProbe) {
+    const status = await rest(`repos/${name}/issues`, { token, method: "POST", body: {}, noRateWait: true }).then(
+      () => 201,
+      (e) => (e.rateLimited ? "rate limited" : e.status || 0),
+    );
     if (status === 422 || status === 201) writable.push(name);
+    else if (status !== 403 && status !== 404) unknown.push(`${name}: ${status || "no answer"}`);
+    if (status === "rate limited") break;
   }
   if (writable.length) throw new Error(`the local token can write to ${writable.length} other repositor${writable.length === 1 ? "y" : "ies"} (${writable.slice(0, 3).join(", ")}${writable.length > 3 ? ", ..." : ""}); limit it to ${repoFull}`);
+  if (unknown.length) throw unknownReach(`the local token's write access to ${unknown.length} other repositor${unknown.length === 1 ? "y" : "ies"} could not be probed (${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ", ..." : ""}); try again`);
 }
 
 /** The issue a PR is a review trigger for: on factory/<issue>, labelled factory:review, not a draft; else 0. */
@@ -665,7 +699,15 @@ export class Local {
     if (gateway) problems.push(gateway);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
-    this.opts = { token: this.token, notice: this.notice };
+    // `project`: the board's node id from the repository's settings (github.mjs findProject), read when a call is made.
+    const settings = () => this.wf || {};
+    this.opts = {
+      token: this.token,
+      notice: this.notice,
+      get project() {
+        return settings().FACTORY_PROJECT || "";
+      },
+    };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
     // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
     // was are a dead loop's (deadHereHolder), resumed at once as after any restart.
@@ -696,11 +738,24 @@ export class Local {
     for (const line of layerLines(settingLayers({ workflow: this.workflowWf, variables: this.variables || {}, machine: machineSettings(process.env) }))) log(`  ${line}`);
   }
 
+  /**
+   * A bounded local setting (inputs.mjs LOCAL_BOUNDS) as this loop takes it now: this machine's environment over the
+   * repository's settings; a value it cannot take is its default, logged once.
+   */
+  bounded(name) {
+    const r = localBound(name, process.env[name] ?? this.wf?.[name]);
+    if (r.problem && !(this.boundSaid ??= new Set()).has(r.problem)) {
+      this.boundSaid.add(r.problem);
+      log(r.problem);
+    }
+    return r.value;
+  }
+
   /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
   async init({ serve = false } = {}) {
     await this.startVariables({ serve });
     this.takeSettings();
-    await checkToken(this.repoFull, this.token);
+    await checkToken(this.repoFull, this.token, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") });
     if (this.notice) {
       const minted = await this.notice().catch((e) => {
         throw new Error(`local mode cannot start: the Factory App (FACTORY_LOCAL_APP_ID ${process.env.FACTORY_LOCAL_APP_ID}) gave no token for ${this.repoFull}: ${e.message.slice(0, 200)}; check the id, the key, and that the App is installed on this repository`);
@@ -1443,7 +1498,10 @@ export class Local {
     }
     // Its env is made: the settings may change from here on.
     setUp();
-    if (this.stopping) {
+    // Stopping, or another loop took the claim meanwhile (withClaim's heartbeat): no process starts.
+    if (this.stopping || this.lost?.has(issue)) {
+      // Refused for the lost claim: withClaim reports the stage as ended for it.
+      if (this.lost?.has(issue)) this.lost.get(issue).ended = true;
       dropStage();
       return { code: null, exit: null, usd: null, usageDir };
     }
@@ -1475,6 +1533,8 @@ export class Local {
         child.stdio[3].on("error", () => {});
         child.stdio[3].end(this.token);
         if (this.notice) serveNotices(child, this.notice);
+        // By its Objective, for withClaim's heartbeat to end it when another loop holds the claim.
+        child.issue = issue;
         this.children.add(child);
         // One relay per stream, whole lines only, so no value split across two chunks escapes the redaction.
         const relays = [child.stdout, child.stderr].map((stream) => {
@@ -1512,7 +1572,9 @@ export class Local {
             const end = this.holdStore(hold).spent({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), window: result.limitRefused.limitType ?? null, steps: this.guessSteps() });
             log(`#${issue}: ${limitName(runs.harness, account)} reached its usage limit with no reset reported; automatic account choice passes it over until ${new Date(end).toISOString()}`);
           }
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
+          // decision calls out), the progress outagePaused reads between pauses.
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -1559,7 +1621,7 @@ export class Local {
       stoppedAt = Date.now();
       this.stopping = true;
       for (const wake of this.wakers || []) wake();
-      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after a day away); a start with no claim yet goes back to Queued; signal again to exit at once`);
+      log(`stopping (${sig}): ending ${this.children.size} stage process(es); their Objectives stay Running, paused, and the next factory run or serve on this machine takes them up (the dispatcher Blocks one only after the claim pause away, claim_pause_hours, a day by default); a start with no claim yet goes back to Queued; signal again to exit at once`);
       for (const child of this.children) child.kill("SIGTERM");
       await Promise.race([Promise.resolve(whenSettled()).catch(() => {}), new Promise((r) => setTimeout(r, 30_000))]);
       process.exit(code);
@@ -1615,6 +1677,11 @@ export class Local {
    * after the claim is written. A start that waited long enough for another loop to put the Objective back to Queued, or
    * to pick it again (serve's sweep of a Running one with no claim, the dispatcher's), sees the stint change and steps
    * aside: it writes no claim, or takes back the one it wrote.
+   *
+   * Two loops that write at once can each read their own name back. The heartbeat settles it: each beat reads the claim
+   * before it writes, and one that names another live loop (fresh, and not a dead loop of this machine) ends this loop's
+   * stage of the Objective instead of overwriting it (`lost`): no lapse, the claim stays that loop's, and this loop never
+   * resumes the Objective from it.
    */
   async withClaim(issue, fn, { onStop = null, stint = false } = {}) {
     const stintNow = async () => {
@@ -1659,9 +1726,8 @@ export class Local {
     } catch (e) {
       throw Object.assign(e, { startFailed: "claim", othersClaim: others });
     }
-    // Two loops writing at once: the comment's last writer holds it, and the other steps aside. A short random wait
-    // lets both writes land before either reads back, so both cannot read their own.
-    await new Promise((r) => setTimeout(r, this.claimSettleMs ?? 1500 + Math.floor(Math.random() * 1500)));
+    // Two loops writing at once: the comment's last writer holds it, and the other steps aside, here or at its next
+    // heartbeat (below), whichever first reads the other's name.
     let mine;
     try {
       mine = await this.readClaim(issue);
@@ -1685,29 +1751,59 @@ export class Local {
     }
     this.ceded?.delete(issue);
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
-    // beats due meanwhile are skipped rather than queued behind it.
+    // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
+    // cannot read is written as before (no answer is no other holder).
     let beating = null;
+    let lost = null;
+    const heartbeat = async () => {
+      const now = await localClaim(this.repo, issue, this.opts).catch(() => undefined);
+      if (now && now.holder !== this.holder && now.fresh && !deadHereHolder(now.holder, { own: this.holder })) {
+        lost = now.holder;
+        clearInterval(beat);
+        log(`#${issue}: another local loop holds it now (${now.holder}); ending this loop's stage of it`);
+        // `ended`: a stage of it ended here for the lost claim (a process killed, or stage() refusing to start one).
+        const mark = { ended: false };
+        (this.lost ??= new Map()).set(issue, mark);
+        for (const child of this.children || []) {
+          if (child.issue !== issue) continue;
+          child.kill("SIGTERM");
+          mark.ended = true;
+        }
+        return;
+      }
+      // This loop's own claim read: rewritten in place, with no second read.
+      if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, this.opts);
+      else await writeClaim(this.repo, issue, this.holder, this.opts);
+    };
     const beat = setInterval(() => {
-      if (beating) return;
-      beating = writeClaim(this.repo, issue, this.holder, this.opts)
+      if (beating || lost) return;
+      beating = heartbeat()
         .catch((e) => log(`#${issue} heartbeat: ${e.message.slice(0, 120)}`))
         .finally(() => {
           beating = null;
         });
-    }, HEARTBEAT_MS);
+    }, this.heartbeatMs ?? HEARTBEAT_MS);
     let result = null;
     let failure = null;
     try {
       result = await fn();
-      return result;
+      // A stage ended for the lost claim is skipped; anything else the body did (a merge it followed to the end) stands.
+      return lost && this.lost?.get(issue)?.ended ? { exit: "skipped" } : result;
     } catch (e) {
       failure = e;
       throw e;
     } finally {
       clearInterval(beat);
+      this.lost?.delete(issue);
+      // The claim went to another live loop (the heartbeat): its stage is that loop's, and so is the claim.
+      if (lost) {
+        (this.ceded ??= new Set()).add(issue);
+        this.lapsed?.delete(issue);
+        this.offline?.delete(issue);
+      }
       // Stopping serve pauses its work: the claim stays, goes stale, and this machine's next serve resumes it. A failed
       // start is unstart's to settle.
-      if (!this.stopping && !failure?.startFailed) {
+      else if (!this.stopping && !failure?.startFailed) {
         // A stage this machine's network ended (`paused`): no lapse, the claim stays, and pausedHere resumes it once
         // the host answers again (outagePaused).
         if (result?.exit === "paused") await this.outagePaused(issue, result);
@@ -1744,11 +1840,14 @@ export class Local {
 
   /**
    * A stage that ended with no exit record under this loop (`result` its stage's end, or `failure` what threw): the claim
-   * stays and pausedHere resumes it once; a second in a row Blocks it here (cause `factory`), naming the stage, its exit
-   * code or signal and its log on this machine, so the cause reaches GitHub and nothing retries forever. A throw names
-   * what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else the local loop itself; never the work; and
-   * the error as postedError has it. The count is this loop's memory: another serve on the machine resumes the
-   * Objective afresh.
+   * stays and pausedHere resumes it, or it Blocks here (cause `factory`), naming the stage, its exit code or signal and
+   * its log on this machine, so the cause reaches GitHub and nothing retries forever. Whether to start it again is the
+   * lapse check's (lib/lapse-check.mjs, a decision call on the AI Gateway): given this end and the one before it, would
+   * the same stage started again end the same way? `same_again` Blocks at once; `transient` resumes it, and the
+   * FACTORY_LOCAL_LAPSE_MAX-th lapse in a row (3 by default) Blocks. With no verdict (no key, no answer, a lower confidence) it is resumed
+   * once and a second lapse in a row Blocks. A throw names what threw: Factory's set-up of a stage (`stageSetup`, stage()), or else
+   * the local loop itself; never the work; and the error as postedError has it. The count is this loop's memory:
+   * another serve on the machine resumes the Objective afresh.
    */
   async lapse(issue, result, failure) {
     const stage = result?.stage || failure?.stageSetup || "local";
@@ -1757,15 +1856,30 @@ export class Local {
     const what = said(String(failure?.message || failure).slice(0, 200));
     const where = result?.log ? `; its log on this machine: ${result.log}` : "";
     const lapsed = (this.lapsed ??= new Map());
-    if (!lapsed.has(issue)) {
-      lapsed.set(issue, 1);
-      log(`#${issue}: ${what}; the claim stays and this loop resumes it once${where}`);
+    const before = lapsed.get(issue) ?? null;
+    let pressure = null;
+    try {
+      pressure = readPressure({ root: this.machinePlaces().proc });
+    } catch {
+      // unknown: the check is told so
+    }
+    const facts = lapseFacts({ result, failure, pressure });
+    // Opened for each lapse, so a key file or decision route set since serve started is read (`lapseCheck`: a test's own).
+    const check = this.lapseCheck ?? openLapseCheck({ inputs: resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }), env: this.baseEnv() });
+    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
+    const count = (before?.count ?? 0) + 1;
+    const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
+    const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("FACTORY_LOCAL_LAPSE_MAX") : count < 2;
+    if (resume) {
+      lapsed.set(issue, { count, facts });
+      log(`#${issue}: ${what}${judged}; the claim stays and this loop resumes it (lapse ${count} in a row)${where}`);
       return;
     }
     lapsed.delete(issue);
-    log(`#${issue}: ${what} again; Blocking it${where}`);
+    const times = count === 1 ? "" : count === 2 ? " twice in a row" : ` ${count} times in a row`;
+    log(`#${issue}: ${what}${times ? " again" : ""}${judged}; Blocking it${where}`);
     try {
-      await this.block(issue, stage, `${said(postedError(failure))} twice in a row on this machine${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
+      await this.block(issue, stage, `${said(postedError(failure))}${times} on this machine${judged}${where}`.replaceAll(homedir(), "~"), { cause: "factory", ...(failure ? { fix: "Fix it on this machine (the local loop's log has the failure), then re-apply `factory:objective`." } : {}) });
       await dropClaim(this.repo, issue, this.holder, this.opts);
     } catch (e) {
       log(`#${issue}: the Block could not be written (${String(e?.message || e).slice(0, 120)}); the claim stays`);
@@ -1778,7 +1892,10 @@ export class Local {
    * comes within OUTAGE.stageWaitMs of this loop resuming the Objective from an earlier one is the same outage (a network
    * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
    * the network. A pause on GitHub's spent rate limit after an earlier one, with no other end between, is the same however
-   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. A pause on GitHub answering
+   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. Either holds only while
+   * nothing was done between them: a stage that paused after its provider served a harness pass (`result.served`,
+   * result.json's servedPasses; a decision call is none) made progress since the earlier pause, so its pause counts
+   * afresh from its own `since`. A pause on GitHub answering
    * 5xx past the client's retries (network.mjs serverDown) is counted in `server` ({since, pauses, at, request,
    * requestSince, tried}: the request that failed, its first failure and whether its one more try was made) across
    * every pause of the Objective however far apart, until a stage ends any other way (withClaim): a probe of the host
@@ -1796,7 +1913,7 @@ export class Local {
     const earlier = this.offline?.get(issue);
     const reset = Date.parse(o.reset);
     const quotaAgain = Number.isFinite(reset) && Number.isFinite(earlier?.reset) && !earlier?.harness;
-    const same = earlier && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
+    const same = earlier && !result?.served && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
     const since = same ? Math.min(own, earlier.since) : own;
     const now = (this.clock ?? Date.now)();
     const before = earlier?.harness ? null : (earlier?.server ?? null);
@@ -2861,20 +2978,52 @@ export class Local {
     return out;
   }
 
-  /** --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. */
-  async followMerge(issue, prNumber, { timeoutMs = 120 * 60_000, pollMs = 60_000 } = {}) {
-    const until = Date.now() + timeoutMs;
+  /**
+   * --wait: follow the PR through the merge queue, then do the bookkeeping the dispatcher does on a merge. The follow's
+   * bounds are the repository's own, from the merge queue's check timeout (setup's default when unread), with `hungMs`
+   * the bound past which the queue calls a running required check hung (logic.mjs queueHungMs). In the queue, it follows
+   * while the entry makes progress (its state, merge_group commit or place changes), and stops once it has not for the
+   * check timeout plus `hungMs`; waiting for the queue ahead of it (queue-wait), it follows while that queue changes (the
+   * default branch's head or any entry ahead: session.mjs queueState, one read per poll) and stops once it has not for
+   * the same bound. Out of the queue (its own checks, or a person's merge with auto_merge off), it stops once it has
+   * waited `hungMs`, counted from its start or from when it last saw the PR in the queue. With auto_merge off, one read of
+   * the PR's queue entry per poll tells whether a person put it in the queue. It logs where the PR is whenever that
+   * changes, and its stop line names the bound and what is still pending.
+   */
+  async followMerge(issue, prNumber, { pollMs = 60_000 } = {}) {
+    const now = () => (this.clock ?? Date.now)();
     const inputs = resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() });
     const queue = await hasMergeQueue(this.repo, this.opts).catch(() => true);
-    // The hung-check bound, read once for this follow rather than every poll; with no Actions token here (the local
-    // App has no Actions permission), the merge pass judges a queue check by that time bound only (session.mjs hangsOn).
-    const hungMs = queue ? await queueBoundMs(this.repo, this.opts) : null;
+    // The queue's check timeout and the hung-check bound from it, read once for this follow rather than every poll; with
+    // no Actions token here (the local App has no Actions permission), the merge pass judges a queue check by that time
+    // bound only (session.mjs hangsOn).
+    const queueTimeout = queue ? await queueTimeoutMin(this.repo, this.opts) : null;
+    const hungMs = queueHungMs(queueTimeout);
+    const minutes = (ms) => Math.round(ms / 60_000);
+    const timeoutText = queueTimeout ? `the merge queue's ${queueTimeout}-min check timeout` : `setup's default ${SETUP_QUEUE_TIMEOUT_MIN}-min check timeout`;
+    // How long the PR may stay in the queue with no change of its entry, or wait for a queue ahead of it that does not
+    // change: the queue's check timeout plus the hung bound, past which the queue itself would have dropped its head.
+    const stillMs = { queue: (queueTimeout || SETUP_QUEUE_TIMEOUT_MIN) * 60_000 + hungMs };
+    stillMs.wait = stillMs.queue;
+    const inQueue = (entry) => {
+      if (entry === "queued") return { kind: "queue", key: "queued", desc: "just enqueued", text: "put in the merge queue" };
+      const desc = entry ? [entry.state, entry.position && `position ${entry.position}`, entry.head && `merge_group commit ${entry.head.slice(0, 7)}`].filter(Boolean).join(", ") : "unread";
+      return { kind: "queue", key: entry ? `${entry.state}:${entry.position}:${entry.head}` : "unread", desc, text: `in the merge queue (entry ${desc})` };
+    };
     const cache = {};
-    while (Date.now() < until && !this.stopping) {
+    // When this wait outside the merge queue began (null while the PR is in it, or waits for the queue ahead), and
+    // since when the PR has been in the queue (or waited for it) with nothing changed.
+    let outSince = now();
+    let still = null;
+    let said = null;
+    let pending = "";
+    let stop = null;
+    while (!this.stopping) {
+      let phase;
       // The merge pass the dispatcher runs (session.mjs mergeReadyOne): this loop holds the Objective, so it runs it.
       if (inputs.autoMerge) {
         const report = {};
-        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, cache, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
+        const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
         const why = mergeBlockReason(how, report);
         if (why) {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
@@ -2893,25 +3042,65 @@ export class Local {
           const sent = await this.sendBack(issue, prNumber, inputs);
           if (sent !== "retry") return sent;
         }
+        if (how === "queue-wait") phase = { kind: "wait", text: "out of the merge queue, waiting for the queue ahead of it to move" };
+        else if (how === "queued" || how === "in-queue") phase = inQueue(how === "queued" ? "queued" : report.entry);
+        else {
+          const checks = report.checks;
+          pending = checks ? `its required checks on ${checks.sha.slice(0, 7)} (${[...checks.pending.map((n) => `${n} running`), ...checks.missing.map((n) => `${n} not reported`)].join(", ")})` : `the merge pass (${how ?? "unread"})`;
+          phase = { kind: "out", text: `${queue ? "out of the merge queue, " : ""}waiting on ${pending}` };
+        }
+      } else {
+        // auto_merge off: a person merges it or puts it in the queue; one read of its queue entry tells which.
+        const entry = queue ? await mergeQueueEntry(this.repo, prNumber, this.opts).catch(() => null) : null;
+        phase = entry ? inQueue(entry) : { kind: "out", text: `waiting for a person to merge it${queue ? " or put it in the merge queue" : ""} (auto_merge is off)` };
       }
+      if (phase.text !== said) log(`#${issue}: following PR #${prNumber}: ${(said = phase.text)}`);
       const pr = await getPr(this.repo, prNumber, this.opts).catch(() => null);
       if (pr?.merged_at) {
         const project = await findProject(this.repo, this.opts).catch(() => null);
         // A split part: the issue stays open and the next part starts from the default branch (handoff.mjs nextPart).
-        const next = await nextPart(this.repo, issue, this.opts).catch(() => null);
+        const next = await nextPart(this.repo, issue, this.opts, { maxParts: inputs.maxParts }).catch(() => null);
         await setStateLabel(this.repo, issue, next === "cap" ? "blocked" : null, this.opts).catch(() => {});
         if (project) await moveCard(project, this.repo, issue, next === "next" ? "Queued" : next === "cap" ? "Blocked" : "Done", this.opts).catch(() => {});
-        log(`#${issue}: PR #${prNumber} merged; ${next === "next" ? "the next part is queued" : next === "cap" ? `split into ${MAX_PARTS} PRs with work left: Blocked` : "card Done"}`);
+        log(`#${issue}: PR #${prNumber} merged; ${next === "next" ? "the next part is queued" : next === "cap" ? `split into ${inputs.maxParts} PRs with work left: Blocked` : "card Done"}`);
         return next === "next" ? "next" : true;
       }
       if (pr?.state === "closed") {
         log(`#${issue}: PR #${prNumber} closed without a merge`);
         return false;
       }
+      if (phase.kind === "wait") {
+        // The queue ahead of it as it stands (session.mjs queueState): any change there is progress for this wait.
+        const ahead = pr ? await mergeQueueHeads(this.repo, pr.base?.ref || "main", this.opts).catch(() => null) : null;
+        const entries = ahead?.entries.filter((e) => e.pr !== prNumber) ?? [];
+        phase.key = ahead ? queueState({ base: ahead.base, entries }) : "unread";
+        phase.desc = ahead ? (entries.length ? entries.map((e) => `#${e.pr}`).join(", ") : "empty") : "unread";
+      }
+      if (phase.kind === "out") {
+        still = null;
+        outSince ??= now();
+      } else {
+        outSince = null;
+        if (still?.key !== phase.key) still = { kind: phase.kind, key: phase.key, since: now() };
+        still.desc = phase.desc;
+      }
+      if (outSince !== null && now() - outSince >= hungMs) {
+        stop = inputs.autoMerge
+          ? ` after ${minutes(hungMs)} min ${queue ? "out of the merge queue" : "waiting for its merge"}, the bound for a hung required check (from ${timeoutText}); still pending: ${pending}`
+          : ` after ${minutes(hungMs)} min with no person merging it${queue ? " or putting it in the merge queue" : ""} (auto_merge is off)`;
+        break;
+      }
+      if (still && now() - still.since >= stillMs[still.kind]) {
+        stop =
+          still.kind === "queue"
+            ? `: its merge queue entry (${still.desc}) made no progress in ${minutes(stillMs.queue)} min, past ${timeoutText} plus the bound for a hung required check (${minutes(hungMs)} min)`
+            : ` after ${minutes(stillMs.wait)} min waiting for the merge queue ahead of it (${still.desc}), which did not change, past ${timeoutText} plus the bound for a hung required check (${minutes(hungMs)} min)`;
+        break;
+      }
       await this.pause(pollMs);
     }
     if (this.stopping) return false;
-    log(`#${issue}: stopped following PR #${prNumber} after ${Math.round(timeoutMs / 60000)} min`);
+    log(`#${issue}: stopped following PR #${prNumber}${stop}`);
     log((await this.pendingMergeLine(issue)) || `#${issue}: PR #${prNumber} is merged or closed`);
     return false;
   }
@@ -2985,6 +3174,17 @@ export class Local {
    * protected paths, the harness, setup) keeps its value from serve's start until serve starts again, said once. The
    * read also brings the workflow's Factory pin (followPin).
    */
+  /**
+   * Serve's own outage bounds as now set (localLimits over baseEnv, each its default when unset): how long an Objective
+   * stays paused on one outage before it Blocks (FACTORY_LOCAL_OUTAGE_HOURS, OUTAGE.blockMs), and the window in which a
+   * new outage after a resume is the same one (FACTORY_LOCAL_WAIT_MINUTES, OUTAGE.stageWaitMs). Taken each tick.
+   */
+  applyLocalLimits() {
+    const { waitMs, outageMs } = localLimits(this.baseEnv());
+    OUTAGE.blockMs = outageMs;
+    OUTAGE.stageWaitMs = waitMs;
+  }
+
   async refreshSettings() {
     if (!this.settingsBranch) return;
     // Fetched every SETTINGS_EVERY_MS; each tick between takes what the last read brought.
@@ -3299,10 +3499,22 @@ export class Local {
     let refused = null;
     let tried = null;
     let probeAt = 0;
+    // When a new token whose check could not tell its reach (checkToken's `again`: a rate limit, a failed listing) is
+    // checked again; a token the check refused is not, until its source changes.
+    let againAt = Infinity;
     while (!this.stopping) {
       if (refused !== null) {
         const now = localToken(this.repoFull);
-        let fresh = now && now !== refused && now !== tried ? await checkToken(this.repoFull, now).then(() => true, (e) => log(`the new token in ${tokenSource(this.repoFull)} is not taken: ${e.message.slice(0, 200)}`)) : false;
+        const check = () =>
+          checkToken(this.repoFull, now, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") }).then(
+            () => true,
+            (e) => {
+              againAt = e.again ? Date.now() + REFUSED_PROBE.ms : Infinity;
+              log(`the new token in ${tokenSource(this.repoFull)} is not taken: ${e.message.slice(0, 200)}${e.again ? "; it is checked again in a minute" : ""}`);
+              return false;
+            },
+          );
+        let fresh = now && now !== refused && (now !== tried || Date.now() >= againAt) ? await check() : false;
         if (!fresh && now === refused && Date.now() >= probeAt) {
           probeAt = Date.now() + REFUSED_PROBE.ms;
           fresh = await rest(`repos/${this.repo.full}`, { token: refused, noRateWait: true }).then(() => true, () => false);
@@ -3321,6 +3533,7 @@ export class Local {
       }
       // The workflow as the default branch has it now: its settings, and its Factory pin, taken at this stage boundary.
       await this.refreshSettings().catch((e) => log(`settings: ${e.message.slice(0, 160)}`));
+      this.applyLocalLimits();
       // A new pinned release: no new stage starts here until serve runs on it (followPin); stages in flight end as they are.
       const switching = await this.followPin(running.size, { once }).catch((e) => {
         log(`pin: ${e.message.slice(0, 160)}`);

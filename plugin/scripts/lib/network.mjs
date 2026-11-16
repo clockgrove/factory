@@ -29,7 +29,8 @@ export const causeCode = (e) => {
 
 /**
  * The code on an error GitHub's primary rate limit refused (github.mjs: a 403 or 429, or a GraphQL RATE_LIMITED, with
- * x-ratelimit-remaining 0 and a reset; no secondary limit's sign), with `resetAt` (ms), in every process; and on the
+ * x-ratelimit-remaining 0, a reset and no Retry-After, and GitHub's count of the quota at none: spentResetOf), with
+ * `resetAt` (ms), in every process; and on the
  * NetworkDown a waiting process throws when the reset is past its limit or the caller's deadline.
  */
 export const RATE_LIMIT_SPENT = "RATE_LIMIT_SPENT";
@@ -54,21 +55,35 @@ export const quotaKey = (url, token = null) => `${new URL(url).origin} ${quotaRe
 const quotaName = (key) => String(key).split(" ")[1] || "core";
 
 /**
- * When GitHub's primary rate limit resets (ms, on this machine's clock), for an answer refused because that limit is
- * spent; else null. The signs: x-ratelimit-remaining 0 with an x-ratelimit-reset, no Retry-After, and no secondary limit
- * (its message, or the older abuse-detection one). A 403 must also carry the primary limit's own message ("API rate limit
- * exceeded"): a 403 on the last quota point for another reason (no access, SAML) is no rate limit. Reading GitHub's
- * documented message is the one place words decide here; the headers alone cannot tell those 403s apart. The reset is
- * moved onto this machine's clock by the answer's Date header, so a clock ahead of GitHub's neither sends again into the
- * limit nor resumes before it.
+ * Whether an answer may be GitHub's primary rate limit spent: x-ratelimit-remaining 0 with an x-ratelimit-reset, and no
+ * Retry-After (a secondary limit's own wait). GitHub's count (GET /rate_limit: quotaNow) then says whether it is.
  */
-export function spentResetOf(status, headers, message, now = OUTAGE.now()) {
-  const msg = String(message || "");
-  if (headers?.get?.("x-ratelimit-remaining") !== "0" || headers.has("retry-after") || /secondary rate limit|abuse/i.test(msg)) return null;
-  if (status === 403 && !/rate limit (already )?exceeded/i.test(msg)) return null;
-  const reset = Number(headers.get("x-ratelimit-reset"));
-  if (!Number.isFinite(reset) || reset <= 0) return null;
-  const date = Date.parse(headers.get("date") || "");
+export const spentCandidate = (headers) => headers?.get?.("x-ratelimit-remaining") === "0" && !headers.has("retry-after") && Number(headers.get("x-ratelimit-reset")) > 0;
+
+/**
+ * GitHub's own count of one quota, from its answer to GET /rate_limit (`body`, the answer's JSON, and `date`, its Date
+ * header; GitHub does not count the read against the primary rate limit, though it can count toward the secondary one):
+ * `resource` (the answer's x-ratelimit-resource, else quotaResource) as {remaining, reset (s), date}; null when the
+ * answer holds no such count.
+ */
+export function quotaNow(body, resource, date = null) {
+  const r = body?.resources?.[resource];
+  return Number.isInteger(r?.remaining) && Number(r?.reset) > 0 ? { remaining: r.remaining, reset: Number(r.reset), date } : null;
+}
+
+/**
+ * When GitHub's primary rate limit resets (ms, on this machine's clock), for an answer refused because that limit is
+ * spent; else null. Only a candidate (spentCandidate) can be one, and GitHub's count of its quota, read just after it
+ * (`count`, quotaNow), decides: spent when it has none remaining, until its reset. One with some remaining is no primary
+ * limit, whatever the answer's words: a secondary limit, or a refusal for another reason (no access, SAML) that met the
+ * last quota point. With no count (`count` null: GET /rate_limit failed) the answer's own headers stand, as GitHub
+ * documents them: no request until x-ratelimit-reset. The reset is moved onto this machine's clock by the Date header of
+ * the answer it came from, so a clock ahead of GitHub's neither sends again into the limit nor resumes before it.
+ */
+export function spentResetOf(headers, count = null, now = OUTAGE.now()) {
+  if (!spentCandidate(headers) || (count && count.remaining > 0)) return null;
+  const reset = count ? count.reset : Number(headers.get("x-ratelimit-reset"));
+  const date = Date.parse((count ? count.date : headers.get("date")) || "");
   return Number.isFinite(date) ? now + Math.max(0, reset * 1000 - date) : reset * 1000;
 }
 
@@ -101,12 +116,15 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
 
 /**
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
- * to resume (fifteen minutes: a DNS flap or a router restart passes, and a longer outage costs the stage no more of its
- * wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS). `blockMs`: how long an Objective may stay paused
- * on one outage before serve Blocks it with the External cause `outage` (twelve hours: a night's outage, from late evening
- * to the next morning, fits with room; under the dispatcher's day for a claim gone quiet, local.mjs CLAIM_PAUSE_MS, so an
- * outage of twelve to twenty-four hours Blocks naming the outage, while one that keeps the machine off GitHub for over a
- * day meets the dispatcher's Block first). `probeMs`: the pause before each probe, the last
+ * to resume (fifteen minutes by default: a DNS flap or a router restart passes, and a longer outage costs the stage no
+ * more of its wall clock than the claim's own freshness, local.mjs CLAIM_FRESH_MS; the repository's or this machine's
+ * FACTORY_LOCAL_WAIT_MINUTES, at most an hour, which a stage sets here when it starts, harness.mjs stageLimits, and serve
+ * each tick for its own same-outage window, local.mjs applyLocalLimits). `blockMs`: how long an
+ * Objective may stay paused on one outage before serve Blocks it with the External cause `outage` (twelve hours by
+ * default: a night's outage, from late evening to the next morning, fits with room; FACTORY_LOCAL_OUTAGE_HOURS, which
+ * serve sets here each tick). It stays under the dispatcher's bound for a claim gone quiet (claim_pause_hours, a day by
+ * default), so an outage between the two Blocks naming the outage, while one that keeps the machine off GitHub for longer
+ * meets the dispatcher's Block first; doctor names a pair that is not so ordered. `probeMs`: the pause before each probe, the last
  * repeated. `passReruns`: how many times one pass cut off by its provider or the network (passCutOff) runs again
  * before its failure stands. `flapMs`: a host lost again this soon after answering is the same
  * outage (its first loss and its limit carried over). `quotaJitterMs`: the most a wait for a rate limit's reset runs past

@@ -1067,9 +1067,12 @@ export function whichSync(cmd, env = process.env) {
   return null;
 }
 
-/** The command's path when it is on PATH, else null (doctor prints the path). */
-export async function onPath(cmd) {
-  return whichSync(cmd);
+/**
+ * The command's path when it is on PATH, else null (doctor prints the path). `env`: the environment the command will
+ * be launched with, whose PATH is the one that finds it (a stage's harness env, not this process's).
+ */
+export async function onPath(cmd, env = process.env) {
+  return whichSync(cmd, env);
 }
 
 /**

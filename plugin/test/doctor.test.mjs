@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claudeSandboxChecks, credentialChecks, decisionKeyCheck, gitCheck, workflowText } from "../scripts/doctor.mjs";
+import { claudeSandboxChecks, credentialChecks, deciderCheck, gitCheck, workflowText } from "../scripts/doctor.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
@@ -169,23 +169,31 @@ test("doctor: with local triage on, a dry rerun tells whether the token can reru
     assert.match(no.detail, /cannot rerun CI jobs: GitHub refused a dry rerun \(403\)/);
     assert.match(no.fix, /Actions read and write/);
     assert.deepEqual(asked, ["POST /repos/o/r/actions/runs/0/rerun-failed-jobs"], "run 0, which no repository has: nothing can rerun");
-    // GitHub may answer 404 for run 0 with or without the permission: never a pass.
-    for (status of [404, 500]) {
-      const r = await rerunProbeCheck({ repo, token: "t" });
-      assert.equal(r.status, "WARN", String(status));
-      assert.equal(r.detail, `not verified: GitHub answered a dry rerun with ${status}`);
-    }
-    // Only a local doctor run with triage on probes; a stage's own checks never do. (Each run stops at its next read.)
+    // #379: GitHub's usual 404 for run 0 is a pass that says what it saw, so a set-up machine gets a clean doctor; any
+    // other answer leaves it not verified.
+    status = 404;
+    const r404 = await rerunProbeCheck({ repo, token: "t" });
+    assert.equal(r404.status, "PASS");
+    assert.match(r404.detail, /did not refuse a dry rerun \(404\)/);
+    status = 500;
+    const r500 = await rerunProbeCheck({ repo, token: "t" });
+    assert.equal(r500.status, "WARN");
+    assert.equal(r500.detail, "not verified: GitHub answered a dry rerun with 500");
+    // Only a local doctor run probes, with a gateway key or without (#379: the stage's harness triages then); a stage's
+    // own checks never do. (Each run stops at its next read.)
     const probed = [];
     const probeRerun = async () => (probed.push(1), { status: "WARN", name: "triage rerun" });
     const env = { GITHUB_ACTIONS: "true" };
     const run = (job, local, inputs = { aiGatewayApiKey: "k" }) => githubChecks({ inputs, repo, token: "t", app: null, env, job, local, probeRerun }).catch(() => null);
     await run(false, true);
     assert.equal(probed.length, 1, "doctor --local with a gateway key");
+    await run(false, true, {});
+    assert.equal(probed.length, 2, "doctor --local without one");
     await run(true, true);
     await run(false, false);
-    await run(false, true, {});
-    assert.equal(probed.length, 1, "a stage's job checks, another route, or triage off: no probe");
+    await run(false, true, { decisionRoute: "off" });
+    await run(false, true, { decisionRoute: "gateway" });
+    assert.equal(probed.length, 2, "a stage's job checks, another route, or no decision call (route off, gateway with no key): no probe");
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;
@@ -452,12 +460,13 @@ test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decis
   assert.equal(old.status, "WARN");
   assert.match(old.detail, /^git 2\.39\.5 is older than 2\.40 .*merge-tree --merge-base/);
   assert.equal(gitCheck(true, null).status, "WARN");
-  const on = decisionKeyCheck({ inputs: { aiGatewayApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
+  // #379: the decision calls' row says which decider judges the rebase check, and what runs with none.
+  const on = deciderCheck({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true" } });
   assert.equal(on.status, "PASS");
-  assert.match(on.detail, /content check of each send-back's conflict pass/);
-  const off = decisionKeyCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } });
+  assert.match(on.detail, /the stage's own harness \(claude\) on its login, one short call with no tools per question \(triage, drift, the answer gate, the finding check, the rebase check\)/);
+  const off = deciderCheck({ inputs: { decisionRoute: "off" }, env: { GITHUB_ACTIONS: "true" } });
   assert.equal(off.status, "PASS");
-  assert.match(off.detail, /^off \(no key\): .*matching commits.*a change lost through a rename or a merge, or a commit kept by author, time and subject whose conflict was resolved to the default branch's side, can pass/);
+  assert.match(off.detail, /^off \(decision_route off\): .*a send-back's conflict pass is checked by matching commits$/);
 });
 
 test("doctor's CI row reads each workflow's parsed on: (workflowEvents), never its raw text (#386)", async () => {

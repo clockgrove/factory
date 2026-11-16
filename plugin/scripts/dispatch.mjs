@@ -32,6 +32,7 @@ import { readHolds } from "./lib/route-holds.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
+import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
@@ -326,7 +327,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Question names it asked on the issue (logic.mjs questionFormOf; the plan-time Question). A Question its PR asks
   // waits for the PR's ready mark (review.mjs readyMark): a comment there starts no work beside that mark's review.
   // Only a Question's issue is read here, with conditional reads (`readCache`; GitHub counts no 304).
+  // Whether the answer gives a decision is the answer check's (lib/answer-check.mjs): with an AI Gateway key it is
+  // judged here: a confident no decision keeps the Question open with one notice, and a decision is recorded for the
+  // work stage. This process has no stage harness: without a key the work stage the answer resumes judges it first
+  // thing, on its own decider. No version of a comment is judged twice; one judged no decision never resumes it.
   const answered = [];
+  let answerCheck = null;
   for (const issue of wanted) {
     if (reset.includes(issue.number)) continue;
     if (stateOf(issue, statuses[issue.number] ?? null) !== "Question") continue;
@@ -341,8 +347,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       retry(`#${issue.number}'s PR`);
       continue;
     }
+    let comments = null;
     if (!sandbox && pr) {
-      const comments = await listComments(repo, issue.number, cached).catch(() => null);
+      comments = await listComments(repo, issue.number, cached).catch(() => null);
       if (!comments) {
         retry(`#${issue.number}'s comments`);
         continue;
@@ -355,6 +362,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // An answer younger than the grace: its own launch is due first; the sweep's turn comes after.
       const answer = sandbox && decisions.find((d) => Date.parse(d.created_at ?? d.at) > Date.parse(asked));
       if (answer) due(issue.number, "answer-grace", Date.parse(answer.created_at ?? answer.at) + RELAUNCH_GRACE_MS + 1000);
+      continue;
+    }
+    comments ??= await listComments(repo, issue.number, cached).catch(() => null);
+    if (!comments) {
+      retry(`#${issue.number}'s comments`);
+      continue;
+    }
+    answerCheck ??= openAnswerCheck({ inputs });
+    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_LOCAL_APP_ID || null, opts, dryRun });
+    if (!screen.requeue) {
+      // Said when it is judged; a comment judged at an earlier tick keeps it open quietly.
+      if (!screen.judged) log(`  #${issue.number}: the Question stays open: ${screen.why}`);
       continue;
     }
     answered.push(issue.number);

@@ -37,7 +37,7 @@ const holdComment = (id, r, by = BOT) => ({ id, user: { login: by, type: by.ends
  * on it kept), the App's token mint, and its record issues: `issues` (title, creator, locked, comments), made, closed,
  * locked and commented on by the App's writes. Every request is in `reads` (method and path, with the query).
  */
-async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [] } = {}, fn) {
+async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory:review"], issues = [], openPr = null, lockFails = false, labelWritesFail = false, raceOlder = false, events = [], progress = [] } = {}, fn) {
   const reads = [];
   const state = { issue: new Set(labels), pr: new Set(prLabels), prComments: [], issues: issues.map((i) => ({ state: "closed", locked: true, labels: [{ name: "factory:holds" }], comments: [], ...i })), labelMade: false };
   let id = 900;
@@ -53,8 +53,10 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/app") return json({ slug: "factory-test", name: "Factory test" });
     if (p === "/repos/acme/app/installation") return json({ id: 3, permissions: { issues: "write", metadata: "read", contents: "write", pull_requests: "write" }, account: { type: "Organization" } });
     if (method === "POST" && p === "/app/installations/3/access_tokens") return json({ token: "ghs_fakeminted0000", expires_at: iso(Date.now() + H), permissions: body.permissions, repositories: [{ full_name: "acme/app" }] }, 201);
-    if (p === "/repos/acme/app/issues/8" && method === "GET") return json({ number: 8, state: "open", labels: [...state.issue].map((name) => ({ name })) });
-    if (p === "/repos/acme/app/issues/8/timeline") return json([...labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: iso(Date.UTC(2026, 10, 15, 0, i)), actor: { login: "kirk", type: "User", id: 7 } })), ...events]);
+    // Objective #8, and #12 for a test of another Objective: the same labels.
+    const objective = /^\/repos\/acme\/app\/issues\/(8|12)(\/timeline)?$/.exec(p);
+    if (objective && !objective[2] && method === "GET") return json({ number: Number(objective[1]), state: "open", labels: [...state.issue].map((name) => ({ name })) });
+    if (objective?.[2]) return json([...labels.map((name, i) => ({ event: "labeled", label: { name }, created_at: iso(Date.UTC(2026, 10, 15, 0, i)), actor: { login: "kirk", type: "User", id: 7 } })), ...events]);
     const perm = /^\/repos\/acme\/app\/collaborators\/([^/]+)\/permission$/.exec(p);
     if (perm) return json({ permission: perm[1] === "kirk" ? "write" : "read" });
     if (p === "/repos/acme/app/issues" && method === "GET") {
@@ -107,6 +109,11 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (p === "/repos/acme/app/issues/9/comments" && method === "GET") return json(state.prComments);
     if (p === "/repos/acme/app/issues/9/comments" && method === "POST") return state.prComments.push({ id: ++id, user: { login: BOT, type: "Bot" }, body: body.body, created_at: iso(Date.now()) }), json(state.prComments.at(-1), 201);
     if (p === "/repos/acme/app/pulls" && method === "GET") return json(openPr ? [openPr] : []);
+    // The repository's issue comments (the stages' progress comments, `progress`), newest first, updated since `since`.
+    if (p === "/repos/acme/app/issues/comments" && method === "GET") {
+      const since = Date.parse(u.searchParams.get("since") || "") || -Infinity;
+      return json(progress.filter((c) => Date.parse(c.updated_at) >= since).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)));
+    }
     if (p.endsWith("/graphql")) return json({ data: { repository: null, viewer: { login: BOT } } });
     return json({ message: "Not Found" }, 404);
   };
@@ -121,7 +128,7 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
 const holdsIssue = (comments = [], extra = {}) => ({ number: 50, title: HOLDS_TITLE, user: { login: BOT, type: "Bot" }, comments, ...extra });
 
 /** The account step as the Action runs it (accountStep: the App's token, then stageAccount), its outputs and log read back. */
-async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {} } = {}) {
+async function runStep({ labels = ["factory:objective"], accounts = THREE, auto = "1", issues = [], issue = "8", env = {}, progress = [] } = {}) {
   const out = join(mkdtempSync(join(tmpdir(), "acct-")), "output");
   writeFileSync(out, "");
   const e = { GITHUB_REPOSITORY: "acme/app", GITHUB_ACTIONS: "true", GITHUB_OUTPUT: out, FACTORY_ACCOUNTS: accounts, FACTORY_RENDERED_ACCOUNTS: routeAccountsText(accounts), FACTORY_AUTO_ACCOUNT: auto, FACTORY_HARNESS: "claude", FACTORY_INPUT_APP_ID: "12", FACTORY_INPUT_APP_PRIVATE_KEY: KEY, ...env };
@@ -132,7 +139,7 @@ async function runStep({ labels = ["factory:objective"], accounts = THREE, auto 
   let reads;
   let r;
   try {
-    r = await withGitHub({ labels, issues }, (rd) => ((reads = rd), accountStep({ args: { repo: "acme/app", issue, branch: "none" }, env: e })));
+    r = await withGitHub({ labels, issues, progress }, (rd) => ((reads = rd), accountStep({ args: { repo: "acme/app", issue, branch: "none" }, env: e })));
   } finally {
     process.stderr.write = write;
     process.stdout.write = writeOut;
@@ -247,6 +254,132 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   const unread = await runStep({ issues: [holdsIssue(null)] });
   assert.equal(unread.outputs.account, "claude");
   assert.match(unread.log, /could not read the account holds .*picks as if none is held: account claude/);
+});
+
+test("#391: a stage's quota reading is kept on the holds issue, replacing its account's earlier one; the account step picks the free account with the most quota left, ahead of the Objective's turn; a stale or pasted reading counts for nothing", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const now = Date.now();
+  const q = (used, reset = now + 48 * H) => ({ harness: "claude", windows: { seven_day: { used, resetsAt: reset } } });
+  let issues;
+  await withGitHub({}, async (_reads, st) => {
+    const at = (account) => routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account, env, opts: { token: "t" } });
+    // No holds issue yet: the first reading opens it, closed and locked, as a first limit does.
+    await at("claude").reading(q(0.9));
+    await at("claude-2").reading(q(0.2));
+    await at("claude-3").reading(q(0.5, now + 4 * H));
+    const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
+    assert.deepEqual([issue.state, issue.locked], ["closed", true]);
+    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"account":"claude".*\} -->\nFactory: account `claude` \(Claude Code\) has used 90% of seven_day until /);
+    // A later reading of claude replaces its earlier one; another harness's reading, or none, writes nothing.
+    await at("claude").reading(q(0.95));
+    assert.equal(await at("claude").reading({ harness: "codex", windows: { "codex/primary": { used: 0, resetsAt: now + H } } }), null);
+    assert.equal(await at("claude").reading(null), null);
+    assert.deepEqual(issue.comments.map((c) => JSON.parse(/\{.*\}/.exec(c.body)[0]).account), ["claude-2", "claude-3", "claude"]);
+    const store = (await readHolds(REPO, { token: "t" }, { now, actions: true })).store;
+    assert.ok(Math.abs(store.left("claude", now) - 0.05) < 1e-9);
+    assert.equal(store.left("claude-3", now + 5 * H), null, "past its window's reset: stale");
+    issues = st.issues;
+  });
+  // Objective #8's turn is claude (routeTurn); claude-2 has the most left.
+  setSelf(null);
+  const r = await runStep({ issues });
+  assert.equal(r.outputs.account, "claude-2");
+  assert.match(r.log, /automatic account choice: account claude-2, 80% of its quota left as its provider last reported/);
+  // A reading pasted by a person, or edited since Factory wrote it, counts for nothing.
+  const pasted = (by, edited = false) => ({ id: 7, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 0, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now + (edited ? 60_000 : 0)) });
+  const kept = issues.map((i) => ({ ...i, comments: [...i.comments, pasted("kirk")] }));
+  assert.equal((await runStep({ issues: kept })).outputs.account, "claude-2");
+  const edited = issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT, true)] }));
+  assert.equal((await runStep({ issues: edited })).outputs.account, "claude-2");
+  assert.equal((await runStep({ issues: issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT)] })) })).outputs.account, "claude-3", "Factory's own, as written: counted");
+  // The stages wire it: a stage's quota reading goes through routeLimits at its end.
+  for (const script of ["worker.mjs", "review.mjs"]) assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8"), /if \(limits && \(usage\.quota \|\| servedSilent\(usage\)\)\) await limits\.reading\(usage\.quota \?\? \{ harness: inputs\.harness, silent: true \}, \{ warmUntil: usage\.cacheWarmUntil \?\? null \}\)/, script);
+});
+
+test("#391: a stage its provider served with no quota reading records so on the holds issue; the account step puts that account after every one with a reading, and one never measured first", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const now = Date.now();
+  let issues;
+  await withGitHub({}, async (_reads, st) => {
+    const at = (account) => routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account, env, opts: { token: "t" } });
+    const r = await at("claude").reading({ harness: "claude", silent: true });
+    assert.equal(r.silentAt !== undefined, true);
+    await at("claude-2").reading({ harness: "claude", windows: { seven_day: { used: 0.97, resetsAt: now + 48 * H } } });
+    assert.equal(await at("claude").reading({ harness: "codex", silent: true }), null, "another harness's: nothing");
+    const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
+    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"silentAt":\d+.*\} -->\nFactory: account `claude` \(Claude Code\) ran a stage and its provider reported no quota reading/);
+    const store = (await readHolds(REPO, { token: "t" }, { now: now + 72 * H, actions: true })).store;
+    assert.equal(store.reportsNothing("claude", now + 72 * H), true, "kept past any window: it is no reading that goes stale");
+    issues = st.issues;
+  });
+  setSelf(null);
+  // claude-3, never measured, first; with it read, claude-2's 3% left beats claude's silence, though #8's turn is claude.
+  assert.equal((await runStep({ issues })).outputs.account, "claude-3");
+  const read3 = issues.map((i) => ({ ...i, comments: [...i.comments, { id: 77, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 1, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now) }] }));
+  assert.equal((await runStep({ issues: read3 })).outputs.account, "claude-2");
+});
+
+test("#391: on these routes the account step keeps an Objective on its previous stage's account while that stage's cache is warm; ranks with the windows its models meet; an unchanged silent record is not written again; readings of accounts no longer declared go", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const now = Date.now();
+  let issues;
+  await withGitHub({}, async (reads, st) => {
+    const at = (account, e = env) => routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account, env: e, opts: { token: "t" } });
+    // claude-2 has the most left, but Objective #8's last stage ran on claude-3, its cache warm for the hour.
+    await at("claude").reading({ harness: "claude", windows: { seven_day: { used: 0.5, resetsAt: now + 48 * H } } });
+    await at("claude-2").reading({ harness: "claude", windows: { seven_day: { used: 0.1, resetsAt: now + 48 * H }, seven_day_opus: { used: 1, resetsAt: now + 48 * H } } });
+    await at("claude-3").reading({ harness: "claude", silent: true }, { warmUntil: now + H });
+    const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
+    assert.match(issue.comments.at(-1).body, /"recent":\{"8":\d+\}/);
+    // The same silent record again, no warm cache to add: nothing written.
+    const posts = () => reads.filter((x) => x === `POST /repos/acme/app/issues/${issue.number}/comments`).length;
+    const before = posts();
+    await at("claude-3").reading({ harness: "claude", silent: true });
+    assert.equal(posts(), before, "unchanged: not written again");
+    // A reading of an account the declaration no longer names goes at the next write.
+    issue.comments.push({ id: 555, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-9", at: now, windows: {}, silentAt: now })} -->`, created_at: iso(now), updated_at: iso(now) });
+    await at("claude").reading({ harness: "claude", windows: { seven_day: { used: 0.5, resetsAt: now + 48 * H } } });
+    assert.ok(!issue.comments.some((c) => c.id === 555), "claude-9's reading is deleted");
+    issues = st.issues;
+  });
+  setSelf(null);
+  const warm = await runStep({ issues });
+  assert.equal(warm.outputs.account, "claude-3");
+  assert.match(warm.log, /account claude-3, where this Objective's previous stage's prompt cache is still warm/);
+  // Another Objective has no warm cache there: quota decides. #8's models are the defaults (worker opus), so claude-2's
+  // spent opus window weighs: claude (50% left) first; on sonnet and fable alone it does not, and claude-2 (90%) wins.
+  const other = await runStep({ issues, issue: "12" });
+  assert.equal(other.outputs.account, "claude");
+  const sonnet = await runStep({ issues, issue: "12", labels: ["factory:objective", "factory:model:claude-sonnet-5-5"] });
+  assert.equal(sonnet.outputs.account, "claude-2");
+});
+
+test("#391: on these routes the stages started since an account's reading are counted from their progress comments, one read: starts before the next reading spread rather than pile on the one with the most left", async () => {
+  const now = Date.now();
+  const at = now - H;
+  const reading = (id, account, used) => ({ id, user: { login: BOT, type: "Bot" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account, at, windows: { seven_day: { used, resetsAt: now + 48 * H } } })} -->`, created_at: iso(at), updated_at: iso(at) });
+  const issues = [holdsIssue([reading(1, "claude", 0.4), reading(2, "claude-2", 0.41), reading(3, "claude-3", 0.7)])];
+  // A stage's progress comment as worker.mjs writes it: its key, then its harness line naming the account (logic.mjs harnessMarker).
+  const progress = (id, objective, account, made, { by = BOT, harness = "claude" } = {}) => ({ id, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:${objective}:progress:work:${id} -->\n- 10:00 started\n<!-- factory:harness ${JSON.stringify({ harness, model: "claude-opus-5-5", account })} -->`, created_at: iso(made), updated_at: iso(now - 60_000) });
+  const { harnessMarker } = await import("../scripts/lib/logic.mjs");
+  assert.match(harnessMarker("claude", "m", { worker: null, labels: [], account: "claude" }), /^<!-- factory:harness \{.*"account":"claude"\} -->$/, "the line the stages write");
+  setSelf(null);
+  // No stage since the readings: claude, the most left.
+  const none = await runStep({ issues, issue: "12" });
+  assert.equal(none.outputs.account, "claude");
+  const reads = none.reads.filter((x) => x.startsWith("GET /repos/acme/app/issues/comments?"));
+  assert.equal(reads.length, 1, "one read");
+  assert.match(reads[0], /since=/);
+  // A stage started on claude since its reading: claude-2, with no start since its own, goes first.
+  assert.equal((await runStep({ issues, issue: "12", progress: [progress(901, 20, "claude", now - 10 * 60_000)] })).outputs.account, "claude-2");
+  // One on each of claude and claude-2: claude-3, though it has least left.
+  assert.equal((await runStep({ issues, issue: "12", progress: [progress(901, 20, "claude", now - 10 * 60_000), progress(902, 21, "claude-2", now - 5 * 60_000)] })).outputs.account, "claude-3");
+  // Not counted: a stage started before the account's reading (it is in it), a person's copy, another harness's line.
+  const ignored = [progress(903, 22, "claude", at - 60_000), progress(904, 23, "claude", now - 60_000, { by: "kirk" }), progress(905, 24, "claude", now - 60_000, { harness: "codex" })];
+  assert.equal((await runStep({ issues, issue: "12", progress: ignored })).outputs.account, "claude");
 });
 
 test("an Objective's turn is a hash of its number, so Objectives of one parity spread over two accounts, and each keeps its own (#268)", () => {

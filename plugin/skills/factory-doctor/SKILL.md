@@ -26,12 +26,12 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 - The workflow checks read the default branch's `.github/workflows/factory.yml` on GitHub, as runs do; a differing local copy is a warning. Fix: pull the default branch.
 - The job token is read-only on code (`permissions: contents: read`, plus `actions: read` for the usage artifacts). Fix: edit the workflow's `permissions:`.
 - No `secrets[...]` lookup, which sends the runner every secret. Fix: re-render.
-- The default branch has the merge queue on, the CI workflow's checks required, and that workflow listens on `pull_request` and `merge_group`. Fix: setup's protection step; add `merge_group:` to the CI workflow's `on:`.
+- The default branch has the merge queue on, the CI workflow's checks required, and its parsed `on:` lists `pull_request` and `merge_group` (unreadable: a warning). Fix: setup's protection step; add `merge_group:` to the CI workflow's `on:`.
 - The `factory:objective` label exists; the Project board has Queued, Running, In review, Blocked and Done; `notify` is a collaborator. Fix: setup creates the label and board.
 
 ## Repository
 
-- `setup` is present (runs clean with `--run-setup`); each validation command names a script in `package.json` or a binary that exists; a lockfile is recognised (or `install` is set); the protected paths exist and cover every repository file the `setup` command names, each literally (no variable or glob; it runs beside the App's key; a `Makefile` those read is not followed: protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
+- `setup` and validation parse, their first command exists (else a warning), an `npm|pnpm run` script exists; `--run-setup` runs `setup`; a lockfile is recognised (or `install` is set); the protected paths exist and cover every repository file the `setup` command names, each literally (no variable or glob; a `Makefile` those read is not followed: protect it yourself); repository skills under `.agents/skills/` parse (frontmatter `name` and `description`) and fit one page; when `.gitattributes` routes files through Git LFS, `git-lfs` is installed. Fix: named per failure.
 
 ## Runner
 

@@ -6,7 +6,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -33,6 +33,8 @@ setSelf(SELF);
  */
 async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = {}) {
   const seen = [];
+  // Workload identity federation (harness.mjs federate): the job's OIDC token, then the exchange, a new key each time.
+  const exchanged = [];
   const comments = [{ id: 2, user: { login: SELF, type: "Bot" }, body: `<!-- factory:7:plan -->${planTextMarker({ sha256: A, label: "2026-11-15T09:00:00Z", text: recordText(BEFORE) })}\n## Plan\n- [ ] item`, created_at: "2026-11-15T09:30:00Z" }];
   const names = ["factory:objective", ...labels];
   const server = createServer((req, res) => {
@@ -45,6 +47,11 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
         res.writeHead(status, { "content-type": "application/json" });
         res.end(typeof data === "string" ? data : JSON.stringify(data));
       };
+      if (req.method === "GET" && u === "/oidc") return send(200, { value: "oidc-jwt" });
+      if (req.method === "POST" && u === "/exchange") {
+        exchanged.push(`sk-ant-api-federated-${exchanged.length + 1}`);
+        return send(200, { api_key: exchanged.at(-1) });
+      }
       if (req.method === "POST" && u.endsWith("/graphql")) {
         if (/issue\(number/.test(JSON.parse(body).query)) return send(200, { data: { repository: { issue: { ...AFTER, lastEditedAt: "2026-11-15T11:00:00Z", author: kirk, editor: kirk, labels: { nodes: names.map((name) => ({ name })) } } } } });
         return send(200, { data: {} });
@@ -74,12 +81,12 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
         return send(201, c);
       }
       if (req.method === "GET" && /per_page=/.test(req.url)) return send(200, []);
-      if (req.method === "GET" && /\/repos\/o\/r$/.test(u)) return send(200, { default_branch: "main", full_name: "o/r", owner: { type: "Organization" } });
+      if (req.method === "GET" && /\/repos\/o\/r$/.test(u)) return send(200, { default_branch: "main", full_name: "o/r", owner: { type: "User" } });
       return send(200, { id: 9, user: { login: SELF, type: "Bot" }, body: "" });
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return { seen, comments, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
+  return { seen, comments, exchanged, url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
 }
 
 /**
@@ -87,7 +94,7 @@ async function fakeGitHub({ labels = [], timeline = [], reviewsFail = false } = 
  * answers every decision call `{choice, confidence 0.9}` and records each call (its arguments, its credential and its
  * question), and an `srt` that runs what it wraps.
  */
-async function stage(script, gh, choice) {
+async function stage(script, gh, choice, { env = { FACTORY_LOCAL: "1", ANTHROPIC_API_KEY: KEY } } = {}) {
   const root = mkdtempSync(join(tmpdir(), "edit-stage-"));
   mkdirSync(join(root, "co"));
   mkdirSync(join(root, "bin"));
@@ -97,7 +104,7 @@ async function stage(script, gh, choice) {
   writeFileSync(join(root, "bin", "srt"), `#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`, { mode: 0o755 });
   const args = script === "worker.mjs" ? ["--issue", "7"] : ["--pr", "12"];
   const child = spawn(process.execPath, [join(SCRIPTS, script), "--repo", "o/r", ...args, "--checkout", join(root, "co"), "--usage-dir", join(root, "u"), "--token-fd", "3"], {
-    env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_LOCAL: "1", FACTORY_INPUT_HARNESS: "claude", ANTHROPIC_API_KEY: KEY },
+    env: { PATH: `${join(root, "bin")}:${process.env.PATH}`, HOME: root, TMPDIR: process.env.TMPDIR, GITHUB_API_URL: gh.url, FACTORY_INPUT_HARNESS: "claude", ...env },
     stdio: ["ignore", "pipe", "pipe", "pipe"],
   });
   child.stdio[3].end("test-token");
@@ -106,7 +113,8 @@ async function stage(script, gh, choice) {
   child.stderr.on("data", (c) => (out += c));
   const code = await new Promise((r) => child.on("exit", r));
   const read = () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { code, out, decisions: read().filter((c) => c.argv.includes("-p")) };
+  const saved = (dir) => (existsSync(dir) ? readdirSync(dir, { recursive: true }).map((f) => join(dir, f)).filter((f) => statSync(f).isFile()).map((f) => readFileSync(f, "utf8")).join("\n") : "");
+  return { code, out, decisions: read().filter((c) => c.argv.includes("-p")), saved: () => saved(join(root, "u")) };
 }
 
 const progressLines = (gh) => gh.comments.filter((c) => /^<!-- factory:7:progress:/.test(c.body)).map((c) => c.body).join("\n");
@@ -183,3 +191,26 @@ for (const choice of ["wording", "requirement"]) {
     }
   });
 }
+
+test("work stage, run for real on a federated credential: the edit check makes an exchange of its own, masked; the passes' read is not made early", async () => {
+  // Off local mode, a Claude key from workload identity federation (harness.mjs federate), which returns a key with no
+  // expiry: the passes read theirs as they start, never the one the edit check minted before setup and install.
+  const gh = await fakeGitHub();
+  try {
+    const env = { FACTORY_APP_TOKEN: "t", ACTIONS_ID_TOKEN_REQUEST_URL: `${gh.url}/oidc?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: "t", FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: `${gh.url}/exchange` };
+    const { out, decisions, saved } = await stage("worker.mjs", gh, "wording", { env });
+    assert.equal(decisions.length, 1, out);
+    assert.deepEqual(gh.exchanged, ["sk-ant-api-federated-1"], "one exchange, the edit check's: the stage stops at its Question before its passes read theirs");
+    assert.equal(decisions[0].key, "sk-ant-api-federated-1", "the decision call runs on the edit check's own read");
+    assert.match(out, /plan-time Question/, out);
+    assert.ok(!out.includes("sk-ant-api-federated-1"), "never in the stage's log");
+    assert.ok(!saved().includes("sk-ant-api-federated-1"), "never in what the stage saves");
+    // The passes' read is where it was: after the checkout's setup and install, just before the hand-off opens.
+    const src = readFileSync(join(SCRIPTS, "worker.mjs"), "utf8");
+    const passes = src.indexOf("  cred = await credentialEnv(");
+    assert.ok(passes > src.indexOf("await installDeps(") && passes < src.indexOf("await openHandoff("), "the passes' credential is read as they start");
+    assert.equal((src.match(/credentialEnv\(/g) || []).length, 2, "the passes' read and the edit check's own, nothing shared");
+  } finally {
+    gh.close();
+  }
+});

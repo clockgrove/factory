@@ -761,6 +761,8 @@ async function main() {
   const defaultBranch = pr.base?.ref || "main";
 
   let cred = { env: {} };
+  // The edit check's own credential read (its decision calls only), masked like `cred` in everything the stage saves.
+  let editCred = {};
   // The worker secrets' values, once the fix and answer passes have them: masked in the saved stream and transcript.
   let shellSecretValues = [];
   // The gateway relay for the fix and answer passes (lib/worker-relay.mjs), closed and booked when the stage ends.
@@ -794,14 +796,14 @@ async function main() {
     // Totals once the relay has closed: every call in flight is priced by then.
     await closeWorkerRelay(relay);
     const workerKey = relay ? relay.totals() : null;
-    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const masked = maskFile(eventsFile, [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
     // The gateway relay's call log (uploaded with the usage directory) carries text the caller chose: masked the same way.
-    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
+    const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Factory's temp directory (its TMPDIR).
       dropOwned(tmp.factory);
@@ -923,7 +925,7 @@ async function main() {
   // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream
   // masked first, its usage only if the usual end did not write it, and its live spend in its progress line.
   const endNow = (recs, why) => {
-    const secrets = [...Object.values(cred.env), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
+    const secrets = [...Object.values(cred.env), ...Object.values(editCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
     if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
@@ -1009,20 +1011,17 @@ async function main() {
   // this harness's credential, read only when a question is due.
   let decisionEnv = null;
   const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
-  // The harness's credential, read once for the stage (the edit check may read it first): `cred`, which every stop and
-  // end masks. Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
-  let credRead = null;
-  const readCred = () =>
-    (credRead ??= (async () => {
-      const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
-      cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
-      return cred;
-    })());
   // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
   const editCheck = async () => {
     if (inputs.decisionRoute === "off") return openEditCheck({ inputs });
     try {
-      decisionEnv ??= { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...(await readCred()).env };
+      // A read of its own, never the passes': federate() returns a key with no expiry, so the passes read theirs as they
+      // start (below), never one minted before setup and install.
+      if (!decisionEnv) {
+        editCred = (await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env;
+        for (const v of Object.values(editCred)) mask(v);
+        decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...editCred };
+      }
     } catch (e) {
       log(`edit check: ${inputs.harness}'s credential could not be read (${String(e?.message || e).slice(0, 160)}); only the AI Gateway can answer it`);
       return openEditCheck({ inputs });
@@ -1143,8 +1142,9 @@ async function main() {
     await finish(applied?.exit ?? "question", applied?.reason ?? reason);
     return;
   }
-  // The harness's credential, read once (readCred: the edit check may have read it already).
-  await readCred();
+  // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
+  const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
+  cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   io.set({ decisions, prNumber: pr.number });

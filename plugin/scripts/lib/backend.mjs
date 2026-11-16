@@ -153,7 +153,10 @@ const LOCAL = {
   /** The hosts this stage's sandboxes allow, as serve resolved them for it (FACTORY_LOCAL_SANDBOX `domains`). */
   hosts: (env = process.env) => sandboxDomains(env),
   trigger: {
-    /** A local loop takes the Objectives labelled factory:local, or every one with FACTORY_LOCAL_ALL=1. */
+    /**
+     * A local loop takes the Objectives labelled factory:local, or every one with FACTORY_LOCAL_ALL=1: serve's --all, or
+     * a default branch with no Factory workflow, where no Action takes any (local.mjs Local.route).
+     */
     routes: (issue, env = process.env) => env.FACTORY_LOCAL_ALL === "1" || hasLocalLabel(issue),
     /** A local loop acts as its developer, so its sweep touches only the Objectives it routes (#2668). */
     tends: (issue, env = process.env) => LOCAL.trigger.routes(issue, env),

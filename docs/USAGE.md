@@ -11,6 +11,7 @@ An Objective is a GitHub issue with the `factory:objective` label. The issue is 
 - **Say what you have decided.** Where the issue admits more than one reading, the worker takes the simplest one that satisfies every acceptance entry and records it as an assumption in its plan and in the PR.
 - **File it yourself, or have someone who can push file it.** Factory acts on an issue only when its author, its last editor once the body was edited, and whoever made its latest rename once the title was renamed, can push to the repository or are maintainers the workflow names. Otherwise the run Blocks before any model sees the text. A maintainer labelling someone else's issue is not enough: the author is checked on every run, so such an issue needs refiling by someone who can push.
 - **Keep it to one repository** (below).
+- **Route it, in local mode:** `factory serve` takes the Objectives labelled `factory:local`. When the default branch has no `.github/workflows/factory.yml`, no Action runs, so it takes every Objective, `factory:local` or not. With the workflow there, an Objective without `factory:local` is the Action's: add `factory:local` to run it on your machine, or start `serve` with `--all` to take every one. `serve` says once per start how many queued Objectives it leaves to the Action ([LOCAL.md](LOCAL.md), Routing).
 
 ```markdown
 ## Goal

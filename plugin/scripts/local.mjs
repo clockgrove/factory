@@ -7,7 +7,8 @@
 //   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
 //   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
-// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). A claim comment with a heartbeat marks one in flight.
+// serve takes only those unless --all (FACTORY_LOCAL_ALL=1), or the default branch has no Factory workflow, so no Action
+// takes any: then it takes every Objective. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
 // COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
 // (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
@@ -633,6 +634,16 @@ async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
   }
 }
 
+/**
+ * serve's line for the Queued Objectives it leaves to the Action because they lack factory:local (dispatch's
+ * `unrouted`): how many, which, and how to take them here.
+ */
+export function unroutedLine(numbers, branch = null) {
+  const n = numbers.length;
+  const shown = numbers.slice(0, 10).map((x) => `#${x}`).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
+  return `${n} queued Objective${n === 1 ? "" : "s"} without ${LOCAL_LABEL} (${shown}) ${n === 1 ? "is" : "are"} left to the Action${branch ? ` (the workflow on origin/${branch})` : ""}: this loop takes only Objectives labelled ${LOCAL_LABEL}. To run one here, add ${LOCAL_LABEL} to it; to take every Objective, start serve with --all`;
+}
+
 /** The start's line when this plugin, which runs every stage here, is older than the release the committed workflow pins; else null. */
 export function pluginLine(committed) {
   const c = committed?.text ? pluginVersionCheck(committed.text) : null;
@@ -643,7 +654,8 @@ export class Local {
   constructor(flags) {
     // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
     process.env.FACTORY_LOCAL = "1";
-    if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
+    // --all, or FACTORY_LOCAL_ALL=1 in this shell: every Objective, whatever the default branch holds (route()).
+    this.allFlag = !!flags.all || process.env.FACTORY_LOCAL_ALL === "1";
     // Canonical, so every sandbox path derived from it is real (lib/local.mjs refuses one that resolves elsewhere).
     this.dev = realpathSync(sh("git", ["-C", resolve(flags.checkout || process.cwd()), "rev-parse", "--show-toplevel"]));
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
@@ -658,6 +670,7 @@ export class Local {
     // A workflow that does not parse holds settings no one can read (protected paths, maintainers, caps): nothing starts.
     if (committed.parseError) throw new Error(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}; fix the file on ${committed.branch} and start again`);
     if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
+    this.route(committed);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     const plugin = pluginLine(committed);
     if (plugin) log(plugin);
@@ -668,6 +681,27 @@ export class Local {
     this.workflowWf = wf.kept;
     this.wf = wf.kept;
     this.token = localToken(this.repoFull);
+  }
+
+  /**
+   * Which Objectives this loop takes (#455), from the default branch's workflow read (committedWorkflowEnv, and each
+   * refreshSettings read): with no .github/workflows/factory.yml there (`absent`), no Action takes any Objective, so this
+   * loop takes every one, labelled factory:local or not; with the file there, only those labelled factory:local, and the
+   * Action the rest, unless --all. Set in FACTORY_LOCAL_ALL, which the dispatcher's routing reads (backend.mjs), and said
+   * at the start and when it changes. A read with no default branch, or one that could not fetch it, changes nothing.
+   */
+  route(read) {
+    if (!read?.branch || read.unfetched) return;
+    const absent = !!read.absent;
+    if (absent === this.noWorkflow) return;
+    const first = this.noWorkflow === undefined;
+    this.noWorkflow = absent;
+    this.allFlag ??= process.env.FACTORY_LOCAL_ALL === "1";
+    if (this.allFlag || absent) process.env.FACTORY_LOCAL_ALL = "1";
+    else delete process.env.FACTORY_LOCAL_ALL;
+    if (this.allFlag) return;
+    if (absent) log(`origin/${read.branch} has no .github/workflows/factory.yml, so no Action takes Objectives in this repository: local mode takes every Objective here, labelled ${LOCAL_LABEL} or not`);
+    else if (!first) log(`origin/${read.branch} has .github/workflows/factory.yml now: the Action takes the Objectives without ${LOCAL_LABEL}, and this loop from now on only those labelled ${LOCAL_LABEL} (start serve with --all to take every one)`);
   }
 
   /**
@@ -3204,6 +3238,7 @@ export class Local {
     }
     const now = this.settingsRead;
     if (!now) return;
+    this.route(now);
     if (now.error) {
       if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
       this.settingsError = now.error;
@@ -3629,6 +3664,11 @@ export class Local {
       if (result.halted) {
         slots.spare();
         break;
+      }
+      // Queued Objectives this loop leaves to the Action only for want of factory:local: said once per start (#455).
+      if (result.unrouted?.length && !this.unroutedSaid) {
+        this.unroutedSaid = true;
+        log(unroutedLine(result.unrouted, this.settingsBranch));
       }
       if (result.refused) {
         slots.spare();

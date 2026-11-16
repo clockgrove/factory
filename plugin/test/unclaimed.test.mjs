@@ -4,15 +4,16 @@
 import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
-import { Local, STAGE_RECORD, holderId, machineIdentity } from "../scripts/local.mjs";
+import { Local, STAGE_RECORD, holderId, machineIdentity, unroutedLine } from "../scripts/local.mjs";
 import { claimBody, claimMarker } from "../scripts/lib/local.mjs";
+import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 RETRY.sleep = async () => {};
@@ -176,9 +177,9 @@ test("serve stopped by SIGINT while a pick reads its claim writes no claim and p
   }
 });
 
-/** The real serve, one tick at a time in this process, against `fake`; the work stage itself is not run (`picks`). */
-async function serveTicks(fake, { ticks = 1, live = false } = {}) {
-  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+/** The real serve, one tick at a time in this process, against `fake`; the work stage itself is not run (`picks`). `extra`: the loop's own fields. */
+async function serveTicks(fake, { ticks = 1, live = false, extra = {} } = {}) {
+  const saved = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL };
   process.env.GITHUB_API_URL = fake.url;
   process.env.FACTORY_LOCAL = "1";
   const dev = mkdtempSync(join(tmpdir(), "unclaimed-dev-"));
@@ -199,6 +200,7 @@ async function serveTicks(fake, { ticks = 1, live = false } = {}) {
     stopOnSignals: () => {},
     cleanup: async () => {},
     runObjective: async (n) => (picks.push(n), { exit: "skipped" }),
+    ...extra,
   });
   const write = process.stdout.write;
   process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
@@ -529,4 +531,104 @@ test("a resume that steps aside on a changed stint leaves its own claim resumabl
     restore();
     await fake.close();
   }
+});
+
+/**
+ * A repository's origin and a developer's clone of it, its default branch `main` with no Factory workflow; `addWorkflow`
+ * pushes .github/workflows/factory.yml to it.
+ */
+function cloneOf() {
+  const root = mkdtempSync(join(tmpdir(), "route-"));
+  const origin = join(root, "origin.git");
+  const dev = join(root, "dev");
+  const ident = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" };
+  const git = (...a) => execFileSync("git", ["-C", dev, ...a], { encoding: "utf8", env: ident, stdio: ["ignore", "pipe", "ignore"] });
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  execFileSync("git", ["clone", "-q", origin, dev], { stdio: "ignore" });
+  git("checkout", "-q", "-b", "main");
+  writeFileSync(join(dev, "README.md"), "app\n");
+  git("add", "README.md");
+  git("commit", "-q", "-m", "app");
+  git("push", "-q", "origin", "main");
+  const addWorkflow = () => {
+    mkdirSync(join(dev, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(dev, ".github", "workflows", "factory.yml"), "name: Factory\nenv:\n  FACTORY_MODEL: m\njobs:\n  work:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: clockgrove/factory@v0.9.30\n");
+    git("add", ".github");
+    git("commit", "-q", "-m", "workflow");
+    git("push", "-q", "origin", "main");
+  };
+  return { dev, addWorkflow };
+}
+
+test("serve: with no Factory workflow on the default branch, an Objective filed with factory:objective alone is taken, and said; once the workflow lands, only factory:local ones (#455)", async () => {
+  const repo = cloneOf();
+  const fake = await fakeGitHub({ labels: ["factory:objective"] });
+  try {
+    const { picks, log } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [7], log);
+    assert.match(log, /origin\/main has no \.github\/workflows\/factory\.yml, so no Action takes Objectives in this repository: local mode takes every Objective here, labelled factory:local or not/);
+    assert.doesNotMatch(log, /without factory:local/);
+  } finally {
+    await fake.close();
+  }
+  // The workflow lands on the default branch: the Action takes the unlabelled Objective, and serve says so.
+  repo.addWorkflow();
+  const later = await fakeGitHub({ labels: ["factory:objective"] });
+  const saved = process.env.FACTORY_LOCAL_ALL;
+  try {
+    const loop = { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0, noWorkflow: true, allFlag: false };
+    process.env.FACTORY_LOCAL_ALL = "1";
+    const { picks, log } = await serveTicks(later, { extra: loop });
+    assert.deepEqual(picks, [], log);
+    assert.match(log, /origin\/main has \.github\/workflows\/factory\.yml now: the Action takes the Objectives without factory:local/);
+  } finally {
+    saved === undefined ? delete process.env.FACTORY_LOCAL_ALL : (process.env.FACTORY_LOCAL_ALL = saved);
+    await later.close();
+  }
+});
+
+test("local mode's start: no Factory workflow on the default branch routes every Objective here; with one, factory:local only, unless --all (#455)", () => {
+  const keys = ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "FACTORY_LOCAL_TOKEN"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  const unlabelled = { number: 7, labels: [{ name: "factory:objective" }] };
+  const routed = (flags) => {
+    delete process.env.FACTORY_LOCAL_ALL;
+    process.env.FACTORY_LOCAL_TOKEN = "t";
+    new Local({ repo: "o/r", ...flags });
+    return { routes: BACKENDS.local.trigger.routes(unlabelled) };
+  };
+  try {
+    const repo = cloneOf();
+    assert.equal(routed({ checkout: repo.dev }).routes, true, "no workflow: no Action, so local mode takes it");
+    repo.addWorkflow();
+    assert.equal(routed({ checkout: repo.dev }).routes, false, "the workflow there: the Action's");
+    assert.equal(routed({ checkout: repo.dev, all: true }).routes, true, "--all takes every one");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
+});
+
+test("serve: queued Objectives it leaves to the Action for want of factory:local are said once per start, with the count and how to take them (#455)", async () => {
+  const repo = cloneOf();
+  repo.addWorkflow();
+  const fake = await fakeGitHub({ labels: ["factory:objective"] });
+  try {
+    const { picks, log } = await serveTicks(fake, { ticks: 3, extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [], "never taken silently");
+    const said = log.split("\n").filter((l) => l.includes("without factory:local"));
+    assert.equal(said.length, 1, log);
+    assert.match(said[0], /1 queued Objective without factory:local \(#7\) is left to the Action \(the workflow on origin\/main\): this loop takes only Objectives labelled factory:local\. To run one here, add factory:local to it; to take every Objective, start serve with --all/);
+  } finally {
+    await fake.close();
+  }
+  // Labelled factory:local, it is taken and nothing is said.
+  const local = await fakeGitHub({ labels: ["factory:objective", "factory:local"] });
+  try {
+    const { picks, log } = await serveTicks(local, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [7]);
+    assert.doesNotMatch(log, /without factory:local/);
+  } finally {
+    await local.close();
+  }
+  assert.match(unroutedLine([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), /^12 queued Objectives without factory:local \(#1, #2, #3, #4, #5, #6, #7, #8, #9, #10 and 2 more\) are left to the Action: /);
 });

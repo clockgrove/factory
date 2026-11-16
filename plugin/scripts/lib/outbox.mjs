@@ -49,6 +49,30 @@ const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The largest package.json whose `scripts` Factory compares (box.outside, the setup scripts' check on push); a larger one
 // cannot be read, so every script the commands run counts as changed.
 const PACKAGE_JSON_MAX = 1024 * 1024;
+/** The most of one diff the rebase check's decision model is given (box.rebaseLeft): a larger one is not judged. */
+export const JUDGE_MAX_BYTES = 32 * 1024;
+/** The most paths the rebase check asks the decision model about, how many at once, and the most time it spends asking. */
+export const JUDGE_MAX_PATHS = 40;
+export const JUDGE_AT_ONCE = 4;
+export const JUDGE_MAX_MS = 3 * 60_000;
+/** Up to `n` names joined, and how many more. */
+const listed = (xs, n = 5) => `${xs.slice(0, n).join(", ")}${xs.length > n ? ` and ${xs.length - n} more` : ""}`;
+
+/** The git `git merge-tree --merge-base` needs. */
+export const MERGE_BASE_GIT = [2, 40];
+
+/** git's version as [major, minor, patch], or null when it cannot be read. `git` runs git (the mirror's, or any). */
+export async function gitVersion(git = (args) => exec("git", args)) {
+  const r = await git(["version"]).catch(() => ({ code: 1 }));
+  const m = r.code === 0 ? /(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(r.stdout)) : null;
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] || 0)] : null;
+}
+
+/** Whether version `v` is at least `min` (both [major, minor, ...]). */
+export const gitAtLeast = (v, min) => {
+  for (let i = 0; i < min.length; i += 1) if ((v[i] ?? 0) !== min[i]) return (v[i] ?? 0) > min[i];
+  return true;
+};
 
 /**
  * git's and git-lfs's own words for a network failure: the connection, DNS, TLS, a dropped stream, or an HTTP 5xx or 429.
@@ -438,13 +462,13 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * What a send-back's conflict pass left in the checkout, read before anything of it is pushed: why it is not the
    * branch at `from` rebased onto `onto` (the default branch's head Factory's own rebase conflicted on), or "" when it
    * is. Not: a rebase, merge or cherry-pick left in progress (HEAD is then the default branch plus some of the commits);
-   * a head that does not contain `onto` (the conflict pass gave up); or one of the branch's own commits missing from it.
-   * A rebase keeps each commit's author, author time and subject while its patch changes to resolve the conflict, so a
-   * commit is found by those, and only a commit that changes something counts as one. One missing (a `rebase --skip`)
-   * is lost unless its patch is already in the head (it reverse-applies there), as git rebase drops a commit whose
-   * change the base already has. Read on git's exit codes and fields, never its messages.
+   * a head that does not contain `onto` (the conflict pass gave up); or the branch's change not kept in it (keptLeft,
+   * on content; with no `judge`, a key-less stage, commitsLeft first). Read on git's exit codes and fields only.
+   * `box.rebaseNote`: a path the branch's commits changed and undid, which the head changes anyway (unsettled `undone`),
+   * said for the progress comment, never a Block; "" when none.
    */
-  box.rebaseLeft = async ({ from, onto }) => {
+  box.rebaseLeft = async ({ from, onto, judge = null }) => {
+    box.rebaseNote = "";
     const busy = await box.inProgress();
     if (busy.code !== undefined) return `Factory could not check the checkout for a rebase left in progress (exit ${busy.code})`;
     if (busy.ops.length) return `the conflict pass left a ${busy.ops.join(" and ")} in progress`;
@@ -455,6 +479,215 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       return `the checkout's head could not be read: ${e.message}`;
     }
     if ((await git(["merge-base", "--is-ancestor", onto, head])).code !== 0) return "the branch it left is not rebased onto it";
+    let open;
+    try {
+      open = await unsettled({ from, onto, head });
+    } catch (e) {
+      log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
+      // Key-less, the commit match needs no merge-tree (a git before 2.40 included).
+      if (!judge) return commitsLeft({ from, onto, head });
+      return `Factory could not compare the rebased branch with the branch before it${e?.why ? `: ${e.why}` : ""}`;
+    }
+    box.rebaseNote = open.undone?.length ? `the branch's commits changed ${listed(open.undone)} and undid it, yet the head changes ${open.undone.length > 1 ? "them" : "it"}: an extra change for the review, not a loss` : "";
+    if (!open.paths.length) return "";
+    try {
+      const left = await keptLeft({ ...open, from, judge });
+      // No decision model (no AI Gateway key) and a path not exactly the branch's: the commits are matched as before,
+      // so no key-less stage Blocks a rebase the commit match passes.
+      return left ?? (await commitsLeft({ from, onto, head }));
+    } catch (e) {
+      log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
+      return judge ? "Factory could not compare the rebased branch with the branch before it" : commitsLeft({ from, onto, head });
+    }
+  };
+
+  /**
+   * Where the head may not keep the branch's change, decided on trees, with git's rename detection: the branch's net
+   * change (its merge base with `onto` to `from`, merges included) replayed onto `onto` (`replayed`). Every path that
+   * replay changes or conflicts on is the branch's; one is settled when that change merged into the head (with `onto`
+   * as the base) changes nothing there. {paths, old, head, onto, replayed, stages (the replay's conflict entries)}:
+   * `paths` every path the replay conflicted on and every path the merge changes or conflicts on (wherever git's
+   * rename detection put it), so nothing of the branch's change is left out. None when the head is the replay.
+   * `undone`: paths the branch's commits changed with no net change, which the head changes (not among `paths`).
+   */
+  const unsettled = async ({ from, onto, head }) => {
+    const one = async (args, what) => {
+      const r = await git(args);
+      const v = r.code === 0 ? String(r.stdout).trim() : "";
+      if (!v) throw new Error(`${what}: git ${args[0]} exited ${r.code}`);
+      return v;
+    };
+    const old = await one(["merge-base", from, onto], "no merge base");
+    const headTree = await one(["rev-parse", "--verify", `${head}^{tree}`], "the head's tree");
+    const replayed = await replay(git, { from: old, onto, theirs: from });
+    if (!replayed.tree) throw await mergeTreeFailed(replayed.code);
+    if (replayed.clean && replayed.tree === headTree) return { paths: [], undone: [] };
+    // The replay as a commit on `onto`, so git merges it into the head like any branch.
+    const ident = { GIT_AUTHOR_NAME: "factory", GIT_AUTHOR_EMAIL: "factory@localhost", GIT_COMMITTER_NAME: "factory", GIT_COMMITTER_EMAIL: "factory@localhost" };
+    const commit = await git(["commit-tree", replayed.tree, "-p", onto, "-m", "replay"], { env: { ...gitEnv(), ...ident } });
+    if (commit.code !== 0 || !SHA.test(commit.stdout.trim())) throw new Error(`git commit-tree exited ${commit.code}`);
+    const merged = await replay(git, { from: onto, onto: head, theirs: commit.stdout.trim() });
+    if (!merged.tree) throw await mergeTreeFailed(merged.code);
+    const names = async (a, b) => {
+      const r = await git(["diff", "--name-only", "--no-renames", "-z", a, b]);
+      if (r.code !== 0) throw new Error(`git diff exited ${r.code}`);
+      return r.stdout.split("\0").filter(Boolean);
+    };
+    // What merging the branch's change into the head would still change: not in the head.
+    const moved = new Set([...merged.conflicts, ...(await names(merged.tree, head))]);
+    const paths = [...new Set([...replayed.conflicts, ...moved])].sort();
+    // Paths a commit of the branch (merges aside) changed while its net change leaves them as the base has them, and the
+    // head differs there.
+    const touched = await git(["log", "--format=", "--name-only", "--no-renames", "--no-merges", "-z", `${old}..${from}`]);
+    if (touched.code !== 0) throw new Error(`git log exited ${touched.code}`);
+    const net = new Set(await names(onto, replayed.tree));
+    const differs = new Set(await names(replayed.tree, head));
+    const undone = [...new Set(touched.stdout.split("\0").map((l) => l.replace(/^\n+/, "")).filter(Boolean))].filter((p) => !net.has(p) && differs.has(p) && !paths.includes(p)).sort();
+    return { paths, undone, old, head, onto, replayed, merged, stages: replayed.stages, mergeConflicts: new Set(merged.conflicts) };
+  };
+
+  /** Why a merge-tree failed, as an error with `why` for the Block: git's exit code, and its version under 2.40. */
+  const mergeTreeFailed = async (code) => {
+    const v = await gitVersion(git);
+    const e = new Error(`git merge-tree exited ${code}`);
+    e.why = v && !gitAtLeast(v, MERGE_BASE_GIT) ? `git ${v.join(".")} has no \`git merge-tree --merge-base\` (git ${MERGE_BASE_GIT.join(".")} or later)` : `git merge-tree exited ${code}`;
+    return e;
+  };
+
+  /**
+   * Each open path (unsettled) decided: kept when the head has exactly the branch's entry, blob and mode (a path the
+   * replay conflicted on: as the branch left it; any other: as replayed). Exactly not kept: the same blob with another
+   * mode, a binary or Git LFS file, or a path the head moved or removed where git cannot merge the branch's change into
+   * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE at a time, at most JUDGE_MAX_PATHS paths and
+   * JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES, it is not judged. The judge gets, for a
+   * replay conflict, the branch's and the default branch's sides from their base; for any other path, what merging the
+   * branch's change into the head would still change there; and the head's change from `onto`. Returns "" or why,
+   * naming each path not kept, the branch's commits that changed it, and why; null, with no `judge`, when a path is not
+   * exactly the branch's.
+   */
+  const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge }) => {
+    const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
+    if (empty.code !== 0) throw new Error(`git hash-object exited ${empty.code}`);
+    const none = empty.stdout.trim();
+    // A path's entry in `tree` as `<mode> <object id>` (a file, a symlink or a submodule's commit), "" when it has none.
+    const entry = async (tree, p) => {
+      const r = await git(["--literal-pathspecs", "ls-tree", "-z", tree, "--", p]);
+      if (r.code !== 0) throw new Error(`git ls-tree exited ${r.code}`);
+      const m = r.stdout.split("\0").map((l) => /^(\d+) (?:blob|commit) ([0-9a-f]+)\t(.+)$/s.exec(l)).find((x) => x && x[3] === p);
+      return m ? `${m[1]} ${m[2]}` : "";
+    };
+    const oid = (e) => (e ? e.split(" ")[1] : "");
+    const mode = (e) => (e ? e.split(" ")[0] : "");
+    // Anything but a regular file (a submodule's commit, a symlink): decided on its mode and object id alone.
+    const plain = (e) => !e || mode(e) === "100644" || mode(e) === "100755";
+    // A blob git reads as binary (a NUL in its first 8000 bytes, git's own test) or a Git LFS pointer.
+    const binary = async (e) => {
+      if (!e) return false;
+      const r = await git(["cat-file", "blob", oid(e)], { encoding: "buffer", maxBytes: 8000 });
+      const b = Buffer.isBuffer(r.stdout) ? r.stdout : Buffer.from(String(r.stdout || ""));
+      return b.includes(0) || !!parsePointer(b.toString("utf8"));
+    };
+    // git's diff of two blobs, its headers naming path `p` where git names the blob ids.
+    const diff = async (a, b, p) => {
+      const ids = [oid(a) || none, oid(b) || none];
+      const r = await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", ...ids], { maxBytes: JUDGE_MAX_BYTES });
+      if (r.code !== 0 && !r.truncated) throw new Error(`git diff exited ${r.code}`);
+      if (r.truncated) return null;
+      const head = (l) => /^(diff --git |--- |\+\+\+ )/.test(l);
+      return r.stdout
+        .split("\n")
+        .map((l) => (head(l) ? ids.reduce((x, id) => x.replaceAll(id, () => p), l) : l))
+        .join("\n");
+    };
+    // Each path decided exactly where it can be; the rest queued for the decision model.
+    const verdicts = new Map();
+    const asks = [];
+    // The head's entries at the replay's conflicted paths, read once when a rename conflict needs them.
+    let held = null;
+    for (const p of paths) {
+      const st = stages.get(p);
+      const theirs = st ? st[3] || "" : await entry(replayed.tree, p);
+      const now = await entry(head, p);
+      if (now === theirs) continue;
+      if (!judge) return null;
+      const exact = await (async () => {
+        // A name only the branch's side has in a replay conflict (the branch renamed the file where the default branch
+        // renamed it too): kept when the head holds exactly that file under another name of the conflict.
+        if (st && st[3] && !st[1] && !st[2]) {
+          held ??= new Set(await Promise.all(replayed.conflicts.filter((q) => q !== p).map((q) => entry(head, q))));
+          if (held.has(st[3])) return "";
+        }
+        // The file mode, apart from the content: the mode the branch's change sets (a replay conflict: its side's, when
+        // it changed it; a path git merged into the head: the merge's), against the head's.
+        const changed = (to, from) => (mode(to) !== mode(from) ? mode(to) : "");
+        const meant = st ? changed(st[3], st[1]) : mergeConflicts.has(p) ? changed(theirs, await entry(onto, p)) : mode(await entry(merged.tree, p));
+        if (now && meant && mode(now) !== meant) return `its file mode is ${mode(now)}, the branch's change makes it ${meant}`;
+        if (oid(now) && oid(now) === oid(theirs)) return "";
+        const ours = st ? st[2] || "" : await entry(onto, p);
+        if (![theirs, now, ours].every(plain)) return "a submodule or symlink that is not the branch's version";
+        if ((await binary(theirs)) || (await binary(now)) || (await binary(ours))) return "a binary or Git LFS file that is not the branch's version";
+        // git cannot merge the branch's change into the head's file: nothing to judge.
+        if (!st && !theirs && mergeConflicts.has(p)) return now && (await entry(onto, p)) ? "the branch deletes it, and the head keeps it with edits git cannot merge that deletion into" : "the head renamed or removed it where git cannot merge the branch's change into it";
+        return null;
+      })();
+      if (exact !== null) {
+        if (exact) verdicts.set(p, exact);
+        continue;
+      }
+      // A conflict of the replay: the branch's and the default branch's sides from its base. Any other path: what
+      // merging the branch's change into the head would still change there (wherever git's rename detection put it).
+      asks.push(async () => {
+        const diffs = st
+          ? { conflicted: true, branch: await diff(st[1], st[3], p), base: await diff(st[1], st[2], p), head: await diff(await entry(onto, p), now, p) }
+          : { conflicted: false, branch: await diff(now, await entry(merged.tree, p), p), base: "", head: await diff(await entry(onto, p), now, p) };
+        if ([diffs.branch, diffs.base, diffs.head].some((d) => d === null)) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
+        const said = await judge({ path: p, ...diffs });
+        return said.kept ? "" : said.why;
+      });
+      verdicts.set(p, null);
+    }
+    const queued = paths.filter((p) => verdicts.get(p) === null);
+    queued.slice(JUDGE_MAX_PATHS).forEach((p) => verdicts.set(p, `not judged: the decision model is asked about ${JUDGE_MAX_PATHS} paths at most`));
+    const out = `not judged: the check's ${JUDGE_MAX_MS / 60_000} minutes ran out`;
+    let timer;
+    const deadline = new Promise((done) => (timer = setTimeout(done, JUDGE_MAX_MS)));
+    const work = queued.slice(0, JUDGE_MAX_PATHS).map((p, i) => [p, asks[i]]);
+    let next = 0;
+    let over = false;
+    const lane = async () => {
+      while (!over && next < work.length) {
+        const [p, ask] = work[next++];
+        const why = await ask();
+        if (!over) verdicts.set(p, why);
+      }
+    };
+    try {
+      await Promise.race([
+        Promise.all(Array.from({ length: JUDGE_AT_ONCE }, lane)),
+        deadline.then(() => {
+          over = true;
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    for (const [p] of work) if (verdicts.get(p) === null) verdicts.set(p, out);
+    const lost = [];
+    for (const p of paths) {
+      const why = verdicts.get(p);
+      if (!why) continue;
+      const commits = (await git(["rev-list", "--abbrev-commit", "--abbrev=7", `${old}..${from}`, "--", `:(literal)${p}`])).stdout.split("\n").filter(Boolean);
+      lost.push(`${p}${commits.length ? ` (${listed(commits, 3)})` : ""}: ${why}`);
+    }
+    return lost.length ? `the branch it left drops the Objective's change to ${lost.length} path(s): ${lost.join("; ")}` : "";
+  };
+
+  /**
+   * The key-less check: each of the branch's commits matched in the head by its author, author time and subject (only
+   * a commit that changes something counts). One missing (a `rebase --skip`) is lost unless its patch is already in the
+   * head (it reverse-applies there), as git rebase drops a commit whose change the base already has.
+   */
+  const commitsLeft = async ({ from, onto, head }) => {
     const old = (await git(["merge-base", from, onto])).stdout.trim();
     const commits = async (range) => {
       const r = await git(["log", "--no-merges", "-z", "--format=%H%x01%ae%x01%at%x01%s", range]);
@@ -494,8 +727,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (await inHead(c.id)) continue;
         lost.push(c.id);
       }
-      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")})`;
-    } catch {
+      if (lost.length) return `the branch it left drops ${lost.length} of the Objective's commit(s) (${lost.map((id) => id.slice(0, 7)).join(", ")}); with an AI Gateway key Factory decides this on content`;
+    } catch (e) {
+      log(`rebase check: ${String(e?.message || e).slice(0, 200)}`);
       return "Factory could not compare the rebased branch with the branch before it";
     }
     return "";
@@ -1133,6 +1367,26 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     rmSync(scratch, { recursive: true, force: true });
   };
   return box;
+}
+
+/**
+ * `theirs`' change since `from` replayed onto `onto` (git merge-tree --merge-base, git 2.40 or later), with `git` a
+ * mirror's git: {tree, clean, conflicts, stages} (`conflicts` the paths git could not merge, whose entries in `tree` are
+ * git's conflict form, not a resolution; `stages` each one's index entries, path to {1: base, 2: onto's, 3: theirs'}
+ * as `<mode> <blob id>`, a side that has no such file left out), or {code} with git's exit code when it could not run
+ * (exit 1 is a conflict).
+ */
+export async function replay(git, { from, onto, theirs }) {
+  const r = await git(["merge-tree", "--write-tree", "--no-messages", "-z", `--merge-base=${from}`, onto, theirs]);
+  const [tree, ...entries] = String(r.stdout ?? "").split("\0");
+  if ((r.code !== 0 && r.code !== 1) || !SHA.test(tree)) return { code: r.code };
+  // Each conflicted entry is `<mode> <object> <stage>\t<path>`.
+  const stages = new Map();
+  for (const e of entries) {
+    const m = /^(\d+) ([0-9a-f]+) ([123])\t(.+)$/s.exec(e);
+    if (m) stages.set(m[4], { ...stages.get(m[4]), [m[3]]: `${m[1]} ${m[2]}` });
+  }
+  return { tree, clean: r.code === 0, conflicts: [...stages.keys()], stages };
 }
 
 /**

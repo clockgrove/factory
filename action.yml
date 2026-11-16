@@ -93,7 +93,7 @@ inputs:
     description: The repository's toolchain command, run in the checkout before the worker (for example `scripts/ci/toolchain.sh postgresql`). Empty runs nothing.
     required: false
   install:
-    description: '`auto` (default) installs the versions each lockfile in the repository''s root pins, one install per ecosystem, all of them: Node.js `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci` or `yarn install --frozen-lockfile` (the one package.json''s `packageManager` names, else in that order); Rust `cargo fetch --locked`; Python `poetry install --no-root` or `uv sync --frozen` (in that order); Go `go mod download`. The list is closed: no file in the repository picks the command. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs.'
+    description: '`auto` (default) installs the versions each lockfile in the repository''s root pins, one install per ecosystem, all of them: Node.js `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci` or `yarn install --frozen-lockfile` (the one package.json''s `packageManager` names, else in that order); Rust `cargo fetch --locked`; Python `poetry install --no-root` or `uv sync --frozen` (in that order); Go `go mod download`. The list is closed: no file in the repository picks the command. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. Each install''s program (`cargo`, `uv`, `go` and the rest) must be on PATH where the stage runs: setup installs it otherwise, and doctor''s lockfile row warns when it is not found. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs. One whose program is not on PATH Blocks at once, naming the program.'
     required: false
   validation:
     description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
@@ -159,10 +159,13 @@ inputs:
     description: 'VERCEL_PROJECT_ID for `sandbox: vercel`: the Vercel project the sandboxes belong to.'
     required: false
   image_refresh:
-    description: '(image) `merge` (default) builds the sandbox image on every push to the default branch until today''s builds reach `image_daily_minutes`, then leaves the head to the next UTC day''s first dispatcher tick (`image_owed`; the nightly schedule is the backstop); `nightly` builds a head once a day, on that tick or the nightly schedule.'
+    description: '(image) `merge` (default) builds the sandbox image on a push to the default branch that changes what the image is made from (docs/ADAPTERS.md, Refresh) until today''s builds reach `image_daily_minutes`, then leaves the head to the next UTC day''s first dispatcher tick (`image_owed`; the nightly schedule is the backstop); `nightly` builds a head once a day, on that tick or the nightly schedule.'
     required: false
   image_daily_minutes:
     description: '(image) Build minutes a day the image may take on merges before refreshes move to the nightly build. Default 5.'
+    required: false
+  image_max_age_days:
+    description: '(image) Days the current image stands for later heads that change nothing it is made from; an older image is built again on the next merge, owed tick or nightly build. A whole number, 1 to 30. Default 7.'
     required: false
   image_owed:
     description: '(image) `true` builds the default branch''s head on an event other than a push, the nightly cron or `image: true`: the dispatcher''s `image_owed` output, when an earlier day left the head unbuilt and today''s turn allows a build.'
@@ -441,6 +444,7 @@ runs:
         FACTORY_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
         FACTORY_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
         FACTORY_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
+        FACTORY_INPUT_IMAGE_MAX_AGE_DAYS: ${{ inputs.image_max_age_days }}
         FACTORY_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
         FACTORY_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
         FACTORY_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}

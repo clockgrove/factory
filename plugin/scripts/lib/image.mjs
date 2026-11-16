@@ -9,7 +9,8 @@
 import { createHash } from "node:crypto";
 import { SNAPSHOT_TAG } from "./adapters/sandbox.mjs";
 import { findRecordIssue, getRepo, listComments, onDefaultBranch, openRecordIssue, rest, upsertComment } from "./github.mjs";
-import { WAKE_SLACK_MS, dependencyFile, guardCovers, isSelf, marker } from "./logic.mjs";
+import { IMAGE_MAX_AGE_DAYS } from "./inputs.mjs";
+import { WAKE_SLACK_MS, dependencyFile, guardCovers, isSelf, marker, toolchainFile } from "./logic.mjs";
 
 /** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
 export const IMAGE_LABEL = "factory:image";
@@ -79,22 +80,34 @@ export function coverHead(builds, { source, head, attempt = null }) {
 }
 
 /**
- * The digest of what the image is made from outside the repository's tree: the setup command, the install command,
- * the harness CLIs' version setting and the vendor's base image. A build records it (`made`); a change to any of them
- * builds again.
+ * The digest of what the image is made from outside the repository's tree: the setup command, the install command, the
+ * exact version of each harness CLI it installs (`versions`, package to version: `harness_version` resolved, `latest`
+ * included), the vendor's base image and Factory's own build code (`factory`, the plugin's digest: an image another
+ * Factory built is built again once). A build records it (`made`); a change to any of them builds again. Null when the
+ * versions are not known (`versions` null), so nothing is taken as unchanged.
  */
-export const imageMade = ({ setup = "", install = "", harnessVersion = "", base = "" }) => createHash("sha256").update(JSON.stringify([setup || "", install || "", harnessVersion || "", base || ""])).digest("hex");
+export const imageMade = ({ setup = "", install = "", versions = null, base = "", factory = "" }) =>
+  versions && typeof versions === "object" ? createHash("sha256").update(JSON.stringify([setup || "", install || "", Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), base || "", factory || ""])).digest("hex") : null;
+
+/**
+ * Files a program reads by its own convention from the directory it runs in, which the setup guard does not follow
+ * (doctor's SETUP_NOT_FOLLOWED): make's makefiles, just's and Task's files, docker compose's files, Nix's and Devbox's.
+ * Counted whatever the setup command is, because a script setup runs may run any of them and is not read.
+ */
+const CONVENTION_FILES = new Set(["Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile", "Taskfile.yml", "Taskfile.yaml", "Taskfile.dist.yml", "Taskfile.dist.yaml", "compose.yaml", "compose.yml", "compose.override.yaml", "compose.override.yml", "docker-compose.yaml", "docker-compose.yml", "docker-compose.override.yaml", "docker-compose.override.yml", "shell.nix", "default.nix", "flake.nix", "devbox.json"]);
 
 /**
  * Whether a change to `files` (the paths a diff names) changes what the image is made from, given setupGuard's view of
- * the setup and install commands (`guards`): the first such path, or null. A manifest, a lockfile or a requirements list
- * anywhere (the dependency store), and any file setup or the install runs (guardCovers); when either may run a file
- * Factory cannot name (`unresolved`), any file.
+ * the setup and install commands (`guards`): the first such path, or null. Anywhere in the tree: a manifest, a lockfile
+ * or a requirements list (the dependency store), a toolchain pin or package-manager configuration (logic.mjs
+ * toolchainFile: `.nvmrc`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml` and the rest, what setup installs
+ * from), and a file a program reads by convention (CONVENTION_FILES); any file setup or the install runs (guardCovers);
+ * when either may run a file Factory cannot name (`unresolved`), any file.
  */
 export function imageTouch(files, guards = []) {
   const unresolved = guards.some((g) => g.unresolved?.length);
   const guarded = guards.flatMap((g) => g.files ?? []);
-  return files.find((f) => unresolved || dependencyFile(f) || guarded.some((p) => guardCovers(p, f))) ?? null;
+  return files.find((f) => unresolved || dependencyFile(f) || toolchainFile(f) || CONVENTION_FILES.has(f.split("/").at(-1)) || guarded.some((p) => guardCovers(p, f))) ?? null;
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */
@@ -212,17 +225,20 @@ export function lastNightly(now = new Date()) {
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
  * schedule), `owed` (the dispatcher saw a head an earlier day left unbuilt, imageOwed) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
- * newest build Factory recorded started, failed ones included. A head already built is never built again, except by
- * hand; so is a head whose changes since `current`'s touch nothing the image is made from (`unchanged`, the caller's
- * check of the diff, with `made` equal to `current.made`): the skip says so (`covers`), and the caller records it
- * (recordCover). On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
+ * newest build Factory recorded started, failed ones included. The current image stands for a head only while it was
+ * made as this build would be (`made` equal to `current.made`, imageMade; an unknown `made` stands for the head it was
+ * built from) and is younger than `maxAgeDays` (image_max_age_days: the base image and what setup fetches without a
+ * pin move on with no change in the repository). While it does, its own head is not built again, except by hand; nor
+ * is a head whose changes since `current`'s touch nothing the image is made from (`unchanged`, the caller's check of the
+ * diff): the skip says so (`covers`), and the caller records it (recordCover). On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
  * unless no build was even tried since the last nightly time (GitHub's cron does not always fire): then one merge
  * builds, and its attempt closes the window whether it succeeds or not.
  */
-export function imageDecision({ trigger, refresh, head, current, made = null, unchanged = false, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
+export function imageDecision({ trigger, refresh, head, current, made = null, unchanged = false, maxAgeDays = IMAGE_MAX_AGE_DAYS, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
   if (trigger === "manual") return { build: true };
-  if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
-  const same = !!made && current?.made === made;
+  const young = !!current && now.getTime() - Date.parse(current.builtAt) < maxAgeDays * 86_400_000;
+  if (current?.sha === head && young && (!made || current.made === made)) return { skip: `the image is already built from ${head.slice(0, 7)}` };
+  const same = young && !!made && current.made === made;
   if (same && current.covers === head) return { skip: `nothing the image is made from changed since ${current.sha.slice(0, 7)}` };
   if (same && unchanged) return { skip: `nothing the image is made from changed since ${current.sha.slice(0, 7)}`, covers: true };
   if (trigger === "nightly" || trigger === "owed") return { build: true };

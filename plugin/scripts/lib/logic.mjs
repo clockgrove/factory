@@ -45,8 +45,20 @@ export function renderTaskCard(template, values) {
   return out;
 }
 
-/** The values the task card needs, from the job's inputs. */
-export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [] }) {
+/**
+ * The task card's and the fix pass's line on what the setup command runs (setupGuard's `files` and `scripts`), so a
+ * worker leaves it alone rather than meet a refused push: at most `max` entries, then how many more. "" with none.
+ */
+export function setupFilesNote(guard, max = 25) {
+  if (!guard || (!guard.files?.length && !guard.scripts?.length && !guard.unresolved?.length)) return "";
+  const items = [...[...guard.files].sort(), ...guard.scripts.map((x) => `${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`)];
+  const shown = items.length ? `${items.slice(0, max).join(", ")}${items.length > max ? ` and ${items.length - max} more` : ""} (each path and anything under it)` : "";
+  const unknown = guard.unresolved?.length ? `${shown ? "; " : ""}it also runs what Factory cannot name, so every push is refused until a person fixes the setup command` : "";
+  return `Setup's files, don't change: ${shown}${unknown}. Setup runs them as the runner from the default branch, so Factory refuses a push that changes one.`;
+}
+
+/** The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote). */
+export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null }) {
   const hours = Math.round((Number(timeoutMinutes) / 60) * 10) / 10;
   const checks = (ciChecks || []).filter(Boolean);
   return {
@@ -59,6 +71,7 @@ export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budg
       : "Run the validation commands before you stop; Factory runs them again.",
     budget_command: budgetCommand && budgetCommand.trim() ? budgetCommand.trim() : "none",
     protected_paths: protectedPaths.join(", "),
+    setup_files: setupFilesNote(setupGuard) ? ` ${setupFilesNote(setupGuard)}` : "",
     branch: `factory/${issue}`,
   };
 }

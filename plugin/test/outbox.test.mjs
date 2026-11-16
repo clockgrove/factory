@@ -336,6 +336,8 @@ test("outbox: what setup runs beyond the files it names is refused on push: a sc
     const ok = await box.push();
     return { ok, error: box.error, kind: box.errorKind };
   };
+  const card = await (await open(r, { setup: "npm run bootstrap" })).setupFiles();
+  assert.ok(card.files.includes("tools/boot.mjs") && card.scripts.some((x) => x.name === "bootstrap"), "the outbox reads what setup runs for the cards, on the default branch");
   const script = await push({ "tools/boot.mjs": "2\n" });
   assert.equal(script.ok, false);
   assert.equal(script.kind, "protected");

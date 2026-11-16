@@ -1151,6 +1151,8 @@ async function main() {
     ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
+    // What the setup command runs, so the worker leaves it alone (the push refuses a change to it).
+    setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null,
     shellSecrets: Object.keys(shellSecrets),
   });
   // Resume policy: under fix-passes the worker's saved session carries this job's fix and answer

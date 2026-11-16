@@ -57,7 +57,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -651,9 +651,18 @@ export async function questionRaisedAt(repo, pr, opts) {
   return drafted.at(-1) || pr.created_at;
 }
 
-export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [] }) {
+/**
+ * The close of a fix pass's ask: fix the cause, never the check; and, from what the setup command runs
+ * (logic.mjs setupFilesNote), the files the pass must leave alone.
+ */
+export function fixClosingText({ commands = [], setupGuard = null } = {}) {
+  const note = setupFilesNote(setupGuard);
+  return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
+}
+
+export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null }) {
   const template = readFileSync(templatePath, "utf8");
-  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks }));
+  const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard }));
   // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
   const recorded = decisionsSection(decisions);
   return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
@@ -1279,7 +1288,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const sha = r?.code === 0 ? String(r.stdout).trim() : "";
     return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
   };
-  const fixClosing = `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question. Ask no other questions.`;
+  const fixClosing = fixClosingText({ commands, setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null });
   /**
    * One fix pass on `red` (lastFix): resumed in the stage's session where the harness can. With `fresh`, a new session
    * instead (never a resume), handed the task card, the failing jobs' own failure lines, the red's output and the fix

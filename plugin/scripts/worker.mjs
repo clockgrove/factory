@@ -637,6 +637,8 @@ async function main() {
     ciChecks: inputs.ciChecks,
     budgetCommand: inputs.budgetCommand,
     protectedList,
+    // What the setup command runs, so the worker leaves it alone (the push refuses a change to it).
+    setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null,
   });
   writeOwn(join(usageDir, "task-card.md"), prompt.split("\n---\n")[0]);
   const session = { id: null, canResume: true };

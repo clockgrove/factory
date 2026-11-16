@@ -1179,6 +1179,14 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     };
   };
 
+  /** What the setup command runs (logic.mjs setupGuard), read on the default branch as Factory fetched it; null with no setup. */
+  let guardAtBase = null;
+  box.setupFiles = async () => {
+    if (!setup) return null;
+    guardAtBase ??= setupGuard(setup, await treeIo(base));
+    return guardAtBase;
+  };
+
   /**
    * The toolchain files changed since the fence started, on the branch, that its scope does not reach, and the
    * package.json scripts of the `setup` and `install` commands it changed ([] unfenced).

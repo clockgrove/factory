@@ -12,6 +12,7 @@
 // probe. Its other quotas, and other tokens, go on.
 import { createHash } from "node:crypto";
 import { log } from "./inputs.mjs";
+import { BARE_BUSY_TYPES } from "./usage.mjs";
 
 /** Node fetch's connect-level failures: no byte of the request left this machine, or its connect timed out. */
 export const UNREACHABLE = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
@@ -75,11 +76,12 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
 
 /**
  * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx
- * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx: usage.mjs providerBusy) past runHarness's
+ * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx, or the gateway's bare 5xx type with no
+ * status, usage.mjs BARE_BUSY_TYPES: providerBusy) past runHarness's
  * waits. Not a lost network. The code alone does not say whose: the outage's origin does (GitHub's is githubOrigin(); a
  * provider pause carries the provider's, harness.mjs providerOrigin), so anything that judges GitHub guards on it.
  */
-export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code));
+export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code)) || BARE_BUSY_TYPES.has(String(code));
 
 /**
  * The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up
@@ -101,34 +103,31 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * to the next morning, fits with room; under the dispatcher's day for a claim gone quiet, local.mjs CLAIM_PAUSE_MS, so an
  * outage of twelve to twenty-four hours Blocks naming the outage, while one that keeps the machine off GitHub for over a
  * day meets the dispatcher's Block first). `probeMs`: the pause before each probe, the last
- * repeated. `passWindowMs`: how close to a failed harness pass's end an outage must have been to have cut it off (the
- * harnesses retry their own calls for minutes before a pass fails); one before the pass began never counts, and one on
- * another host than the pass's provider counts only when it lasted `passOutageMs`. `passReruns`: how many times one pass
- * runs again after an outage before its failure stands. `flapMs`: a host lost again this soon after answering is the same
+ * repeated. `passReruns`: how many times one pass cut off by its provider or the network (passCutOff) runs again
+ * before its failure stands. `flapMs`: a host lost again this soon after answering is the same
  * outage (its first loss and its limit carried over). `quotaJitterMs`: the most a wait for a rate limit's reset runs past
  * it (a tenth of it at least), so the callers of several processes on one quota do not all go again at once; a limit
  * still refused after its stated reset waits `probeMs` (doubling) instead. `exitWaitMs`: how long past its deadline a
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
  * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
- * after). `serverResumeMs`, `serverResumeMaxMs`, `serverResumes`: serve resumes an Objective paused on GitHub answering
- * 5xx past the client's retries (serverDown) after 1, 2, 4… minutes, doubling up to half an hour, since a probe of the
- * host answers while one endpoint fails; six such resumes in a row (an hour in all) and it Blocks (local.mjs). `now`,
- * `sleep` and `random` are replaced in tests.
+ * after). `serverResumeMs`, `serverResumeMaxMs`: serve resumes an Objective paused on a host that answered, and failed
+ * or was busy, past the retries (serverDown: GitHub's 5xx, a model provider's busy answer) after 1, 2, 4… minutes,
+ * doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; it waits on up
+ * to `blockMs`, and for GitHub's own 5xx GitHub's status page decides whether the request gets one more try and then
+ * Blocks (adapters/github-status.mjs, local.mjs resume). runHarness waits a busy provider out in place on the same
+ * doubling. `now`, `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
   blockMs: 12 * 60 * 60_000,
   probeMs: [5_000, 10_000, 20_000, 30_000, 60_000],
   probeTimeoutMs: 10_000,
-  passWindowMs: 10 * 60_000,
-  passOutageMs: 2 * 60_000,
   passReruns: 2,
   flapMs: 60_000,
   quotaJitterMs: 10_000,
   exitWaitMs: 12 * 60_000,
   serverResumeMs: 60_000,
   serverResumeMaxMs: 30 * 60_000,
-  serverResumes: 6,
   now: () => Date.now(),
   random: Math.random,
   sleep: (ms, signal) =>
@@ -193,6 +192,9 @@ export class NetworkDown extends Error {
 let MODE = null;
 let STOPPED = false;
 const EPISODES = new Map();
+// The outages this process met that have ended, newest last ({origin, code, since, back, kind}, ms; the last 20): a host
+// lost to this machine's network (`network`), or a model provider's busy answer (`busy`, noteBusy). What passCutOff
+// reads for an outage met while a pass ran.
 const PAST = [];
 // The outage each host was in when this process stopped waiting for it (given up, or stopWaiting): what a later request
 // to it, or the stage's end, names (downFor, outageOf), so the host and the first loss are never lost to a caller that
@@ -258,8 +260,9 @@ export const downFor = (origin) => {
 /**
  * A host this process gave up waiting for (past its limit, or stopped waiting while it was lost) that still fails a probe
  * now, as the NetworkDown its requests fail with: its host, code and first loss. Null when there is none, or each such host
- * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass that fails and
- * a run left with no exit record are that outage's (harness.mjs outageCut, session.mjs exitRecord).
+ * answers again. A spent rate limit is no such host: it cuts no harness pass off. While one is down, a pass that failed
+ * with no structured error or with a provider or network failure, and a run left with no exit record, are that outage's
+ * (harness.mjs outageCut, session.mjs exitRecord).
  */
 export async function givenUp() {
   const hosts = [...GIVEN_UP.values()].filter((g) => !Number.isFinite(g.resetAt)).sort((a, b) => b.since - a.since);
@@ -369,7 +372,7 @@ function episode(origin, code, resetAt = null, key = origin) {
   })().finally(() => {
     if (gen !== GEN) return;
     EPISODES.delete(origin);
-    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now() });
+    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now(), kind: "network" });
     if (PAST.length > 20) PAST.shift();
   });
   return ep;
@@ -418,10 +421,7 @@ function spentEpisode(origin, resetAt, key) {
     if (gen === GEN) RECENT.set(key, { since, end, code: RATE_LIMIT_SPENT, back: ep.back, resetAt, backoffMs });
     return true;
   })().finally(() => {
-    if (gen !== GEN) return;
-    EPISODES.delete(key);
-    PAST.push({ origin, code: RATE_LIMIT_SPENT, since, back: ep.back ?? OUTAGE.now(), resetAt });
-    if (PAST.length > 20) PAST.shift();
+    if (gen === GEN) EPISODES.delete(key);
   });
   return ep;
 }
@@ -456,24 +456,44 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
 export const outageOn = (origin) => (origin && EPISODES.get(origin)) || null;
 
 /**
- * Whether a harness pass that failed, run from `startedMs` to `endedMs`, was cut off by this machine's network: an outage
- * under way now, or one on any host during the pass's last OUTAGE.passWindowMs, else one of `origins` (the provider's,
- * GitHub's) that does not answer a probe now. An outage that ended before the pass began never counts, so a pass run
- * again after one is judged on its own. Returns {origin, code, since, ongoing} or null.
+ * Record that a model provider (`origin`) answered a pass busy (`code`, `HTTP 429`) at `at` (ms): an outage of that host
+ * as passCutOff reads one met while another pass ran (harness.mjs runBusy).
  */
-export async function passCutOff(startedMs, endedMs, origins) {
-  const from = Math.max(startedMs, endedMs - OUTAGE.passWindowMs);
-  const [provider] = origins;
-  // Only an outage that could have cut the pass off: on its provider's host, or one on any host that lasted at least
-  // OUTAGE.passOutageMs (a heartbeat's GitHub blip of a few seconds is no reason for a pass to fail).
-  // A spent rate limit is GitHub refusing, not the network: it cuts no pass off.
-  const counts = (o) => !Number.isFinite(o.resetAt) && (o.origin === provider || (o.back ?? OUTAGE.now()) - o.since >= OUTAGE.passOutageMs);
-  const now = [...EPISODES.values()].find(counts);
-  if (now) return { origin: now.origin, code: now.code, since: now.since, ongoing: true };
-  const past = PAST.findLast((p) => p.back >= from && p.since <= endedMs && counts(p));
-  if (past) return { origin: past.origin, code: past.code, since: past.since, ongoing: false };
-  const down = await unreachableNow(origins);
-  return down ? { ...down, since: OUTAGE.now(), ongoing: true } : null;
+export function noteBusy(origin, code, at = OUTAGE.now()) {
+  if (!origin) return;
+  PAST.push({ origin, code, since: at, back: at, kind: "busy" });
+  if (PAST.length > 20) PAST.shift();
+}
+
+/**
+ * Whether a failed harness pass, run from `startedMs` to `endedMs`, was cut off by its provider or this machine's
+ * network, `origin` being the provider's API: {origin, code, since, ongoing}, else null. `failure` is the provider or
+ * network failure its harness reported as its own structured error (a record's `providerOutage`, usage.mjs outageError),
+ * or null for a pass whose harness reported none (a harness that prints a 5xx or a lost connection as prose only, a
+ * crash, a structured error with no status that names no outage). Such a pass is decided on exact facts instead: an
+ * outage this process met between the pass's start and its end (one under way, or one that ended since the pass began),
+ * of any kind on the provider's own host (lost, or a busy answer: noteBusy), or on any host a connect-level loss (this
+ * machine's network down); a GitHub 5xx or any other host's answer is none. Else the provider's API not answering a
+ * probe now. Ongoing when the outage is under way or the provider does not answer: the pass waits for it (networkBack)
+ * before it runs again. With the provider answering, a reported failure runs the pass again at once, its code the
+ * failure's status, else its code or type.
+ */
+export async function passCutOff(failure, origin, { startedMs = null, endedMs = null } = {}) {
+  const own = origin ? [...EPISODES.values()].find((o) => o.origin === origin) : null;
+  if (own) return { origin, code: own.code, since: own.since, ongoing: true };
+  if (!failure) {
+    const end = Number.isFinite(endedMs) ? endedMs : OUTAGE.now();
+    // A host lost to this machine's network (every episode but a spent rate limit's), on any host.
+    const live = [...EPISODES.values()].find((o) => !Number.isFinite(o.resetAt) && o.since <= end);
+    if (live) return { origin: live.origin, code: live.code, since: live.since, ongoing: true };
+    const counts = (p) => p.origin === origin || p.kind === "network";
+    const past = Number.isFinite(startedMs) ? PAST.findLast((p) => p.back >= startedMs && p.since <= end && counts(p)) : null;
+    if (past) return { origin: past.origin, code: past.code, since: past.since, ongoing: false };
+  }
+  const code = origin ? await probe(origin) : null;
+  if (code !== null) return { origin, code, since: OUTAGE.now(), ongoing: true };
+  if (!failure) return null;
+  return { origin, code: failure.status !== null ? `HTTP ${failure.status}` : failure.code || failure.type || "no answer", since: OUTAGE.now(), ongoing: false };
 }
 
 /**

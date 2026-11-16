@@ -99,3 +99,48 @@ process.exit(1);
     process.env.PATH = saved;
   }
 });
+
+// Claude Code 2.1.325 against a provider that refused the connection, and one that answered 529 (overloaded).
+test("providerError and providerOutage: a failed run's provider error is read from the harness's own structure, never its words", () => {
+  const fields = (r) => r && { status: r.status, type: r.type, code: r.code };
+  const refused = failed("claude", fixture("claude-2.1.325-connection-refused.jsonl"));
+  assert.deepEqual(fields(refused.providerOutage), { status: null, type: "server_error", code: "connection_failed" });
+  assert.equal(refused.refusal, undefined);
+  // A 529 carries its status: the provider busy (providerBusy), no outage of this reading.
+  const busy = failed("claude", fixture("claude-2.1.325-529.jsonl"));
+  assert.deepEqual([busy.busy?.status, busy.providerOutage, busy.providerError], [529, undefined, undefined]);
+  assert.equal(failed("claude", fixture("claude-2.1.321-401.jsonl")).providerOutage, undefined, "a refusal is no outage");
+  // Codex: a JSON error body with no status and the type server_error is one; one with a 5xx or 429 status is busy; a
+  // 409 is a provider error, no outage.
+  const body = (status, type = "server_error") => JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type, code: null, message: "m" }, ...(status === null ? {} : { status }) }) } });
+  assert.deepEqual(fields(failed("codex", body(null)).providerOutage), { status: null, type: "server_error", code: null });
+  for (const status of [503, 429]) assert.deepEqual([failed("codex", body(status)).busy?.status, failed("codex", body(status)).providerOutage], [status, undefined], `HTTP ${status}`);
+  assert.equal(failed("codex", body(409)).providerOutage, undefined);
+  assert.deepEqual(fields(failed("codex", body(409)).providerError), { status: 409, type: "server_error", code: null });
+  // The gateway's bare 5xx bodies, with no status: the provider busy, as a 5xx with its status is.
+  for (const type of ["service_unavailable_error", "overloaded_error", "internal_server_error"]) {
+    const rec = failed("codex", body(null, type));
+    assert.deepEqual([fields(rec.busy), rec.providerOutage, rec.refusal], [{ status: null, type, code: null }, undefined, undefined], type);
+  }
+  // Another bare type with no status: a provider error that names no outage by itself (harness.mjs probes for it).
+  assert.deepEqual([fields(failed("codex", body(null, "api_error")).providerError), failed("codex", body(null, "api_error")).busy], [{ status: null, type: "api_error", code: null }, undefined]);
+  // A 5xx that carries an auth, permission, quota or billing type is that refusal, never busy; any other 5xx is busy.
+  for (const type of ["authentication_error", "permission_error", "insufficient_quota", "billing_error"]) {
+    const rec = failed("codex", body(503, type));
+    assert.deepEqual([rec.refusal?.status, rec.refusal?.type, rec.busy, rec.providerError], [503, type, undefined, undefined], type);
+  }
+  // Codex prints a 5xx and a lost stream as prose: no structure at all.
+  for (const prose of ["unexpected status 503 Service Unavailable: Service Unavailable, url: http://127.0.0.1:8080/v1/responses", "stream disconnected before completion: error sending request"]) {
+    const rec = failed("codex", JSON.stringify({ type: "turn.failed", error: { message: prose } }));
+    assert.deepEqual([rec.providerOutage, rec.providerError], [undefined, undefined], prose);
+  }
+  // Copilot: session.error's statusCode; one with none is a provider error that names no outage.
+  const copilot = fixture("copilot-1.0.107-session-error.jsonl").replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', '"errorType":"server","errorCode":"bad_gateway","statusCode":502');
+  assert.deepEqual([failed("copilot", copilot).busy?.status, failed("copilot", copilot).providerOutage], [502, undefined]);
+  const bare = fixture("copilot-1.0.107-session-error.jsonl").replace('"errorType":"quota","errorCode":"quota_exceeded","statusCode":402', '"errorType":"query"');
+  assert.deepEqual([fields(failed("copilot", bare).providerError), failed("copilot", bare).providerOutage], [{ status: null, type: "query", code: null }, undefined]);
+  assert.equal(failed("copilot", fixture("copilot-1.0.107-session-error.jsonl")).providerOutage, undefined);
+  // Claude's API error with no status and a type other than server_error (`unknown`): no outage by itself, and no refusal.
+  const unknown = failed("claude", fixture("claude-2.1.325-connection-refused.jsonl").replace('"error":"server_error"', '"error":"unknown"').replaceAll('"api_error":"connection_failed"', '"api_error":null'));
+  assert.deepEqual([fields(unknown.providerError), unknown.providerOutage, unknown.refusal], [{ status: null, type: "unknown", code: null }, undefined, undefined]);
+});

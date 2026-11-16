@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BARE_BUSY_TYPES } from "./network.mjs";
 
 /**
  * Codex prices, USD per million tokens: the one table (codex-prices.json beside this file), which the bench reads too.
@@ -304,24 +305,33 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   // Claude Code's API error with no status (a connection it could not make) is no refusal.
   if (!e || (harness === "claude" && e.status === null)) return null;
   const { reset, retryAt, ...r } = e;
-  const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r)) : refusedKind(r);
+  // A 5xx with an auth, permission, quota or billing type or code is that refusal, not the provider busy (providerBusy).
+  const refused = r.status !== null ? (r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || refusedKind(r))) || (r.status >= 500 && refusedKind(r)) : refusedKind(r);
   if (!refused) return null;
   return { ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
 /**
  * The provider saying it is busy, from its error (providerError) on a failed run: {harness, status, type, code, message,
- * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included),
- * with no refusal type or code (REFUSED_KINDS: a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or
- * global rate limit is a refusal). No status (a transport error, a bare body) is never busy. `retryAt` is the error's
- * own (providerError: a 429's only); runHarness waits for it, else the outage doubling, and runs the pass again: no death.
+ * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included);
+ * with no status, the AI Gateway's bare 5xx types (network.mjs BARE_BUSY_TYPES: `service_unavailable_error`,
+ * `overloaded_error`, `internal_server_error`). A refusal type or code (REFUSED_KINDS: auth, permission, quota or
+ * billing; a 429 `insufficient_quota`, `usage_limit_reached`, or Copilot's weekly or global rate limit) is a refusal
+ * instead, whatever the status: providerRefusal reads a 5xx with one as a refusal too, so no such error falls between.
+ * `retryAt` is the error's own (providerError: a 429's only); runHarness waits for it, else the outage doubling, and runs
+ * the pass again: no death. busyCode is its code as an outage's.
  */
 export function providerBusy(harness, events) {
   const e = providerError(harness, events);
-  if (!e || e.status === null || refusedKind(e) || !(BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600))) return null;
+  if (!e || refusedKind(e)) return null;
+  const busy = e.status !== null ? BUSY_4XX.has(e.status) || (e.status >= 500 && e.status < 600) : BARE_BUSY_TYPES.has(e.type);
+  if (!busy) return null;
   const { reset, retryAt, ...r } = e;
   return { ...r, ...(Number.isFinite(retryAt) ? { retryAt } : {}) };
 }
+
+/** A busy answer (providerBusy) as an outage's code (network.mjs serverDown): `HTTP 503`, or the bare body's type. */
+export const busyCode = (r) => (r.status !== null ? `HTTP ${r.status}` : r.type);
 
 /**
  * Whether a refusal refuses only the request a resumed session sends (its transcript), so one fresh pass can tell: a

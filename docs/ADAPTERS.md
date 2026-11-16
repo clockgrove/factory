@@ -102,7 +102,7 @@ Contract: `plugin/scripts/lib/adapters/github-status.mjs`. Vendor: GitHub's stat
 
 | Operation | Does |
 | --- | --- |
-| `githubStatus()` → `{state, components, incidents, maintenances, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, when the page lists an unresolved incident (any status but `resolved` or `postmortem`), or when a scheduled maintenance is `in_progress`; `operational` when none of that holds; null when the page cannot say: no page for this GitHub host, no answer, no JSON, or one of the components missing. `error` is then the reason as a code (`no page`, `HTTP 503`, a connect-level code, `no answer`, `invalid`, `missing <name>`). Never throws. |
+| `githubStatus()` → `{state, components, incidents, maintenances, error?}` | `state` is `degraded` when any of the components Factory's requests use (`API Requests`, `Issues`, `Pull Requests`, matched by their exact names) has a status other than `operational`, when the page lists an unresolved incident (any status but `resolved` or `postmortem`) that affects one of those components or names none (one with no `components` list counts, and its name in the log says so), or when a scheduled maintenance is `in_progress`; `operational` when none of that holds; null when the page cannot say: no page for this GitHub host, no answer, no JSON, or one of the components missing. `error` is then the reason as a code (`no page`, `HTTP 503`, a connect-level code, `no answer`, `invalid`, `missing <name>`). Never throws. |
 
 Rules:
 

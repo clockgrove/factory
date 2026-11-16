@@ -117,10 +117,17 @@ test("providerError and providerOutage: a failed run's provider error is read fr
   for (const status of [503, 429]) assert.deepEqual([failed("codex", body(status)).busy?.status, failed("codex", body(status)).providerOutage], [status, undefined], `HTTP ${status}`);
   assert.equal(failed("codex", body(409)).providerOutage, undefined);
   assert.deepEqual(fields(failed("codex", body(409)).providerError), { status: 409, type: "server_error", code: null });
-  // The gateway's bare bodies, with no status: a provider error that names no outage by itself (harness.mjs probes for it).
+  // The gateway's bare 5xx bodies, with no status: the provider busy, as a 5xx with its status is.
   for (const type of ["service_unavailable_error", "overloaded_error", "internal_server_error"]) {
     const rec = failed("codex", body(null, type));
-    assert.deepEqual([fields(rec.providerError), rec.providerOutage, rec.refusal], [{ status: null, type, code: null }, undefined, undefined], type);
+    assert.deepEqual([fields(rec.busy), rec.providerOutage, rec.refusal], [{ status: null, type, code: null }, undefined, undefined], type);
+  }
+  // Another bare type with no status: a provider error that names no outage by itself (harness.mjs probes for it).
+  assert.deepEqual([fields(failed("codex", body(null, "api_error")).providerError), failed("codex", body(null, "api_error")).busy], [{ status: null, type: "api_error", code: null }, undefined]);
+  // A 5xx that carries an auth, permission, quota or billing type is that refusal, never busy; any other 5xx is busy.
+  for (const type of ["authentication_error", "permission_error", "insufficient_quota", "billing_error"]) {
+    const rec = failed("codex", body(503, type));
+    assert.deepEqual([rec.refusal?.status, rec.refusal?.type, rec.busy, rec.providerError], [503, type, undefined, undefined], type);
   }
   // Codex prints a 5xx and a lost stream as prose: no structure at all.
   for (const prose of ["unexpected status 503 Service Unavailable: Service Unavailable, url: http://127.0.0.1:8080/v1/responses", "stream disconnected before completion: error sending request"]) {

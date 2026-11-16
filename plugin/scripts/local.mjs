@@ -1464,6 +1464,8 @@ export class Local {
       try {
         // Named while it runs, so a later start on this machine never runs a second stage beside it (liveStage).
         if (child.pid) writeFileSync(join(usageDir, STAGE_RECORD), JSON.stringify(processRecord(child.pid)), { mode: 0o600 });
+        // The one more try resume granted a 5xx (serverVerdict) is made now, its stage's process started; never before.
+        if (child.pid) this.tryStarted(issue);
         child.stdio[3].on("error", () => {});
         child.stdio[3].end(this.token);
         if (this.notice) serveNotices(child, this.notice);
@@ -1803,7 +1805,7 @@ export class Local {
     const what = Number.isFinite(reset)
       ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset`
       : serverDown(o.code)
-        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${new Date(server.since).toISOString()}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses}), going by GitHub's status page`
+        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${new Date(server.since).toISOString()}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses})${o.origin === githubOrigin() ? ", going by GitHub's status page" : ""}`
         : `${lostText(o.host || "the network", o.code || "no answer")} since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
@@ -2259,7 +2261,8 @@ export class Local {
    * null (wait on). A part of GitHub its requests use degraded, an unresolved incident, a maintenance in progress, or the
    * page not readable (no answer, or no page for this GitHub host): an incident, so it is resumed and waits on, up to
    * OUTAGE.blockMs from its first pause, and an earlier one more try counts no more. All operational: the 5xx is the
-   * request's own, so it gets one more try (`once`: resume marks it made only when the try starts); when that try
+   * request's own, so it gets one more try (`once`: resume grants it, and tryStarted marks it made once the stage's
+   * process has started); when that try
    * pauses on a 5xx of the same request again with the page still operational, `block`. Logged once per pause.
    */
   async serverVerdict(issue, off) {
@@ -2272,11 +2275,21 @@ export class Local {
         ? `GitHub's status page could not be read (${s.error})`
         : `GitHub's status page reported ${parts}`;
     if (s.state === "operational" && off.server.tried) return { block: said };
+    off.server.tryGranted = false;
     if (s.state !== "operational") off.server.tried = false;
     const line = `${said}; ${s.state === "operational" ? "the 5xx is this request's: one more try" : `waiting it out as an incident, up to ${minutesText(OUTAGE.blockMs)} from ${new Date(off.since).toISOString()}`}`;
     if (off.server.said !== `${off.server.pauses} ${line}`) log(`#${issue}: ${line}`);
     off.server.said = `${off.server.pauses} ${line}`;
     return s.state === "operational" ? { once: true } : null;
+  }
+
+  /**
+   * A stage of `issue` has started its process (stage()): the one more try resume granted its 5xx (serverVerdict) is
+   * made now, so it is not made again.
+   */
+  tryStarted(issue) {
+    const server = this.offline?.get(issue)?.server;
+    if (server?.tryGranted) Object.assign(server, { tried: true, tryGranted: false });
   }
 
   /**
@@ -2336,15 +2349,14 @@ export class Local {
     // A PR still waiting for its review pass goes to review (as pendingReviews); Running work (a first run, or a
     // send-back rebase) runs again; anything else (reviewed, waiting in the merge queue) needs nothing here.
     const next = stageFor({ pr, issue: data });
-    // The one more try a 5xx got (serverVerdict) is made only here, as the stage starts: a resume skipped above makes none.
-    const tryNow = () => {
-      if (verdict?.once) off.server.tried = true;
-    };
-    if (next === "review") return (tryNow(), this.withClaim(issue, () => this.review(issue, pr.number)));
-    if (next === "work") return (tryNow(), this.runObjective(issue));
+    // The one more try a 5xx got (serverVerdict) is only granted here: it is made when the stage's process starts
+    // (tryStarted), so a resume skipped above, a claim that cannot be read or written, or a start that fails makes none.
+    if (verdict?.once) off.server.tryGranted = true;
+    if (next === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
+    if (next === "work") return this.runObjective(issue);
     // A review this loop holds paused after its label came off (an outage met on its merge path: session.mjs outageFirst)
     // ends nothing by the label: the review runs again, and its exit or merge follows.
-    if (next === "merge" && off?.stage === "review") return (tryNow(), this.withClaim(issue, () => this.review(issue, pr.number)));
+    if (next === "merge" && off?.stage === "review") return this.withClaim(issue, () => this.review(issue, pr.number));
     log(`#${issue}: nothing left to run here (its PR is reviewed or gone); releasing the claim`);
     const held = await localClaim(this.repo, issue, this.opts).catch(() => null);
     if (held?.commentId && sameMachineHolder(held.holder)) await rest(`repos/${this.repo.full}/issues/comments/${held.commentId}`, { ...this.opts, method: "DELETE" }).catch(() => {});

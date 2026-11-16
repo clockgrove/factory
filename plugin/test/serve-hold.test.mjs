@@ -1032,8 +1032,10 @@ async function serverPaused() {
   // GitHub's host answers a probe (github.test answers every request) while that one request keeps failing.
   const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date(at.t).toISOString(), endpoint: at.endpoint } });
   let tries = 0;
-  // The resumed stage runs longer than a network outage's carry-over before it meets the 5xx again.
-  loop.runObjective = (n) => ((tries += 1), (at.t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
+  // The resumed stage starts its process (stage(): tryStarted) and runs longer than a network outage's carry-over before
+  // it meets the 5xx again.
+  const stub = (n) => ((tries += 1), loop.tryStarted(n), (at.t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
+  loop.runObjective = stub;
   await loop.withClaim(7, paused());
   // Each resume is due after its doubling wait, not on the probe.
   const next = async () => {
@@ -1046,7 +1048,7 @@ async function serverPaused() {
   };
   // A resume after the wait with no time moved (one skipped before it, tried again on the next tick).
   const again = () => loop.resume(7);
-  return { loop, first, at, next, again, tries: () => tries };
+  return { loop, first, at, next, again, stub, tries: () => tries };
 }
 
 test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page reports an incident or does not answer, past any count of resumes, and Blocks at 12 h as an outage", async () => {
@@ -1140,6 +1142,34 @@ test("#389: a resume skipped before its stage starts (a read that fails) makes n
   }
 });
 
+test("#389: a start whose claim cannot be read makes no try: the one more try is made only once the stage's process starts", async () => {
+  let commentsDown = false;
+  const gh = claimGitHub({ fail: (kind) => commentsDown && kind === "comments" });
+  const page = await statusPage(() => ({ components: parts("operational") }));
+  try {
+    const { loop, at, next, again, stub, tries } = await serverPaused();
+    // The real start: its claim read fails, so no stage process starts.
+    let worked = 0;
+    loop.work = async () => ((worked += 1), { exit: "delivered" });
+    loop.runObjective = Local.prototype.runObjective;
+    const off = loop.offline.get(7);
+    at.t = off.server.at + OUTAGE.serverResumeMs;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+    commentsDown = true;
+    assert.notEqual((await loop.resume(7)).exit, "blocked");
+    assert.equal(worked, 0, "the stage never ran");
+    assert.deepEqual([loop.offline.get(7)?.server.tried, tries()], [false, 0], "no try was made");
+    commentsDown = false;
+    loop.runObjective = stub;
+    assert.notEqual((await again()).exit, "blocked", "the next tick makes the one more try");
+    assert.equal(tries(), 1);
+    assert.equal((await next()).exit, "blocked", "that try met the 5xx again: Blocked");
+  } finally {
+    await page.close();
+    gh.restore();
+  }
+});
+
 test("#389: the one more try belongs to the request that failed: a 5xx on another request, or a pause on anything else, starts it afresh, and the Block names the request from its own first failure", async () => {
   const gh = claimGitHub();
   const page = await statusPage(() => ({ components: parts("operational") }));
@@ -1169,9 +1199,40 @@ test("#389: the one more try belongs to the request that failed: a 5xx on anothe
   }
 });
 
+test("#389: a pause on a model provider's busy answer is never judged by GitHub's status page, and its log does not say so", async () => {
+  const gh = claimGitHub();
+  const page = await statusPage(() => ({ components: parts("operational") }));
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...more) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...more));
+  try {
+    const loop = await claimLoop();
+    let t = Date.parse("2026-11-14T08:47:00Z");
+    loop.clock = () => t;
+    let tries = 0;
+    const paused = () => async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "api.anthropic.test", origin: "https://api.anthropic.test", code: "HTTP 529", since: new Date(t).toISOString() } });
+    loop.runObjective = (n) => ((tries += 1), loop.tryStarted(n), (t += OUTAGE.stageWaitMs + 60_000), loop.withClaim(n, paused()));
+    await loop.withClaim(7, paused());
+    for (let i = 0; i < 3; i++) {
+      t = loop.offline.get(7).server.at + OUTAGE.serverResumeMaxMs;
+      assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+      assert.notEqual((await loop.resume(7)).exit, "blocked");
+    }
+    assert.equal(tries, 3);
+    assert.equal(page.asked(), 0, "GitHub's page was never asked");
+    const paused_ = lines.filter((l) => /the work stage paused: api\.anthropic\.test answered HTTP 529/.test(l));
+    assert.equal(paused_.length, 4);
+    assert.ok(paused_.every((l) => !/status page/.test(l)), paused_.join(""));
+  } finally {
+    process.stdout.write = write;
+    await page.close();
+    gh.restore();
+  }
+});
+
 test("#389: GitHub's status page counts an unresolved incident and a maintenance in progress as an incident; GitHub Enterprise has no page: it waits on, and nothing is fetched", async () => {
   const { githubStatus } = await import("../scripts/lib/adapters/github-status.mjs");
-  let answer = { components: parts("operational"), incidents: [{ id: "i1", name: "Disruption with some GitHub services", status: "investigating" }] };
+  let answer = { components: parts("operational"), incidents: [{ id: "i1", name: "Disruption with some GitHub services", status: "investigating", components: [{ id: "c1", name: "Issues", status: "degraded_performance" }] }] };
   const page = await statusPage(() => answer);
   try {
     const one = await githubStatus();
@@ -1181,6 +1242,17 @@ test("#389: GitHub's status page counts an unresolved incident and a maintenance
     assert.deepEqual([two.state, two.maintenances], ["degraded", ["Database upgrade"]]);
     answer = { components: parts("operational"), maintenances: [{ id: "m2", name: "Later", status: "scheduled" }] };
     assert.equal((await githubStatus()).state, "operational");
+    // An incident that names its components counts only when one of them is GitHub's API, Issues or Pull Requests, or it
+    // names none; one with no components list counts, and says so.
+    const incident = (components) => ({ id: "i2", name: "Copilot is slow", status: "identified", ...(components === undefined ? {} : { components: components.map((name) => ({ id: name, name, status: "degraded_performance" })) }) });
+    answer = { components: parts("operational"), incidents: [incident(["Copilot"])] };
+    assert.deepEqual([(await githubStatus()).state, page.paths.length], ["operational", 4], "one read of summary.json per reading");
+    answer = { components: parts("operational"), incidents: [incident(["Copilot", "Pull Requests"])] };
+    assert.equal((await githubStatus()).state, "degraded");
+    answer = { components: parts("operational"), incidents: [incident([])] };
+    assert.equal((await githubStatus()).state, "degraded");
+    answer = { components: parts("operational"), incidents: [incident(undefined)] };
+    assert.deepEqual((await githubStatus()).incidents, ["Copilot is slow (it lists no components, so it counts whatever it affects)"]);
   } finally {
     await page.close();
   }

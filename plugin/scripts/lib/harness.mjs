@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, answeredError, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, answeredError, busyCode, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -990,14 +990,14 @@ async function runBusy(opts) {
     const origin = providerOrigin(opts.harness, opts.env);
     if (!origin) break;
     // An outage of the provider's host for any other pass of this process that fails meanwhile (network.mjs passCutOff).
-    noteBusy(origin, `HTTP ${r.status}`, now);
+    noteBusy(origin, busyCode(r), now);
     const label = opts.label || "run";
     const limit = given !== null && given >= LIMIT.minRunMs ? { ...r, resetAt: r.retryAt } : null;
     const bound = waitBound(since);
     const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - waitMs : Infinity;
     if (bound === null || now + waitMs > bound || left < LIMIT.minRunMs) {
       if (limit) throw new UsageLimitReached(limit, { since: now, label });
-      throw new NetworkDown({ origin, code: `HTTP ${r.status}`, since });
+      throw new NetworkDown({ origin, code: busyCode(r), since });
     }
     if (limit && waitMs > LIMIT.movePastMs) {
       if (LIMIT.elsewhere && (await LIMIT.elsewhere(limit))) throw new UsageLimitReached(limit, { since: now, label });

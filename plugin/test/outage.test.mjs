@@ -263,11 +263,36 @@ const PROSE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000
 // A structured 4xx that is neither a refusal nor busy: the provider's JSON body with a 409.
 const LIMITED_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "conflict", code: null, message: "m" }, status: 409 }) } })}\n`;
 
-// The AI Gateway's bare body for an unavailable provider: a structured error with no status and a type that is not
-// `server_error`, so it names no outage by itself and goes to the probe as a pass with no structure does.
+// A bare body with no status and a type that names neither an outage nor the provider busy: a structured error that
+// goes to the probe as a pass with no structure does.
+const BARE_UNKNOWN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "api_error", message: "m" } }) } })}\n`;
+// The AI Gateway's bare body for an unavailable provider: its 5xx type with no status, the provider busy.
 const BARE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ error: { type: "service_unavailable_error", message: "m" } }) } })}\n`;
 
-for (const [what, lost, up] of [["printed its 503 as prose only", PROSE_503, false], ["printed its 503 as prose only", PROSE_503, true], ["ended on the gateway's bare service_unavailable_error (no status)", BARE_503, false], ["ended on the gateway's bare service_unavailable_error (no status)", BARE_503, true]]) {
+test("runHarness: a pass that ended on the gateway's bare service_unavailable_error (no status) is the provider busy: it waits the doubling and runs again, no probe", async () => {
+  const { bin, calls } = fakeCodex({ lost: BARE_503 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    await offline(
+      () => new Response(null, { status: 200 }),
+      async ({ seen, waits }) => {
+        waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+        const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the task", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60 * 60_000, label: "work-1" });
+        assert.equal(calls().length, 2, "the busy pass, then its run after the wait");
+        assert.equal(rec.ok, true);
+        assert.equal(rec.busyWaits, 1);
+        assert.equal(rec.lostToOutage, undefined);
+        assert.ok(waits.includes(OUTAGE.serverResumeMs), `waited the doubling's first minute: ${waits}`);
+        assert.deepEqual(seen.filter((r) => r.probe), [], "no probe: the provider said it is busy");
+      },
+    );
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+for (const [what, lost, up] of [["printed its 503 as prose only", PROSE_503, false], ["printed its 503 as prose only", PROSE_503, true], ["ended on a bare error type with no status that names no outage", BARE_UNKNOWN, false], ["ended on a bare error type with no status that names no outage", BARE_UNKNOWN, true]]) {
   test(`runHarness: a pass whose harness ${what} is a cut exactly when its provider ${up ? "answers a probe: no, its failure stands" : "does not answer a probe: it runs again once the provider answers"}`, async () => {
     const { bin, calls } = fakeCodex({ lost });
     const saved = process.env.PATH;

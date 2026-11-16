@@ -23,7 +23,8 @@ export const statusBase = (env = process.env) => {
  * GitHub's status, read from the page's `summary.json`: {state, components: [{name, status}], incidents, maintenances,
  * error?}. `state` is `degraded` when any of GITHUB_COMPONENTS has a status other than `operational` (Statuspage's
  * `degraded_performance`, `partial_outage`, `major_outage`, `under_maintenance`), when the page lists an unresolved
- * incident (its `incidents`, any status but `resolved` and `postmortem`), or when a scheduled maintenance is
+ * incident (its `incidents`, any status but `resolved` and `postmortem`) that affects one of them or names no
+ * components (one with no `components` list counts, and says so), or when a scheduled maintenance is
  * `in_progress`; `operational` when none of that holds; null when the page cannot say. `incidents` and `maintenances`
  * are the names of those counted (for the log). With `state` null, `error` is the reason as a code: `no page` (no status
  * page speaks for this GitHub host), `HTTP 503`, a connect-level code, `no answer`, `invalid` (no JSON, or no
@@ -54,7 +55,13 @@ export async function githubStatus({ env = process.env, timeoutMs = 10_000 } = {
     components.push({ name, status: c.status });
   }
   const list = (v) => (Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : []);
-  const incidents = list(body.incidents).filter((i) => !["resolved", "postmortem"].includes(i.status)).map((i) => String(i.name ?? i.id ?? "an incident"));
+  // An unresolved incident counts when it names one of GITHUB_COMPONENTS among the components it affects, or names
+  // none (GitHub's own scope unknown); one that names only others (Copilot, Pages) does not. An incident with no
+  // `components` list at all is counted, and marked so in its name for the log.
+  const ours = (i) => !Array.isArray(i.components) || !i.components.length || i.components.some((c) => GITHUB_COMPONENTS.includes(c?.name));
+  const incidents = list(body.incidents)
+    .filter((i) => !["resolved", "postmortem"].includes(i.status) && ours(i))
+    .map((i) => `${String(i.name ?? i.id ?? "an incident")}${Array.isArray(i.components) ? "" : " (it lists no components, so it counts whatever it affects)"}`);
   const maintenances = list(body.scheduled_maintenances).filter((m) => m.status === "in_progress").map((m) => String(m.name ?? m.id ?? "a maintenance"));
   const degraded = components.some((c) => c.status !== "operational") || incidents.length > 0 || maintenances.length > 0;
   return { state: degraded ? "degraded" : "operational", components, incidents, maintenances };

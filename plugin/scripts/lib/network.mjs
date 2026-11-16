@@ -75,11 +75,19 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
 
 /**
  * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx
- * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx: usage.mjs providerBusy) past runHarness's
+ * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx, or the gateway's bare 5xx type with no
+ * status, BARE_BUSY_TYPES: usage.mjs providerBusy) past runHarness's
  * waits. Not a lost network. The code alone does not say whose: the outage's origin does (GitHub's is githubOrigin(); a
  * provider pause carries the provider's, harness.mjs providerOrigin), so anything that judges GitHub guards on it.
  */
-export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code));
+export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code)) || BARE_BUSY_TYPES.has(String(code));
+
+/**
+ * The AI Gateway's error types for a 5xx it sends as a bare body with no status (gateway-relay.mjs UNAVAILABLE_ERRORS
+ * and `internal_server_error`, docs/PLAN.md's decider): a provider busy as a 5xx with its status is (usage.mjs
+ * providerBusy), and the outage code of a pause on one (harness.mjs runBusy).
+ */
+export const BARE_BUSY_TYPES = new Set(["service_unavailable_error", "overloaded_error", "internal_server_error"]);
 
 /**
  * The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up

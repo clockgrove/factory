@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claudeSandboxChecks, credentialChecks, workflowText } from "../scripts/doctor.mjs";
+import { claudeSandboxChecks, credentialChecks, decisionKeyCheck, gitCheck, workflowText } from "../scripts/doctor.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
@@ -442,4 +442,20 @@ test("doctor: an unknown flag exits 64 naming it before any check; --checkout an
   } finally {
     server.close();
   }
+});
+
+test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decision model's key said with what it turns on (#362)", () => {
+  assert.equal(gitCheck(false, null).status, "FAIL");
+  assert.deepEqual(gitCheck(true, [2, 53, 0]), { name: "git", status: "PASS", detail: "2.53.0", fix: "" });
+  assert.equal(gitCheck(true, [2, 40, 0]).status, "PASS");
+  const old = gitCheck(true, [2, 39, 5]);
+  assert.equal(old.status, "WARN");
+  assert.match(old.detail, /^git 2\.39\.5 is older than 2\.40 .*merge-tree --merge-base/);
+  assert.equal(gitCheck(true, null).status, "WARN");
+  const on = decisionKeyCheck({ inputs: { aiGatewayApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } });
+  assert.equal(on.status, "PASS");
+  assert.match(on.detail, /content check of each send-back's conflict pass/);
+  const off = decisionKeyCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } });
+  assert.equal(off.status, "PASS");
+  assert.match(off.detail, /^off \(no key\): .*matching commits.*a change lost through a rename or a merge, or a commit kept by author, time and subject whose conflict was resolved to the default branch's side, can pass/);
 });

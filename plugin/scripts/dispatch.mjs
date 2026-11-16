@@ -17,7 +17,7 @@ import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, che
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, asksQuestion, missedAnswer, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, START_LOST_MS, REVIEW_LABEL, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseBlockedBy, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, inFlightUntil, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -318,8 +318,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // With a cloud sandbox the launcher does that on the comment's event (launch.mjs): this pass takes an answer whose
   // launch was lost (an event GitHub dropped, a pending launcher a newer one replaced), past a grace for that launch.
   // On every other route (Actions without a sandbox, a local loop) nothing launches on a comment: this pass is the
-  // answer's cue, at the next tick, for a Question asked on the issue (no open PR, or a PR whose body asks no
-  // `QUESTION:`: the plan-time Question). A Question its PR asks waits for the PR's ready mark (review.mjs readyMark).
+  // answer's cue, at the next tick, for a Question asked on the issue: no open PR, or Factory's notice since the
+  // Question names it asked on the issue (logic.mjs questionFormOf; the plan-time Question). A Question its PR asks
+  // waits for the PR's ready mark (review.mjs readyMark): a comment there starts no work beside that mark's review.
   // Only a Question's issue is read here, with conditional reads (`readCache`; GitHub counts no 304).
   const answered = [];
   for (const issue of wanted) {
@@ -336,7 +337,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       retry(`#${issue.number}'s PR`);
       continue;
     }
-    if (!sandbox && pr && asksQuestion(pr.body)) continue;
+    if (!sandbox && pr) {
+      const comments = await listComments(repo, issue.number, cached).catch(() => null);
+      if (!comments) {
+        retry(`#${issue.number}'s comments`);
+        continue;
+      }
+      if (questionFormOf(comments, { issue: issue.number, since: asked }) !== "issue") continue;
+    }
     const decisions = await objectiveDecisions(repo, { issue: issue.number, prNumber: pr?.number ?? null }, cached, { quiet: !sandbox }).catch(() => []);
     const graceMs = sandbox ? RELAUNCH_GRACE_MS : 0;
     if (!missedAnswer(decisions, { questionSince: asked, graceMs })) {

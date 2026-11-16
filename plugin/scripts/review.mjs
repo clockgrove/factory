@@ -88,7 +88,7 @@ import {
 } from "./lib/session.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, objectiveReader, parked, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
-import { asksQuestion, stageSpendLine, usdText } from "./lib/logic.mjs";
+import { asksQuestion, stageSpendLine, stateOf, usdText } from "./lib/logic.mjs";
 
 /** The most of a PR's diff Factory reads from its mirror for the review (comments are fitted to it). */
 const REVIEW_DIFF_BYTES = 256 * 1024 * 1024;
@@ -332,6 +332,18 @@ export function answerScope(comments, protectedList) {
 export function readyMark({ action = null, sender = null, local = false, issue = null, pr = null }) {
   if (action === "ready_for_review") return sender?.type !== "Bot";
   return !!local && !!pr && !pr.draft && (issue?.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === "factory:question");
+}
+
+/**
+ * Why a person's ready mark starts no review, or null: the Objective is Queued or Running (its labels: logic.mjs
+ * stateOf), so a work stage owns factory/<n> or is about to (a maintainer's comment resumed its Question: dispatch.mjs).
+ * Two stages never run on one branch: this one ends quietly, and the work stage's own delivery starts the review. Only a
+ * person's mark: Factory's own review label can come while the worker that applied it is still Running.
+ */
+export function workOwnsBranch({ action = null, sender = null, issue = null }) {
+  if (action !== "ready_for_review" || sender?.type === "Bot" || !issue) return null;
+  const state = stateOf(issue, null);
+  return state === "Queued" || state === "Running" ? `marked ready while the Objective is ${state}: its work stage owns factory/${issue.number}` : null;
 }
 
 /** The worker's prompt for the one pass that answers the review. */
@@ -640,6 +652,12 @@ async function main() {
     log(`#${issue}: ${stopText(stopped, inputs.objectiveLabel)}; no review`);
     await dropLabel();
     await finish("skipped", `the Objective is stopped (${stopText(stopped, inputs.objectiveLabel)})`);
+    return;
+  }
+  const working = workOwnsBranch({ action: eventAction(), sender: eventSender(), issue: issueNow });
+  if (working) {
+    log(`PR #${pr.number} ${working}; no review`);
+    await finish("skipped", working);
     return;
   }
   // The stopped stage's end when the usual one runs out of time (session.mjs stopStage): written at once, its stream

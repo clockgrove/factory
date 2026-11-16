@@ -1,14 +1,17 @@
-// A Question asked on the issue (no PR, or the plan-time Question its PR body does not ask) says "answer in a comment on
-// the issue" (#344). On every route a trusted answer there puts it back in the queue at the next tick: the dispatcher's
-// answered pass, which only the sandbox route ran. Each tick is the real dispatch() against one fake GitHub whose
-// labels, timelines and comments persist between ticks, with ETags, so a read can be conditional.
+// A Question asked on the issue (no PR, or the plan-time Question) says "answer in a comment on the issue" (#344). On
+// every route a trusted answer there puts it back in the queue at the next tick: the dispatcher's answered pass, which
+// only the sandbox route ran. Which form a Question has is the one decision applyExit makes (logic.mjs questionForm):
+// its notice's text and marker, and so whether a comment alone resumes it. Each Question here is asked by the real
+// applyExit and each tick is the real dispatch(), against one fake GitHub whose labels, timelines and comments persist
+// between ticks, with ETags, so a read can be conditional.
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { asksQuestion, marker, setSelf } from "../scripts/lib/logic.mjs";
-import { questionNotice } from "../scripts/lib/session.mjs";
+import { asksQuestion, missedAnswer, questionForm, questionFormOf, questionMarker, setSelf } from "../scripts/lib/logic.mjs";
+import { applyExit, questionNotice } from "../scripts/lib/session.mjs";
+import { workOwnsBranch } from "../scripts/review.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -20,25 +23,26 @@ const OBJ = "factory:objective";
 const MIN = 60_000;
 
 /**
- * One repository: Objectives asked a Question `asked` ago (its factory:question label), each with an optional open PR
- * on factory/<n> (`pr`: its body). Pages carry an ETag; a request whose If-None-Match matches gets a 304.
+ * One repository: Objectives, each with an optional open draft PR on factory/<n> (`pr`: its body). `asked`: the
+ * Question asked that long ago, its issue-form notice with it (else ask() asks one through applyExit). Pages carry an
+ * ETag; a request whose If-None-Match matches gets a 304.
  */
 function fakeGitHub(open, { self = BOT } = {}) {
   let last = 0;
   const stamp = () => new Date((last = Math.max(Date.now(), last + 1))).toISOString();
   const issues = new Map();
   let ids = 1000;
-  for (const { number, labels = [OBJ, "factory:question"], asked = 30 * MIN, pr = null } of open) {
-    const at = new Date(Date.now() - asked).toISOString();
+  for (const { number, asked = null, pr = null } of open) {
+    const labels = asked === null ? [OBJ] : [OBJ, "factory:question"];
+    const at = new Date(Date.now() - (asked ?? 60 * MIN)).toISOString();
     issues.set(number, {
       issue: { number, state: "open", body: "", user: PERSON, labels: [...labels] },
       timeline: [
         { event: "labeled", label: { name: OBJ }, actor: PERSON, created_at: new Date(Date.parse(at) - 20 * MIN).toISOString() },
         ...labels.filter((l) => l !== OBJ).map((name) => ({ event: "labeled", label: { name }, actor: self, created_at: at })),
       ],
-      // Factory's own Question notice, made as the Question was asked.
-      comments: [{ id: (ids += 1), user: self, body: `${marker(number, "question", "work:1")}\nQuestion (work): which one? Answer in a comment on the issue.`, created_at: at, updated_at: at }],
-      pr: pr === null ? null : { number: number * 10, state: "open", draft: true, body: pr, head: { ref: `factory/${number}` }, labels: [] },
+      comments: asked === null ? [] : [{ id: (ids += 1), user: self, body: `${questionMarker(number, { stage: "work", runId: "1", form: "issue" })}\nQuestion (work): which one?`, created_at: at, updated_at: at }],
+      pr: pr === null ? null : { number: number * 10, node_id: `PR_${number}`, state: "open", draft: true, body: pr, head: { ref: `factory/${number}` }, labels: [], user: self },
     });
   }
   const reads = [];
@@ -91,6 +95,11 @@ function fakeGitHub(open, { self = BOT } = {}) {
       const prs = [...issues.values()].map((i) => i.pr).filter(Boolean);
       return json(head ? prs.filter((p) => `acme:${p.head.ref}` === head) : prs);
     }
+    const onePr = /^\/pulls\/(\d+)$/.exec(path);
+    if (method === "GET" && onePr) {
+      const p = [...issues.values()].map((i) => i.pr).find((x) => x?.number === Number(onePr[1]));
+      return p ? json(p) : json({ message: "Not Found" }, 404);
+    }
     if (method === "GET" && /^\/(issues|pulls)\/\d+\/(comments|reviews)$/.test(path)) return json([]);
     if (method === "GET" && path === "/collaborators") return json([{ login: PERSON.login }]);
     if (method === "GET" && /^\/collaborators\/[^/]+\/permission$/.test(path)) return json({ permission: "read" });
@@ -103,12 +112,30 @@ function fakeGitHub(open, { self = BOT } = {}) {
     fetch,
     reads,
     labels: (n) => [...issues.get(n).issue.labels].sort(),
-    /** A comment on the issue, `ago` ms back (0: now). */
+    pr: (n) => issues.get(n).pr,
+    /** A comment on the issue, `ago` ms back (0: now, after every write so far). */
     comment(n, user, text, ago = 0) {
-      const at = new Date(Date.now() - ago).toISOString();
+      const at = ago ? new Date(Date.now() - ago).toISOString() : stamp();
       issues.get(n).comments.push({ id: (ids += 1), user, body: text, created_at: at, updated_at: at });
     },
   };
+}
+
+/** A stage's Question exit on `gh`, as the worker applies it (session.mjs applyExit): its PR, if any, and its form. */
+async function ask(gh, n, { askOnIssue = false, pr = null, self = BOT } = {}) {
+  const realFetch = globalThis.fetch;
+  const saved = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  globalThis.fetch = gh.fetch;
+  setSelf(self.login);
+  try {
+    await applyExit(REPO, { issue: n, pr, exit: "question", reason: "question: which one?", notify: "kirk", stage: "work", askOnIssue }, { token: "t" });
+  } finally {
+    globalThis.fetch = realFetch;
+    setSelf(null);
+    if (saved === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved;
+  }
 }
 
 /** One dispatcher tick on `gh`: the Action's route, or a local loop's (`local`, where Factory posts as the person). */
@@ -136,18 +163,36 @@ async function tick(gh, { local = false, sandbox = undefined, localStopped = {},
   }
 }
 
-test("the notice a Question with no PR posts tells the person to answer in a comment on the issue", () => {
+const PR_BODY = "## Assumptions\n- the simplest reading";
+
+test("one decision, questionForm, picks the notice's instruction and its marker; questionFormOf reads Factory's latest since the Question", () => {
+  const pr = { number: 70 };
+  assert.equal(questionForm({ pr: null }), "issue");
+  assert.equal(questionForm({ pr, askOnIssue: true }), "issue");
+  assert.equal(questionForm({ pr }), "pr");
   assert.match(questionNotice({ stage: "work", reason: "question: which one?" }), /Answer in a comment on the issue\.$/);
-  assert.match(questionNotice({ stage: "work", reason: "which one?", pr: { number: 70 }, askOnIssue: true }), /answer here on the issue, not by marking it ready/);
+  assert.match(questionNotice({ stage: "work", reason: "which one?", pr, askOnIssue: true }), /answer here on the issue, not by marking it ready/);
+  assert.match(questionNotice({ stage: "work", reason: "which one?", pr }), /Answer in a comment on the issue or the PR, then mark the PR ready\.$/);
   assert.equal(asksQuestion("## Assumptions\n- QUESTION: which one?"), true);
-  assert.equal(asksQuestion("## Assumptions\n- the simplest reading"), false);
+  assert.equal(asksQuestion(PR_BODY), false);
+
+  const since = "2026-11-15T10:00:00Z";
+  const notice = (form, at, user = BOT) => ({ user, body: `${questionMarker(7, { stage: "work", runId: "9-1", form })}\nQuestion`, created_at: at, updated_at: at });
+  assert.equal(questionFormOf([notice("issue", "2026-11-15T10:00:00Z")], { issue: 7, since }), "issue", "posted with the label's second");
+  assert.equal(questionFormOf([notice("issue", "2026-11-15T09:00:00Z")], { issue: 7, since }), null, "an earlier Question's notice");
+  assert.equal(questionFormOf([notice("issue", "2026-11-15T10:01:00Z"), notice("pr", "2026-11-15T10:02:00Z")], { issue: 7, since }), "pr", "the latest counts");
+  assert.equal(questionFormOf([notice("issue", "2026-11-15T10:01:00Z", STRANGER)], { issue: 7, since }), null, "a stranger's pasted marker");
+  assert.equal(questionFormOf([{ ...notice("issue", "2026-11-15T10:01:00Z"), body: "<!-- factory:7:question:work:1 -->\nQuestion" }], { issue: 7, since }), null, "a notice with no form");
+  // With no grace, an answer whose GitHub time is ahead of this machine's clock still counts.
+  assert.ok(missedAnswer([{ created_at: "2026-11-15T10:05:00Z" }], { questionSince: since, now: Date.parse("2026-11-15T10:04:00Z"), graceMs: 0 }));
 });
 
 test("Actions without a sandbox: a maintainer's comment after an issue Question requeues it at the next tick; Factory's own, a stranger's or an earlier one does not", async () => {
   const gh = fakeGitHub([{ number: 7 }]);
   gh.comment(7, PERSON, "an earlier thought, before the Question", 40 * MIN);
-  gh.comment(7, STRANGER, "use the second one", 5 * MIN);
-  gh.comment(7, BOT, `${marker(7, "progress", "1")}\nFactory's progress`, 4 * MIN);
+  await ask(gh, 7);
+  gh.comment(7, STRANGER, "use the second one");
+  gh.comment(7, BOT, "<!-- factory:7:progress:1 -->\nFactory's progress");
   const before = await tick(gh);
   assert.deepEqual(before.answered, [], "no trusted answer since the Question");
   assert.deepEqual(gh.labels(7), [OBJ, "factory:question"].sort());
@@ -159,22 +204,35 @@ test("Actions without a sandbox: a maintainer's comment after an issue Question 
   assert.ok(!gh.labels(7).includes("factory:question"), "no longer a Question");
 });
 
-test("Actions without a sandbox: a Question its PR asks waits for the ready mark; one asked on the issue with a PR (plan time) resumes on the comment", async () => {
+test("Actions without a sandbox: a Question its PR asks waits for the ready mark, even with no QUESTION: line in the body; a plan-time Question with a PR resumes on the comment", async () => {
   const gh = fakeGitHub([
-    { number: 8, pr: "## Assumptions\n- QUESTION: change the exported type?" },
-    { number: 9, pr: "## Assumptions\n- the simplest reading" },
+    { number: 8, pr: PR_BODY },
+    { number: 9, pr: PR_BODY },
   ]);
+  // The same PR body, no QUESTION: line in either: only the Question's form tells them apart.
+  await ask(gh, 8, { pr: gh.pr(8) });
+  await ask(gh, 9, { pr: gh.pr(9), askOnIssue: true });
   gh.comment(8, PERSON, "yes, change it");
   gh.comment(9, PERSON, "do it in this repository alone");
   const r = await tick(gh);
   assert.deepEqual(r.answered, [9]);
   assert.ok(gh.labels(8).includes("factory:question"), "the PR's Question waits for the PR to be marked ready");
   assert.ok(!gh.labels(9).includes("factory:question"));
+
+  // An earlier Question asked on the issue, answered, then a Question the PR asks: the old notice does not count.
+  const later = fakeGitHub([{ number: 10, pr: PR_BODY }]);
+  await ask(later, 10, { pr: later.pr(10), askOnIssue: true });
+  later.comment(10, PERSON, "do it here");
+  assert.deepEqual((await tick(later)).answered, [10]);
+  await ask(later, 10, { pr: later.pr(10) });
+  later.comment(10, PERSON, "yes, change it");
+  assert.deepEqual((await tick(later)).answered, [], "the PR's Question waits for its ready mark");
 });
 
 test("local loop: Factory's own comments, posted as the person's login, never answer; the person's answer releases the stop and requeues it", async () => {
   const gh = fakeGitHub([{ number: 7 }], { self: PERSON });
-  gh.comment(7, PERSON, `${marker(7, "progress", "1")}\nFactory's progress, as the person's login`, 2 * MIN);
+  await ask(gh, 7, { self: PERSON });
+  gh.comment(7, PERSON, "<!-- factory:7:progress:1 -->\nFactory's progress, as the person's login");
   const stopped = { 7: "its stage here ended with a Question" };
   const held = await tick(gh, { local: true, localStopped: stopped });
   assert.deepEqual([held.answered, held.released, held.ready], [[], [], []]);
@@ -191,7 +249,8 @@ test("local loop: Factory's own comments, posted as the person's login, never an
 });
 
 test("a kept read cache makes the next tick's Question reads conditional (GitHub counts no 304)", async () => {
-  const gh = fakeGitHub([{ number: 7 }]);
+  const gh = fakeGitHub([{ number: 7, pr: PR_BODY }]);
+  await ask(gh, 7, { pr: gh.pr(7), askOnIssue: true });
   const readCache = new Map();
   await tick(gh, { readCache });
   const first = gh.reads.length;
@@ -202,7 +261,7 @@ test("a kept read cache makes the next tick's Question reads conditional (GitHub
 });
 
 test("the sandbox route keeps its rule: any Question a maintainer answered past the launch's grace is requeued, its PR's too", async () => {
-  const gh = fakeGitHub([{ number: 8, pr: "## Assumptions\n- QUESTION: change the exported type?" }]);
+  const gh = fakeGitHub([{ number: 8, asked: 30 * MIN, pr: "## Assumptions\n- QUESTION: change the exported type?" }]);
   gh.comment(8, PERSON, "yes, change it", 1 * MIN);
   const young = await tick(gh, { sandbox: "vercel" });
   assert.deepEqual(young.answered, [], "within the grace the comment's own launch is due first");
@@ -210,4 +269,15 @@ test("the sandbox route keeps its rule: any Question a maintainer answered past 
   gh.comment(8, PERSON, "and keep the old name as an alias", 10 * MIN);
   const r = await tick(gh, { sandbox: "vercel" });
   assert.deepEqual(r.answered, [8]);
+});
+
+test("review: a person's ready mark while the Objective is Queued or Running starts no review; a Question's, an In-review one's or Factory's own does", () => {
+  const issue = (...labels) => ({ number: 7, labels: [OBJ, ...labels].map((name) => ({ name })) });
+  const ready = { action: "ready_for_review", sender: PERSON };
+  assert.match(workOwnsBranch({ ...ready, issue: issue("factory:running") }), /Running: its work stage owns factory\/7/);
+  assert.match(workOwnsBranch({ ...ready, issue: issue() }), /Queued/);
+  assert.equal(workOwnsBranch({ ...ready, issue: issue("factory:question") }), null, "the answer to a Question");
+  assert.equal(workOwnsBranch({ ...ready, issue: issue("factory:in-review") }), null);
+  assert.equal(workOwnsBranch({ action: "ready_for_review", sender: BOT, issue: issue("factory:running") }), null, "Factory's own mark");
+  assert.equal(workOwnsBranch({ action: null, issue: issue("factory:running") }), null, "the review label the worker applies while it is still Running");
 });

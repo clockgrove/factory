@@ -22,16 +22,19 @@ const CI = "jobs:\n  quality:\n    name: quality\n    runs-on: ubuntu-latest\n";
  * workflow files at the head by path; `jobs` Actions jobs by id; `older` an older commit's check runs by name and
  * `suites` the workflow run of a check suite.
  */
-async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs = {}, older = {}, suites = {}, workflows = null, prFiles = null }, fn) {
+async function withGitHub({ checkRuns = [], workflowRuns = [], files = {}, jobs = {}, older = {}, suites = {}, workflows = null, prFiles = null, routes = null }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   const reads = { checks: 0, runs: 0, contents: 0 };
   const at = (v, n) => (typeof v === "function" ? v(n) : v);
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname;
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    // `routes(path, url, reads, init)`: a test's own answers (a body; undefined for none), asked first.
+    const own = routes?.(p, u, reads, init);
+    if (own !== undefined) return json(own);
     if (p === `/repos/${REPO.full}/commits/${SHA}/check-runs`) {
       const runs = at(checkRuns, (reads.checks += 1));
       // null: this read fails on GitHub's side.
@@ -81,7 +84,7 @@ async function loop(github, { checks = {}, deadlineMs = 30_000, triage = null } 
       taskCard: "",
       env: process.env,
       deadlineAt: Date.now() + deadlineMs,
-      checks: { repo: REPO, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, maxPollMs: 4, timeoutMs: 20, stuckWaitMs: 40, guardMs: 0, ...checks },
+      checks: { repo: REPO, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks },
       outbox: { push: async () => true, expected: () => SHA },
       onPhase: async (l) => phases.push(l),
       ...(triage ? { triage } : {}),
@@ -206,7 +209,7 @@ test("filterSkips: paths runs on a match (a ! pattern excludes again), paths-ign
   assert.equal(filterSkips(paths(["src/**"]), null), null, "files unknown");
 });
 
-test("a check that starts during the wait and is still running at its cap gets the checks' normal timeout", async () => {
+test("a check that starts during the wait and is still running at its cap is waited for as usual", async () => {
   const inProgress = [{ id: 3, name: "quality", status: "in_progress", conclusion: null, check_suite: { id: 9 }, started_at: new Date().toISOString() }];
   const green = [{ ...inProgress[0], status: "completed", conclusion: "success" }];
   let classified = 0;
@@ -293,13 +296,13 @@ test("a failed read of the check runs keeps the last good reading: the wait goes
   // Reads 2 and 3 of the wait fail (past appearMs, 0 here), each through every one of the client's tries (#168), so the
   // failure reaches the wait rather than being hidden by a retry; read 4 sees the check finish green.
   const T = RETRY.tries;
-  const { result, checkReads } = await loop({ checkRuns: (n) => (n === 1 ? running : n <= 1 + 2 * T ? null : green), workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 5000 } });
+  const { result, checkReads } = await loop({ checkRuns: (n) => (n === 1 ? running : n <= 1 + 2 * T ? null : green), workflowRuns: [ciRun({ status: "in_progress" })], files });
   assert.equal(result.green, true, "the run was still going: a failed read is no proof that nothing ran");
   assert.equal(result.passes, 1);
   assert.equal(checkReads, 2 + 2 * T, "two whole failed reads, then the green one");
   // No read has succeeded since the wait began: it ends at appearMs as for nothing ran, never at the full timeout.
   const t0 = Date.now();
-  const failing = await loop({ checkRuns: () => null, workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { timeoutMs: 60_000, stuckWaitMs: 0 } });
+  const failing = await loop({ checkRuns: () => null, workflowRuns: [ciRun({ status: "in_progress" })], files }, { checks: { stuckWaitMs: 0 } });
   assert.ok(Date.now() - t0 < 5000, "it did not wait to the timeout");
   assert.equal(failing.result.green, false);
   assert.ok(failing.result.stuck, "Blocked as a wait with nothing failed");
@@ -326,12 +329,12 @@ test("a run that ended before its jobs is known as soon as every run on the head
   const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success", check_suite: { id: 10 }, started_at: ago(2) }];
   const runs = [ciRun({ status: "completed", conclusion: "startup_failure" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "success" })];
   const t0 = Date.now();
-  const { result } = await loop({ checkRuns: lint, workflowRuns: runs, files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 60_000 } });
+  const { result } = await loop({ checkRuns: lint, workflowRuns: runs, files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] });
   assert.ok(Date.now() - t0 < 5000, "the wait ended once every run had completed");
   assert.equal(result.stuck.kind, "ended");
   assert.equal(result.stuck.cause, "setup");
-  // A run still going is not that: the wait goes on (to its timeout here).
-  const going = await loop({ checkRuns: lint, workflowRuns: [runs[0], { ...runs[1], status: "in_progress", conclusion: null }], files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] }, { checks: { timeoutMs: 50 } });
+  // A run still going is not that: the wait goes on (to the not-started bound here, nothing required running).
+  const going = await loop({ checkRuns: lint, workflowRuns: [runs[0], { ...runs[1], status: "in_progress", conclusion: null }], files, workflows: [{ id: 5, path: ".github/workflows/ci.yml", state: "active" }] });
   assert.ok(going.checkReads > 2, "it kept reading");
 });
 
@@ -342,13 +345,304 @@ test("an unrelated run cancelled, or a producing run cancelled after its jobs st
   const quality = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2) }];
   const runs = [ciRun({ status: "completed", conclusion: "success" }), ciRun({ id: 78, name: "Lint", workflow_id: 6, path: ".github/workflows/lint.yml", check_suite_id: 10, status: "completed", conclusion: "cancelled" })];
   const t0 = Date.now();
-  const outside = await loop({ checkRuns: quality, workflowRuns: runs, files, workflows }, { checks: { names: ["quality", "outside/check"], timeoutMs: 300, stuckWaitMs: 0 } });
-  assert.ok(Date.now() - t0 >= 300, "the wait went on to its timeout");
+  const outside = await loop({ checkRuns: quality, workflowRuns: runs, files, workflows }, { checks: { names: ["quality", "outside/check"], stuckWaitMs: 300 } });
+  assert.ok(Date.now() - t0 >= 300, "the wait went on to the not-started bound");
   assert.notEqual(outside.result.stuck?.kind, "ended");
   // quality's own run cancelled after a job of it ran (a check run in its suite): not before its jobs, so not `ended`.
   const build = [{ id: 4, name: "build", status: "completed", conclusion: "cancelled", check_suite: { id: 9 }, started_at: ago(2) }];
   const t1 = Date.now();
-  const late = await loop({ checkRuns: build, workflowRuns: [ciRun({ status: "completed", conclusion: "cancelled" })], files, workflows }, { checks: { timeoutMs: 300, stuckWaitMs: 0 } });
-  assert.ok(Date.now() - t1 >= 300, "the wait went on to its timeout");
+  const late = await loop({ checkRuns: build, workflowRuns: [ciRun({ status: "completed", conclusion: "cancelled" })], files, workflows }, { checks: { stuckWaitMs: 300 } });
+  assert.ok(Date.now() - t1 >= 300, "the wait went on to the not-started bound");
   assert.notEqual(late.result.stuck?.kind, "ended");
+});
+
+// ------------------------------------------------------------------ #401: progress decides, not a hidden 60 minutes
+
+const ACTIONS = { id: 15368, slug: "github-actions" };
+
+/**
+ * One validation loop on GitHub's virtual clock, with production's bounds (no injected wait caps): read n of the head's
+ * check runs is n minutes after `t0` and answers `at(n)`, so a wait of hours takes milliseconds. `routes` are the
+ * test's own answers; `calls` counts every request by path.
+ */
+async function virtual({ t0 = Date.now(), at, workflowRuns = [ciRun({ status: "in_progress" })], files: f = files, workflows = null, routes = null, stageMin = 300, checks = {}, triage = null }) {
+  const realNow = Date.now;
+  let clock = t0;
+  Date.now = () => clock;
+  const calls = new Map();
+  const own = (p, u, reads, init) => {
+    calls.set(p, (calls.get(p) || 0) + 1);
+    return routes?.(p, u, reads, init);
+  };
+  try {
+    const r = await loop({ checkRuns: (n) => ((clock = t0 + n * min), at(n)), workflowRuns, files: f, workflows, routes: own }, { checks: { stuckWaitMs: undefined, guardMs: undefined, ...checks }, deadlineMs: stageMin * min, triage });
+    return { ...r, minutes: (clock - t0) / min, calls };
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+/** The default branch's rulesets: the merge queue's check timeout (`timeoutMin`) and the app each required check is bound to (`bound`). */
+const rulesets = ({ timeoutMin = null, bound = null } = {}) => (p) => {
+  if (p === `/repos/${REPO.full}/rulesets`) return timeoutMin || bound ? [{ id: 1, target: "branch", enforcement: "active" }] : [];
+  if (p === `/repos/${REPO.full}/rulesets/1`) {
+    const rules = [];
+    if (timeoutMin) rules.push({ type: "merge_queue", parameters: { check_response_timeout_minutes: timeoutMin } });
+    if (bound) rules.push({ type: "required_status_checks", parameters: { required_status_checks: Object.entries(bound).map(([context, id]) => ({ context, integration_id: id })) } });
+    return { conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules };
+  }
+  return undefined;
+};
+
+/**
+ * A required check `quality` running one long step: `stepMin` is that step's duration in the workflow's recent green runs
+ * (none: no history), `doneAt` the minute it completes green (never: null), `timeoutMin` the merge queue rule's
+ * check_response_timeout_minutes (none: no ruleset), `comments` the PR's. Returns the loop's result, the Actions job
+ * reads and the comments posted.
+ */
+async function running({ step = "Run npm test", stepMin = null, doneAt = null, timeoutMin = null, stageMin = 300, comments = [], red = null }) {
+  const t0 = Date.now();
+  const at = (m) => new Date(t0 + m * min).toISOString();
+  const run = { id: 2, name: "quality", status: "in_progress", conclusion: null, check_suite: { id: 9 }, started_at: at(0), app: ACTIONS };
+  const job = { id: 2, run_id: 42, name: "quality", workflow_name: "CI", status: "in_progress", started_at: at(0), runner_id: 4, runner_name: "r4", steps: [{ name: "Set up job", status: "completed", started_at: at(0), completed_at: at(0) }, { name: step, status: "in_progress", started_at: at(0), completed_at: null }] };
+  const green = (k) => ({ id: 100 + k, name: "quality", steps: [{ name: step, status: "completed", conclusion: "success", started_at: at(-1000), completed_at: at(-1000 + stepMin) }] });
+  let jobReads = 0;
+  const posted = [];
+  const rules = rulesets({ timeoutMin });
+  const routes = (p, u, reads, init) => {
+    if (p === `/repos/${REPO.full}/actions/jobs/2`) return (jobReads += 1), job;
+    if (p === `/repos/${REPO.full}/actions/runs/42`) return { id: 42, workflow_id: 5 };
+    if (p === `/repos/${REPO.full}/actions/workflows/5/runs`) return { workflow_runs: stepMin === null ? [] : Array.from({ length: 5 }, (_, k) => ({ id: 100 + k, event: "push", head_branch: "main" })) };
+    const m = /\/actions\/runs\/(1\d\d)\/jobs$/.exec(p);
+    if (m) return { jobs: [green(Number(m[1]) - 100)] };
+    if (p === `/repos/${REPO.full}/issues/5/comments`) return init.method === "POST" ? (posted.push(JSON.parse(init.body).body), {}) : comments;
+    return rules(p);
+  };
+  // `red`: the head's earlier red run, which triage reruns (its id ignored after); the running check is the rerun's.
+  let rerun = !red;
+  const triage = red ? { red: async () => ((rerun = true), { rerun: true, ignoreIds: new Set([red.id]), jobs: ["quality"] }) } : null;
+  const now = (n) => (doneAt !== null && n >= doneAt ? [{ ...run, status: "completed", conclusion: "success" }] : [run]);
+  const r = await virtual({ t0, at: (n) => (rerun ? [...(red ? [red] : []), ...now(n)] : [red]), routes, stageMin, triage });
+  return { ...r, jobReads, posted };
+}
+
+test("a required check whose step is within its usual duration is waited for past an hour, and goes green", async () => {
+  // Tests normally take 80 minutes: at 90 that is progress, not a hang, whatever the time since the push.
+  const { result, jobReads } = await running({ stepMin: 80, doneAt: 90 });
+  assert.equal(result.green, true, result.stuck?.reason);
+  assert.equal(result.passes, 1);
+  // Not read before 15 minutes, then once each 15 minutes (16, 31, 46, 61, 76): the step it is on could not stall sooner.
+  assert.equal(jobReads, 5);
+});
+
+test("a required check whose step runs past its usual duration has hung: the wait ends there, as at a timeout, naming the step and the way past it", async () => {
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const { noProgressMarker } = await import("../scripts/lib/session.mjs");
+  setSelf("factory-app[bot]");
+  // Set-up normally takes 1 minute: past max(3 x 1, 1 + 15) = 16 it has hung, long before any hour.
+  const { result, minutes, posted } = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40 });
+  assert.equal(result.harness, undefined, "no fix pass: nothing failed");
+  assert.equal(result.passes, 0);
+  assert.equal(minutes, 17);
+  assert.equal(result.stuck.kind, "running");
+  assert.equal(result.stuck.reason, "no progress: `quality` / `Run scripts/ci/setup.sh` running 17 min, normally ~1 min; required check(s) quality not finished on aaaaaaa after 17 min: CI (run 77) still in progress; no failing run to fix; when this change makes that step slower, re-apply the Objective's label: aaaaaaa is then waited for up to the stage's wall clock");
+  assert.equal(posted.length, 1);
+  assert.ok(posted[0].startsWith(noProgressMarker(4, SHA)), posted[0]);
+  // The label re-applied: the next stage on that head has no hang judgement, and the slower step goes green at 40.
+  const again = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40, comments: [{ id: 1, user: { login: "factory-app[bot]" }, body: posted[0] }] });
+  assert.equal(again.result.green, true, again.result.stuck?.reason);
+  assert.equal(again.minutes, 40);
+  // A person's own pasted marker, someone who cannot push, is no answer.
+  const pasted = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, doneAt: 40, comments: [{ id: 1, user: { login: "drive-by" }, author_association: "NONE", body: posted[0] }] });
+  assert.equal(pasted.minutes, 17);
+  setSelf(null);
+});
+
+test("a no-progress Block after a triage rerun records its waiver too", async () => {
+  const { setSelf } = await import("../scripts/lib/logic.mjs");
+  const { noProgressMarker } = await import("../scripts/lib/session.mjs");
+  setSelf("factory-app[bot]");
+  const red = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: ago(10), completed_at: ago(5), app: ACTIONS };
+  const { result, posted } = await running({ step: "Run scripts/ci/setup.sh", stepMin: 1, red });
+  setSelf(null);
+  assert.match(result.stuck?.reason || "", /^no progress: .*re-apply the Objective's label/);
+  assert.equal(posted.length, 1);
+  assert.ok(posted[0].startsWith(noProgressMarker(4, SHA)), posted[0]);
+});
+
+test("a required check with no history waits up to the merge queue rule's check timeout, else the stage's wall clock", async () => {
+  const ruled = await running({ timeoutMin: 30 });
+  assert.equal(ruled.minutes, 31);
+  assert.match(ruled.result.stuck.reason, /^no progress: `quality` \/ `Run npm test` running 31 min; required check\(s\) quality not finished/);
+  // No such rule: only the stage's wall clock bounds it, so a long run with no history goes green.
+  const unruled = await running({ doneAt: 120 });
+  assert.equal(unruled.result.green, true, unruled.result.stuck?.reason);
+  // And at the wall clock it ends unfinished.
+  const clocked = await running({ stageMin: 100 });
+  assert.equal(clocked.result.stuck.kind, "running");
+  assert.equal(clocked.minutes, 101);
+  assert.doesNotMatch(clocked.result.stuck.reason, /^no progress/);
+});
+
+test("on the local route no Actions job is read: a running required check is judged by the time bound only", async () => {
+  const before = process.env.FACTORY_LOCAL;
+  process.env.FACTORY_LOCAL = "1";
+  try {
+    const { result, jobReads, minutes } = await running({ stepMin: 80, doneAt: 90, timeoutMin: 30 });
+    assert.equal(jobReads, 0);
+    assert.equal(minutes, 31);
+    assert.match(result.stuck.reason, /^no progress: `quality` running 31 min; /);
+  } finally {
+    if (before === undefined) delete process.env.FACTORY_LOCAL;
+    else process.env.FACTORY_LOCAL = before;
+  }
+});
+
+test("a required check queued with no runner keeps the not-started bound, never the stage's wall clock", async () => {
+  const queued = [{ id: 2, name: "quality", status: "queued", conclusion: null, check_suite: { id: 9 }, started_at: null, app: ACTIONS }];
+  const routes = (p) => (p === `/repos/${REPO.full}/actions/jobs/2` ? { id: 2, status: "queued", runner_id: 0, runner_name: "" } : undefined);
+  // 60 minutes with nothing running, then up to 60 more for it to start: as on main, not the 300-minute stage.
+  const { result, minutes } = await virtual({ at: () => queued, routes });
+  assert.equal(minutes, 122);
+  assert.equal(result.stuck.kind, "not-started");
+  assert.match(result.stuck.reason, /^GitHub has not started the required check\(s\) quality on a{7}: quality queued with no runner in workflow run CI \(run 77\)/);
+});
+
+// A head on which CI ran and finished green: its job is `lint`, so the required `quality` is a name nothing produces.
+const lint = [{ id: 8, name: "lint", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2), app: ACTIONS }];
+const lintOnly = { ".github/workflows/ci.yml": "jobs:\n  lint:\n    runs-on: x\n" };
+const suitesRoute = (suites) => (p) => (p === `/repos/${REPO.full}/commits/${SHA}/check-suites` ? { total_count: suites.length, check_suites: suites } : undefined);
+const actionsSuite = { id: 9, app: { id: 15368 }, status: "completed", latest_check_runs_count: 1 };
+// Apps that leave a suite queued with no runs on every head (as on clockgrove/factory).
+const stale = [1, 2, 3].map((k) => ({ id: 20 + k, app: { id: 900 + k }, status: "queued", latest_check_runs_count: 0 }));
+const both = (...fs) => (p, u, reads, init) => fs.reduce((v, f) => (v !== undefined ? v : f(p, u, reads, init)), undefined);
+const completedCi = [ciRun({ status: "completed", conclusion: "success" })];
+
+test("a required check no workflow produces Blocks as soon as every workflow run on the head completed, unless another app may still report it", async () => {
+  const wrong = await loop({ checkRuns: lint, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: suitesRoute([actionsSuite]) });
+  assert.equal(wrong.checkReads, 1, "the wait ended at the first reading");
+  assert.equal(wrong.result.harness, undefined, "no fix pass");
+  assert.equal(wrong.result.stuck.kind, "unreported");
+  assert.equal(wrong.result.stuck.reason, "required check(s) quality never reported on aaaaaaa: no workflow run on it produces it (CI (run 77) completed success); check the required check names; no failing run to fix");
+  // Another app's check suite still going may report it: the wait goes on, to the not-started bound.
+  const outside = await loop({ checkRuns: lint, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: suitesRoute([actionsSuite, { id: 12, app: { id: 999 }, status: "queued", latest_check_runs_count: 0 }]) });
+  assert.ok(outside.checkReads > 2, "it kept reading");
+});
+
+test("a required check the ruleset binds to Actions ignores other apps' stale suites; unbound, they hold it to the not-started bound only", async () => {
+  const bound = await loop({ checkRuns: lint, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: both(suitesRoute([actionsSuite, ...stale]), rulesets({ bound: { quality: 15368 } })) });
+  assert.equal(bound.checkReads, 1);
+  assert.equal(bound.result.stuck.kind, "unreported");
+  // Bound to any app: the stale suites may report it, so the wait goes to 60 minutes with nothing running, not the stage's 300.
+  const unbound = await virtual({ at: () => lint, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: suitesRoute([actionsSuite, ...stale]) });
+  assert.equal(unbound.minutes, 61);
+  assert.equal(unbound.result.stuck.kind, "unreported");
+  // Its suites read every poll, but it is classified only when the runs or the suites read differently: once here, and
+  // once for the Block.
+  assert.equal(unbound.calls.get(`/repos/${REPO.full}/commits/${SHA}/check-suites`), 61);
+  assert.ok((unbound.calls.get(`/repos/${REPO.full}/actions/workflows`) || 0) <= 1, `${unbound.calls.get(`/repos/${REPO.full}/actions/workflows`)} workflow list reads`);
+});
+
+test("a required commit status a service posts after CI completed is waited for, not Blocked as a wrong name", async () => {
+  // Codecov's way: `coverage` is a commit status, posted on older commits; here it arrives at minute 3, after CI completed.
+  const quality = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2), app: ACTIONS }];
+  let n = 0;
+  const status = (p) => {
+    if (p === `/repos/${REPO.full}/commits/${SHA}/status`) return { statuses: n >= 3 ? [{ id: 60, context: "coverage", state: "success", created_at: ago(0) }] : [] };
+    if (p === `/repos/${REPO.full}/commits/${OLD}/status`) return { statuses: [{ id: 59, context: "coverage", state: "success", created_at: ago(600) }] };
+    return undefined;
+  };
+  const r = await virtual({ at: (k) => ((n = k), quality), workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: both(status, suitesRoute([actionsSuite])), checks: { names: ["quality", "coverage"] } });
+  assert.equal(r.result.green, true, r.result.stuck?.reason);
+  assert.equal(r.minutes, 3);
+  // Never posted: after the not-started bounds it Blocks naming the service, never as a wrong name.
+  const never = await virtual({ at: () => quality, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: both((p) => (p === `/repos/${REPO.full}/commits/${OLD}/status` ? status(p) : undefined), suitesRoute([actionsSuite])), checks: { names: ["quality", "coverage"] } });
+  assert.equal(never.result.stuck.kind, "not-started");
+  assert.match(never.result.stuck.reason, /^the service posting it has not started the required check\(s\) coverage on a{7}: coverage is a commit status earlier commits got, not posted on this head yet/);
+});
+
+test("a required check the ruleset binds to another app never ends the wait early, its suite done or not", async () => {
+  const done = { id: 30, app: { id: 999 }, status: "completed", latest_check_runs_count: 1 };
+  const r = await virtual({ at: () => lint, workflowRuns: completedCi, files: lintOnly, workflows: oneWorkflow, routes: both(suitesRoute([actionsSuite, done]), rulesets({ bound: { quality: 999 } })) });
+  assert.equal(r.minutes, 61);
+  assert.equal(r.result.stuck.kind, "unreported");
+  assert.equal(r.calls.get(`/repos/${REPO.full}/commits/${SHA}/check-suites`) ?? 0, 0, "its suites are not read");
+});
+
+test("a check an `on: workflow_run` workflow may post is never Blocked as a wrong name at once: it gets the not-started bound", async () => {
+  const chained = { ...lintOnly, ".github/workflows/post.yml": "on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\njobs:\n  report:\n    runs-on: x\n    steps:\n      - run: ./post-status\n" };
+  const workflows = [...oneWorkflow, { id: 6, path: ".github/workflows/post.yml", state: "active" }];
+  const r = await virtual({ at: () => lint, workflowRuns: completedCi, files: chained, workflows, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(r.minutes, 61);
+  assert.equal(r.result.stuck.kind, "unreported");
+  // Classified once while it waited (the runs never changed), once for the Block.
+  assert.equal(r.calls.get(`/repos/${REPO.full}/actions/workflows`), 2);
+});
+
+test("a workflow file that cannot be read is no evidence against an `on: workflow_run` producer: no early end, the not-started bound", async () => {
+  // post.yml is listed but its read fails (404 here): it may post the check after the others completed.
+  const workflows = [...oneWorkflow, { id: 6, path: ".github/workflows/post.yml", state: "active" }];
+  const r = await virtual({ at: () => lint, workflowRuns: completedCi, files: lintOnly, workflows, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(r.minutes, 61);
+  assert.equal(r.result.stuck.kind, "unreported");
+});
+
+test("a reusable workflow called through `uses: ./…` that cannot be read is no evidence either: no early end, the not-started bound", async () => {
+  // ci.yml calls ./.github/workflows/q.yml, whose read fails (404 here).
+  const calling = { ".github/workflows/ci.yml": "jobs:\n  lint:\n    runs-on: x\n  call:\n    uses: ./.github/workflows/q.yml\n" };
+  const r = await virtual({ at: () => lint, workflowRuns: completedCi, files: calling, workflows: oneWorkflow, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(r.minutes, 61);
+  assert.equal(r.result.stuck.kind, "unreported");
+  // Read, and producing no `quality`: the wrong name Blocks at the first reading.
+  const read = await loop({ checkRuns: lint, workflowRuns: completedCi, files: { ...calling, ".github/workflows/q.yml": "on: workflow_call\njobs:\n  build:\n    runs-on: x\n" }, workflows: oneWorkflow, routes: rulesets({ bound: { quality: 15368 } }) });
+  assert.equal(read.checkReads, 1);
+  assert.equal(read.result.stuck.kind, "unreported");
+});
+
+test("while a triage rerun is awaited a missing required check is not read as a wrong name", async () => {
+  // quality failed; triage reruns it. GitHub's run list still shows the run completed, and the rerun's check is not listed yet.
+  const failed = { id: 1, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: ago(10), completed_at: ago(5), app: ACTIONS };
+  const rerun = { id: 2, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(1), app: ACTIONS };
+  let rerunAt = null;
+  const triage = { red: async ({ failedRuns }) => (failedRuns.length ? ((rerunAt = 0), { rerun: true, ignoreIds: new Set([1]), jobs: ["quality"] }) : { rerun: false }) };
+  const at = () => [...lint, ...(rerunAt === null ? [failed] : (rerunAt += 1) < 4 ? [failed] : [failed, rerun])];
+  const { result, checkReads } = await loop({ checkRuns: at, workflowRuns: [ciRun({ status: "completed", conclusion: "failure" })], files: {}, routes: rulesets({ bound: { quality: 15368 } }) }, { triage });
+  assert.equal(result.green, true, result.stuck?.reason);
+  assert.ok(checkReads >= 5);
+});
+
+test("a required commit status is read: green when it is, and waited for while pending, not as a check nobody runs", async () => {
+  const quality = [{ id: 3, name: "quality", status: "completed", conclusion: "success", check_suite: { id: 9 }, started_at: ago(2), app: ACTIONS }];
+  const status = (state) => (p) => (p === `/repos/${REPO.full}/commits/${SHA}/status` ? { state, statuses: [{ id: 50, context: "deploy", state, created_at: ago(3), target_url: "https://ci.example/50" }] } : undefined);
+  const green = await loop({ checkRuns: quality, workflowRuns: completedCi, files, checks: {}, routes: status("success") }, { checks: { names: ["quality", "deploy"] } });
+  assert.equal(green.result.green, true, green.result.stuck?.reason);
+  assert.equal(green.checkReads, 1);
+  // Pending for 70 minutes, then green: a pending status is a check running, so the not-started bound never ends it.
+  let state = "pending";
+  const later = await virtual({ at: (n) => ((state = n >= 70 ? "success" : "pending"), quality), workflowRuns: completedCi, routes: (p) => status(state)(p), checks: { names: ["quality", "deploy"] } });
+  assert.equal(later.result.green, true, later.result.stuck?.reason);
+  assert.equal(later.minutes, 70);
+  // Failed: a red the fix pass is handed, named by its context.
+  const red = await loop({ checkRuns: quality, workflowRuns: completedCi, files, routes: status("failure") }, { checks: { names: ["quality", "deploy"] } });
+  assert.equal(red.result.green, false);
+  assert.match(red.result.lastOutput, /--- deploy: failure\ncommit status https:\/\/ci\.example\/50/);
+});
+
+test("awaitChecks backs its reads off only past `backoffAfterMs`", async () => {
+  const { awaitChecks } = await import("../scripts/lib/github.mjs");
+  const realNow = Date.now;
+  let clock = Date.now();
+  const t0 = clock;
+  Date.now = () => clock;
+  const pauses = [];
+  try {
+    const running = [{ id: 3, name: "quality", status: "in_progress", conclusion: null, check_suite: { id: 9 }, started_at: new Date(t0).toISOString(), app: ACTIONS }];
+    await withGitHub({ checkRuns: () => (clock - t0 > 90 * min ? [{ ...running[0], status: "completed", conclusion: "success" }] : running) }, () =>
+      awaitChecks(REPO, SHA, ["quality"], { token: "t", pollMs: min, maxPollMs: 5 * min, backoffAfterMs: 60 * min, sleep: async (ms) => (pauses.push(ms), (clock += ms)) }),
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.ok(pauses.slice(0, 60).every((ms) => ms === min), "one minute apart for the first hour");
+  assert.deepEqual(pauses.slice(60, 65), [min, 2 * min, 4 * min, 5 * min, 5 * min], "then backing off to five");
 });

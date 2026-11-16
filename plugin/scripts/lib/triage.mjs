@@ -505,14 +505,21 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
   try {
     doc = parseYaml(String(text || ""));
   } catch {
-    return { checks: [], filters: null };
+    return { checks: [], filters: null, chained: false };
   }
   const checks = [];
+  // A reusable workflow called here that could not be read (`readLocal` gave null) may run anything: `chained`.
+  let unread = false;
   for (const [id, job] of Object.entries(doc?.jobs || {})) {
     const own = typeof job?.name === "string" ? job.name : id;
     const uses = typeof job?.uses === "string" ? job.uses.trim() : "";
     if (!uses) checks.push(own);
-    else if (uses.startsWith("./") && depth < 3) for (const c of (await workflowChecks(await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => ""), readLocal, depth + 1)).checks) checks.push(`${own} / ${c}`);
+    else if (uses.startsWith("./") && depth < 3) {
+      const text = await readLocal(uses.slice(2).replace(/@.*$/, "")).catch(() => null);
+      const called = await workflowChecks(text, readLocal, depth + 1);
+      unread ||= text === null || called.chained;
+      for (const c of called.checks) checks.push(`${own} / ${c}`);
+    }
     else checks.push(`${own} / \${{ callee }}`);
   }
   const on = doc?.on && typeof doc.on === "object" && !Array.isArray(doc.on) ? doc.on : null;
@@ -521,7 +528,9 @@ export async function workflowChecks(text, readLocal = async () => "", depth = 0
   // The filter decides alone only when pull_request is the one trigger that can start the workflow on the head:
   // another (push, pull_request_target, workflow_dispatch…) may run it anyway (`sole` false).
   const sole = !!on && Object.keys(on).every((t) => t === "pull_request" || NOT_ON_HEAD.includes(t));
-  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null };
+  // `chained`: it runs on another workflow's run (`on: workflow_run`), so after the head's other runs completed.
+  const triggers = typeof doc?.on === "string" ? [doc.on] : Array.isArray(doc?.on) ? doc.on : Object.keys(on || {});
+  return { checks, filters: key ? { key: `on.pull_request.${key}`, ignore: key === "paths-ignore", patterns: pr[key].map(String), sole } : null, chained: triggers.includes("workflow_run") || unread };
 }
 /** Whether a check name `name` is one the template `check` reports (a matrix job adds ` (…)`). */
 export const reports = (check, name) => new RegExp(`^${String(check).split(/\$\{\{[\s\S]*?\}\}/).map(esc).join(".+")}(?: \\(.+\\))?$`).test(name);
@@ -725,7 +734,8 @@ export function filterSkips(filters, files) {
  * produce it (`producers`: name → workflow ids): a workflow of the repository (or one that ran on the head) whose file
  * at the head has a job reporting that name (workflowChecks), else the workflow of that check's run on an older commit
  * (`history()`: commit ids, newest first, read only when needed), found through its check suite. `skips`: workflow id
- * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `workflowRuns` null: they
+ * → its path filter and whether it skips this change (`files()`: the PR's changed paths). `chained`: a workflow at the
+ * head runs `on: workflow_run`, or one could not be read, so a check may come after every run listed completed. `workflowRuns` null: they
  * could not be read (`readError`).
  */
 export async function checkSources({ repo, sha, names, checkRuns = [], token, actionsToken = token, history = async () => [], files = async () => null, cache = new Map() }) {
@@ -743,13 +753,15 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
   }
   const producers = new Map();
   const skips = new Map();
+  const posted = new Set();
+  let chained = false;
   const add = (n, id) => producers.set(n, new Set([...(producers.get(n) || []), id]));
   const missing = names.filter((n) => !latestRun(checkRuns, n));
   if (missing.length) {
     // A workflow file at the head is read once per stage (`cache`, the caller's), however often the wait is classified.
     const read = (path) => {
       const key = `${sha}:${path}`;
-      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => ""));
+      if (!cache.has(key)) cache.set(key, rest(`repos/${repo.full}/contents/${path}?ref=${sha}`, { token, raw: "Accept: application/vnd.github.raw+json" }).then(String, () => null));
       return cache.get(key);
     };
     // Every workflow of the repository, a path-filtered one that never ran on the head included, and those that ran.
@@ -758,7 +770,10 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
     let changed;
     for (const [id, path] of all) {
       if (/(^|\/)factory\.ya?ml$/.test(path)) continue;
-      const { checks, filters } = await workflowChecks(await read(path), read);
+      const text = await read(path);
+      const { checks, filters, chained: after } = await workflowChecks(text, read);
+      // A file that could not be read may run `on: workflow_run`: that is never read as no such workflow.
+      chained ||= after || text === null;
       const its = missing.filter((n) => checks.some((c) => reports(c, n)));
       for (const n of its) add(n, id);
       // Every producer is recorded, filtered or not: a check is filtered out only when each of them skips the change.
@@ -780,8 +795,20 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
         }
       }
     }
+    // Still none: an older commit's commit status of that name (a service posting statuses, Codecov's say) is its
+    // producer, which posts it on this head when it does (`posted`). Each older commit's statuses are read once.
+    const statusesOf = new Map();
+    for (const n of left.filter((x) => !producers.has(x))) {
+      for (const c of older) {
+        if (!statusesOf.has(c)) statusesOf.set(c, rest(`repos/${repo.full}/commits/${c}/status`, { token }).then((st) => new Set((st?.statuses || []).map((x) => x?.context)), () => new Set()));
+        if ((await statusesOf.get(c)).has(n)) {
+          posted.add(n);
+          break;
+        }
+      }
+    }
   }
-  return { workflowRuns, readError: "", jobs, producers, skips };
+  return { workflowRuns, readError: "", jobs, producers, skips, chained, posted };
 }
 
 /** GitHub Actions' own app: a check run from any other app is that service's, not Actions'. */
@@ -797,10 +824,11 @@ const ACTIONS_APP = "github-actions";
  * service whose app owns the check run. Kinds that do not wait: `running` (a check still running), `approval` (a
  * deployment approval), `filtered` (its workflow's path filter skips this change), `ended` (every workflow run on the
  * head that produces it ended `startup_failure`, or `cancelled` with no check run in its suite), `unreported` (no workflow on the head
- * produces it: a wrong check name) and `unread`. A queued run of another workflow is not this check's. `now` and
+ * produces it: a wrong check name) and `unread`. A required check with no run that older commits got as a commit
+ * status (`posted`) is not started yet, by the service posting it. A queued run of another workflow is not this check's. `now` and
  * `waitedMin` only word the reason.
  */
-export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), skips = new Map(), waitedMin = 0, readError = "", now = Date.now() }) {
+export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns = null, jobs = new Map(), producers = new Map(), skips = new Map(), posted = new Set(), waitedMin = 0, readError = "", now = Date.now() }) {
   const short = String(sha).slice(0, 7);
   const list = (xs) => xs.join(", ");
   const mins = (t) => (Number.isFinite(Date.parse(t)) ? Math.max(0, Math.round((now - Date.parse(t)) / 60000)) : null);
@@ -830,6 +858,11 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
       } else running.push({ n, w });
       continue;
     }
+    // A commit status earlier commits got (`posted`): its service has not posted it here yet.
+    if (posted.has(n)) {
+      started.push({ n, w: null, by: "the service posting it", text: `${n} is a commit status earlier commits got, not posted on this head yet` });
+      continue;
+    }
     const ids = producers.get(n);
     const mine = ids ? workflowRuns.filter((w) => ids.has(w.workflow_id)) : [];
     const queued = mine.filter((w) => UNSTARTED.includes(w.status));
@@ -852,7 +885,7 @@ export function checksNotStarted({ sha, names = [], checkRuns = [], workflowRuns
     // cancellation may be the repository's own concurrency setting: the work's.
     return { waits: false, kind: "ended", cause: runs.some((w) => w.conclusion === "startup_failure") ? "setup" : "work", runs, reason: `required check(s) ${list(ended.map((x) => x.n))} never reported on ${short}: ${list(runs.map((w) => `workflow run ${label(w)} ended ${w.conclusion}`))} before ${ended.length > 1 ? "their jobs" : "its job"} ran${runs.some((w) => w.conclusion === "startup_failure") ? " (GitHub could not start the workflow: its file or GitHub's side, as the run's page says)" : ""}; rerun it on GitHub or fix the workflow, then re-apply the label; no failing run to fix` };
   }
-  if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map(label))}); check the required check names; no failing run to fix` };
+  if (unreported.length) return { waits: false, kind: "unreported", runs: [], reason: `required check(s) ${list(unreported)} never reported on ${short}: no workflow run on it produces ${unreported.length > 1 ? "them" : "it"} (${list(workflowRuns.slice(0, 3).map((w) => `${label(w)} ${w.status === "completed" ? `completed ${w.conclusion}` : w.status}`))}${workflowRuns.length > 3 ? `, ${workflowRuns.length - 3} more` : ""}); check the required check names; no failing run to fix` };
   if (filtered.length) return { waits: false, kind: "filtered", runs: [], reason: `required check(s) ${list(filtered.map((x) => x.n))} never run on ${short}: ${list([...new Set(filtered.map((x) => x.key))])} of ${filtered.length > 1 ? "their workflows skips" : "its workflow skips"} this change, so GitHub starts no run for it; run the check on every change, or stop requiring it; no failing run to fix` };
   if (approval.length) return { waits: false, kind: "approval", runs: [], reason: `required check(s) ${list(approval)} on ${short} wait for a deployment approval; approve ${approval.length > 1 ? "them" : "it"}, then re-apply the label; no failing run to fix` };
   if (started.length) {

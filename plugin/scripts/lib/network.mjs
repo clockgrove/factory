@@ -4,7 +4,8 @@
 // (waitOutages: the stages and `factory serve`) sends no such request again until a cheap probe of the same host gets
 // an answer. One probe loop per host, however many calls wait on it, and one log line when the host is lost and one
 // when it answers again. Any HTTP answer, a 5xx or a 429 included, is GitHub (or the provider) answering: the client's
-// own retries handle those (github.mjs RETRY), with one exception: GitHub's primary rate limit spent (#250). That answer
+// own retries handle those (github.mjs RETRY), until a 5xx outlasts them: then GitHub is down for the caller, an outage
+// of its host (github.mjs outlasted) named by the status (#353). One exception: GitHub's primary rate limit spent (#250). That answer
 // says no request will pass until its reset, a known moment, so it is an outage of known length of that one quota (the
 // host, the quota GitHub counts the request against, the token: quotaKey): a process that waits outages out sends nothing
 // more against that quota until the reset (plus a little jitter), one sleep and two log lines for all its callers, no
@@ -66,8 +67,17 @@ export function spentResetOf(status, headers, message, now = OUTAGE.now()) {
   return Number.isFinite(date) ? now + Math.max(0, reset * 1000 - date) : reset * 1000;
 }
 
-/** Whether an error is this machine failing to reach a host: a connect-level code on it or its causes, or a NetworkDown. */
+/**
+ * Whether an error is a host out of this machine's reach: a connect-level code on it or its causes, a NetworkDown, or
+ * GitHub's 5xx past the client's retries (`offline`, its code the status: serverDown).
+ */
 export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(causeCode(e)));
+
+/** Whether an outage's code is GitHub answering 5xx past the client's retries ("HTTP 500"), not a lost network. */
+export const serverDown = (code) => /^HTTP 5\d\d$/.test(String(code));
+
+/** How an outage of `host` with `code` reads in a reason: GitHub's 5xx, or this machine not reaching the host. */
+export const lostText = (host, code) => (serverDown(code) ? `${host} answered ${code} to every try` : `this machine could not reach ${host} (${code})`);
 
 /**
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
@@ -459,4 +469,4 @@ export function outageOf(e, now = OUTAGE.now()) {
 
 /** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` and `resetAt` in ms). */
 export const outageReason = ({ host, code, since, resetAt, quota = "core" }, now = OUTAGE.now()) =>
-  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `this machine could not reach ${host} (${code}) from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;
+  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${lostText(host, code)} from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;

@@ -60,7 +60,7 @@ import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inp
 import { EXIT_PROMPT, activityLine, answersComment, blockMarker, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
-import { OUTAGE, givenUp, outageMet, outageOf, outageReason, stopWaiting } from "./network.mjs";
+import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
@@ -1892,7 +1892,7 @@ async function afterReset(lost, deadlineAt) {
 const outageBlock = (lost) =>
   Number.isFinite(lost.resetAt)
     ? { reason: `${outageReason(lost)}, past the stage's deadline. Re-apply the label to run it again after the reset.`, cause: "provider-quota" }
-    : { reason: `${outageReason(lost)}; the stage waited for the network until its time ran out. ${RELAUNCH_NOTE}`, cause: "outage" };
+    : { reason: `${outageReason(lost)}; ${serverDown(lost.code) ? "the stage ended on it" : "the stage waited for the network until its time ran out"}. ${RELAUNCH_NOTE}`, cause: "outage" };
 
 /**
  * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level

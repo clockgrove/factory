@@ -5,10 +5,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { STEP_BASELINE_RUNS, answersComment, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -128,14 +128,15 @@ export const RETRY = { tries: 4, maxWaitMs: 90_000, baseMs: 2_000, sleep: (ms) =
 
 /**
  * Whether a REST call means the same when sent twice: a read; a PUT, PATCH or DELETE, which sets a state (except a
- * merge and an update-branch, which are actions). A POST creates something (a comment, a review, a PR, a label event,
- * a dispatch, a rerun) and is not.
+ * merge and an update-branch, which are actions); a POST of labels to an issue or PR, which adds them to the ones it
+ * has. Any other POST creates something (a comment, a review, a PR, a dispatch, a rerun) and is not.
  */
 const repeatable = (method, path) => {
   const m = String(method).toUpperCase();
+  const route = String(path).split("?")[0];
   if (m === "GET" || m === "HEAD") return true;
-  if (m === "PUT" || m === "PATCH" || m === "DELETE") return !/\/(merge|update-branch)$/.test(String(path).split("?")[0]);
-  return false;
+  if (m === "PUT" || m === "PATCH" || m === "DELETE") return !/\/(merge|update-branch)$/.test(route);
+  return m === "POST" && /\/issues\/\d+\/labels$/.test(route);
 };
 
 /** Whether a failed request provably did nothing: it never left this machine, or GitHub's rate limit (403, 429) turned it away. */
@@ -204,11 +205,16 @@ const LANDED = Symbol("landed");
  * reset past the process's limit or `deadlineAt` throws NetworkDown at once (with `resetAt`), and once the quota is given
  * up no request goes against it until the reset. Any other process keeps the bound: the error, with its code and
  * `resetAt`, goes to the caller when the reset is beyond it. An answer clears the quota's record (clearSpent).
+ *
+ * A 5xx that is still the answer once the bound is spent (or a create's check for it fails) is thrown as an outage of
+ * `origin` from the call's first 5xx (outlasted), so the stage ends on it as on a lost network, never a crash.
  */
 async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWait = false, origin = null, quota = null } = {}) {
   // The bound starts again after a wait for the network: the time the host was unreachable is no retry's.
   const bound = () => Math.min(RETRY.now() + RETRY.maxWaitMs, Number.isFinite(deadlineAt) ? deadlineAt : Infinity);
   let end = bound();
+  // When this call first met a 5xx (outlasted).
+  let serverSince = null;
   for (let n = 1; ; n += 1) {
     let e;
     if (origin && waitingOutages() && outageOn(origin)) {
@@ -245,20 +251,35 @@ async function withRetry(what, attempt, again, { deadlineAt = Infinity, noRateWa
         continue;
       }
     }
-    if (n >= RETRY.tries || !transientError(e) || (noRateWait && e.rateLimited) || (again.possible && !again.possible(e))) throw e;
+    if (serverError(e)) serverSince ??= OUTAGE.now();
+    if (!transientError(e) || (noRateWait && e.rateLimited) || (again.possible && !again.possible(e))) throw e;
+    if (n >= RETRY.tries) throw outlasted(e, origin, serverSince);
     // GitHub's ask: its header, or the minute it documents for a rate limit that names none. Spread only upward.
     const asked = e.waitMs !== undefined || (e.rateLimited && e.status > 0);
     const base = e.waitMs ?? (asked ? 60_000 : RETRY.baseMs * 2 ** (n - 1));
     // The bound is held against the unspread wait: jitter never costs a retry, it is cut back to what is left instead.
-    if (RETRY.now() + base > end) throw e;
+    if (RETRY.now() + base > end) throw outlasted(e, origin, serverSince);
     const wait = Math.min(jitter(base, asked), Math.max(base, end - RETRY.now()));
     const cause = e.transport ? `network${e.code ? ` (${e.code})` : ""}` : e.rateLimited ? `rate limited${e.status ? ` (HTTP ${e.status})` : ""}` : `HTTP ${e.status}`;
     log(`GitHub ${what}: ${cause}; try ${n + 1} of ${RETRY.tries} in ${Math.ceil(wait / 1000)} s`);
     await RETRY.sleep(wait);
     const go = await again(e);
     if (go && typeof go === "object") return { [LANDED]: go.value };
-    if (!go) throw e;
+    if (!go) throw outlasted(e, origin, serverSince);
   }
+}
+
+/** A 5xx: GitHub answered, and failed. */
+const serverError = (e) => Number.isInteger(e?.status) && e.status >= 500;
+
+/**
+ * A 5xx that outlasted the client's retries (`since`: the first in the call, ms on OUTAGE's clock) is an outage of
+ * GitHub's `origin`, as network.mjs reads one (unreachable, outageMet, outageOf): `offline`, its origin, `code` the
+ * status ("HTTP 500") and `since`, so a stage ends on it (paused locally) rather than crashing. Any other error as it is.
+ */
+function outlasted(e, origin, since) {
+  if (!serverError(e) || !origin) return e;
+  return Object.assign(e, { offline: true, origin, code: `HTTP ${e.status}`, since: since ?? OUTAGE.now() });
 }
 
 /** A fetch that got no answer, as a GitHubError: `transport`, its connect-level `code`, and whether it never left (`unsent`). */
@@ -288,28 +309,45 @@ const createAgain = (landed) => {
 };
 
 /**
+ * For a new comment on an issue or PR (POST …/issues/N/comments) whose caller gave no `landed`: a read of the comments
+ * updated since just before the call (on GitHub's clock, less CLOCK_SKEW_MS) that finds one with the very body sent, by
+ * Factory's own login when it is known. So a comment GitHub made before failing (a 5xx, a dropped answer) is found, not
+ * posted twice. Null for any other call.
+ */
+function commentLanded(method, url, body, { token, signal }) {
+  const route = new URL(url);
+  if (String(method).toUpperCase() !== "POST" || !/\/issues\/\d+\/comments$/.test(route.pathname) || typeof body?.body !== "string") return null;
+  const from = new Date(githubNow() - CLOCK_SKEW_MS).toISOString();
+  return async () => {
+    const list = await rest(`${route.origin}${route.pathname}?since=${encodeURIComponent(from)}&per_page=100`, { token, paginate: true, signal });
+    return (list || []).find((c) => c?.body === body.body && (!selfLogin() || isSelf(c))) || null;
+  };
+}
+
+/** GitHub's clock less this machine's (ms), from the newest answer's Date header; 0 before any answer. */
+let clockSkewMs = 0;
+/** Now on GitHub's clock (to its Date header's second): what a time GitHub wrote (a label event's) is compared with. */
+export const githubNow = () => Date.now() + clockSkewMs;
+
+/**
  * REST call with Node's fetch and the token in memory: no token in any process environment or file. `body` is sent as
  * JSON; `paginate` follows the Link header and returns every page's items as one array (a page that is an object with
  * one array field, such as {total_count, artifacts}, contributes that array); `raw` is an Accept header whose text is
  * returned as is. Returns parsed JSON or null.
  *
  * A transient failure is sent again within RETRY's bound and before `deadlineAt` (ms) when the call may repeat
- * (repeatable); a create only as createAgain allows, with the caller's optional `landed`. A DELETE whose retry finds
+ * (repeatable); a create only as createAgain allows, with the caller's optional `landed` (for a comment with none,
+ * commentLanded). A 5xx that outlasts the bound is thrown as GitHub's outage (outlasted). A DELETE whose retry finds
  * nothing (404) after a transient failure is done: the first try removed it. `noRateWait`: a rate limit is thrown at once,
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
  * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
  */
-/** GitHub's clock less this machine's (ms), from the newest answer's Date header; 0 before any answer. */
-let clockSkewMs = 0;
-/** Now on GitHub's clock (to its Date header's second): what a time GitHub wrote (a label event's) is compared with. */
-export const githubNow = () => Date.now() + clockSkewMs;
-
 export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
-  const again = repeatable(method, path) ? async () => true : createAgain(landed);
+  const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal }));
   const quota = quotaKey(url, tokenOf(token));
   const conditional = cache && method === "GET" && !raw;
   const one = async (n) => {

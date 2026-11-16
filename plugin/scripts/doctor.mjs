@@ -1498,7 +1498,7 @@ export async function claudeLocalStart({ checkout, env = process.env, commands =
     for (const d of [join(usage, "harness"), corepack]) mkdirSync(d, { recursive: true });
     await exec("git", ["init", "-q", clone], { env: { PATH: env.PATH || SAFE_PATH } });
     // What resolves the stage's tools (package.json's packageManager and scripts, the version pins), nothing else.
-    for (const f of ["package.json", ".tool-versions", "mise.toml", ".mise.toml"]) if (existsSync(join(checkout, f))) copyFileSync(join(checkout, f), join(clone, f));
+    for (const f of ["package.json", ".tool-versions", "mise.toml", ".mise.toml", ".python-version", ".ruby-version"]) if (existsSync(join(checkout, f))) copyFileSync(join(checkout, f), join(clone, f));
     const tools = localTools({ harness: "claude", clone, commands, path: env.PATH || "", off: [ws, join(checkout, ".factory"), dirname(tmp)], usageDir: usage });
     const gitBin = join(usage, "gitbin");
     mkdirSync(gitBin);

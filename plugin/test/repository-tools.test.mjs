@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { harnessCommand } from "../scripts/lib/harness.mjs";
 import { CONFINEMENT_PROBE, PROBE_MARKER } from "../scripts/lib/codex-runner.mjs";
@@ -52,7 +52,7 @@ test("a version manager's shim resolves to the version the repository pins, else
   const clone = mkdtempSync(join(root, "c-"));
   const commands = { validation: ["uv run pytest"] };
   const path = `${join(data, "shims")}:/usr/bin`;
-  assert.deepEqual(repositoryTools({ clone, commands, path, home }).tools, [{ word: "uv", from: "validation", real: uv, dirs: [join(data, "installs", "uv", "0.13.7")], link: true }], "its only install (an alias to it is the same one)");
+  assert.deepEqual(repositoryTools({ clone, commands, path, home }).tools, [{ word: "uv", from: "validation", real: uv, dirs: [join(data, "installs", "uv", "0.13.7")], denied: [], link: true }], "its only install (an alias to it is the same one)");
   const newer = tool(join(data, "installs", "uv", "0.14.0", "bin"), "uv");
   assert.match(repositoryTools({ clone, commands, path, home }).unresolved[0].why, /uv has several versions installed and none pinned/);
   writeFileSync(join(clone, ".tool-versions"), "uv 0.14.0\n");
@@ -75,10 +75,10 @@ test("a repository tool never opens the home, a credential store or what a sandb
   const path = ["/usr/bin", join(home, ".cargo", "bin"), join(home, "bin"), join(home, ".config", "factory", "bin"), join(writable, "bin")].join(":");
   const r = repositoryTools({ clone, commands: { validation: ["cargo test", "mine", "leak", "planted", "ls"] }, path, off: [writable], home });
   assert.deepEqual(r.tools, [
-    { word: "cargo", from: "validation", real: cargo, dirs: [cargo], link: true },
-    { word: "mine", from: "validation", real: own, dirs: [own], link: true },
-    { word: "ls", from: "validation", real: "/usr/bin/ls", dirs: [], link: false },
-  ], "~/.cargo holds a registry token, so the executable alone; never the home; the system's own needs nothing");
+    { word: "cargo", from: "validation", real: cargo, dirs: [cargo], denied: [], link: true },
+    { word: "mine", from: "validation", real: own, dirs: [own], denied: [], link: true },
+    { word: "ls", from: "validation", real: "/usr/bin/ls", dirs: [], denied: [], link: false },
+  ], "~/.cargo is a directory directly in the home (and holds a registry token): the executable alone; never the home; the system's own needs nothing");
   assert.deepEqual(r.unresolved.map((u) => u.word), ["leak", "planted"]);
 });
 
@@ -114,14 +114,15 @@ test("local mode (#371), the real path: a validation tool outside node, npm, pnp
   assert.deepEqual(box.toolchain.tools, [join(toolBin, "mytool"), join(toolBin, "scripttool")], "the probe proves both");
   assert.equal(realpathSync(join(toolBin, "mytool")), realpathSync(mytool));
   assert.equal(realpathSync(join(toolBin, "scripttool")), realpathSync(scripted));
-  for (const d of [join(root, "opt", "mytool"), join(root, "opt", "st")]) assert.ok(box.readable.includes(d), `${d} read-only in its sandbox`);
+  assert.ok(box.readable.includes(join(root, "opt", "mytool", "bin")), "a configured command's tool: its install's bin, read-only");
+  assert.ok(box.readable.includes(realpathSync(scripted)) && !box.readable.includes(join(root, "opt", "st", "bin")), "a script's tool: the executable alone");
   assert.match(readFileSync(box.claudeEnv, "utf8"), new RegExp(`'${toolBin}'`), "the toolbin leads each command's PATH");
   assert.equal(lines.filter((l) => l.includes("nosuchtool-371")).length, 1, "named once per loop");
   assert.match(lines.find((l) => l.includes("nosuchtool-371")), /`nosuchtool-371` \(validation\) is not visible to Claude Code's commands: not on PATH/);
   // Claude Code's settings: the tools readable, the credential stores and Factory's own settings still denied.
   const { args } = harnessCommand({ harness: "claude", prompt: "p", local: box });
   const fs = JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.filesystem;
-  assert.ok(fs.allowRead.includes(join(root, "opt", "mytool")));
+  assert.ok(fs.allowRead.includes(join(root, "opt", "mytool", "bin")));
   for (const secret of [".ssh", ".config/factory", ".cargo/credentials.toml"]) assert.ok(fs.denyRead.includes(join(homedir(), secret)), `${secret} stays denied`);
 });
 
@@ -156,4 +157,75 @@ test("doctor --local names each repository tool Claude Code's and Copilot's comm
   assert.ok(row.detail.includes(uv));
   const ok = localToolchainRows({ checkout: repo, env, commands: { validation: ["uv run pytest"] }, os: "linux", run: () => "v1\n" }).find((r) => r.name === "repository tools");
   assert.equal(ok.status, "PASS");
+});
+
+test("who wrote a word decides its reach: a script's tool is its executable alone, a configured one its install's bin and lib, never a directory directly in the home", () => {
+  const home = mkdtempSync(join(tmpdir(), "rwho-"));
+  const fly = tool(join(home, ".fly", "bin"), "flyctl");
+  writeFileSync(join(home, ".fly", "config.yml"), "access_token: x\n");
+  const proj = tool(join(home, "proj", "bin"), "mytool");
+  writeFileSync(join(home, "proj", ".env"), "SECRET=x\n");
+  const deep = tool(join(home, "tools", "kit", "bin"), "kit");
+  mkdirSync(join(home, "tools", "kit", "lib"));
+  writeFileSync(join(home, "tools", "kit", ".env"), "SECRET=x\n");
+  const path = [join(home, ".fly", "bin"), join(home, "proj", "bin"), join(home, "tools", "kit", "bin"), "/usr/bin"].join(":");
+  const clone = mkdtempSync(join(tmpdir(), "rwc-"));
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ scripts: { test: "flyctl version && mytool && kit" } }));
+  const reach = (commands) => Object.fromEntries(repositoryTools({ clone, commands, path, home }).tools.map((t) => [t.word, t.dirs]));
+  assert.deepEqual(reach({ validation: ["npm test"] }), { flyctl: [fly], mytool: [proj], kit: [deep] }, "from package.json: the executable alone, never ~/.fly (its token) or the checkout (its .env)");
+  assert.deepEqual(reach({ validation: ["flyctl version", "mytool", "kit"] }), { flyctl: [fly], mytool: [proj], kit: [join(home, "tools", "kit", "bin"), join(home, "tools", "kit", "lib")] }, "configured: bin and lib of a deeper prefix, never a directory directly in the home");
+});
+
+test("an install that is all the tool's own is bound whole but its etc, which is denied (a second node's npmrc holds a registry token)", () => {
+  const home = mkdtempSync(join(tmpdir(), "retc-"));
+  const v22 = join(home, ".nvm", "versions", "node", "v22.1.0");
+  const t = tool(join(v22, "bin"), "tsx");
+  mkdirSync(join(v22, "lib"));
+  mkdirSync(join(v22, "etc"));
+  writeFileSync(join(v22, "etc", "npmrc"), "//registry.npmjs.org/:_authToken=x\n");
+  const clone = mkdtempSync(join(tmpdir(), "retcc-"));
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ scripts: { test: "tsx t.ts" } }));
+  const [got] = repositoryTools({ clone, commands: { validation: ["npm test"] }, path: join(v22, "bin"), home }).tools;
+  assert.deepEqual(got, { word: "tsx", from: "package.json scripts.test", real: t, dirs: [join(v22, "bin"), join(v22, "lib")], denied: [join(v22, "etc")], link: true });
+});
+
+test("a package.json script never makes Factory's front end, a harness or its sandbox visible, by name or by a link to one", () => {
+  const root = mkdtempSync(join(tmpdir(), "rharn-"));
+  const bin = join(root, "opt", "bin");
+  const claude = tool(bin, "claude");
+  for (const w of ["factory", "codex", "copilot", "srt", "bwrap"]) tool(bin, w);
+  symlinkSync(claude, join(bin, "cc"));
+  const clone = mkdtempSync(join(root, "c-"));
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ scripts: { test: "factory run; claude -p x; codex; copilot; srt x; bwrap x; cc" } }));
+  const r = repositoryTools({ clone, commands: { validation: ["npm test"] }, path: bin, home: join(root, "h") });
+  assert.deepEqual(r.tools, []);
+  assert.deepEqual(r.unresolved.map((u) => u.word), ["factory", "claude", "codex", "copilot", "srt", "bwrap", "cc"]);
+  assert.match(r.unresolved[0].why, /never made visible from a package\.json script/);
+});
+
+test("pins that are no version name are ignored; pyenv's versions are resolved; a rustup proxy is named, not supported", () => {
+  const home = mkdtempSync(join(tmpdir(), "rpin-"));
+  const data = join(home, ".local", "share", "mise");
+  tool(home, "mise");
+  mkdirSync(join(data, "shims"), { recursive: true });
+  symlinkSync(join(home, "mise"), join(data, "shims", "uv"));
+  tool(join(data, "installs", "uv", "0.13.7", "bin"), "uv");
+  tool(join(data, "installs", "uv", "0.14.0", "bin"), "uv");
+  tool(join(data, "installs", "bin"), "uv");
+  const clone = mkdtempSync(join(tmpdir(), "rpinc-"));
+  writeFileSync(join(clone, ".tool-versions"), "uv ..\n");
+  const uvPath = `${join(data, "shims")}:/usr/bin`;
+  assert.match(repositoryTools({ clone, commands: { validation: ["uv sync"] }, path: uvPath, home }).unresolved[0].why, /several versions installed and none pinned/, "`..` is no pin");
+  const pyenv = join(home, ".pyenv");
+  mkdirSync(join(pyenv, "shims"), { recursive: true });
+  writeFileSync(join(pyenv, "shims", "python"), "#!/bin/sh\nexec pyenv exec python\n", { mode: 0o755 });
+  const py = tool(join(pyenv, "versions", "3.12.1", "bin"), "python");
+  tool(join(pyenv, "versions", "3.11.0", "bin"), "python");
+  writeFileSync(join(clone, ".python-version"), "3.12.1\n");
+  assert.deepEqual(repositoryTools({ clone, commands: { validation: ["python -m pytest"] }, path: join(pyenv, "shims"), home }).tools.map((t) => [t.real, t.dirs]), [[py, [join(pyenv, "versions", "3.12.1")]]]);
+  const cargo = tool(join(home, ".cargo", "bin"), "cargo");
+  tool(join(home, ".cargo", "bin"), "rustup");
+  const r = repositoryTools({ clone, commands: { validation: ["cargo test"] }, path: dirname(cargo), home });
+  assert.deepEqual(r.tools, []);
+  assert.match(r.unresolved[0].why, /rustup proxy.*not supported yet/);
 });

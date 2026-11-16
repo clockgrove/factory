@@ -25,7 +25,7 @@
 import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { APP_PERMISSIONS_TEXT, mintInstallationToken } from "./lib/app-token.mjs";
+import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, repoOf, requiredChecks, rest } from "./lib/github.mjs";
 import { DEFAULTS, FACTORY_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
@@ -604,7 +604,7 @@ async function main() {
     token = app.token;
     mask(token);
     process.stdout.write(`App ${app.appSlug}: installation ${app.installationId}${app.missing.length ? `; MISSING ${app.missing.join(", ")}` : "; permissions ok"}${app.extra.length ? `; extra ${app.extra.join(", ")}` : ""}\n`);
-    if (app.missing.length) throw new Error(`the App lacks ${app.missing.join(", ")}; fix its permissions (${APP_PERMISSIONS_TEXT}) before setup`);
+    if (app.missing.length) throw new Error(`the App lacks ${app.missing.join(", ")}; fix its permissions (${appPermissionsText({ userAccount: app.userAccount })}) before setup`);
   }
   if (!token && yes) process.stdout.write("no App credentials given: GitHub steps run as your gh login\n");
   const opts = { token };

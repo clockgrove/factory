@@ -249,8 +249,10 @@ export const OWNER_LIMITS = {
   FACTORY_SIBLING_WAIT_HOURS: { from: 0, above: true, max: 7 * 24 },
   FACTORY_MAX_PARTS: { whole: true, from: 1, max: 50 },
   FACTORY_STEP_STALL_FACTOR: { from: 1, max: 100 },
-  FACTORY_STEP_STALL_FLOOR_MINUTES: { from: 0, above: true, max: 24 * 60 },
-  FACTORY_QUEUE_STALL_MINUTES: { from: 0, above: true, max: 24 * 60 },
+  // At least a minute each: near 0, every queue commit is stalled the moment it is made (dequeued, requeued, Blocked, so
+  // nothing merges), and every running check's job is read again on each poll, on the shared API quota.
+  FACTORY_STEP_STALL_FLOOR_MINUTES: { from: 1, max: 24 * 60 },
+  FACTORY_QUEUE_STALL_MINUTES: { from: 1, max: 24 * 60 },
   FACTORY_RELAY_UNKNOWN_SHUT: { whole: true, from: 1, max: 1000 },
   FACTORY_RELAY_UNKNOWN_FLOOR_USD: { from: 0, above: true, max: 100 },
   FACTORY_RELAY_SLOW_FLOOR_USD: { from: 0, above: true, max: 100 },

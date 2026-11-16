@@ -192,10 +192,10 @@ inputs:
     description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Factory then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.
     required: false
   step_stall_floor_minutes:
-    description: The least time over a step's longest recent green duration before it counts as hung on a merge queue commit (step_stall_factor), and how old the queue commit must be before its checks are judged; 15 when empty. A number above 0, at most 1440. Scheduling only.
+    description: The least time over a step's longest recent green duration before it counts as hung on a merge queue commit (step_stall_factor), and how old the queue commit must be before its checks are judged; 15 when empty. A number from 1 (under a minute every queue commit would be judged at once) to 1440. Scheduling only.
     required: false
   queue_stall_minutes:
-    description: How long a merge queue commit may wait with no CI begun on it before Factory takes the PR out of the queue and puts it back once; 10 when empty. A number above 0, at most 1440. Scheduling only.
+    description: How long a merge queue commit may wait with no CI begun on it before Factory takes the PR out of the queue and puts it back once; 10 when empty. A number from 1 (under a minute every queue commit would be stalled as it is made) to 1440. Scheduling only.
     required: false
   relay_unknown_shut:
     description: How many failed calls through the gateway relay whose cost cannot be known and that may have been billed shut the relay for the stage (the stage Blocks); 6 when empty. A whole number from 1 to 1000. Set in the workflow file only, since it bounds spend.

@@ -54,6 +54,10 @@ test("#423: every owner limit is a setting whose default is today's value; a val
   const bad = resolveInputs({ env: { FACTORY_CLAIM_PAUSE_HOURS: "1e12", FACTORY_SIBLING_WAIT_HOURS: "-1", FACTORY_MAX_PARTS: "2.5", FACTORY_USAGE_LIMIT_WAITS: "many", FACTORY_STEP_STALL_FACTOR: "0.5", FACTORY_RELAY_UNKNOWN_SHUT: "0" } });
   assert.deepEqual([bad.claimPauseMs, bad.siblingWaitMs, bad.maxParts, bad.usageLimitWaits, bad.stall.factor, bad.relay.unknownShut], [CLAIM_PAUSE_MS, WAIT_MAX_MS, MAX_PARTS, LIMIT.waits, STALL_DEFAULTS.factor, UNKNOWN_STAGE_SHUT]);
   assert.deepEqual(localLimits({ FACTORY_LOCAL_WAIT_MINUTES: "1e9" }).waitMs, OUTAGE.stageWaitMs);
+  // A stall floor or queue stall under a minute would judge every queue commit stalled the moment it is made.
+  const tiny = resolveInputs({ env: { FACTORY_STEP_STALL_FLOOR_MINUTES: "1e-9", FACTORY_QUEUE_STALL_MINUTES: "0.5" } }).stall;
+  assert.deepEqual([tiny.floorMs, tiny.queueMs], [STALL_DEFAULTS.floorMs, STALL_DEFAULTS.queueMs]);
+  assert.equal(resolveInputs({ env: { FACTORY_QUEUE_STALL_MINUTES: "1" } }).stall.queueMs, MIN);
   // A claim pause under two hours would Block a paused Objective between the hourly beats its loop writes.
   assert.equal(resolveInputs({ env: { FACTORY_CLAIM_PAUSE_HOURS: "1" } }).claimPauseMs, CLAIM_PAUSE_MS);
 });

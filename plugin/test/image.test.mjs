@@ -1,18 +1,23 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, findImageIssue, currentImage, imageDecision, imageOwed, imageWaits, owedAttempt, withBuild, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
+import { IMAGE_LABEL, IMAGE_TITLE, NIGHTLY_CRON, coverHead, findImageIssue, currentImage, imageDecision, imageMade, imageOwed, recordCover, imageWaits, owedAttempt, withBuild, imageEntry, imageMarkerLine, imageRecordOf, imageTags, lastNightly, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "../scripts/lib/image.mjs";
 import { marker, setSelf } from "../scripts/lib/logic.mjs";
-import { changePath, imageTrigger, privilegedChanges, unexplainedChanges } from "../scripts/image.mjs";
+import { buildImage, changePath, harnessVersions, imageChange, imagePlan, imageTrigger, privilegedChanges, unexplainedChanges } from "../scripts/image.mjs";
+import { resolveInputs } from "../scripts/lib/inputs.mjs";
+import { installTools } from "../scripts/lib/checkout.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
 import { setupRuns } from "../scripts/doctor.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 
 const SHA = "a".repeat(40);
 const OTHER = "b".repeat(40);
+/** The harness CLIs' exact versions, as harnessVersions resolves them. */
+const VERSIONS = { "@anthropic-ai/claude-code": "2.1.400", "@openai/codex": "0.200.0", "@github/copilot": "1.0.40" };
 const build = (over = {}) => imageEntry({ vendor: "vercel", snapshot: "snap_abc", source: "factory-src1", sha: SHA, builtAt: "2026-11-08T10:00:00Z", buildMs: 60_000, ...over });
 const image = (over = {}) => ({ source: "factory-src1", snapshot: "snap_abc", sha: SHA, createdAt: "2026-11-08T09:59:00Z", ...over });
 
@@ -108,13 +113,13 @@ test("refresh: merges until today's minutes, then nightly, unless no build was t
   assert.match(imageDecision({ ...base, trigger: "merge", todayMs: 5 * 60_000, lastAttemptAt: "2026-11-08T11:00:00Z" }).skip, /next UTC day/, "a failed attempt since the nightly time closes the window");
   assert.match(imageDecision({ ...base, trigger: "merge", refresh: "nightly" }).skip, /^image_refresh is nightly; the next UTC day's first dispatcher tick builds it$/);
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", todayMs: 99 * 60_000 }), { build: true });
-  assert.match(imageDecision({ ...base, trigger: "nightly", current: { sha: SHA } }).skip, /already built/);
-  assert.deepEqual(imageDecision({ ...base, trigger: "manual", current: { sha: SHA } }), { build: true });
+  assert.match(imageDecision({ ...base, trigger: "nightly", current: { sha: SHA, builtAt: "2026-11-08T09:00:00Z" } }).skip, /already built/);
+  assert.deepEqual(imageDecision({ ...base, trigger: "manual", current: { sha: SHA, builtAt: "2026-11-08T09:00:00Z" } }), { build: true });
   assert.deepEqual(imageDecision({ ...base, trigger: "merge", current: null }), { build: true });
   assert.equal(lastNightly(new Date("2026-11-08T09:00:00Z")).toISOString(), "2026-11-07T10:41:00.000Z");
   assert.equal(lastNightly(now).toISOString(), "2026-11-08T10:41:00.000Z");
   assert.deepEqual(imageDecision({ ...base, trigger: "owed", todayMs: 99 * 60_000 }), { build: true }, "the dispatcher checked today's turn");
-  assert.match(imageDecision({ ...base, trigger: "owed", current: { sha: SHA } }).skip, /already built/, "a second owed tick during a build skips");
+  assert.match(imageDecision({ ...base, trigger: "owed", current: { sha: SHA, builtAt: "2026-11-08T09:00:00Z" } }).skip, /already built/, "a second owed tick during a build skips");
 });
 
 test("an owed build: a head an earlier day left unbuilt, on the UTC day's first tick today's turn allows", () => {
@@ -221,6 +226,237 @@ test("workflow template: the image job runs on the default branch's pushes, the 
   assert.ok(step && step.with.app_id && step.with.app_private_key, "the App writes the record");
   assert.equal(doc.env.FACTORY_IMAGE_REFRESH, "merge");
   assert.equal(String(doc.env.FACTORY_IMAGE_DAILY_MINUTES), "5");
+  assert.equal(String(doc.env.FACTORY_IMAGE_MAX_AGE_DAYS), "7");
   const plain = renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3" });
   assert.doesNotMatch(plain, /image|push:|41 10/, "nothing of the image without a sandbox");
+});
+
+test("a head whose changes touch nothing the image is made from builds nothing: the diff is read with git, the setup guard names setup's files", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "image-diff-"));
+  const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" }).trim();
+  const commit = (files) => {
+    for (const [p, text] of Object.entries(files)) {
+      mkdirSync(join(dir, p, ".."), { recursive: true });
+      writeFileSync(join(dir, p), text);
+    }
+    git("add", "-A");
+    git("commit", "-qm", "c");
+    return git("rev-parse", "HEAD");
+  };
+  git("init", "-q");
+  const built = commit({ "package.json": "{}", "package-lock.json": "{}", "scripts/setup.sh": "true\n", "src/a.js": "1\n" });
+  const setup = "bash scripts/setup.sh";
+  const install = "npm ci --ignore-scripts";
+  const code = commit({ "src/a.js": "2\n", "docs/x.md": "x\n" });
+  assert.deepEqual(await imageChange(dir, built, code, { setup, install }), { touched: null }, "source and docs only");
+  const script = commit({ "scripts/setup.sh": "apt-get install -y jq\n" });
+  assert.deepEqual(await imageChange(dir, built, script, { setup, install }), { touched: "scripts/setup.sh" }, "a file setup runs");
+  const dep = commit({ "crates/x/Cargo.lock": "" });
+  assert.deepEqual(await imageChange(dir, script, dep, { setup, install }), { touched: "crates/x/Cargo.lock" }, "a lockfile anywhere");
+  const npmrc = commit({ ".npmrc": "registry=https://example.invalid\n" });
+  assert.deepEqual(await imageChange(dir, dep, npmrc, { setup, install }), { touched: ".npmrc" }, "the install's own configuration");
+  const later = commit({ "src/a.js": "3\n" });
+  assert.deepEqual(await imageChange(dir, npmrc, later, { setup: 'bash "$(cat which-script)"', install }), { touched: "src/a.js" }, "setup may run a file Factory cannot name: any change");
+  assert.match((await imageChange(dir, "c".repeat(40), later, { setup, install })).unknown, /^git cannot list the changes/, "a head git does not have");
+});
+
+test("imageDecision: a head that changes nothing the image is made from, under the same settings, is covered, not built, on every trigger but a manual one", () => {
+  const made = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1" });
+  const now = new Date("2026-11-08T15:00:00Z");
+  const base = { refresh: "merge", head: SHA, current: build({ sha: OTHER, made }), made, lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now };
+  for (const trigger of ["merge", "nightly", "owed"]) {
+    assert.deepEqual(imageDecision({ ...base, trigger, unchanged: true }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}`, covers: true }, trigger);
+    assert.deepEqual(imageDecision({ ...base, trigger, unchanged: false }), { build: true }, `${trigger}: a change the image is made from`);
+  }
+  assert.deepEqual(imageDecision({ ...base, trigger: "manual", unchanged: true }), { build: true }, "by hand it builds");
+  const other = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts && cargo fetch --locked", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1" });
+  assert.notEqual(other, made);
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: other, unchanged: true }), { build: true }, "other settings build");
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", current: build({ sha: OTHER }), unchanged: true }), { build: true }, "a build recorded without its settings builds once");
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", current: build({ sha: OTHER, made, covers: SHA }) }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}` }, "already covered: nothing to record");
+  // The dispatcher owes a covered head nothing.
+  const owed = { refresh: "merge", head: SHA, headAt: "2026-11-07T22:00:00Z", todayMs: 0, dailyMinutes: 5, now };
+  assert.equal(imageOwed({ ...owed, builds: [build({ sha: OTHER, made })] }), true);
+  assert.equal(imageOwed({ ...owed, builds: [build({ sha: OTHER, made, covers: SHA })] }), false);
+});
+
+test("recordCover: the current image's entry covers the head, the owed job's attempt goes, and the record keeps it", async () => {
+  setSelf("factory-app[bot]");
+  const realFetch = globalThis.fetch;
+  const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  const self = { login: "factory-app[bot]" };
+  const made = "d".repeat(64);
+  const attempt = { vendor: "vercel", snapshot: null, source: null, sha: SHA, builtAt: "2026-11-09T03:00:00.000Z", buildMs: 0, sizeBytes: null, usd: null, attempt: true };
+  const older = build({ sha: "e".repeat(40), source: "factory-src0", snapshot: "snap_0", builtAt: "2026-11-07T10:00:00Z" });
+  let comment = `${marker(5, "image")}\n${imageMarkerLine([attempt, build({ sha: OTHER, made }), older])}\nhuman line`;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (init.method === "PATCH" && u.includes("/issues/comments/9")) {
+      comment = JSON.parse(init.body).body;
+      return json({ id: 9 });
+    }
+    if (u.includes("/issues?creator=")) return json([{ number: 5, user: self, title: IMAGE_TITLE, locked: true }]);
+    if (u.includes("/issues/5/comments")) return json([{ id: 9, user: self, body: comment }]);
+    return json({});
+  };
+  try {
+    await recordCover({ full: "o/r", owner: "o", name: "r" }, { source: "factory-src1", head: SHA, attempt }, { token: "t" });
+  } finally {
+    globalThis.fetch = realFetch;
+    setSelf(null);
+  }
+  const builds = imageRecordOf(comment);
+  assert.deepEqual(builds.map((b) => [b.sha.slice(0, 1), b.covers ?? null, b.made ?? null]), [["b", SHA, made], ["e", null, null]], "the attempt is gone; the image built from OTHER covers SHA");
+  assert.match(comment, /changes nothing the image is made from\.$/);
+  assert.equal(coverHead(builds, { source: "factory-src0", head: OTHER })[1].covers, OTHER, "a later cover moves to the build it names");
+});
+
+// A git repository in a temp directory, and a commit of `files` (path: text) in it, returning its sha.
+const gitRepo = () => {
+  const dir = mkdtempSync(join(tmpdir(), "image-repo-"));
+  const git = (...a) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" }).trim();
+  git("init", "-q");
+  const commit = (files) => {
+    for (const [p, text] of Object.entries(files)) {
+      mkdirSync(join(dir, p, ".."), { recursive: true });
+      writeFileSync(join(dir, p), text);
+    }
+    git("add", "-A");
+    git("commit", "-qm", "c");
+    return git("rev-parse", "HEAD");
+  };
+  return { dir, commit };
+};
+
+test("imageMade: Factory's own build code and each harness CLI's exact version are part of what the image is made from, so an image another Factory or other CLIs built is built again", () => {
+  const now = new Date("2026-11-08T15:00:00Z");
+  const of = (over = {}) => imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1", ...over });
+  const made = of();
+  assert.equal(of({ versions: { ...VERSIONS } }), made, "the same versions, in any order, make the same digest");
+  assert.notEqual(of({ factory: "f2" }), made, "another Factory");
+  assert.notEqual(of({ versions: { ...VERSIONS, "@anthropic-ai/claude-code": "2.1.401" } }), made, "a newer Claude Code");
+  assert.equal(of({ versions: null }), null, "unknown versions: nothing is taken as made the same way");
+  const base = { refresh: "merge", head: SHA, current: build({ sha: OTHER, made }), lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now, unchanged: true };
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: of({ factory: "f2" }) }), { build: true }, "an image the previous Factory built is built again once");
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", made: of({ versions: { ...VERSIONS, "@openai/codex": "0.201.0" } }) }), { build: true }, "a newer CLI is built in");
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", made }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}`, covers: true });
+});
+
+test("harnessVersions: harness_version resolved to each CLI's exact version (latest included) through the registry; an exact version is used as given; one unread is null", () => {
+  const asked = [];
+  const view = (pkg, spec) => (asked.push(`${pkg}@${spec}`), VERSIONS[pkg]);
+  assert.deepEqual(harnessVersions("latest", { view }), VERSIONS);
+  assert.deepEqual(asked, Object.keys(VERSIONS).map((p) => `${p}@latest`));
+  assert.deepEqual(harnessVersions("", { view }), VERSIONS, "empty is latest");
+  asked.length = 0;
+  assert.deepEqual(harnessVersions("2.1.400", { view }), Object.fromEntries(Object.keys(VERSIONS).map((p) => [p, "2.1.400"])));
+  assert.deepEqual(asked, [], "an exact version asks the registry nothing");
+  assert.equal(harnessVersions("latest", { view: (pkg) => (pkg === "@openai/codex" ? null : "1.0.0") }), null);
+});
+
+test("imageDecision: an image older than image_max_age_days stands for no head, its own included; the setting is a person's, bounded", () => {
+  const now = new Date("2026-11-20T15:00:00Z");
+  const made = "a".repeat(64);
+  const old = build({ sha: OTHER, made, builtAt: "2026-11-08T10:00:00Z" });
+  const base = { refresh: "merge", head: SHA, current: old, made, unchanged: true, lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now };
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge" }), { build: true }, "12 days old, over the default 7");
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", current: { ...old, covers: SHA } }), { build: true }, "a head it covered too");
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", current: { ...old, sha: SHA } }), { build: true }, "its own head too");
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", maxAgeDays: 14 }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}`, covers: true });
+  const days = (v) => resolveInputs({ env: { FACTORY_IMAGE_MAX_AGE_DAYS: v } }).imageMaxAgeDays;
+  assert.deepEqual(["", "14", "30", "0", "31", "2.5", "x"].map(days), [7, 14, 30, 7, 7, 7, 7]);
+});
+
+test("imageDecision: the image's own head is built again on a merge or nightly once what it is made from changed outside the tree (a setting, a CLI, Factory)", () => {
+  const now = new Date("2026-11-08T15:00:00Z");
+  const made = "a".repeat(64);
+  const base = { refresh: "merge", head: SHA, current: build({ sha: SHA, made }), lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now };
+  assert.match(imageDecision({ ...base, trigger: "nightly", made }).skip, /already built/);
+  assert.deepEqual(imageDecision({ ...base, trigger: "nightly", made: "b".repeat(64) }), { build: true }, "setup set from a repository variable, with no new commit");
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: "b".repeat(64) }), { build: true });
+  assert.match(imageDecision({ ...base, trigger: "nightly", made: null }).skip, /already built/, "with what it is made from unknown, the head it was built from stands");
+});
+
+test("imageChange: a toolchain pin, and a file a program reads by convention, change the image; under make setup or mise install as under any setup", async () => {
+  const r = gitRepo();
+  const built = r.commit({ "package.json": "{}", "package-lock.json": "{}", Makefile: "setup:\n\tnpm ci\n", "src/a.js": "1\n" });
+  const install = "npm ci --ignore-scripts";
+  let from = built;
+  for (const [setup, file] of [["make setup", "Makefile"], ["make setup", ".nvmrc"], ["mise install", ".tool-versions"], ["mise install", "mise.toml"], ["bash scripts/setup.sh", "rust-toolchain.toml"], ["bash scripts/setup.sh", ".python-version"], ["bash scripts/setup.sh", "services/compose.yaml"], ["bash scripts/setup.sh", "justfile"]]) {
+    const head = r.commit({ [file]: `${file} ${from}\n` });
+    assert.deepEqual(await imageChange(r.dir, from, head, { setup, install }), { touched: file }, `${file} under ${setup}`);
+    from = head;
+  }
+  const code = r.commit({ "src/a.js": "2\n" });
+  assert.deepEqual(await imageChange(r.dir, from, code, { setup: "make setup", install }), { touched: null }, "source only");
+  // A path the repository's toolchain_paths setting names is toolchain to the image too.
+  const pinned = r.commit({ "tools/versions.cfg": "node 22\n" });
+  assert.deepEqual(await imageChange(r.dir, code, pinned, { setup: "make setup", install, toolchainPaths: ["/tools/"] }), { touched: "tools/versions.cfg" }, "a toolchain_paths path");
+  assert.deepEqual(await imageChange(r.dir, code, pinned, { setup: "make setup", install }), { touched: null }, "the same path without the setting");
+});
+
+test("imagePlan: the job's decision on a real clone, with an owed attempt in the record: a head that changes nothing is covered and the attempt goes; a change, a newer CLI or another Factory builds", async () => {
+  const r = gitRepo();
+  const built = r.commit({ "package.json": "{}", "package-lock.json": "{}", Makefile: "setup:\n\ttrue\n", "src/a.js": "1\n" });
+  const head = r.commit({ "src/a.js": "2\n", "docs/x.md": "x\n" });
+  const inputs = resolveInputs({ env: { FACTORY_SETUP: "make setup" } });
+  const base = "vercel/sandbox/node:22";
+  const view = (pkg) => VERSIONS[pkg];
+  const now = new Date("2026-11-09T03:00:00Z");
+  // What the current image was made from: the same install the plan reads from the clone, the same CLIs and Factory.
+  const made = imageMade({ setup: "make setup", install: "npm ci --ignore-scripts", versions: VERSIONS, base, factory: "f1" });
+  const current = build({ sha: built, made, builtAt: "2026-11-08T10:00:00Z" });
+  const attempt = { vendor: "vercel", snapshot: null, sha: head, builtAt: "2026-11-09T02:59:00.000Z", buildMs: 0, attempt: true };
+  const builds = [imageEntry(attempt), current];
+  const plan = (over = {}) => imagePlan({ checkout: r.dir, head, trigger: "owed", inputs, base, current, builds, attempt, todayMs: 0, factory: "f1", view, now, ...over });
+  const p = await plan();
+  assert.equal(p.install, "npm ci --ignore-scripts");
+  assert.deepEqual(p.tools.map((t) => t.tool), ["npm"]);
+  assert.deepEqual(p.versions, VERSIONS);
+  assert.equal(p.made, made);
+  assert.deepEqual(p.change, { touched: null });
+  assert.deepEqual(p.decision, { skip: `nothing the image is made from changed since ${built.slice(0, 7)}`, covers: true });
+  assert.deepEqual(p.cover, { source: current.source, head, attempt });
+  const next = coverHead(builds, p.cover);
+  assert.equal(next.length, 1, "the owed job's own attempt goes: no build of the head ran");
+  assert.equal(next[0].covers, head);
+  assert.equal(imageOwed({ refresh: "merge", head, headAt: "2026-11-08T22:00:00Z", builds: next, todayMs: 0, dailyMinutes: 5, now }), false, "and the dispatcher owes it nothing");
+  // A newer CLI, or another Factory: built again, the diff not even read.
+  for (const over of [{ view: (pkg) => (pkg === "@github/copilot" ? "1.0.41" : VERSIONS[pkg]) }, { factory: "f2" }]) {
+    const q = await plan(over);
+    assert.deepEqual([q.decision, q.change, q.cover], [{ build: true }, null, null]);
+    assert.match(q.notes.join("\n"), /was built otherwise/);
+  }
+  // A Makefile change under make setup: built.
+  const makefile = r.commit({ Makefile: "setup:\n\tapt-get install -y jq\n" });
+  const m = await plan({ head: makefile, attempt: null, builds: [current], trigger: "merge" });
+  assert.deepEqual([m.change, m.decision, m.cover], [{ touched: "Makefile" }, { build: true }, null]);
+});
+
+test("buildImage: an automatic install whose program setup did not bring fails the build naming it, and the harness CLIs are installed at their exact versions", async () => {
+  const r = gitRepo();
+  r.commit({ "package.json": "{}", "package-lock.json": "{}", "Cargo.lock": "" });
+  const tools = installTools(r.dir, "auto");
+  // A vendor stand-in: every step succeeds but the install (cargo missing: 127), and only npm is on its PATH.
+  const ran = [];
+  let destroyed = null;
+  const adapter = {
+    create: async () => ({ id: "sbx_1" }),
+    writeFiles: async () => {},
+    readFile: async () => Buffer.from(""),
+    destroy: async (id) => void (destroyed = id),
+    run: async (id, spec) => {
+      ran.push(spec.argv);
+      if (spec.argv[2] === "npm ci --ignore-scripts && cargo fetch --locked") return { exitCode: 127 };
+      if (spec.argv[2]?.startsWith("command -v")) return { exitCode: spec.argv[4] === "npm" ? 0 : 1 };
+      return { exitCode: 0 };
+    },
+  };
+  const args = { adapter, base: "vercel/sandbox/node:22", bundle: Buffer.from(""), repo: { full: "o/r", name: "r" }, branch: "main", sha: SHA, setup: "", install: "npm ci --ignore-scripts && cargo fetch --locked", tools, harnessVersion: "latest", versions: VERSIONS, tags: {} };
+  await assert.rejects(buildImage(args), (e) => e.step === "install" && e.message === "install exited 127: cargo is not on PATH (for Cargo.lock); the setup command must install it, or set install: to the command this repository needs (install: none skips)");
+  assert.equal(destroyed, "sbx_1");
+  // With cargo there, the build goes on to the harness CLIs, each at the exact version its `made` names.
+  adapter.run = async (id, spec) => (ran.push(spec.argv), { exitCode: spec.argv[2] === "npm ci --ignore-scripts && cargo fetch --locked" ? 0 : spec.argv[0] === "npm" ? 1 : 0 });
+  await assert.rejects(buildImage(args), (e) => e.step === "harness CLIs");
+  assert.deepEqual(ran.at(-1).slice(-3), Object.entries(VERSIONS).map(([p, v]) => `${p}@${v}`));
 });

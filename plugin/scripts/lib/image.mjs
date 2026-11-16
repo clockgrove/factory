@@ -6,9 +6,11 @@
 // - The vendor's, the proof: the sandbox each image came from stays in Factory's own project, stopped, tagged with this
 //   repository's id, the head and the snapshot id. A snapshot is used or deleted only when that listing shows it.
 // Paths inside the image are constants, never read from a record.
+import { createHash } from "node:crypto";
 import { SNAPSHOT_TAG } from "./adapters/sandbox.mjs";
 import { findRecordIssue, getRepo, listComments, onDefaultBranch, openRecordIssue, rest, upsertComment } from "./github.mjs";
-import { WAKE_SLACK_MS, isSelf, marker } from "./logic.mjs";
+import { IMAGE_MAX_AGE_DAYS } from "./inputs.mjs";
+import { WAKE_SLACK_MS, dependencyFile, guardCovers, isSelf, marker, toolchainFile } from "./logic.mjs";
 
 /** The label on Factory's image issue (a hint to find it; anyone with triage can remove it) and its exact title. */
 export const IMAGE_LABEL = "factory:image";
@@ -37,18 +39,23 @@ const MAX_BUILD_MS = 45 * 60_000;
 
 const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SHA = /^[0-9a-f]{40}$/;
+const DIGEST = /^[0-9a-f]{64}$/;
 
 /** The image's paths, from constants and the repository's name: the clone and the JSON of what setup exported. */
 export const imagePaths = (repo) => ({ checkout: `${IMAGE_DIR}/${repo.name}`, envFile: `${IMAGE_DIR}/setup-env.json` });
 /** The tags a build sandbox is created with (the adapter adds `snapshot` when it is kept as an image). */
 export const imageTags = (repoId, sha) => ({ factory: "image", [IMAGE_TAG]: String(repoId), sha });
 
-/** One build in the record, checked field by field; null when it is not one. */
+/**
+ * One build in the record, checked field by field; null when it is not one. `made`: imageMade's digest of the
+ * settings it was built with. `covers`: a later head of the default branch whose changes since `sha` touch nothing the
+ * image is made from (coverHead), so the image stands for that head too.
+ */
 export function imageEntry(e) {
   if (!e || typeof e !== "object" || typeof e.vendor !== "string" || !ID.test(e.vendor) || !SHA.test(e.sha ?? "") || !Number.isFinite(Date.parse(e.builtAt))) return null;
   const id = (v) => (typeof v === "string" && ID.test(v) ? v : null);
   const num = (v) => (Number.isFinite(v) && v >= 0 ? v : null);
-  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd), ...(e.attempt === true ? { attempt: true } : {}) };
+  return { vendor: e.vendor, snapshot: id(e.snapshot), source: id(e.source), sha: e.sha, builtAt: new Date(Date.parse(e.builtAt)).toISOString(), buildMs: Math.min(num(e.buildMs) ?? 0, MAX_BUILD_MS), sizeBytes: num(e.sizeBytes), usd: num(e.usd), ...(DIGEST.test(e.made ?? "") ? { made: e.made } : {}), ...(SHA.test(e.covers ?? "") ? { covers: e.covers } : {}), ...(e.attempt === true ? { attempt: true } : {}) };
 }
 
 /**
@@ -61,6 +68,47 @@ export function withBuild(builds, entry) {
   if (!e) return builds;
   const ends = (b) => !e.attempt && b.attempt === true && b.sha === e.sha && b.builtAt === e.builtAt;
   return [e, ...builds.filter((b) => !ends(b))].slice(0, RECORDED);
+}
+
+/**
+ * The record once `head` is found to change nothing the image built from `source` is made from: that build's entry
+ * `covers` it, and the attempt this job recorded for it (an owed build's, `attempt`) goes, as no build of it ran.
+ */
+export function coverHead(builds, { source, head, attempt = null }) {
+  const ran = (b) => attempt && b.attempt === true && b.sha === attempt.sha && b.builtAt === attempt.builtAt;
+  return builds.filter((b) => !ran(b)).map((b) => (b.source === source && !b.attempt ? imageEntry({ ...b, covers: head }) : b));
+}
+
+/**
+ * The digest of what the image is made from outside the repository's tree: the setup command, the install command, the
+ * exact version of each harness CLI it installs (`versions`, package to version: `harness_version` resolved, `latest`
+ * included), the vendor's base image and Factory's own build code (`factory`, the plugin's digest: an image another
+ * Factory built is built again once). A build records it (`made`); a change to any of them builds again. Null when the
+ * versions are not known (`versions` null), so nothing is taken as unchanged.
+ */
+export const imageMade = ({ setup = "", install = "", versions = null, base = "", factory = "" }) =>
+  versions && typeof versions === "object" ? createHash("sha256").update(JSON.stringify([setup || "", install || "", Object.entries(versions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), base || "", factory || ""])).digest("hex") : null;
+
+/**
+ * Files a program reads by its own convention from the directory it runs in, which the setup guard does not follow
+ * (doctor's SETUP_NOT_FOLLOWED): make's makefiles, just's and Task's files, docker compose's files, Nix's and Devbox's.
+ * Counted whatever the setup command is, because a script setup runs may run any of them and is not read.
+ */
+const CONVENTION_FILES = new Set(["Makefile", "makefile", "GNUmakefile", "justfile", "Justfile", ".justfile", "Taskfile.yml", "Taskfile.yaml", "Taskfile.dist.yml", "Taskfile.dist.yaml", "compose.yaml", "compose.yml", "compose.override.yaml", "compose.override.yml", "docker-compose.yaml", "docker-compose.yml", "docker-compose.override.yaml", "docker-compose.override.yml", "shell.nix", "default.nix", "flake.nix", "devbox.json"]);
+
+/**
+ * Whether a change to `files` (the paths a diff names) changes what the image is made from, given setupGuard's view of
+ * the setup and install commands (`guards`): the first such path, or null. Anywhere in the tree: a manifest, a lockfile
+ * or a requirements list (the dependency store), a toolchain pin or package-manager configuration (logic.mjs
+ * toolchainFile: `.nvmrc`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml` and the rest, what setup installs
+ * from, and a path the repository's `toolchain_paths` setting covers, `paths`), and a file a program reads by convention
+ * (CONVENTION_FILES); any file setup or the install runs (guardCovers); when either may run a file Factory cannot name
+ * (`unresolved`), any file.
+ */
+export function imageTouch(files, guards = [], paths = []) {
+  const unresolved = guards.some((g) => g.unresolved?.length);
+  const guarded = guards.flatMap((g) => g.files ?? []);
+  return files.find((f) => unresolved || dependencyFile(f) || toolchainFile(f, paths) || CONVENTION_FILES.has(f.split("/").at(-1)) || guarded.some((p) => guardCovers(p, f))) ?? null;
 }
 
 /** The record comment's JSON line (`<` and `>` escaped, as the sandbox record's) and its parse. */
@@ -94,18 +142,25 @@ export async function listImages(repo, opts) {
  * closed and locked, so it neither shows among open issues nor takes comments. Codes, ids and times only.
  */
 export async function recordImage(repo, entry, opts) {
+  return writeRecord(repo, (builds) => withBuild(builds, entry), opts);
+}
+
+/** Record that `head` changes nothing the image built from `source` is made from (coverHead). */
+export const recordCover = (repo, cover, opts) => writeRecord(repo, (builds) => coverHead(builds, cover), opts, `Factory's sandbox image: \`${cover.head.slice(0, 7)}\` changes nothing the image is made from.`);
+
+async function writeRecord(repo, change, opts, said = null) {
   let { issue, builds } = await listImages(repo, opts);
   if (!issue) {
     const body = "Factory keeps the record of this repository's sandbox image here: what each build made, from which head, in how long. Factory reads only its own comment. Do not reopen.";
     issue = await openRecordIssue(repo, { label: IMAGE_LABEL, color: "5319e7", description: "Factory's sandbox image record", title: IMAGE_TITLE, body }, opts);
   }
-  const next = withBuild(builds, entry);
+  const next = change(builds);
   const e = next[0];
-  const human = e.attempt
+  const human = said ?? (e.attempt
     ? `Factory's sandbox image: a build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) started at ${e.builtAt.slice(0, 16)}Z.`
     : e.snapshot
     ? `Factory's sandbox image: \`${e.snapshot}\` (${e.vendor}) from \`${e.sha.slice(0, 7)}\`, built in ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`
-    : `Factory's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`;
+    : `Factory's sandbox image: the build of \`${e.sha.slice(0, 7)}\` (${e.vendor}) failed after ${Math.round(e.buildMs / 1000)} s at ${e.builtAt.slice(0, 16)}Z.`);
   await upsertComment(repo, issue, marker(issue, "image"), `${imageMarkerLine(next)}\n${human}`, opts);
   return issue;
 }
@@ -171,14 +226,22 @@ export function lastNightly(now = new Date()) {
 /**
  * Whether this event builds the image. `trigger` is `merge` (a push to the default branch), `nightly` (the nightly
  * schedule), `owed` (the dispatcher saw a head an earlier day left unbuilt, imageOwed) or `manual` (workflow_dispatch). `current` is the newest confirmed, ready image; `lastAttemptAt` when the
- * newest build Factory recorded started, failed ones included. A head already built is never built again, except by
- * hand. On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
+ * newest build Factory recorded started, failed ones included. The current image stands for a head only while it was
+ * made as this build would be (`made` equal to `current.made`, imageMade; an unknown `made` stands for the head it was
+ * built from) and is younger than `maxAgeDays` (image_max_age_days: the base image and what setup fetches without a
+ * pin move on with no change in the repository). While it does, its own head is not built again, except by hand; nor
+ * is a head whose changes since `current`'s touch nothing the image is made from (`unchanged`, the caller's check of the
+ * diff): the skip says so (`covers`), and the caller records it (recordCover). On a merge, `refresh: nightly` leaves it to the nightly build; so do today's builds at `dailyMinutes` or more,
  * unless no build was even tried since the last nightly time (GitHub's cron does not always fire): then one merge
  * builds, and its attempt closes the window whether it succeeds or not.
  */
-export function imageDecision({ trigger, refresh, head, current, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
+export function imageDecision({ trigger, refresh, head, current, made = null, unchanged = false, maxAgeDays = IMAGE_MAX_AGE_DAYS, lastAttemptAt = null, todayMs, dailyMinutes, now = new Date() }) {
   if (trigger === "manual") return { build: true };
-  if (current?.sha === head) return { skip: `the image is already built from ${head.slice(0, 7)}` };
+  const young = !!current && now.getTime() - Date.parse(current.builtAt) < maxAgeDays * 86_400_000;
+  if (current?.sha === head && young && (!made || current.made === made)) return { skip: `the image is already built from ${head.slice(0, 7)}` };
+  const same = young && !!made && current.made === made;
+  if (same && current.covers === head) return { skip: `nothing the image is made from changed since ${current.sha.slice(0, 7)}` };
+  if (same && unchanged) return { skip: `nothing the image is made from changed since ${current.sha.slice(0, 7)}`, covers: true };
   if (trigger === "nightly" || trigger === "owed") return { build: true };
   if (trigger !== "merge") return { skip: `no image build on ${trigger}` };
   if (refresh === "nightly") return { skip: "image_refresh is nightly; the next UTC day's first dispatcher tick builds it" };
@@ -190,15 +253,15 @@ export function imageDecision({ trigger, refresh, head, current, lastAttemptAt =
 /**
  * Whether the image is owed a build now (the dispatcher's tick runs the image job when it is): the default branch's
  * head (`head`, committed at `headAt`) is in no build Factory recorded (`builds`, newest first: built, failed, or only
- * started), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
+ * started) and no build covers it (coverHead), it was committed before today's 00:00 UTC (a head an earlier day's minutes or `image_refresh: nightly`
  * left to the nightly build; a merge today builds on its own push), and today's turn allows one: `merge`, today's
  * builds under `dailyMinutes`; `nightly`, none tried yet today. So an owed build runs on the first dispatcher tick of
  * the UTC day, an event's or a wake's, never on GitHub's nightly cron alone, which stays the backstop.
  */
 export function imageOwed({ refresh, head, headAt, builds = [], todayMs, dailyMinutes, now = new Date() }) {
   // Any build of the head Factory recorded ends the owing: built, failed, or only started (an attempt a crash, a timeout
-  // or a vendor error left). The next merge or the nightly cron tries again, never another tick.
-  if (!head || builds.some((b) => b.sha === head)) return false;
+  // or a vendor error left), and so does a build that covers it. The next merge or the nightly cron tries again, never another tick.
+  if (!head || builds.some((b) => b.sha === head || b.covers === head)) return false;
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   if (!(Date.parse(headAt) < today)) return false;
   if (refresh === "nightly") return !builds.some((b) => Date.parse(b.builtAt) >= today);

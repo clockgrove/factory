@@ -371,8 +371,9 @@ async function main() {
   // read before the text (planGate): an edit and a start landing between the two reads then count as after this stage's
   // plan, never as before it.
   const labeledAt = await startedAt(repo, issue, inputs.objectiveLabel, token);
-  // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the body read with its author
-  // and last editor, and Blocks before any harness when either cannot push and is not a pinned maintainer.
+  // Only text a writer wrote reaches a harness (objective-trust.mjs): the stage acts on the title and body read with their
+  // author, last editor and latest title renamer, and Blocks before any harness when one cannot push and is not a pinned
+  // maintainer.
   const trusted = await authorGate({ repo, issue, issueData, notify: inputs.notify, opts: token, apply: applyExit });
   if (!trusted.ok) {
     log(trusted.reason);

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { harnessActivity } from "../scripts/lib/logic.mjs";
+import { readFileSync } from "node:fs";
 import { agentRoute, cpuTimeMs, exec, hangVerdict, runReading } from "../scripts/lib/proc.mjs";
 import { runHarness } from "../scripts/lib/harness.mjs";
 
@@ -51,31 +52,19 @@ test("exec: an open command item whose command uses no CPU and does no I/O is hu
   assert.deepEqual([r.idle, r.idleOpen, !!r.signal], [true, 1, true]);
 });
 
-test("exec: with no item open, a harness whose timers use CPU while its model stream sends nothing is hung; one the stream feeds works", async () => {
-  const peers = new Set();
-  let drip = null;
-  const server = createServer((s) => {
-    peers.add(s);
-    s.on("error", () => {});
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const { port } = server.address();
-  // An idle harness's own timers (Claude Code's use ~1 tick a second), waiting on a model connection that never answers.
-  const harness = (bytes) => `const s = require("node:net").connect(${port}, "127.0.0.1"); let got = 0; s.on("data", (d) => { got += d.length; if (got >= ${bytes}) process.exit(0); }); setInterval(() => { let x = 0; for (let i = 0; i < 2e6; i++) x += i; }, 20);`;
-  try {
-    const hung = await run(harness(1e9));
-    assert.deepEqual([hung.idle, hung.idleOpen, !!hung.signal], [true, 0, true]);
-    // The same harness with its answer arriving a few bytes at a time.
-    drip = setInterval(() => {
-      for (const s of peers) s.write("x");
-    }, 50);
-    const fed = await run(harness(30));
-    assert.deepEqual([fed.code, fed.idle], [0, false]);
-  } finally {
-    clearInterval(drip);
-    for (const s of peers) s.destroy();
-    server.close();
-  }
+// A harness waiting on its model with no command open: its own timers use CPU and it reads its own files (an idle Claude
+// Code reads ~157 KB a minute), so only the answer's own lines tell a live stream from a stalled one.
+const delta = line({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "x" } } });
+const waiting = (deltas) => `let n = 0; const t = setInterval(() => { if (n++ < ${deltas}) console.log(${JSON.stringify(delta)}); }, 50); const fs = require("node:fs"); const fd = fs.openSync(process.execPath, "r"); const buf = Buffer.alloc(65536); setInterval(() => { let x = 0; for (let i = 0; i < 2e6; i++) x += i; fs.readSync(fd, buf, 0, buf.length, 0); }, 20); setTimeout(() => process.exit(0), ${WINDOW * 8});`;
+
+test("exec: with no item open, a harness that streams its answer is hung once the stream stalls, whatever its CPU and reads", async () => {
+  const seen = [];
+  const r = await exec(process.execPath, ["-e", `console.log(${JSON.stringify(line({ type: "system", subtype: "init" }))}); ${waiting(WINDOW / 50 * 3)}`], { idleMs: WINDOW, answerStreams: true, dropLine: (l) => JSON.parse(l).type === "stream_event", onLine: (l) => seen.push(l), fileStdio: true });
+  assert.deepEqual([r.idle, r.idleOpen, !!r.signal], [true, 0, true]);
+  assert.deepEqual([seen.length, r.stdout], [1, `${seen[0]}\n`], "the deltas count as output and go no further");
+  // A harness that streams no answer (Codex: it ends a stalled stream itself): the silence decides nothing.
+  const codex = await exec(process.execPath, ["-e", waiting(0)], { idleMs: WINDOW, fileStdio: true });
+  assert.deepEqual([codex.code, codex.idle], [0, false]);
 });
 
 test("exec: a command that left the run's group and tree (setsid, double fork) is found by the run's tag", async () => {
@@ -121,8 +110,6 @@ test("runReading: /proc, and ps with lsof, find a run's harness and its commands
       after = await runReading(child.pid, { procfs });
     }
     assert.equal(hangVerdict(before, after, { open: 1 }), false, `procfs ${procfs}: the command's CPU is counted`);
-    // No item open: the harness's reads decide, and only /proc has them.
-    assert.equal(hangVerdict(before, after, { open: 0 }), procfs ? true : null, `procfs ${procfs}: the harness read nothing`);
     for (const p of after.procs.values()) process.kill(p.pid, "SIGKILL");
   }
 });
@@ -136,16 +123,16 @@ test("runReading and hangVerdict: what cannot be read decides nothing", async ()
   const harness = { pid: 1, ppid: 0, cpu: 5, io: { rchar: 10, wchar: 0 }, role: "harness" };
   const command = { pid: 2, ppid: 1, cpu: 5, io: { rchar: 10, wchar: 0 }, role: "command" };
   const r = reading([harness, command]);
-  assert.deepEqual([hangVerdict(null, r), hangVerdict(r, null), hangVerdict(r, r, { heard: true })], [null, null, false]);
-  assert.deepEqual([hangVerdict(r, r, { open: 1 }), hangVerdict(r, r)], [true, true], "no progress anywhere is hung");
+  assert.deepEqual([hangVerdict(null, r, { open: 1 }), hangVerdict(r, null, { open: 1 }), hangVerdict(r, r, { heard: true, open: 1 })], [null, null, false]);
+  assert.equal(hangVerdict(r, r, { open: 1 }), true, "an open command with no progress is hung");
+  assert.deepEqual([hangVerdict(null, null, { streams: true }), hangVerdict(r, r)], [true, null], "no command open: a streaming harness's silence decides, readings or not; another's cannot");
   const unreadCommand = reading([harness, { ...command, io: null }]);
   assert.equal(hangVerdict(unreadCommand, unreadCommand, { open: 1 }), null, "a command whose I/O cannot be read");
-  const unreadHarness = reading([{ ...harness, io: null }, command]);
-  assert.equal(hangVerdict(unreadHarness, unreadHarness), null, "a harness whose reads cannot be read");
   const unclassified = reading([harness, { ...command, role: null }]);
-  assert.deepEqual([hangVerdict(unclassified, unclassified, { open: 1 }), hangVerdict(unclassified, unclassified)], [null, null]);
+  assert.equal(hangVerdict(unclassified, unclassified, { open: 1 }), null, "a process that cannot be classified");
+  assert.equal(hangVerdict(reading([harness]), reading([harness]), { open: 1 }), null, "an item open with no command process (a sub-agent)");
   const macos = reading([{ ...harness, io: null }, { ...command, io: null }], false);
-  assert.deepEqual([hangVerdict(macos, macos, { open: 1 }), hangVerdict(macos, macos)], [true, null], "without I/O counts: the command's CPU decides; the model's answer cannot be told");
+  assert.equal(hangVerdict(macos, macos, { open: 1 }), true, "without I/O counts the command's CPU decides");
   assert.equal(agentRoute(["-n", "/usr/bin/env", "codex", "--", "--unit=factory-agent-x"]), null, "only systemd-run's own options name a unit");
   assert.deepEqual(agentRoute(["-n", "/usr/bin/unshare", "/bin/bash", "-c", "…", "factory-agent-wrap", "/home/a"]), { cgroup: "/sys/fs/cgroup/factory-agent" });
   assert.deepEqual(["00:01:02", "1:02.03", "1-00:00:00", "0:00.5", "x"].map(cpuTimeMs), [62_000, 62_030, 86_400_000, 500, null]);
@@ -190,6 +177,31 @@ put({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, 
     const hung = await pass();
     assert.equal(hung.idle, true);
     assert.match(hung.error, /^hung: no output for \d+ min with 1 command item open and no CPU or I\/O by its commands; killed$/);
+  } finally {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("runHarness: a Claude pass streams its answer (--include-partial-messages) and is killed as hung when it stalls with no command open; the deltas stay out of its record", async () => {
+  const bin = mkdtempSync(join(tmpdir(), "factory-hung-claude-"));
+  const events = join(bin, "usage", "events.jsonl");
+  const claude = `#!${process.execPath}
+if (!process.argv.includes("--include-partial-messages")) process.exit(3);
+console.log(${JSON.stringify(line({ type: "system", subtype: "init", session_id: "s1" }))});
+console.log(${JSON.stringify(line({ type: "assistant", session_id: "s1", message: { content: [{ type: "text", text: "thinking" }], usage: { input_tokens: 1, output_tokens: 1 } } }))});
+${waiting(WINDOW / 50 * 2)}
+`;
+  writeFileSync(join(bin, "claude"), claude, { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  try {
+    const rec = await runHarness({ harness: "claude", model: "claude-opus-5-5", prompt: "p", maxUsd: 0, cwd: bin, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work", idleMs: WINDOW, eventsFile: events });
+    assert.equal(rec.idle, true, rec.error);
+    assert.match(rec.error, /^hung: no output for \d+ min with no command open, so its model stream stalled; killed$/);
+    assert.ok(!rec.stdoutTail.includes("stream_event") && rec.stdoutTail.includes('"assistant"'), rec.stdoutTail);
+    const kept = readFileSync(events, "utf8");
+    assert.ok(!kept.includes("stream_event") && kept.includes('"assistant"'), "the events file keeps no deltas");
   } finally {
     process.env.PATH = path;
     rmSync(bin, { recursive: true, force: true });

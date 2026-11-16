@@ -337,7 +337,10 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       const settings = local ? claudeLocalSettings({ domains: local.domains, clone: local.clone, credentials: local.credentials, readOnly: local.readOnly, writable: caches, readable: local.readable || [], secretEnv: hidden, ripgrep: local.ripgrep || null }) : runner ? claudeRunnerSettings({ domains: runner.domains, clone: runner.clone, writable: [runner.clone, runner.agentTmp, runner.cmdTmp, ...runner.caches], readOnly: runner.editDiffs ? [runner.editDiffs] : [], secretEnv: hidden }) : null;
       const dirs = local ? [...(local.clone ? [local.clone] : []), ...local.addDirs.filter((d) => !caches.includes(d)), ...(local.readDirs || [])] : runner ? [runner.clone, runner.agentTmp] : [];
       const perms = settings ? ["--permission-mode", "acceptEdits", "--setting-sources", "", "--strict-mcp-config", "--settings", JSON.stringify(settings), ...plugin, ...dirs.flatMap((d) => ["--add-dir", d])] : ["--dangerously-skip-permissions"];
-      const args = ["-p", "--output-format", "stream-json", "--verbose", ...perms, "--exclude-dynamic-system-prompt-sections"];
+      // --include-partial-messages: the model's answer shows on stdout as it arrives (`stream_event` lines), so a silent
+      // pass with no command open is one whose model stream stalled (proc.mjs hangVerdict). Those lines are kept out
+      // of the events file and the parsed output (HARNESS_DELTAS).
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", ...perms, "--exclude-dynamic-system-prompt-sections"];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (agent) args.push("--agent", agent);
@@ -382,7 +385,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // without -p a piped stdin is a non-interactive prompt (1.0.107, checked live with 200 KB, fresh and --resume).
       // Every route: the credentials (SHELL_SECRET_KEYS, its own COPILOT_GITHUB_TOKEN included) are removed from its shell
       // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
-      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+      // --stream on: the model's answer shows on stdout as it arrives (`assistant.*_delta` events), as Claude Code's above.
+      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json", "--stream", "on"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
       // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.
@@ -405,6 +409,26 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
  * prompt or the env.
  */
+/**
+ * The stream lines that only carry the model's answer as it arrives, by harness: what tells a silent harness's model
+ * stream stalled. They count as output for the hung check and are dropped before anything stores or parses the
+ * stream (the events file, the pass's stdout, the stream parsers). Codex prints none: it ends a stalled model stream
+ * itself (its `stream_idle_timeout_ms`, then its retries, each an `error` line), so for it a silence with no command
+ * open decides nothing.
+ */
+export const HARNESS_DELTAS = { claude: new Set(["stream_event"]), copilot: new Set(["assistant.message_delta", "assistant.reasoning_delta", "assistant.streaming_delta", "assistant.tool_call_delta"]) };
+
+/** Whether a stream line of `harness` is one of its HARNESS_DELTAS. */
+export function deltaLine(harness, line) {
+  const kinds = HARNESS_DELTAS[harness];
+  if (!kinds) return false;
+  try {
+    return kinds.has(JSON.parse(line)?.type);
+  } catch {
+    return false;
+  }
+}
+
 // The window a silent harness is checked over (proc.mjs exec `idleMs`): one that printed nothing across it is killed as
 // hung only when its own state says so (proc.mjs hangVerdict), never for the silence alone.
 export const HARNESS_IDLE_MS = 30 * 60_000;
@@ -1199,7 +1223,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     onLine?.(l);
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
@@ -1291,7 +1315,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   } else if (r.idle) {
     rec.ok = false;
     const min = Math.round(idleMs / 60000);
-    rec.error = r.idleOpen ? `hung: no output for ${min} min with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open and no CPU or I/O by its commands; killed` : `hung: no output for ${min} min and no byte of the model's answer read; killed`;
+    rec.error = r.idleOpen ? `hung: no output for ${min} min with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open and no CPU or I/O by its commands; killed` : `hung: no output for ${min} min with no command open, so its model stream stalled; killed`;
   } else if (r.code !== 0 && rec.ok) {
     rec.ok = false;
     rec.error = `${cmd} exited ${r.code ?? r.signal}`;

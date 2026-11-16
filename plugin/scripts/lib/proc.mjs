@@ -7,6 +7,7 @@ import { constants as osConstants, tmpdir } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 // ------------------------------------------------------------------ the agent uid
 
@@ -294,10 +295,12 @@ function fileStdio(limit) {
  * rather than leaving a live run that looks silent.
  * `idleMs`: the window a silent run is checked over, and `openItems` (a function) the count of command items its own
  * stream shows started and not yet ended. Silence alone kills nothing: a run that printed nothing across a whole window
- * is killed only when hangVerdict finds it hung (its open command made no progress, or with none open the harness read
- * no byte of its model's answer), and reported `idle`, with `idleOpen` the items open at the kill.
+ * is killed only when hangVerdict finds it hung (its open command made no progress, or with none open a harness that
+ * prints its answer as it arrives, `answerStreams`, printed nothing), and reported `idle`, with `idleOpen` the items
+ * open at the kill. `dropLine`: stdout lines that count as output for that check and are not kept, teed or handed to
+ * `onLine` (a harness's answer deltas).
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, openItems = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, dropLine = null, idleMs = 0, openItems = null, answerStreams = false, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -365,6 +368,8 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     else signal?.addEventListener("abort", stop, { once: true });
     // Each idleMs window, a run that printed nothing across it is judged from its own state (runReading, hangVerdict):
     // killed when hung, left when working or when that cannot be told (the wall clock, timeoutMs, still stops it).
+    // `answerStreams`: the run prints its model's answer as it arrives (dropLine's deltas), so its silence with no
+    // command open is a stalled model stream.
     let heard = false;
     let exited = false;
     let baseline = null;
@@ -372,60 +377,65 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       const opts = { group, tag, agent: agentRoute(args), streamFd: files ? files.streamFd : null };
       const read = () => runReading(child.pid, opts).catch(() => null);
       let before = null;
-      let busy = false;
-      const tick = async () => {
-        if (busy || exited) return;
-        busy = true;
+      let ticking = false;
+      check = setInterval(async () => {
+        if (ticking || exited) return;
+        ticking = true;
+        const silent = !heard;
+        heard = false;
         try {
           const after = await read();
           if (exited) return;
           const open = openItems?.() ?? 0;
-          if (hangVerdict(before, after, { heard, open }) === true) {
+          if (hangVerdict(before, after, { heard: !silent, open, streams: answerStreams }) === true) {
             idle = true;
             idleOpen = open;
             clearInterval(check);
             kill();
-          } else if (after) {
-            before = after;
-            heard = false;
-          }
+          } else if (after) before = after;
         } catch {
           // decides nothing
         } finally {
-          busy = false;
+          ticking = false;
         }
-      };
-      // The windows count from the first reading that finds the run (an agent's unit starts after its client): tried at
-      // the start, and again at each output until one does.
+      }, idleMs);
+      // The processes' windows count from the first reading that finds the run (an agent's unit starts after its
+      // client): tried at the start, and again at each output until one does.
+      let reading = false;
       baseline = async () => {
-        if (busy || before || exited) return;
-        busy = true;
+        if (reading || before || exited) return;
+        reading = true;
         try {
           before = await read();
-          if (before && !exited) {
-            heard = false;
-            check = setInterval(tick, idleMs);
-          }
         } finally {
-          busy = false;
+          reading = false;
         }
       };
       baseline();
     }
     let partial = "";
-    const onOut = (chunk) => {
+    const decoder = new StringDecoder("utf8");
+    const keep = (chunk) => {
       outBytes += chunk.length;
       if (outBytes <= maxBytes) out.push(chunk);
       // `killPastMax`: a child that writes past `maxBytes` is stopped, not read on and dropped (a file that never ends).
       else if (killPastMax) kill();
       if (tee) appendOwn(tee, chunk);
+    };
+    // `dropLine`: stdout lines it names (a harness's answer deltas) count as output for the hung check and go no further:
+    // not into the result, `tee` or `onLine`.
+    const onOut = (chunk) => {
       heard = true;
       baseline?.();
-      if (onLine) {
-        partial += chunk.toString("utf8");
-        const parts = partial.split("\n");
-        partial = parts.pop();
-        for (const line of parts) if (line) onLine(line);
+      if (!dropLine) keep(chunk);
+      if (!onLine && !dropLine) return;
+      partial += decoder.write(chunk);
+      const parts = partial.split("\n");
+      partial = parts.pop();
+      for (const line of parts) {
+        if (dropLine && line && dropLine(line)) continue;
+        if (dropLine) keep(Buffer.from(`${line}\n`));
+        if (line) onLine?.(line);
       }
     };
     const onErr = (chunk) => {
@@ -500,7 +510,11 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
         files.drop();
       }
       if (readError) err.push(Buffer.from(`\n[factory] reading the run's output failed (${readError}); the run was stopped\n`));
-      if (onLine && partial) onLine(partial);
+      partial += decoder.end();
+      if (partial && !dropLine?.(partial)) {
+        if (dropLine) keep(Buffer.from(partial));
+        onLine?.(partial);
+      }
       const decode = (chunks) => (encoding === "buffer" ? Buffer.concat(chunks) : Buffer.concat(chunks).toString("utf8"));
       resolve({ code, signal: sig, stdout: decode(out), stderr: decode(err), timedOut, idle, idleOpen, stopped, truncated: outBytes > maxBytes || overflow, readError });
     });
@@ -810,42 +824,35 @@ export async function runReading(pid, { group = false, tag = null, agent = null,
 }
 
 /**
- * Whether a run that printed nothing since `before` (a runReading) is hung at `after`: true hung, false working, null
- * unknown (the caller then decides nothing; the wall clock still ends the run). Output since `before` is working.
- * With a command item open (`open`, from the harness's own stream) and command processes running, the question is
- * whether the commands progress: any CPU, or any byte read or written (a download, a pipe), by a command process, one
- * started since included, is working; none, with every command's I/O read, is hung. With no item open, or one open with
- * no command process (a sub-agent, a web fetch, in the harness itself), the question is whether the model's answer
- * arrives: any byte the harness's processes read is working, none is hung; CPU says nothing there (an idle harness's
- * timers use some). Whatever is unread (I/O on a platform without it, a process whose stdout or I/O cannot be read)
- * makes that answer unknown, never "no progress".
+ * Whether a run that printed nothing across a window (`heard`: it did print) is hung at its end: true hung, false
+ * working, null unknown (the caller then decides nothing; the wall clock still ends the run).
+ * With no command item open (`open`, from the harness's own stream), the harness is waiting on its model: a harness that
+ * prints the answer as it arrives (`streams`) and printed nothing has a stalled model stream, hung; for any other the
+ * silence decides nothing (Codex ends a stalled stream itself). Neither its CPU nor its reads say more: an idle
+ * harness's timers use CPU and read its own files.
+ * With a command item open, the question is whether the commands (`before` and `after`, runReading) progress: any CPU,
+ * or any byte read or written (a download, a pipe), by a command process, one started since included, is working;
+ * none, with every command's I/O read, is hung. An item open with no command process (a sub-agent, a web fetch, in the
+ * harness itself), a reading missing, a process unclassified or I/O unread where the platform has it: unknown.
  */
-export function hangVerdict(before, after, { heard = false, open = 0 } = {}) {
+export function hangVerdict(before, after, { heard = false, open = 0, streams = false } = {}) {
   if (heard) return false;
+  if (open === 0) return streams ? true : null;
   if (!before || !after) return null;
   const was = (k) => before.procs.get(k);
   const commands = [...after.procs].filter(([, v]) => v.role === "command");
   const unclassified = [...after.procs.values()].some((v) => v.role === null);
   const gain = (k, v, f) => Math.max(0, f(v) - (was(k) ? f(was(k)) : 0));
-  if (open > 0 && commands.length) {
-    let progress = 0;
-    let unread = false;
-    for (const [k, v] of commands) {
-      progress += gain(k, v, (x) => x.cpu);
-      if (v.io && (!was(k) || was(k).io)) progress += gain(k, v, (x) => x.io.rchar + x.io.wchar);
-      else if (after.ioRead) unread = true;
-    }
-    if (progress > 0) return false;
-    return unread || unclassified ? null : true;
+  if (!commands.length) return null;
+  let progress = 0;
+  let unread = false;
+  for (const [k, v] of commands) {
+    progress += gain(k, v, (x) => x.cpu);
+    if (v.io && (!was(k) || was(k).io)) progress += gain(k, v, (x) => x.io.rchar + x.io.wchar);
+    else if (after.ioRead) unread = true;
   }
-  if (!after.ioRead || unclassified) return null;
-  let read = 0;
-  for (const [k, v] of after.procs) {
-    if (v.role !== "harness") continue;
-    if (!v.io || (was(k) && !was(k).io)) return null;
-    read += gain(k, v, (x) => x.io.rchar);
-  }
-  return read > 0 ? false : true;
+  if (progress > 0) return false;
+  return unread || unclassified ? null : true;
 }
 
 /** The pids in process group `pgid`, from `ps -A -o pid=,pgid=` output. */

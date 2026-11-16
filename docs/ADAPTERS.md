@@ -43,7 +43,7 @@ Run the proof: `npm ci --ignore-scripts --prefix plugin && node bench/sandbox-co
 
 ## Decision model
 
-Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK). Used by red-check triage (`lib/triage.mjs`), the drift advisory (`lib/drift.mjs`), each with its own model setting, and the answer gate (`review.mjs` answerGate), on triage's model.
+Contract: `plugin/scripts/lib/adapters/decider.mjs`. Vendors: `ai-gateway` (`decider-ai-gateway.mjs`, Vercel AI Gateway's `/v1/decisions`, plain `fetch`, no SDK). Used by red-check triage (`lib/triage.mjs`), the drift advisory (`lib/drift.mjs`), each with its own model setting, and the finding check (`lib/finding-check.mjs`) and the answer gate (`review.mjs` answerGate), on triage's.
 
 | Operation | Does |
 | --- | --- |

@@ -143,8 +143,6 @@ const pathLooking = (v) => v.includes("/") || /\.[A-Za-z0-9]+$/.test(v);
  *   directory `pip install` builds, a package manager's configuration and hook files where it runs.
  * - `scripts`: package.json scripts it runs, {pkg, name, lifecycle?}: `pkg` a package.json path, or `*` for any (a
  *   workspace option, `turbo`); `lifecycle`: an install's, which `ignore-scripts=true` in .npmrc turns off.
- * - `programs`: each fixed command word it runs, a wrapped one included (`sudo env nvm` gives sudo, env and nvm), by
- *   its file name (`/usr/bin/uv` is uv).
  * - `unresolved`: what setup may run and is not one fixed string, in a place it runs it (a variable, a substitution's
  *   output but a fixed program's, a glob, a brace expansion), a `cd` it cannot follow, `.` (the whole repository) outside
  *   `pip install`, a command that does not parse: each with why. Any other computed word is data.
@@ -152,7 +150,7 @@ const pathLooking = (v) => v.includes("/") || /\.[A-Za-z0-9]+$/.test(v);
  * a path, names no repository file, and neither does a requirement spec (`uv==${V}`).
  */
 export function commandRefs(command, { cwd = "", errexit = true, env = null, roots = [] } = {}) {
-  const out = { paths: new Set(), guarded: new Set(), scripts: new Set(), unresolved: new Set(), programs: new Set() };
+  const out = { paths: new Set(), guarded: new Set(), scripts: new Set(), unresolved: new Set() };
   // Every value each variable is given anywhere in the command (an assignment, `export`, `env NAME=`, a `for` loop's
   // words, `read`): a reference is each of them, never only the last one written.
   const vars = new Map();
@@ -828,7 +826,6 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   /** The command word: a path in the repository, one found on a PATH entry in it, or a program elsewhere. */
   const commandWord = (w, cwds, mode) => {
     if (!literal(w)) return execWord(w, cwds, mode.spec, "not a fixed command");
-    out.programs.add(base(w.value));
     if (w.value.includes("/")) return execWord(w, cwds, mode.spec);
     for (const d of pathDirs) out.guarded.add(`${d}/${w.value}`);
   };
@@ -1129,5 +1126,5 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   // Every path-looking word of the text, as Factory read a command before it parsed one: never fewer files than that.
   for (const p of wordScan(text)) add("paths", p, true, start, true);
   const scripts = [...out.scripts].map((s) => s.split("\0")).map(([pkg, name, kind]) => (kind ? { pkg, name, lifecycle: kind.slice(10) } : { pkg, name }));
-  return { paths: [...out.paths], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved], programs: [...out.programs] };
+  return { paths: [...out.paths], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved] };
 }

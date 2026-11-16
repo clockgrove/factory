@@ -9,7 +9,7 @@ import { agentUser, exec } from "./proc.mjs";
 import { scrubbedEnv } from "./harness.mjs";
 import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
-import { AUTO_INSTALLS, validationGroups } from "./logic.mjs";
+import { validationGroups } from "./logic.mjs";
 import { noReplace, serverBase } from "./lfs.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
@@ -394,10 +394,19 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
 }
 
 /**
- * Pick the install command from the lockfile present (logic.mjs AUTO_INSTALLS, in that order): the versions it pins,
- * over the network (pnpm tries its store offline first). It runs with the stage's scrubbed env (sh), so no credential. `install: none` skips; a given command wins.
+ * Pick the install command from the lockfile present: the versions it pins, over the network (pnpm tries its store
+ * offline first). npm, pnpm and yarn run no install scripts (--ignore-scripts); poetry and uv run a source package's
+ * build. It runs with the stage's scrubbed env (sh), so no credential. `install: none` skips; a given command wins.
  */
 export function installCommand(checkout, setting = "auto") {
   if (setting && setting !== "auto") return setting === "none" ? null : setting;
-  return AUTO_INSTALLS.find(([lock]) => existsSync(join(checkout, lock)))?.[1] ?? null;
+  const has = (f) => existsSync(join(checkout, f));
+  if (has("pnpm-lock.yaml")) return "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts";
+  if (has("package-lock.json")) return "npm ci --ignore-scripts";
+  if (has("yarn.lock")) return "yarn install --frozen-lockfile --ignore-scripts";
+  if (has("Cargo.lock")) return "cargo fetch --locked";
+  if (has("poetry.lock")) return "poetry install --no-root";
+  if (has("uv.lock")) return "uv sync --frozen";
+  if (has("go.sum")) return "go mod download";
+  return null;
 }

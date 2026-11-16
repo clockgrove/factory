@@ -1240,12 +1240,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const m = /^(\d+) \w+ [0-9a-f]+\t(.*)$/s.exec(lines[0]);
     return lines.length === 1 && m && m[2] === path ? m[1] : undefined;
   };
-  const regular = (mode) => mode === null || mode === "100644" || mode === "100755";
+  const regular = (mode) => mode === "100644" || mode === "100755";
   /**
    * `refused` (fixScopeRefused's) less the files the fence check (box.fenceCheck) judges part of the fix: only those
-   * logic.mjs fenceDecidable allows (a lockfile, or a version pin that no program setup or install runs reads; never a
-   * protected path, or what setup or install names or runs, as the setup guard reads it on the default branch),
-   * FENCE_MAX_PATHS at most, each a regular file where the fence starts and at the head (or absent at one of them), by
+   * logic.mjs fenceDecidable allows (a lockfile; never a protected path, or what setup or install names or runs, as the
+   * setup guard reads it on the default branch), FENCE_MAX_PATHS at most, each a regular file both where the fence
+   * starts and at the head (one the pass created or deleted is not judged), by
    * the pass's textual diff to it from where the fence starts, given in full. A diff over FENCE_DIFF_MAX, a binary or
    * empty one, or one that cannot be read is not judged. No check, and anything but its yes, keeps the file refused. The
    * stage harness's usage limit stops the asking.
@@ -1256,7 +1256,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     const guard = await box.setupFiles().catch(() => undefined);
     // A setup whose guard cannot be read: nothing is judged.
     if (guard === undefined) return refused;
-    const ctx = { extra: fence.extra, unknown: fence.unknown, protectedList, guarded: guard?.files ?? [], programs: [...(toolchain.programs ?? []), ...(guard?.programs ?? [])], opaque: !!toolchain.opaque || !!guard?.opaque };
+    const ctx = { extra: fence.extra, unknown: fence.unknown, protectedList, guarded: guard?.files ?? [] };
     const decidable = refused.filter((p) => fenceDecidable(p, ctx));
     for (const path of decidable.slice(FENCE_MAX_PATHS)) verdict.judged.push(`${path}: not judged (over the cap of ${FENCE_MAX_PATHS} files)`);
     const goes = new Set();
@@ -1266,7 +1266,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     };
     for (const path of decidable.slice(0, FENCE_MAX_PATHS)) {
       const modes = await Promise.all([fence.since, h].map((rev) => modeAt(rev, path)));
-      if (!modes.every((m) => m !== undefined && regular(m)) || modes.every((m) => m === null)) {
+      // A lockfile the pass created or deleted can change which install `install: auto` runs: never judged.
+      if (modes.some((m) => m === null)) {
+        not(path, "created or deleted by the pass");
+        continue;
+      }
+      if (!modes.every(regular)) {
         not(path, "not a regular file");
         continue;
       }

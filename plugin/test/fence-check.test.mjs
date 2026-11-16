@@ -56,8 +56,8 @@ const vendor = (answer) => {
 };
 
 test("#414: a fenced toolchain change the fence check judges part of the fix goes; one judged to weaken the check stays refused", async () => {
-  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", ".nvmrc": "22\n" });
-  const v = vendor((input) => (input.includes(".nvmrc") ? { verdict: "weakens", confidence: 0.95 } : { verdict: "fix", confidence: 0.9 }));
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "web/yarn.lock": "#\n" });
+  const v = vendor((input) => (input.includes("web/yarn.lock") ? { verdict: "weakens", confidence: 0.95 } : { verdict: "fix", confidence: 0.9 }));
   const box = await fenced(r, {}, { comments: [{ path: "app.txt", line: 1, body: "the lockfile is stale" }] });
   box.fenceCheck = openFenceCheck({ decider: v.decider });
   // The lockfile alone, its manifest neither changed nor named: fenced, then judged part of the fix.
@@ -71,17 +71,17 @@ test("#414: a fenced toolchain change the fence check judges part of the fix goe
   for (const part of ["package-lock.json", '+{"lockfileVersion":3}', "--- test: FAIL app.txt:1 expected v3", "app.txt:1: the lockfile is stale", "1. owns `app.txt`"]) assert.ok(input.includes(part), part);
   assert.equal(await box.push(), true, box.error);
   assert.equal(v.asked.length, 1, "the same change is not asked about again at the push");
-  // A pin judged to weaken the check: refused, with what the check said; the work's Block.
-  r.commit({ ".nvmrc": "18\n" }, "pin");
+  // A lockfile judged to weaken the check: refused, with what the check said; the work's Block.
+  r.commit({ "web/yarn.lock": "# pinned below the fix\n" }, "relock");
   const before = execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim();
   assert.equal(await box.push(), false);
-  assert.match(box.error, /^a fix pass changed \.nvmrc \(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: \.nvmrc: judged to weaken or sidestep the check at 0\.95/);
+  assert.match(box.error, /^a fix pass changed web\/yarn\.lock \(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: web\/yarn\.lock: judged to weaken or sidestep the check at 0\.95/);
   assert.equal(box.errorCause, null);
-  assert.deepEqual(box.fenceVerdict().told, [".nvmrc: judged to weaken or sidestep the check"], "the worker is told the verdict, not the confidence");
+  assert.deepEqual(box.fenceVerdict().told, ["web/yarn.lock: judged to weaken or sidestep the check"], "the worker is told the verdict, not the confidence");
   assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim(), before);
 });
 
-test("#414: only a lockfile or a pin no setup program reads is asked about; CI, containers, package-manager configuration, protected and setup files never are", async () => {
+test("#414: only a lockfile is asked about; pins, CI, containers, package-manager configuration, protected and setup files never are", async () => {
   const setup = "bash scripts/setup.sh";
   const r = repos({ "scripts/setup.sh": "echo ok\n", ".gitlab-ci.yml": "test: {}\n", ".npmrc": "\n", "Dockerfile": "FROM node:22\n", ".nvmrc": "22\n", "package-lock.json": "{}\n", "toolchain/zig.sh": "zig\n" });
   const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
@@ -89,21 +89,23 @@ test("#414: only a lockfile or a pin no setup program reads is asked about; CI, 
   box.fenceCheck = openFenceCheck({ decider: v.decider });
   r.commit({ "app.txt": "v3\n", ".gitlab-ci.yml": "test: { allow_failure: true }\n", ".npmrc": "ignore-scripts=true\n", "Dockerfile": "FROM node:18\n", ".nvmrc": "18\n", "scripts/setup.sh": "true\n", "package-lock.json": '{"v":2}\n', "toolchain/zig.sh": "zig 0.14\n" }, "fix");
   assert.deepEqual(await box.outside(), [".gitlab-ci.yml", ".npmrc", ".nvmrc", "Dockerfile", "scripts/setup.sh", "toolchain/zig.sh"], "the lockfile goes on its yes; the rest stays");
-  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["package-lock.json"], "the pin too: setup runs a repository file, which may read it");
+  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["package-lock.json"]);
   // At the push the setup guard refuses first, as hard as before.
   assert.equal(await box.push(), false);
   assert.equal(box.errorKind, "protected");
 });
 
-test("#414: a pin a program of setup reads, through a package.json script setup runs, is never asked about; one no program reads is", async () => {
-  const setup = "npm run boot";
-  const r = repos({ "package.json": '{"scripts":{"boot":"fnm use"}}\n', ".nvmrc": "22\n", "global.json": "{}\n" });
+test("#414: a lockfile the pass created or deleted is never asked about: it can change which install runs", async () => {
+  const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n" });
   const v = vendor(() => ({ verdict: "fix", confidence: 1 }));
-  const box = await fenced(r, { setup, toolchain: setupPaths({ setup, install: "none" }) });
+  const box = await fenced(r);
   box.fenceCheck = openFenceCheck({ decider: v.decider });
-  r.commit({ ".nvmrc": "18\n", "global.json": '{"sdk":{"version":"9.0.100"}}\n' }, "pins");
-  assert.deepEqual(await box.outside(), [".nvmrc"]);
-  assert.deepEqual(v.asked.map((a) => /<<<BEGIN \w+>>>\n(.*)\n/.exec(a.input)[1]), ["global.json"]);
+  r.commit({ "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" }, "a new lockfile");
+  r.run("rm", "-q", "package-lock.json");
+  r.run("commit", "-q", "-m", "and the old one gone");
+  assert.deepEqual(await box.outside(), ["package-lock.json", "pnpm-lock.yaml"]);
+  assert.equal(v.asked.length, 0);
+  assert.deepEqual(box.fenceVerdict().judged, ["package-lock.json: not judged (created or deleted by the pass)", "pnpm-lock.yaml: not judged (created or deleted by the pass)"]);
 });
 
 test("#414: no answer refuses as Factory's or an outage's Block only when every refused file is undecided; a refusal to judge is the work's", async () => {
@@ -282,4 +284,9 @@ test("#414: the question's input is fenced; a missing failure or comment says so
   assert.equal(strict.allow, false);
   assert.match(strict.why, /under 0\.95/);
   assert.equal((await openFenceCheck({ inputs: { triageMinConfidence: 0.95 }, decider: at("harness") }).judge(item)).allow, true, "another model than the setting's: the default floor");
+  // A lower setting cannot weaken this gate: never under 0.7.
+  const low = { name: "ai-gateway", decide: async () => ({ verdict: "fix", confidence: 0.6 }) };
+  const lowered = await openFenceCheck({ inputs: { triageMinConfidence: 0.5 }, decider: low }).judge(item);
+  assert.equal(lowered.allow, false);
+  assert.match(lowered.why, /under 0\.7/);
 });

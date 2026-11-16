@@ -270,40 +270,13 @@ export function simpleCommands(command) {
 }
 
 /**
- * The install command `install: auto` runs, by the first lockfile present (checkout.mjs installCommand). npm, pnpm and
- * yarn run no install scripts (--ignore-scripts); poetry and uv run a source package's build.
- */
-export const AUTO_INSTALLS = Object.freeze([
-  ["pnpm-lock.yaml", "pnpm install --frozen-lockfile --offline --ignore-scripts || pnpm install --frozen-lockfile --ignore-scripts"],
-  ["package-lock.json", "npm ci --ignore-scripts"],
-  ["yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"],
-  ["Cargo.lock", "cargo fetch --locked"],
-  ["poetry.lock", "poetry install --no-root"],
-  ["uv.lock", "uv sync --frozen"],
-  ["go.sum", "go mod download"],
-]);
-
-/**
  * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
- * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name),
- * scripts, unresolved, programs, opaque}. `programs`: every fixed command word either runs, and with `install: auto`
- * each one an automatic install may run (AUTO_INSTALLS). `opaque`: whether they run more than those words show: a
- * repository file either names, or a package.json script the explicit install runs (setup's scripts the setup guard
- * reads: setupGuard `programs`).
+ * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name), scripts, unresolved}.
  */
 export function setupPaths({ setup = "", install = "auto" } = {}, ctx = {}) {
-  const explicit = install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : null;
-  const all = [commandRefs(setup, ctx), explicit ?? { paths: [], guarded: [], scripts: [], unresolved: [], programs: [] }];
-  const auto = install === "auto" || !install ? AUTO_INSTALLS.flatMap(([, c]) => commandRefs(c).programs) : [];
+  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], guarded: [], scripts: [], unresolved: [] }];
   const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, { pkg: x.pkg, name: x.name }]));
-  return {
-    paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))],
-    named: [...new Set(all.flatMap((r) => r.paths))],
-    scripts: [...scripts.values()],
-    unresolved: [...new Set(all.flatMap((r) => r.unresolved))],
-    programs: [...new Set([...all.flatMap((r) => r.programs ?? []), ...auto])],
-    opaque: all.some((r) => r.paths.length > 0) || (explicit?.scripts.length ?? 0) > 0,
-  };
+  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))], named: [...new Set(all.flatMap((r) => r.paths))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
 }
 
 /**
@@ -358,16 +331,12 @@ export async function guardLinks(paths, io) {
  *   its symlinks followed (guardLinks), beside the path itself.
  * - `scripts`: {pkg, name}, each package.json entry it runs (`pkg` `*`: in any package.json), which no push may change.
  * - `unresolved`: what may run and cannot be named, in the command or a script it runs (`<pkg> scripts.<name>: …`).
- * - `programs`: every fixed command word the command and the scripts it runs run (commandRefs `programs`); `opaque`
- *   whether they also run a repository file, whose own commands these words do not show.
  */
 export async function setupGuard(setup, io) {
   const ctx = { env: io.env ?? null, roots: io.roots ?? [] };
   const refs = commandRefs(setup, ctx);
   const files = new Set([...refs.paths, ...refs.guarded]);
   const unresolved = [...refs.unresolved];
-  const programs = new Set(refs.programs ?? []);
-  let opaque = refs.paths.length > 0;
   const scripts = new Map();
   // An install's lifecycle scripts run unless scripts are off: for npm and pnpm, by `ignore-scripts` in the .npmrc they
   // read, the nearest one up from the install's directory that sets it (the root's last). Yarn Berry reads no .npmrc
@@ -421,8 +390,6 @@ export async function setupGuard(setup, io) {
       const value = doc.scripts && typeof doc.scripts === "object" ? doc.scripts[name] : undefined;
       if (typeof value !== "string") continue;
       const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
-      for (const x of sub.programs ?? []) programs.add(x);
-      if (sub.paths.length) opaque = true;
       for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
       unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
       for (const x of sub.scripts) if (!(x.lifecycle && (await scriptsOff(x)))) queue.push(x);
@@ -449,7 +416,7 @@ export async function setupGuard(setup, io) {
   const links = await guardLinks([...files], io);
   for (const p of links.paths) files.add(p);
   unresolved.push(...links.unresolved);
-  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)], programs: [...programs], opaque };
+  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)] };
 }
 /** `dir` + `rel` as a path from the root, or null when it leaves the root or is absolute. */
 const posixJoin = (dir, rel) => {
@@ -693,38 +660,18 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], n
   return [...now].filter((p) => (toolchainFile(p, paths) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
 }
 
-// The plain version-pin files the fence check may judge, each with the programs that read it: a version manager, or a
-// tool that reads the pin itself (uv, cargo and rustc through rustup, dotnet). Any other pin or configuration file (a
-// container, a devcontainer, a build-tool wrapper, mise.toml, package-manager configuration that can run code) is
-// never judged.
-const NODE_PINS = ["nvm", "fnm", "n", "nodenv", "volta", "nodeenv", "asdf", "mise", "rtx"];
-const PYTHON_PINS = ["pyenv", "uv", "uvx", "rye", "asdf", "mise", "rtx"];
-const RUST_PINS = ["rustup", "cargo", "rustc", "asdf", "mise", "rtx"];
-const PIN_READERS = Object.freeze({
-  ".nvmrc": NODE_PINS,
-  ".node-version": NODE_PINS,
-  ".tool-versions": ["asdf", "mise", "rtx"],
-  ".python-version": PYTHON_PINS,
-  "rust-toolchain": RUST_PINS,
-  "rust-toolchain.toml": RUST_PINS,
-  "global.json": ["dotnet", "asdf", "mise", "rtx"],
-});
-
 /**
  * Whether the fence check (fence-check.mjs) may be asked about `entry`, one of fixScopeRefused's (or a package.json
- * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go. Only a lockfile, or a plain
- * version pin (PIN_READERS) that the `setup` and `install` commands read through no program of theirs (`programs`,
- * setupPaths' and setupGuard's) and while those commands run no repository file whose commands Factory cannot see
- * (`opaque`). Never a script entry, a protected path, what either command names or runs (`extra`, each with what is
- * under and above it: guardCovers), what the setup guard covers (`guarded`, setupGuard `files`), nor anything while
- * either command may run a file Factory cannot name (`unknown`). Everything else stays refused as the fence found it.
+ * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go. Only a lockfile: never a
+ * version pin (any program setup, install or a check runs may read one), a script entry, a protected path, what either
+ * command names or runs (`extra`, each with what is under and above it: guardCovers), what the setup guard covers
+ * (`guarded`, setupGuard `files`), nor anything while either command may run a file Factory cannot name (`unknown`).
+ * A lockfile setup's install reads is no exception: its manifest beside it in scope already lets it go
+ * (fixScopeRefused). Everything else stays refused as the fence found it.
  */
-export function fenceDecidable(entry, { extra = [], unknown = [], protectedList = [], guarded = [], programs = [], opaque = false } = {}) {
+export function fenceDecidable(entry, { extra = [], unknown = [], protectedList = [], guarded = [] } = {}) {
   const p = String(entry).replace(/^\.\//, "");
-  if (unknown.length || / scripts\./.test(p)) return false;
-  const name = fileName(p);
-  const pin = Object.hasOwn(PIN_READERS, name) ? PIN_READERS[name] : null;
-  if (!LOCKFILES.has(name) && !(pin && !opaque && !programs.some((x) => pin.includes(x)))) return false;
+  if (unknown.length || / scripts\./.test(p) || !LOCKFILES.has(fileName(p))) return false;
   if (protectedTouched([p], protectedList).length) return false;
   return ![...extra, ...guarded].some((g) => guardCovers(String(g).replace(/^\.\//, ""), p));
 }
@@ -1132,7 +1079,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // A fix pass that committed nothing left the same red (session.mjs unchangedBlock): said as such, never a second red.
     if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
-    // Its cause is `factory` or `outage` when the fence check could not judge a file it would have let go (scopeCause).
+    // Its cause is `factory` or `outage` when the fence check gave no answer on every file still refused (scopeCause).
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: Object.hasOwn(BLOCK_CAUSES, validation.scopeCause ?? "") ? validation.scopeCause : "work" };
     // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
     const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";

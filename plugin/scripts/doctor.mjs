@@ -34,6 +34,7 @@ import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { triageKey, triageKeyState } from "./lib/triage.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
+import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
 import { TokenType } from "../vendor/@actions/expressions/dist/lexer.js";
 import { dropOwned } from "./lib/fsafe.mjs";
@@ -1040,31 +1041,98 @@ export async function shellSyntax(command, { cwd, env = process.env } = {}) {
   return { refused: true, message: r.stderr.trim().split("\n").join("; ").slice(0, 300) || `bash -n exited ${r.code}` };
 }
 
+/** Whether a bash word is one fixed string: no expansion, substitution, glob or brace. */
+const fixedWord = (w) => !w?.parts || w.parts.every((p) => p.type === "Literal" || p.type === "SingleQuoted" || p.type === "AnsiCQuoted" || (p.type === "DoubleQuoted" && (p.parts || []).every((c) => c.type === "Literal")));
+
+/**
+ * The first simple command `command` runs at its own level, read from its bash syntax tree (unbash): {first: that
+ * Command node (null when it has none), functions: the functions defined before it}, or {error} when unbash reports
+ * one. A function's body runs only when called, so it is no first command.
+ */
+export function firstCommand(command) {
+  const tree = parseShell(command);
+  if (tree.errors?.length) return { error: tree.errors[0].message };
+  const functions = new Set();
+  let first = null;
+  const visit = (n) => {
+    if (first) return;
+    if (n.type === "Function") return void functions.add(n.name.value);
+    if (n.type === "Command" && n.name) return void (first = n);
+    forEachChild(n, visit);
+  };
+  visit(tree);
+  return { first, functions };
+}
+
+/**
+ * `npm run X` and `pnpm run X` fail when the checkout's package.json has no script X (yarn runs a binary named X
+ * instead, so it is not judged). Only a first command of exactly that shape counts: fixed words, no assignment or
+ * redirection before it (npm_config_* would change it), X no option, and for npm no option after X before `--` (npm
+ * reads one such as --if-present or --workspace itself). The reason it fails, or null.
+ */
+export function missingScript(cmd, checkout) {
+  const words = cmd.suffix.filter((w) => w.type === "Word");
+  const pm = fixedWord(cmd.name) ? cmd.name.value : "";
+  if (!["npm", "pnpm"].includes(pm) || cmd.prefix.length || words.length < 2 || !fixedWord(words[0]) || words[0].value !== "run" || !fixedWord(words[1]) || words[1].value.startsWith("-")) return null;
+  if (pm === "npm") {
+    const after = words.slice(2);
+    const end = after.findIndex((w) => w.text === "--");
+    if ((end < 0 ? after : after.slice(0, end)).some((w) => !fixedWord(w) || w.value.startsWith("-"))) return null;
+  }
+  const script = words[1].value;
+  const file = join(checkout, "package.json");
+  if (!existsSync(file)) return `${pm} run ${script} needs a package.json, and the checkout has none`;
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    return `package.json does not parse (${e.message})`;
+  }
+  const scripts = pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  return Object.hasOwn(scripts, script) ? null : `no script "${script}" in package.json`;
+}
+
+/** What bash takes `name` for in `cwd` (`type -t`: file, builtin, function…), or "" when it finds nothing. */
+async function commandType(name, { cwd, env }) {
+  const r = await exec("bash", ["-c", 'type -t -- "$1"', "_", name], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 }).catch(() => null);
+  return r?.code === 0 ? r.stdout.trim() : "";
+}
+
+/**
+ * One command's row (setup or validation), never running it: bash parses it (`bash -n`, a refusal FAILs), a
+ * `npm|pnpm run X` first command names a script package.json has (missingScript, a FAIL), and bash finds its first
+ * simple command here (`type -t`; not found is a WARN, as `missing` says why it may still run). A first command that
+ * is no fixed word, or that unbash cannot read, cannot be looked up: a WARN saying so.
+ */
+export async function commandCheck(row, command, { checkout, env = process.env, missing, pass = "" }) {
+  const syntax = await shellSyntax(command, { cwd: checkout, env });
+  if (syntax?.refused) return FAIL(row, `${command}: bash cannot parse it (${syntax.message})`, `fix the ${row} command: Factory runs it with bash -eo pipefail -c`);
+  if (syntax) return WARN(row, `${command}: not parsed here (${syntax.message})`, "run doctor where bash runs");
+  const read = firstCommand(command);
+  if (read.error) return WARN(row, `${command}: bash parses it but doctor's parser does not (${read.error}), so its first command is not looked up`, "nothing to fix if it runs; report it to Factory");
+  if (!read.first) return PASS(row, `${command}${pass}`);
+  const name = read.first.name;
+  if (!fixedWord(name)) return WARN(row, `${command}: its first command, ${name.text}, is not a fixed word, so doctor cannot look it up`, `nothing to fix if it runs; a fixed command name lets doctor check it`);
+  const why = missingScript(read.first, checkout);
+  if (why) return FAIL(row, `${command}: ${why}`, `fix the ${row} command or add the script`);
+  const type = read.functions.has(name.value) ? "function" : await commandType(name.value, { cwd: checkout, env });
+  if (!type) return WARN(row, `${command}: ${name.value} is not found here; ${missing}`, `install ${name.value}, or fix the ${row} command`);
+  return PASS(row, `${command}${pass}`);
+}
+
 export async function repositoryChecks({ inputs, checkout, env = process.env, runSetup = false, local = false, wf = readWorkflowEnv(checkout) }) {
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
   const install = installCommand(checkout, inputs.install);
   out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
-  // Whether a validation command runs here is its exit code after setup, which Factory reads on every run: before
-  // that, bash's parse is all doctor can know, and it says so rather than guess from the command's words.
-  const parsed = [];
-  for (const cmd of inputs.validation.map(commandText)) {
-    const bad = await shellSyntax(cmd, { cwd: checkout, env });
-    if (bad) out.push(bad.refused ? FAIL("validation", `${cmd}: bash cannot parse it (${bad.message})`, "fix the validation command: Factory runs it with bash -eo pipefail -c") : WARN("validation", `${cmd}: not parsed here (${bad.message})`, "run doctor where bash runs"));
-    else parsed.push(cmd);
-  }
-  if (parsed.length) out.push(WARN("validation", `${parsed.join("; ")}: ${parsed.length > 1 ? "each parses" : "parses"} as bash; doctor does not run validation, so whether ${parsed.length > 1 ? "each runs" : "it runs"} here is known only when Factory runs it after setup`, "nothing to fix before a run: a red validation command gets a fix pass; to see it now, run it after setup in a clone"));
+  for (const cmd of inputs.validation.map(commandText)) out.push(await commandCheck("validation", cmd, { checkout, env, missing: "setup may install it" }));
   if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Factory has a feedback loop"));
   if (inputs.setup) {
     if (runSetup) {
       const r = await exec("bash", ["-eo", "pipefail", "-c", inputs.setup], { cwd: checkout, env, timeoutMs: 20 * 60_000 });
       out.push(r.code === 0 ? PASS("setup", inputs.setup) : FAIL("setup", `${inputs.setup} exited ${r.code}`, "fix the setup command"));
     } else {
-      // Only parsed, never run: what it runs, and whether that exists here, is known when it runs.
-      const bad = await shellSyntax(inputs.setup, { cwd: checkout, env });
-      if (bad?.refused) out.push(FAIL("setup", `${inputs.setup}: bash cannot parse it (${bad.message})`, "fix the setup command: Factory runs it with bash -eo pipefail -c"));
-      else if (bad) out.push(WARN("setup", `${inputs.setup}: not parsed here (${bad.message})`, "run doctor where bash runs"));
-      else out.push(WARN("setup", `${inputs.setup}: parses as bash; doctor did not run it, so whether it runs here is known only when it runs`, "run doctor with --run-setup to run it here; on a run, a setup that exits non-zero Blocks"));
+      out.push(await commandCheck("setup", inputs.setup, { checkout, env, missing: "the runner may have it", pass: " (parsed and looked up; doctor did not run it: --run-setup does)" }));
     }
   }
   // `local`: the developer's own checkout in local mode (doctor --local). A worker job's checkout in local mode is the

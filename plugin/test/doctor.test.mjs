@@ -497,35 +497,60 @@ test("doctor's CI row reads each workflow's parsed on: (workflowEvents), never i
   }
 });
 
-test("doctor parses setup and validation with bash -n, runs neither, and says what it cannot judge before setup runs (#386)", async () => {
+test("doctor parses setup and validation, looks up their first command and the npm or pnpm script it runs, and runs neither (#386)", async () => {
   const { repositoryChecks } = await import("../scripts/doctor.mjs");
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const { existsSync } = await import("node:fs");
+  const { chmodSync, existsSync } = await import("node:fs");
   const dir = mkdtempSync(join(tmpdir(), "doctor-repo-"));
   mkdirSync(join(dir, "scripts"));
   writeFileSync(join(dir, "scripts", "setup.sh"), "#!/bin/sh\n");
+  chmodSync(join(dir, "scripts", "setup.sh"), 0o755);
   writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "x" } }));
   execFileSync("git", ["init", "-q", dir]);
-  const rows = async (env, name = "setup") => (await repositoryChecks({ inputs: resolveInputs({ env }), checkout: dir, env: { PATH: process.env.PATH } })).filter((c) => c.name === name);
-  // A keyword first: no program named `if` exists, and bash runs it fine.
-  const [kw] = await rows({ FACTORY_SETUP: "if true; then ./scripts/setup.sh; fi" });
-  assert.equal(kw.status, "WARN");
-  assert.match(kw.detail, /parses as bash; doctor did not run it, so whether it runs here is known only when it runs/);
-  assert.match(kw.fix, /--run-setup/);
-  // A first word that exists does not make a command bash cannot parse runnable.
-  const [syntax] = await rows({ FACTORY_SETUP: "./scripts/setup.sh && (" });
-  assert.equal(syntax.status, "FAIL");
+  // The package managers on this PATH are stand-ins: only bash's lookup of them is under test.
+  const bin = mkdtempSync(join(tmpdir(), "doctor-bin-"));
+  for (const pm of ["npm", "pnpm", "yarn"]) {
+    writeFileSync(join(bin, pm), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, pm), 0o755);
+  }
+  const env = { PATH: `${bin}:/usr/bin:/bin` };
+  const rows = async (settings, name) => (await repositoryChecks({ inputs: resolveInputs({ env: settings }), checkout: dir, env })).filter((c) => c.name === name);
+  const setup = async (cmd) => (await rows({ FACTORY_SETUP: cmd }, "setup"))[0];
+  // A correctly set-up command is a clean PASS, saying doctor did not run it.
+  for (const ok of ["./scripts/setup.sh", "if true; then ./scripts/setup.sh; fi", "f() { ./scripts/setup.sh; }; f", "FOO=1 ./scripts/setup.sh --ci"]) {
+    const r = await setup(ok);
+    assert.equal(r.status, "PASS", ok);
+    assert.match(r.detail, /doctor did not run it: --run-setup does/);
+  }
+  const syntax = await setup("./scripts/setup.sh && (");
+  assert.equal(syntax.status, "FAIL", "a first word that exists does not make a command bash cannot parse runnable");
   assert.match(syntax.detail, /bash cannot parse it \(.*syntax error/);
+  const absent = await setup("no-such-tool-386 install");
+  assert.deepEqual([absent.status, absent.detail], ["WARN", "no-such-tool-386 install: no-such-tool-386 is not found here; the runner may have it"]);
+  const variable = await setup("$TOOL install");
+  assert.equal(variable.status, "WARN");
+  assert.match(variable.detail, /its first command, \$TOOL, is not a fixed word/);
+  assert.equal((await setup("npm run bootstrap")).status, "FAIL", "npm run names a script package.json lacks");
   // Nothing is run: a setup that would leave a file leaves none.
-  const [quiet] = await rows({ FACTORY_SETUP: "touch ran-by-doctor" });
-  assert.equal(quiet.status, "WARN");
-  assert.equal(existsSync(join(dir, "ran-by-doctor")), false, "bash -n only parses");
-  // A package manager's own command is no missing script, and no list of them decides it; a parse error FAILs.
-  const val = await rows({ FACTORY_VALIDATION: "npm audit --omit dev, pnpm test --filter web, npm test )" }, "validation");
-  assert.deepEqual(
-    val.map((c) => c.status),
-    ["FAIL", "WARN"],
-  );
-  assert.match(val[0].detail, /^npm test \): bash cannot parse it/);
-  assert.match(val[1].detail, /^npm audit --omit dev; pnpm test --filter web: each parses as bash; doctor does not run validation/);
+  assert.equal((await setup("touch ran-by-doctor")).status, "PASS");
+  assert.equal(existsSync(join(dir, "ran-by-doctor")), false);
+  // Validation: only a first command of exactly `npm|pnpm run X` is checked against package.json's scripts.
+  const commands = {
+    "npm audit --omit dev": "PASS",
+    "pnpm test --filter web": "PASS",
+    "npm run test": "PASS",
+    "npm run lint": "FAIL",
+    "pnpm run lint --fix": "FAIL",
+    "yarn run lint": "PASS",
+    "npm run lint --if-present": "PASS",
+    "cd web && npm run lint": "PASS",
+    "npm_config_if_present=true npm run lint": "PASS",
+    "no-such-tool-386 check": "WARN",
+    "npm test )": "FAIL",
+  };
+  const val = await rows({ FACTORY_VALIDATION: Object.keys(commands).join(", ") }, "validation");
+  assert.deepEqual(Object.fromEntries(val.map((c) => [c.detail.split(":")[0].replace(/ \(.*$/, ""), c.status])), commands);
+  assert.match(val.find((c) => c.status === "FAIL").detail, /^npm run lint: no script "lint" in package\.json$/);
+  assert.match(val.at(-1).detail, /^npm test \): bash cannot parse it/);
+  assert.match(val.find((c) => c.status === "WARN").detail, /no-such-tool-386 is not found here; setup may install it$/);
 });

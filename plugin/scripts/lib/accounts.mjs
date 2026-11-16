@@ -269,21 +269,39 @@ export const stageMoves = ({ local, limits = null, pinned = false, env = process
 
 /**
  * The account a stage with no account label starts on when automatic choice is on (#266), from `list` (harnessAccounts,
- * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones: `prefer` (a
- * name: the account the Objective's last stage paused on, whose session carries over there); else the one whose latest
- * usage limit was met least recently (`limitedAt(a)`, ms, null for none the machine remembers: those first); then the
- * one a stage last started on least recently (`startedAt(a)`, ms or null: the machine's round-robin); then the first
- * declared. With every account held, the one whose hold ends first: the stage is held on it until then.
+ * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones:
+ * - `prefer` (a name: the account the Objective's last stage paused on, whose session carries over there, and nowhere
+ *   else);
+ * - else `warm` (a name: the account of the Objective's previous stage, while that stage's prompt cache lasts, which a
+ *   move would lose);
+ * - else by the quota its provider last reported (#391), in three groups: an account never measured (no reading stands,
+ *   and `silent(a)` is false: holds.mjs reportsNothing), so each is measured; the ones with a reading; last the ones that
+ *   ran a stage and reported nothing (`silent(a)`: an API key, Copilot), since a subscription with quota left beats a
+ *   pay-per-use key. Within a group, the fewest stages started since the account's reading first (`startsSince(a)`: a
+ *   reading says nothing of what stages started after it spend, so stages started together spread rather than pile on
+ *   the one with the most left), then the most left (`left(a)`, 0 to 1: holds.mjs left); then the one whose latest usage
+ *   limit was met least recently (`limitedAt(a)`, ms, null for none the machine remembers: those first); then the one a
+ *   stage last started on least recently (`startedAt(a)`, ms or null: the machine's round-robin); then the first declared.
+ * With every account held, the one whose hold ends first: the stage is held on it until then.
  */
-export function chooseAccount(list, { until, limitedAt = () => null, startedAt = () => null, prefer = null }) {
+export function chooseAccount(list, { until, left = () => null, silent = () => false, startsSince = () => 0, limitedAt = () => null, startedAt = () => null, prefer = null, warm = null }) {
   const rows = list.map((a, i) => ({ a, i, until: until(a) }));
   const free = rows.filter((r) => r.until === null);
   if (!free.length) return rows.reduce((x, y) => (y.until < x.until ? y : x)).a;
-  const own = prefer ? free.find((r) => r.a.name === prefer) : null;
-  if (own) return own.a;
+  for (const name of [prefer, warm]) {
+    const own = name ? free.find((r) => r.a.name === name) : null;
+    if (own) return own.a;
+  }
   const at = (v) => (Number.isFinite(v) ? v : -Infinity);
-  for (const r of free) [r.limited, r.started] = [at(limitedAt(r.a)), at(startedAt(r.a))];
-  return free.sort((x, y) => x.limited - y.limited || x.started - y.started || x.i - y.i)[0].a;
+  for (const r of free) {
+    const share = left(r.a);
+    // 0: never measured; 1: a reading; 2: ran and reported nothing.
+    r.group = Number.isFinite(share) ? 1 : silent(r.a) ? 2 : 0;
+    r.left = Number.isFinite(share) ? share : 0;
+    r.since = Number.isFinite(startsSince(r.a)) ? startsSince(r.a) : 0;
+    [r.limited, r.started] = [at(limitedAt(r.a)), at(startedAt(r.a))];
+  }
+  return free.sort((x, y) => x.group - y.group || x.since - y.since || y.left - x.left || x.limited - y.limited || x.started - y.started || x.i - y.i)[0].a;
 }
 
 /** An account label as a notice shows it: code-quoted when its name is an account name, else not echoed at all. */

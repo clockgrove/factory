@@ -175,7 +175,7 @@ const RETRYABLE_4XX = new Set([408, 409, 425, 429]);
 const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
 
 /**
- * The provider error a failed Codex run ended on, as structure: {status, type, code, message} from the last `turn.failed`
+ * The provider error a failed Codex run ended on, as structure: {status, type, code, message, param?} from the last `turn.failed`
  * (else `error`) event's JSON body, or null when the run's last word was a completed turn or the message is prose.
  */
 function codexError(events) {
@@ -191,7 +191,7 @@ function codexError(events) {
     }
   }
   if (!body || typeof body !== "object" || !body.error || typeof body.error !== "object") return null;
-  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message) };
+  return { status: num(body.status), type: str(body.error.type), code: str(body.error.code), message: str(body.error.message), ...(str(body.error.param) ? { param: str(body.error.param) } : {}) };
 }
 
 /**
@@ -314,6 +314,88 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   const refused = r.status !== null ? r.status >= 400 && r.status < 500 && (!RETRYABLE_4XX.has(r.status) || kind) : kind;
   if (!refused) return null;
   return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
+}
+
+/**
+ * Claude Code's per-model windows (SDKRateLimitInfo `rateLimitType`): each limits only stages on that model family; and
+ * `overage`, which meters pay-as-you-go use past the included limits, so it is no limit on included use at all.
+ */
+const MODEL_WINDOWS = { seven_day_opus: "opus", seven_day_sonnet: "sonnet" };
+const NO_LIMIT_WINDOWS = new Set(["overage"]);
+/**
+ * A Claude model id's family, the word after `claude-` (`claude-opus-5-5`: opus); null for any other name: an alias
+ * (`opus`, `opusplan`, which runs more than one), another harness's model, or none.
+ */
+export const modelFamily = (model) => /^claude-([a-z]+)-/.exec(String(model || "").trim().toLowerCase())?.[1] ?? null;
+/**
+ * Whether a quota window limits a stage that runs `models` (its worker, sub-agent or reviewer models): `overage` never;
+ * a per-model window only when one of the models is of its family, or when any model is unknown (none, a harness
+ * default: it could be that family); every other window always.
+ */
+export function quotaWindowApplies(name, models = []) {
+  if (NO_LIMIT_WINDOWS.has(name)) return false;
+  const family = MODEL_WINDOWS[name];
+  if (!family) return true;
+  const families = models.map(modelFamily);
+  return !families.length || families.includes(null) || families.includes(family);
+}
+
+/** A usage window's name as a quota reading keeps it (the names holds.mjs windowOf accepts). */
+const QUOTA_WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
+/** The most windows one reading keeps: Claude Code names five or six, Codex two. */
+const QUOTA_WINDOWS_MAX = 8;
+
+/**
+ * How much of its subscription's usage limits a pass's account had used, as the harness reported it during the pass:
+ * {harness, windows: {<window>: {used, resetsAt}}}, `used` the fraction of the window spent (1 is all of it) and
+ * `resetsAt` (ms) when the window starts again; null when the harness reported none. Only a window with both numbers is
+ * kept: a reading with no reset could never be told stale. The structure read:
+ *   claude  : each `rate_limit_event` on the stream (Claude Code sends one for a claude.ai subscription; none on an API
+ *             key): its `rate_limit_info.unifiedWindows` (`five_hour`, `seven_day`, ...: {utilization, resetsAt}), and
+ *             its own `rateLimitType` with `utilization` and `resetsAt` when it names them; a later event's window
+ *             replaces an earlier one's
+ *   codex   : the last `token_count` line of the thread's rollout stamped at or after `since` (the pass's start) whose
+ *             `rate_limits` is the subscription's own limit group (`limit_id` "codex" or absent, as codexLimit reads):
+ *             its `primary` and `secondary` windows' `used_percent` and `resets_at`, kept as `codex/primary` and
+ *             `codex/secondary`. Codex writes it from each answer's headers on a ChatGPT login; an API key or the AI
+ *             Gateway gets none
+ *   copilot : reports none
+ */
+export function quotaReading(harness, stdout, { rollout = null, since = null } = {}) {
+  const windows = {};
+  const put = (name, used, reset) => {
+    const at = epochMs(reset);
+    if (typeof name !== "string" || !QUOTA_WINDOW.test(name) || num(used) === null || used < 0 || at === null) return;
+    if (!(name in windows) && Object.keys(windows).length >= QUOTA_WINDOWS_MAX) return;
+    windows[name] = { used, resetsAt: at };
+  };
+  if (harness === "claude") {
+    for (const e of jsonLines(stdout)) {
+      const info = e?.type === "rate_limit_event" ? e.rate_limit_info : null;
+      if (!info || typeof info !== "object") continue;
+      put(info.rateLimitType, info.utilization, info.resetsAt);
+      const uw = info.unifiedWindows;
+      if (uw && typeof uw === "object" && !Array.isArray(uw)) for (const [name, w] of Object.entries(uw)) put(name, w?.utilization, w?.resetsAt);
+    }
+  } else if (harness === "codex") {
+    const from = Date.parse(since);
+    if (typeof rollout !== "string" || !Number.isFinite(from)) return null;
+    let snap = null;
+    for (const line of rollout.split("\n")) {
+      if (!line.includes('"token_count"')) continue;
+      const o = jsonLines(line)[0];
+      if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
+      const at = Date.parse(o.timestamp);
+      const rl = o.payload.rate_limits;
+      if (Number.isFinite(at) && at >= from && rl && typeof rl === "object" && (rl.limit_id == null || rl.limit_id === "codex")) snap = rl;
+    }
+    if (!snap) return null;
+    for (const k of ["primary", "secondary"]) {
+      const w = snap[k];
+      if (w && typeof w === "object" && num(w.used_percent) !== null) put(`codex/${k}`, w.used_percent / 100, w.resets_at);
+    }
+  } else return null;
+  return Object.keys(windows).length ? { harness, windows } : null;
 }
 
 /**
@@ -444,7 +526,8 @@ const writeShare = (t) => (t?.written === null || t?.written === undefined || !t
  * reports a request, a turn, or nothing finer than the run). The setting is kept only if these writes drop.
  */
 export function cacheSummary(records) {
-  const live = records.filter(Boolean);
+  // The stage's decision record (harness.mjs keepDecision) is no pass: no cache split, no wait, no write share of its own.
+  const live = records.filter((r) => r && !r.decision);
   const tokens = mergeUsage(live)?.tokens ?? null;
   const afterWait = [];
   live.forEach((r, i) => {
@@ -745,7 +828,9 @@ export function sinceSession(rec, prior) {
 }
 
 export function mergeUsage(records) {
-  const live = records.filter(Boolean);
+  // A stage's decision record (harness.mjs keepDecision) is never the base: its label, basis and model are no pass's.
+  const all = records.filter(Boolean);
+  const live = [...all.filter((r) => !r.decision), ...all.filter((r) => r.decision)];
   if (!live.length) return null;
   const first = live[0];
   // A negative dollar figure is no spend: it never lowers a total (every harness).

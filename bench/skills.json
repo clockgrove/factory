@@ -2,9 +2,9 @@
   "version": 2,
   "skills": {
     "factory-deliver-pr": {
-      "sha256": "aa2a44ab40d651873f1e6efd28e5674feee6c39f177d287668c768bf6c1d7621",
+      "sha256": "8e801f979bf6c208addf3414358893e8ae701617b901e3ebb92eecbc57d553be",
       "lines": 41,
-      "words": 675,
+      "words": 692,
       "files": {
         "reference.md": {
           "sha256": "d284f416064eb648a78c293a9cfd5a8f50b9024d6aeea53d3c102c8e7d7cc73b",
@@ -51,9 +51,9 @@
       "words": 700
     },
     "factory-prove-acceptance": {
-      "sha256": "1caee995d51684b9783c69324b2d722ec51d4af391956e9212715ed1ad62ca27",
+      "sha256": "cd92275b13c29f4f6248cc1942c0cf79f62b98caaf33016bbc1c7cb4e73be9e5",
       "lines": 41,
-      "words": 686
+      "words": 697
     },
     "factory-queue": {
       "sha256": "3dc163cc8c7db8f104dcf79e8aeed51f1fba878f80b61665a46421f07e76469e",

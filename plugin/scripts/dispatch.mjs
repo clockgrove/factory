@@ -19,11 +19,11 @@ import { activeFactoryJobs, activeWorkIssues, addLabels, blockedByRelations, che
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, vendorEvidence, knownWriter, pinnedMaintainer, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
-import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
+import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
 import { WAIT_MAX_MS, announceStarts, clearRebaseWait, orderSiblings, prFinder, rebaseWaitReason, reviewWaitResume, sayRebaseWait, sayWaiting, sendBackOrder, siblingTrials, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeAutoAccounts, routeTwoLine } from "./lib/accounts.mjs";
@@ -965,6 +965,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // Each In-review Objective's merge pass answer this tick (session.mjs mergeReadyOne): one that cannot merge soon (red
   // checks, a person took it out of the queue) is no sibling a send-back waits for.
   const mergeHow = {};
+  // A PR whose hand-off waits for a sibling (overlap.mjs reviewHold) is settled after every other In-review PR's merge
+  // pass, which says which siblings a person holds out of the merge queue (personHeld): none of those is ahead of it.
+  // Its reads are kept from its first turn, by issue, with the count of PRs merged by then: when one merged since, its
+  // PR is read again, as that merge can have made it conflict with the default branch.
+  const waitsLast = new Map();
   const dirty = [];
   const rebaseHeld = [];
   try {
@@ -972,19 +977,23 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     // The fallback bound and the step history, read once for this tick's merge pass (as the queue watch reads them once
     // for its watch). Actions are read with the job token (actions: read), which the App has not.
     let hungMs = null;
+    // The queue's own check timeout (minutes, null when unread), read once per tick with the bound it sets.
+    let queueTimeout;
     const cache = {};
-    for (const issue of issues) {
+    const pass = [...issues];
+    for (const issue of pass) {
       // One Objective whose read or decision throws is said and read again next tick; the rest of the tick goes on.
       try {
+        const kept = waitsLast.get(issue.number);
         // A factory:local Objective in review whose review a local loop owes gets a Running one's day, on any route's tick.
-        if (hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
+        if (!kept && hasLocalLabel(issue) && !localHeld?.[issue.number] && stateOf(issue, statuses[issue.number] ?? null) === "In review" && (await reviewLapsed(issue))) continue;
         // Send-backs follow routing too: a factory:local PR is its local loop's to rebase, the rest the Action's.
         if (!backend().trigger.routes(issue)) continue;
         // A restart waiting for its stage to stop: nothing merges, updates or sends it back meanwhile.
         if (restarting[issue.number]) continue;
         if (stateOf(issue, statuses[issue.number] ?? null) !== "In review") continue;
         let prRead = true;
-        const open = await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
+        const open = kept ? kept.open : await findPr(repo, `factory/${issue.number}`, opts).catch(() => ((prRead = false), null));
         // Read once this tick: the sibling ordering below takes it rather than read it again (overlap.mjs prFinder).
         if (prRead) prsSeen[issue.number] = open;
         if (!open) {
@@ -1007,12 +1016,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           }
           continue;
         }
-        const pr = await getPrSettled(repo, open.number, opts).catch(() => null);
+        const pr = kept && kept.landed === landed.length ? kept.pr : await getPrSettled(repo, open.number, opts).catch(() => null);
         // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
         // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
         // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-        const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+        const marks = kept ? kept.marks : await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+        const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait, rebaseWait } = marks;
         const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
+        if (!kept && !reviewing && reviewWait && !reviewWait.released && pr) {
+          waitsLast.set(issue.number, { open, pr, marks, landed: landed.length });
+          pass.push(issue);
+          continue;
+        }
         // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
         // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
         // review label goes back on, which starts the review stage again on this route (the review job, a sandbox launch,
@@ -1072,7 +1087,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (!reviewing && reviewWait && !reviewWait.released && pr) {
           let how;
           try {
-            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { dryRun, log });
+            how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: (s) => twoAccounts(s) || personHeld.has(s.number), prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead, trials: trialsOf(), waitMaxMs: siblingWait }, opts, { dryRun, log });
           } catch (e) {
             log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
             retry(`#${issue.number}'s review wait`);
@@ -1215,8 +1230,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           // The merge: the reviewed, validated head (or GitHub's signed update of it) merges once its required checks are
           // green, with no unread maintainer decision. Nothing is armed between ticks.
           const report = {};
-          if (queue) hungMs ??= await queueBoundMs(repo, opts);
-          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
+          if (queue && queueTimeout === undefined) {
+            queueTimeout = await queueTimeoutMin(repo, opts);
+            hungMs = queueHungMs(queueTimeout);
+          }
+          const how = await mergeReadyOne(repo, { issue: issue.number, prNumber: open.number, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, actionsToken: backend().name === "local" ? null : inputs.githubToken || null, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, issueData: issue, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, opts).catch((e) => {
             log(`  #${issue.number}: merge: ${String(e.message).slice(0, 160)}`);
             return null;
           });
@@ -1226,6 +1244,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
           if (how === "merged") landed.push(issue.number);
           if (how === "held") personHeld.add(issue.number);
           if (report.watch) queueWatch.push(open.number);
+          if (report.retry) retry(`#${issue.number}'s hung queue step`);
           if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
           const why = mergeBlockReason(how, report);
           if (why) {
@@ -1268,9 +1287,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     trialsTick?.close();
   }
 
-  // The waiting hand-offs' notes, once the merge pass has said which siblings a person holds out of the merge queue.
+  // The waiting hand-offs' notes.
   for (const h of reviewHeld) {
-    if (!h.wait.cause && personHeld.has(h.wait.on)) h.wait.cause = "a person took it out of the merge queue";
     log(`  #${h.issue.number}: PR #${h.pr}: ${waitReason(h.wait)}`);
     if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log, waitMaxMs: siblingWait });
   }

@@ -1281,14 +1281,14 @@ export async function mergeQueueRemovals(repo, number, opts) {
 }
 
 /**
- * The PR's merge queue entry, or null when it is not in the queue: `{state, enqueuedAt, head, headAt}`, `state` GitHub's
- * (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), `head` the queue's merge_group commit once it is made and
- * `headAt` that commit's time.
+ * The PR's merge queue entry, or null when it is not in the queue: `{state, enqueuedAt, head, headAt, position}`, `state`
+ * GitHub's (QUEUED, AWAITING_CHECKS, MERGEABLE, UNMERGEABLE, LOCKED), `head` the queue's merge_group commit once it is
+ * made, `headAt` that commit's time and `position` its place in the queue (1 is next).
  */
 export async function mergeQueueEntry(repo, number, opts) {
-  const d = await graphql(`query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { mergeQueueEntry { state enqueuedAt headCommit { oid committedDate } } } } }`, { owner: repo.owner, name: repo.name, n: Number(number) }, opts);
+  const d = await graphql(`query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { mergeQueueEntry { state enqueuedAt position headCommit { oid committedDate } } } } }`, { owner: repo.owner, name: repo.name, n: Number(number) }, opts);
   const e = d?.repository?.pullRequest?.mergeQueueEntry;
-  return e ? { state: e.state ?? null, enqueuedAt: e.enqueuedAt ?? null, head: e.headCommit?.oid ?? null, headAt: e.headCommit?.committedDate ?? null } : null;
+  return e ? { state: e.state ?? null, enqueuedAt: e.enqueuedAt ?? null, head: e.headCommit?.oid ?? null, headAt: e.headCommit?.committedDate ?? null, position: e.position ?? null } : null;
 }
 
 /**
@@ -1368,13 +1368,14 @@ export async function checksStarted(repo, sha, gate, opts) {
 }
 
 /** A check run as logic.mjs queueHangs reads it (queueCommitChecks, awaitChecks' `progress`). */
-const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, started_at: r.started_at ?? null, app: r.app?.id ?? null });
+const commitCheck = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null, app: r.app?.id ?? null });
 
 /** A commit status as a check run: `in_progress` while pending, else completed, `success` or failed; from its creation. */
-const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, details_url: x.target_url ?? null, commitStatus: true });
+const statusRun = (x) => ({ id: x.id, name: x.context, status: x.state === "pending" ? "in_progress" : "completed", conclusion: x.state === "pending" ? null : x.state === "success" ? "success" : x.state, started_at: x.created_at ?? null, completed_at: x.state === "pending" ? null : (x.updated_at ?? x.created_at ?? null), details_url: x.target_url ?? null, commitStatus: true });
 
 /**
- * The checks on a queue commit as logic.mjs queueHangs reads them: each check run `{id, name, status, started_at, app}`
+ * The checks on a queue commit as logic.mjs queueHangs and hungOutcome read them: each check run `{id, name, status,
+ * conclusion, started_at, completed_at, app}`
  * (GitHub's status: `queued`, `in_progress`, `completed`, ...; `app` its integration's id; an Actions run's id is its
  * job's) and each commit status, `in_progress` while pending, from its creation. A failed read throws, so it never reads
  * as "nothing running".

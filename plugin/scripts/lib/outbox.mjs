@@ -13,7 +13,7 @@ import { backend } from "./backend.mjs";
 import { holdIfStopped } from "./stop.mjs";
 import { stageChanges } from "./checkout.mjs";
 import { LEGACY_POINTER_HEAD, lfsEndpoint, lfsPinArgs, lfsQuotaLine, lfsVersion, localMediaCapMb, noReplace, noSmudge, plainLfsBlobs, POINTER_HEAD } from "./lfs.mjs";
-import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, settingsFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
+import { WORKFLOWS_DIR, WORKSPACE_FILES, fixScopeReason, fixScopeRefused, membershipOnly, protectedReason, protectedTouched, pushRefusal, guardCovers, guardLinks, scriptsChanged, settingsFile, setupGuard, setupGuardReason, workflowScopeReason, workflowScopeRefused, workspaceDeclarations, workspaceLockDirs } from "./logic.mjs";
 import { agentUser, exec, runnerCommand, sudoEnv } from "./proc.mjs";
 import { RETRY } from "./github.mjs";
 import { NetworkDown, OUTAGE, downFor, networkBack, originOf, stoppedWaiting, unreachableNow, waitingOutages } from "./network.mjs";
@@ -46,6 +46,9 @@ export async function secretScan(git, range, held = heldSecrets(), maxBytes = SE
 }
 
 const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+// The largest package.json whose `scripts` Factory compares (box.outside, the setup scripts' check on push); a larger one
+// cannot be read, so every script the commands run counts as changed.
+const PACKAGE_JSON_MAX = 1024 * 1024;
 /** The most of one diff the rebase check's decision model is given (box.rebaseLeft): a larger one is not judged. */
 export const JUDGE_MAX_BYTES = 32 * 1024;
 /** The most paths the rebase check asks the decision model about, how many at once, and the most time it spends asking. */
@@ -245,7 +248,7 @@ export async function openOutbox({ base: tmpBase = tmpdir(), ...opts }) {
   }
 }
 
-async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = [], deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
+async function outboxIn({ branch, defaultBranch, checkout, remote, token = () => null, agentEnv = process.env, local = false, protectedList = [], toolchain = { paths: [], scripts: [], unresolved: [] }, setup = "", setupContext = {}, deadlineAt = Infinity, readMaxBytes = 64 * 1024 * 1024, mirror, scratch, networkOrigin = originOf(remote) }) {
   // Factory's own git sees the real history (no replace refs or grafts), none of the box's global or system config,
   // and no hook: it runs only here, never in the agent's checkout.
   const gitEnv = () => noReplace(addConfig({ PATH: process.env.PATH, HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TEMPLATE_DIR: "", GIT_TERMINAL_PROMPT: "0", GIT_LFS_SKIP_PUSH: "1", LANG: "C", ...credentialEnv(token()) }, [["core.hooksPath", "/dev/null"], ["core.fsmonitor", "false"]]));
@@ -1095,17 +1098,18 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * Fence what fix passes change from here on: the agent's head now is where the fence starts, and what the branch had
    * changed by then is in scope. `plan` (the plan as it stands) counts from the first call only, so a fix pass cannot
    * widen a later one's scope by editing the plan; `texts` (the issue, the decisions, the red's output, the review
-   * comments) widen it at each call. `toolchain` (the files the `setup` and `install` commands name) counts as
-   * toolchain. Every later push is checked against it (box.outside). A fence that could not be set fails closed: every
+   * comments) widen it at each call. `toolchain` (what the `setup` and `install` commands refer to, logic.mjs
+   * setupPaths) counts as toolchain: the files they name, the package.json scripts they run, and, when they may run a
+   * file Factory cannot name, every file. Every later push is checked against it (box.outside). A fence that could not be set fails closed: every
    * later push is refused, never let through unchecked.
    */
   box.fence = async ({ plan = "", texts = [] } = {}) => {
     if (!fence) {
       const since = await take().catch(() => expected || base);
       try {
-        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], extra: toolchain };
+        fence = { since, prior: await names([`${base}...${since}`]), texts: [plan], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved };
       } catch (e) {
-        fence = { since, prior: [], texts: [], extra: toolchain, broken: String(e?.message || e).slice(0, 160) };
+        fence = { since, prior: [], texts: [], extra: toolchain.paths, named: toolchain.named ?? toolchain.paths, unknown: toolchain.unresolved, broken: String(e?.message || e).slice(0, 160) };
         throw e;
       }
     }
@@ -1115,19 +1119,79 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
   box.fenced = () => !!fence;
   box.fenceStart = () => fence?.since ?? null;
 
-  // A regular file's text at `rev` (64 KiB at most, membershipOnly's bound), null when `rev` has no `path`, undefined when
-  // it cannot be read as that: a symlink, a directory, a larger file, a git failure.
-  const settingsAt = async (rev, path) => {
+  // A regular file's text at `rev` (`max` bytes at most: 64 KiB, membershipOnly's bound), null when `rev` has no `path`,
+  // undefined when it cannot be read as that: a symlink, a directory, a larger file, a git failure.
+  const settingsAt = async (rev, path, max = 64 * 1024) => {
     const ls = await git(["ls-tree", "-z", rev, "--", path]);
     if (ls.code !== 0) return undefined;
     if (!ls.stdout) return null;
     const m = /^(100644|100755) blob ([0-9a-f]+)\t/.exec(ls.stdout);
     if (!m || ls.stdout.split("\0").filter(Boolean).length !== 1) return undefined;
-    const r = await git(["cat-file", "blob", m[2]], { maxBytes: 64 * 1024 + 1 });
+    const r = await git(["cat-file", "blob", m[2]], { maxBytes: max + 1 });
     return r.code === 0 && !r.truncated ? r.stdout : undefined;
   };
 
-  /** The toolchain files changed since the fence started, on the branch, that its scope does not reach ([] unfenced). */
+  // Each package.json entry `scripts` names ({pkg, name}, `pkg` `*` for any) that differs between `from` and `to` in
+  // the changed `files`, as `<path> scripts.<name>` (logic.mjs scriptsChanged); a version that cannot be read changes
+  // every name. `also`: a second base the entry must differ from too.
+  const scriptsMoved = async (files, from, to, scripts, also = null) => {
+    const hits = [];
+    for (const p of files.filter((f) => f.split("/").at(-1) === "package.json")) {
+      const names = [...new Set(scripts.filter((x) => x.pkg === p || x.pkg === "*").map((x) => x.name))];
+      if (!names.length) continue;
+      const [was, now, other] = await Promise.all([from, to, also].map((rev) => (rev ? settingsAt(rev, p, PACKAGE_JSON_MAX) : undefined)));
+      const moved = scriptsChanged(was, now, names);
+      const alsoMoved = also ? new Set(scriptsChanged(other, now, names)) : null;
+      for (const n of moved) if (!alsoMoved || alsoMoved.has(n)) hits.push(`${p} scripts.${n}`);
+    }
+    return hits;
+  };
+
+  const commandNamedHas = (guards, f) => guards.some((g) => g.named.includes(f));
+  // The setup guard's view of a commit (logic.mjs setupGuard `io`), from one listing of its tree.
+  const treeIo = async (rev) => {
+    const ls = await git(["ls-tree", "-r", "-z", "--full-tree", rev]);
+    const entries = new Map();
+    const dirs = new Set();
+    if (ls.code === 0) {
+      for (const line of ls.stdout.split("\0").filter(Boolean)) {
+        const m = /^(\d+) \w+ ([0-9a-f]+)\t(.*)$/s.exec(line);
+        if (!m) continue;
+        entries.set(m[3], { mode: m[1], sha: m[2] });
+        const parts = m[3].split("/");
+        for (let k = 1; k < parts.length; k += 1) dirs.add(parts.slice(0, k).join("/"));
+      }
+    }
+    const blob = async (sha) => {
+      const r = await git(["cat-file", "blob", sha], { maxBytes: PACKAGE_JSON_MAX + 1 });
+      return r.code === 0 && !r.truncated ? r.stdout : undefined;
+    };
+    return {
+      ...setupContext,
+      read: async (p) => {
+        if (ls.code !== 0) return undefined;
+        const e = entries.get(p);
+        if (!e) return null;
+        return e.mode === "100644" || e.mode === "100755" ? blob(e.sha) : undefined;
+      },
+      exists: (p) => ls.code !== 0 || entries.has(p) || dirs.has(p),
+      list: (name) => [...entries.keys()].filter((p) => p.split("/").at(-1) === name),
+      link: async (p) => (entries.get(p)?.mode === "120000" ? blob(entries.get(p).sha) : null),
+    };
+  };
+
+  /** What the setup command runs (logic.mjs setupGuard), read on the default branch as Factory fetched it; null with no setup. */
+  let guardAtBase = null;
+  box.setupFiles = async () => {
+    if (!setup) return null;
+    guardAtBase ??= setupGuard(setup, await treeIo(base));
+    return guardAtBase;
+  };
+
+  /**
+   * The toolchain files changed since the fence started, on the branch, that its scope does not reach, and the
+   * package.json scripts of the `setup` and `install` commands it changed ([] unfenced).
+   */
   box.outside = async ({ head = null } = {}) => {
     if (!fence) return [];
     if (fence.broken) throw new Error(fence.broken);
@@ -1137,6 +1201,11 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     // Only the branch's own changes: a file the default branch changed and the branch took in a rebase is not the pass's.
     const own = new Set(await names([`${base}...${h}`]));
     const mine = since.filter((f) => own.has(f));
+    const moved = await scriptsMoved(mine, fence.since, h, toolchain.scripts ?? []);
+    return [...(await outsideFiles(mine, h)), ...moved];
+  };
+  /** box.outside's toolchain files among `mine`, the branch's own changes since the fence started, to the head `h`. */
+  const outsideFiles = async (mine, h) => {
     let refused = fixScopeRefused(mine, fence);
     // A refused pnpm-workspace.yaml whose change touches only its `packages` list, from where the fence starts to the
     // head (logic.mjs membershipOnly): workspace membership, not toolchain. A version that cannot be read is not.
@@ -1229,12 +1298,40 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     if (files instanceof Error) return refuse(`the branch's changes could not be read: ${files.message.slice(0, 160)}`);
     const hits = protectedTouched(files, protectedList);
     if (hits.length) return refuse(protectedReason(hits), { kind: "protected" });
+    // What the setup command runs (logic.mjs setupGuard), read where the branch left the default branch and on the
+    // default branch now, is as protected as the files it names: this stage's own change to any of it is refused, and a
+    // package.json script only when it differs both from the stage's start and from where the branch left (so a script
+    // the default branch or a person changed is not the stage's). A setup whose runs cannot all be named refuses the push.
+    if (setup && files.length) {
+      const mb = await git(["merge-base", base, head]);
+      const fork = mb.code === 0 ? mb.stdout.trim() : null;
+      const at = new Map();
+      for (const rev of new Set([fork, base, start].filter(Boolean))) at.set(rev, await setupGuard(setup, await treeIo(rev)));
+      const guards = [...at.values()];
+      // What cannot be named where the branch left counts only while it still cannot at the stage's start: a script the
+      // default branch has fixed since (taken in by a catch-up merge) no longer refuses the push.
+      const still = new Set(at.get(start)?.unresolved ?? []);
+      const unresolved = [...new Set([...(at.get(base)?.unresolved ?? []), ...(fork ? at.get(fork).unresolved.filter((u) => fork === start || still.has(u)) : [])])];
+      if (unresolved.length) return refuse(setupGuardReason([], unresolved), { kind: "protected" });
+      // Every guarded path with the pushed tree's symlinks followed too: a link the branch made along it leads elsewhere.
+      const covered = [...new Set(guards.flatMap((g) => g.files))];
+      const linked = await guardLinks(covered, await treeIo(head));
+      if (linked.unresolved.length) return refuse(setupGuardReason([], linked.unresolved), { kind: "protected" });
+      covered.push(...linked.paths);
+      // A change to pnpm-workspace.yaml's packages list alone stays the branch's (logic.mjs membershipOnly), though a
+      // package manager setup runs reads it; the setup command naming the file itself keeps it whole.
+      const membersOnly = async (f) => settingsFile(f) && !commandNamedHas(guards, f) && membershipOnly(await settingsAt(start, f), await settingsAt(head, f));
+      const touched = [];
+      for (const f of files) if (covered.some((p) => guardCovers(p, f)) && !(await membersOnly(f))) touched.push(f);
+      const moved = await scriptsMoved(files, start, head, guards.flatMap((g) => g.scripts), fork);
+      if (touched.length || moved.length) return refuse(setupGuardReason([...touched, ...moved]), { kind: "protected" });
+    }
     // A worker secret's value (inputs.mjs holdSecrets) in any commit going out, its change or its message: nothing is pushed.
     const leak = await secretScan(git, `${base}..${head}`);
     if (leak) return refuse(leak);
     const outside = await box.outside({ head }).catch((e) => e);
     if (outside instanceof Error) return refuse(`the fix pass's changes could not be read: ${outside.message.slice(0, 160)}`);
-    if (outside.length) return refuse(fixScopeReason(outside), { kind: "fix-scope" });
+    if (outside.length) return refuse(fixScopeReason(outside, toolchain.unresolved), { kind: "fix-scope" });
     const plain = await plainLfsBlobs(mirror, base, { source: "HEAD", env: gitEnv() }).catch(() => []);
     if (plain.length) return refuse(`committed as plain git blobs though .gitattributes routes them to Git LFS: ${plain.slice(0, 5).join(", ")}`, { lfs: true });
     const media = await lfsMedia(head);

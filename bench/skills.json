@@ -2,9 +2,9 @@
   "version": 2,
   "skills": {
     "factory-deliver-pr": {
-      "sha256": "cd417e1c0e8a670193c9960f3a9335fc557b164c9c9c5c402e94eb67eaf40914",
+      "sha256": "aa2a44ab40d651873f1e6efd28e5674feee6c39f177d287668c768bf6c1d7621",
       "lines": 41,
-      "words": 657,
+      "words": 675,
       "files": {
         "reference.md": {
           "sha256": "d284f416064eb648a78c293a9cfd5a8f50b9024d6aeea53d3c102c8e7d7cc73b",
@@ -14,9 +14,9 @@
       }
     },
     "factory-doctor": {
-      "sha256": "0bf7320b48680ae5300374717fd12fade90ff82a9bd6c116f1e279b04a6fd8e1",
+      "sha256": "d67cddaaa885ca3a87d85642479859c43600d740e90f16c52f4898c66c38c428",
       "lines": 43,
-      "words": 700
+      "words": 696
     },
     "factory-draft": {
       "sha256": "d8200e878cf46822c258fb71b49b987d50cfc70a8eb977dd103d4d87d8028e04",
@@ -51,9 +51,9 @@
       "words": 700
     },
     "factory-prove-acceptance": {
-      "sha256": "6f85136e37a29cb10e710350c1552d93e1564963a345b8e49a9eb38795afb40e",
+      "sha256": "1caee995d51684b9783c69324b2d722ec51d4af391956e9212715ed1ad62ca27",
       "lines": 41,
-      "words": 669
+      "words": 686
     },
     "factory-queue": {
       "sha256": "3dc163cc8c7db8f104dcf79e8aeed51f1fba878f80b61665a46421f07e76469e",

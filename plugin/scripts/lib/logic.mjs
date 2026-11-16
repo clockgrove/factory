@@ -2,6 +2,7 @@
 // Everything here is covered by test/ with `node --test`.
 
 import { parseToml } from "./toml.mjs";
+import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
 import { refusalCause, refusalFields, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
@@ -44,8 +45,32 @@ export function renderTaskCard(template, values) {
   return out;
 }
 
-/** The values the task card needs, from the job's inputs. */
-export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [] }) {
+/**
+ * The task card's and the fix pass's line on what the setup command runs (setupGuard's `files` and `scripts`), so a
+ * worker leaves it alone rather than meet a refused push: at most `max` entries, then how many more, each at most
+ * `width` characters and in a code span, with what could break out of one (a backtick, a line break) or read as a
+ * template slot or an HTML comment (any angle bracket) replaced. "" with none.
+ */
+export function setupFilesNote(guard, max = 25, width = 80) {
+  if (!guard || (!guard.files?.length && !guard.scripts?.length && !guard.unresolved?.length)) return "";
+  const plain = (x) => {
+    const t = String(x).replace(/[\r\n\t`]/g, " ").replace(/\{(?=\{)/g, "{ ").replace(/\}(?=\})/g, "} ").replace(/[<>]/g, " ");
+    return `\`${t.length > width ? `${t.slice(0, width - 3)}...` : t}\``;
+  };
+  const files = [...guard.files].sort().map(plain);
+  const scripts = guard.scripts.map((x) => plain(`${x.pkg === "*" ? "any package.json" : x.pkg} scripts.${x.name}`));
+  const cut = (xs, room) => `${xs.slice(0, room).join(", ")}${xs.length > room ? ` and ${xs.length - room} more` : ""}`;
+  const room = Math.min(files.length, max);
+  const lines = [];
+  if (files.length) lines.push(`Setup's files, don't change them or anything under them: ${cut(files, room)}.`);
+  if (scripts.length) lines.push(`Setup's package.json scripts, don't change them: ${cut(scripts, Math.max(max - room, Math.min(scripts.length, 5)))}.`);
+  if (lines.length) lines.push("Setup runs them as the runner from the default branch, so Factory refuses a push that changes one.");
+  if (guard.unresolved?.length) lines.push("Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");
+  return lines.join(" ");
+}
+
+/** The values the task card needs, from the job's inputs. `setupGuard`: what the setup command runs (setupFilesNote). */
+export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths, ciChecks = [], setupGuard = null }) {
   const hours = Math.round((Number(timeoutMinutes) / 60) * 10) / 10;
   const checks = (ciChecks || []).filter(Boolean);
   return {
@@ -58,6 +83,7 @@ export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budg
       : "Run the validation commands before you stop; Factory runs them again.",
     budget_command: budgetCommand && budgetCommand.trim() ? budgetCommand.trim() : "none",
     protected_paths: protectedPaths.join(", "),
+    setup_files: setupFilesNote(setupGuard) ? ` ${setupFilesNote(setupGuard)}` : "",
     branch: `factory/${issue}`,
   };
 }
@@ -78,15 +104,6 @@ export function protectedPaths(additions = []) {
   const all = [...FACTORY_PROTECTED, ...additions.map((p) => p.trim()).filter(Boolean)];
   return [...new Set(all)];
 }
-
-/**
- * Whether a red validation pass gets a fix run: `maxPasses` passes at most, plus one when the red is the first the
- * required checks found. Locally the commands run before the checks, so a change they do not exercise (a browser test
- * only CI runs) is first red in the checks, possibly on the last pass; that red gets its fix run. Each later red stops
- * at `maxPasses`. `catchUps`: the catch-up merges of Factory's own (outbox.mjs catchUp) found red so far, each one
- * pass more: a pass on a merge Factory chose is not the change's, so it never takes the change's last pass.
- */
-export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catchUps = 0 }) => passes < maxPasses + catchUps + (fromChecks && !checksFixed ? 1 : 0);
 
 /**
  * Why a red head a fix pass left unchanged gets no fresh worker pass before the stage Blocks (session.mjs
@@ -129,6 +146,15 @@ export function protectedReason(hits) {
   const why = `touched protected path ${hits.join(", ")}`;
   return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun` : why;
 }
+
+/**
+ * The push refusal for what the `setup` command runs (setupGuard) that a branch changed (`hits`: paths, or `<path>
+ * scripts.<name>`), or, with `unresolved`, for a setup command whose runs cannot all be named.
+ */
+export const setupGuardReason = (hits, unresolved = []) =>
+  unresolved.length
+    ? `the setup command runs ${unresolved.slice(0, 3).join("; ")}${unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : ""}, which Factory cannot resolve to repository files, so it cannot tell whether this push changes what runs as the runner beside the App's key; name each file literally in the command, or move the command into a script file`
+    : `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Factory never pushes one; a person changes it on the default branch`;
 
 /** Changed files that fall under a protected path (protectedCovers). */
 export function protectedTouched(files, protectedList) {
@@ -192,55 +218,19 @@ const dependencyFile = (path) => {
 };
 
 /**
- * The repository paths a shell command names (`setup`, an explicit `install`): each word that is a relative path with a
- * directory, an extension or a leading `./` (`scripts/setup.sh`, `./tools/install-deps.sh`, `setup.sh`, `./setup`), or
- * the script an interpreter runs (`sh configure`, `bash -e bootstrap`; interpreterScript),
- * quotes and a leading `./` dropped; flags, assignments, variables, absolute paths, URLs and `..` are not, nor are
- * manifests, lockfiles and requirements files (dependencyFile). A fix pass changing one is changing the toolchain (fixScopeRefused `extra`).
+ * What the shell command `command` (`setup`, an explicit `install`, a package.json script) refers to in the repository
+ * (shell.mjs commandRefs, `ctx` its context): {paths, guarded, scripts, unresolved}, with the manifests,
+ * lockfiles and requirements files an install reads (dependencyFile) left out of `paths`.
  */
-export function commandPaths(command) {
-  const out = new Set();
-  for (const segment of String(command || "").split(/[;&|()<>`\n]+/)) {
-    const script = interpreterScript(segment);
-    for (let w of segment.split(/\s+/)) {
-      w = w.replace(/^['"]+|['"]+$/g, "");
-      if (w.startsWith("-") && w.includes("=")) w = w.slice(w.indexOf("=") + 1);
-      if (!w || w.startsWith("-") || /[=$~*?{}\\]|:\/\//.test(w) || w.startsWith("/")) continue;
-      const dotted = /^\.\//.test(w);
-      const named = w === script;
-      w = w.replace(/^(\.\/)+/, "");
-      if (!w || w.split("/").some((s) => s === ".." || s === "")) continue;
-      if ((dotted || named || w.includes("/") || /\.[A-Za-z0-9]+$/.test(w)) && !dependencyFile(w)) out.add(w);
-    }
-  }
-  return [...out];
+export function commandRefs(command, ctx = {}) {
+  const refs = shellRefs(command, ctx);
+  return { ...refs, paths: refs.paths.filter((p) => !dependencyFile(p)) };
 }
+/** The repository paths a shell command names (commandRefs `paths`). */
+export const commandPaths = (command) => commandRefs(command).paths;
 
-// Interpreters whose first operand is a script file (`sh configure`, `bash -e bootstrap`); the options that make the
-// next word inline code or a module instead (`node -e`, `python -m`) mean no script. `sudo`, `env` and assignments may
-// come first.
-const SHELL_INLINE = /^-[A-Za-z]*c$/;
-const INTERPRETERS = {
-  bash: SHELL_INLINE, sh: SHELL_INLINE, dash: SHELL_INLINE, zsh: SHELL_INLINE, ksh: SHELL_INLINE,
-  node: /^(-e|-p|--eval|--print)$/, python: /^-[A-Za-z]*[cm]$/, python3: /^-[A-Za-z]*[cm]$/, ruby: /^-[A-Za-z]*e$/, perl: /^-[A-Za-z]*[eE]$/,
-};
+// `sudo`, `env` and the like run the command after them (simpleCommands).
 const PREFIXES = new Set(["sudo", "env", "exec", "command", "nice", "time"]);
-
-/** The script word an interpreter runs in one simple command (`sh configure` → `configure`), quotes kept off; else null. */
-function interpreterScript(segment) {
-  const words = segment.trim().split(/\s+/).map((w) => w.replace(/^['"]+|['"]+$/g, "")).filter(Boolean);
-  let i = 0;
-  let prefixed = false;
-  for (; i < words.length; i += 1) {
-    if (PREFIXES.has(words[i])) prefixed = true;
-    else if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) && !(prefixed && words[i].startsWith("-"))) break;
-  }
-  const name = (words[i] ?? "").split("/").pop();
-  if (!Object.hasOwn(INTERPRETERS, name)) return null;
-  const inline = INTERPRETERS[name];
-  for (i += 1; i < words.length && words[i].startsWith("-"); i += 1) if (inline.test(words[i])) return null;
-  return words[i] ?? null;
-}
 
 // Shell keywords, skipped to the command they introduce (`if make; then …`), and builtins, which run no executable.
 const SHELL_KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "select", "function", "!", "{", "}", "[[", "]]"]);
@@ -275,15 +265,191 @@ export function simpleCommands(command) {
   return out;
 }
 
-/** The repository paths the `setup` command and an explicit `install` command name (commandPaths): toolchain to a fix pass. */
-export const setupPaths = ({ setup = "", install = "auto" } = {}) => [...new Set([...commandPaths(setup), ...(install && install !== "auto" && install !== "none" ? commandPaths(install) : [])])];
+/**
+ * What the `setup` command and an explicit `install` command refer to (commandRefs), together: toolchain to a fix pass
+ * (outbox.mjs box.outside). {paths (every path either may run, named or guarded), named (those the commands name), scripts, unresolved}.
+ */
+export function setupPaths({ setup = "", install = "auto" } = {}, ctx = {}) {
+  const all = [commandRefs(setup, ctx), install && install !== "auto" && install !== "none" ? commandRefs(install, ctx) : { paths: [], guarded: [], scripts: [], unresolved: [] }];
+  const scripts = new Map(all.flatMap((r) => r.scripts).map((x) => [`${x.pkg}\0${x.name}`, { pkg: x.pkg, name: x.name }]));
+  return { paths: [...new Set(all.flatMap((r) => [...r.paths, ...r.guarded]))], named: [...new Set(all.flatMap((r) => r.paths))], scripts: [...scripts.values()], unresolved: [...new Set(all.flatMap((r) => r.unresolved))] };
+}
 
 /**
- * The repository files the `setup` command names (commandPaths) that are files in the checkout (`isFile`, given a path
- * from its root). Setup runs as the runner, beside the App's key (with sudo on Actions, as root into a sandbox's image),
- * on every route, so each must be a protected path: no worker or fix pass may change what it runs.
+ * Whether a change to `file` changes the guarded `path`: the path itself, anything under it (each guarded path is a
+ * file and a directory), or a directory above it (a change there, a symlink made there included, moves what the path is).
  */
-export const setupFiles = (setup, isFile) => commandPaths(setup).filter((p) => isFile(p));
+export const guardCovers = (path, file) => file === path || file.startsWith(`${path}/`) || path.startsWith(`${file}/`);
+
+/**
+ * Each path with every symlink along it followed, as `io` (setupGuard's) reads the tree: {paths (the resolved ones,
+ * beside the given), unresolved (a link out of the repository, or a chain too long)}.
+ */
+export async function guardLinks(paths, io) {
+  const out = new Set();
+  const unresolved = [];
+  for (const p of paths) {
+    let parts = p.split("/");
+    let hops = 0;
+    for (let k = 0; k < parts.length; k += 1) {
+      const at = parts.slice(0, k + 1).join("/");
+      const target = await io.link?.(at);
+      if (typeof target !== "string") continue;
+      if ((hops += 1) > 40) {
+        unresolved.push(`${p} (a chain of links Factory cannot follow)`);
+        break;
+      }
+      const real = posixJoin(dirOf(at), target);
+      if (!real) {
+        if (!target.startsWith("/")) unresolved.push(`${at} (a link out of the repository)`);
+        parts = null;
+        break;
+      }
+      parts = [...real.split("/"), ...parts.slice(k + 1)];
+      k = -1;
+    }
+    if (parts && parts.join("/") !== p) out.add(parts.join("/"));
+  }
+  return { paths: [...out], unresolved };
+}
+
+/**
+ * Everything the `setup` command runs from the repository, as read through `io` at one revision (the checkout for
+ * doctor, a commit for the push): {named, files, scripts, unresolved}. `io`: {read(path) (text, null: none, undefined:
+ * unreadable), exists(path) (a file or directory), list(name) (every path with that file name), link(path) (a symlink's
+ * target, else null)}, all may be async, plus commandRefs' `env` and `roots`.
+ * - `named`: the paths the command itself names (commandRefs `paths`); doctor wants each regular file among them on
+ *   the protected list.
+ * - `files`: what no push may change, each as a file and as a directory, and with every directory above it
+ *   (guardCovers): `named`, what the command runs without naming it (`guarded`), the same for every package.json script
+ *   it runs, read from its package's directory and followed through the scripts that one runs (an install's lifecycle
+ *   scripts unless `.npmrc` sets `ignore-scripts=true`), `.yarnrc.yml`'s `yarnPath` and `plugins`, and each path with
+ *   its symlinks followed (guardLinks), beside the path itself.
+ * - `scripts`: {pkg, name}, each package.json entry it runs (`pkg` `*`: in any package.json), which no push may change.
+ * - `unresolved`: what may run and cannot be named, in the command or a script it runs (`<pkg> scripts.<name>: …`).
+ */
+export async function setupGuard(setup, io) {
+  const ctx = { env: io.env ?? null, roots: io.roots ?? [] };
+  const refs = commandRefs(setup, ctx);
+  const files = new Set([...refs.paths, ...refs.guarded]);
+  const unresolved = [...refs.unresolved];
+  const scripts = new Map();
+  // An install's lifecycle scripts run unless scripts are off: for npm and pnpm, by `ignore-scripts` in the .npmrc they
+  // read, the nearest one up from the install's directory that sets it (the root's last). Yarn Berry reads no .npmrc
+  // for it (its own `enableScripts` in .yarnrc.yml is not read here), so its install stays fenced.
+  const scriptsOff = async (x) => {
+    if (x.lifecycle !== "npm" && x.lifecycle !== "pnpm") return false;
+    const parts = x.pkg === "*" ? [] : dirOf(x.pkg).split("/").filter(Boolean);
+    for (let k = parts.length; k >= 0; k -= 1) {
+      const text = await io.read(`${parts.slice(0, k).map((d) => `${d}/`).join("")}.npmrc`);
+      const m = typeof text === "string" ? /^\s*ignore-scripts\s*=\s*(\S+)\s*$/m.exec(text) : null;
+      if (m) return m[1] === "true";
+    }
+    return false;
+  };
+  // In a workspace an install runs every member's lifecycle scripts too, a member the branch adds included.
+  const workspace = async (pkg) => {
+    if (pkg === "*") return false;
+    if (typeof (await io.read(`${dirOf(pkg)}pnpm-workspace.yaml`)) === "string") return true;
+    try {
+      const doc = JSON.parse((await io.read(pkg)) ?? "null");
+      return !!doc?.workspaces;
+    } catch {
+      return false;
+    }
+  };
+  const queue = [];
+  for (const x of refs.scripts) {
+    if (x.lifecycle && (await scriptsOff(x))) continue;
+    queue.push(x);
+    if (x.lifecycle && (await workspace(x.pkg))) queue.push({ pkg: "*", name: x.name });
+  }
+  const seen = new Set();
+  while (queue.length) {
+    const { pkg, name } = queue.shift();
+    scripts.set(`${pkg}\0${name}`, { pkg, name });
+    for (const p of pkg === "*" ? await io.list("package.json") : [pkg]) {
+      if (seen.has(`${p}\0${name}`)) continue;
+      seen.add(`${p}\0${name}`);
+      const text = await io.read(p);
+      if (text === null) continue;
+      let doc;
+      try {
+        doc = typeof text === "string" ? JSON.parse(text) : undefined;
+      } catch {
+        doc = undefined;
+      }
+      if (!doc || typeof doc !== "object") {
+        unresolved.push(`${p} (cannot be read as JSON, so the scripts setup runs from it cannot be named)`);
+        continue;
+      }
+      const value = doc.scripts && typeof doc.scripts === "object" ? doc.scripts[name] : undefined;
+      if (typeof value !== "string") continue;
+      const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
+      for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
+      unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
+      for (const x of sub.scripts) if (!(x.lifecycle && (await scriptsOff(x)))) queue.push(x);
+    }
+  }
+  for (const f of [...files]) {
+    if (fileName(f) === ".yarnrc.yml") {
+      // The yarn release it runs (`yarnPath`) and the plugins it loads (`plugins:`, a path or {path}).
+      const text = await io.read(f);
+      let doc = null;
+      try {
+        doc = typeof text === "string" ? parseYaml(text) : null;
+      } catch {
+        unresolved.push(`${f} (does not parse, so the yarn release and plugins it names cannot be read)`);
+      }
+      const named = [doc?.yarnPath, ...(Array.isArray(doc?.plugins) ? doc.plugins.map((x) => (typeof x === "string" ? x : x?.path)) : [])];
+      for (const n of named) {
+        if (typeof n !== "string") continue;
+        const p = posixJoin(dirOf(f), n);
+        if (p) files.add(p);
+      }
+    }
+  }
+  const links = await guardLinks([...files], io);
+  for (const p of links.paths) files.add(p);
+  unresolved.push(...links.unresolved);
+  return { named: refs.paths, files: [...files], scripts: [...scripts.values()], unresolved: [...new Set(unresolved)] };
+}
+/** `dir` + `rel` as a path from the root, or null when it leaves the root or is absolute. */
+const posixJoin = (dir, rel) => {
+  if (rel.startsWith("/")) return null;
+  const parts = [];
+  for (const s of `${dir}${rel}`.split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else parts.push(s);
+  }
+  return parts.join("/") || null;
+};
+
+/**
+ * The package.json `scripts` entries among `names` whose value differs between two texts of one package.json (`before`
+ * and `after`; null: no file there). A side that could not be read (undefined), or is not a JSON object while the
+ * texts differ, changes every name.
+ */
+export function scriptsChanged(before, after, names) {
+  if (!names.length || (before !== undefined && before === after)) return [];
+  const read = (text) => {
+    if (text === null) return {};
+    if (typeof text !== "string") return null;
+    try {
+      const doc = JSON.parse(text);
+      return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null;
+    } catch {
+      return null;
+    }
+  };
+  const [a, b] = [read(before), read(after)];
+  if (!a || !b) return [...names];
+  const entry = (doc, n) => (doc.scripts && typeof doc.scripts === "object" && Object.hasOwn(doc.scripts, n) ? JSON.stringify(doc.scripts[n]) : undefined);
+  return names.filter((n) => entry(a, n) !== entry(b, n));
+}
 /** The setup files no entry of the protected list covers (protectedTouched): doctor FAILs on any, setup adds them. */
 export const unprotectedFiles = (files, protectedList) => files.filter((f) => !protectedTouched([f], protectedList).length);
 
@@ -469,10 +635,12 @@ export const settingsFile = (path) => fileName(String(path)) === SETTINGS_FILE;
  * dependency may change it, and its lockfile follows). A workspace's root lockfile (`workspaces`, from
  * workspaceDeclarations) is in scope when one of its member manifests is changed before or by this pass. A lockfile
  * changed without its manifest or a member manifest in scope is refused. `extra` (the files the repository's `setup`
- * and `install` commands name, commandPaths) counts as toolchain too. A pnpm-workspace.yaml in `membership` (its change
- * touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may change as before.
+ * and `install` commands name, setupPaths) counts as toolchain too, and with `unknown` (what those commands may run that
+ * Factory cannot name, commandRefs `unresolved`) every file does: any one may be what they run. A pnpm-workspace.yaml in
+ * `membership` (its change touches only the `packages` list, membershipOnly) is not. Everything else a fix pass may
+ * change as before.
  */
-export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], workspaces = [], membership = [] } = {}) {
+export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], named: commandNamed = extra, unknown = [], workspaces = [], membership = [] } = {}) {
   const clean = (p) => String(p).replace(/^\.\//, "");
   const before = new Set(prior.map(clean));
   const setupPaths = new Set([...extra].map(clean));
@@ -481,13 +649,19 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], w
   const manifestIn = (p) => (Object.hasOwn(LOCK_PAIRS, fileName(p)) ? LOCK_PAIRS[fileName(p)] : []).some((m) => [before, now].some((s) => s.has(`${dirOf(p)}${m}`)) || named(`${dirOf(p)}${m}`));
   const memberIn = (p) => workspaces.some((w) => w.dir === dirOf(p) && w.locks.includes(fileName(p)) && [before, now].some((s) => [...s].some((m) => workspaceMember(w, m))));
   const members = new Set(membership.map(clean));
-  const membersOnly = (p) => settingsFile(p) && members.has(p) && !setupPaths.has(p);
-  return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p)) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
+  // Membership alone stays a fix pass's to change though a package manager setup runs reads the file; not when the
+  // setup command names the file itself.
+  const namedBySetup = new Set([...commandNamed].map(clean));
+  const membersOnly = (p) => settingsFile(p) && members.has(p) && !namedBySetup.has(p);
+  return [...now].filter((p) => (toolchainFile(p) || setupPaths.has(p) || unknown.length > 0) && !before.has(p) && !named(p) && !manifestIn(p) && !memberIn(p) && !membersOnly(p));
 }
 
-/** The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. */
-export const fixScopeReason = (files) =>
-  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective`;
+/**
+ * The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. `unknown`: what
+ * the setup or install command may run that Factory cannot name (fixScopeRefused), said once, with its fix.
+ */
+export const fixScopeReason = (files, unknown = []) =>
+  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Factory cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
 
 /**
  * The Blocked reason for a push GitHub refused because it would create or update a workflow file, which a token
@@ -804,7 +978,9 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
  *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
- *              pass was given after a fix pass changed nothing on it, when the red after it is the last)}
+ *              pass was given after a fix pass changed nothing on it, when the red after it is the last), stalled?: string
+ *              (why the fix pass before the last red made no progress, or could not be judged, naming that red: session.mjs
+ *              validationLoop), stalledCause?: its Block's cause (`work`; `factory` or `outage` when the judgement was not made)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -884,9 +1060,13 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
     // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
     const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
-    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
+    const red = validation.stalled
+      ? `validation red on Factory's pass ${validation.passes}${validation.command ? ` (${validation.command})` : ""}: ${validation.stalled}${fresh}`
+      : `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
-    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
+    // A progress judgement the decider could not make is Factory's (or its vendor's outage), never the work's.
+    const cause = validation.stalled && Object.hasOwn(BLOCK_CAUSES, validation.stalledCause ?? "") ? validation.stalledCause : "work";
+    return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause };
   }
   const open = question !== undefined ? question : record?.exit === "question";
   // A Question the answer pass raised stands with findings still open: it carries them to a maintainer. Otherwise

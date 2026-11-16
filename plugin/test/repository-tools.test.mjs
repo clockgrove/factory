@@ -135,7 +135,7 @@ test("the probe's toolchain rule: a repository tool linked from the toolbin must
   symlinkSync(real, join(bin, "mytool"));
   symlinkSync(join(root, "gone", "other"), join(bin, "other"));
   const drive = (tools) => {
-    const driver = probeDriver({ gitConfig: "", host: "", marker: "m9", toolchain: { tools }, copilotTmp: join(root, "no-copilot-tmp") });
+    const driver = probeDriver({ gitConfig: "", host: "", marker: "m9", toolchain: { tools }, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
     execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m9" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };

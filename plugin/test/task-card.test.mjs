@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { PLUGIN_ROOT } from "../scripts/lib/checkout.mjs";
 import { FACTORY_PROTECTED, protectedPaths, protectedTouched, renderTaskCard, taskCardValues } from "../scripts/lib/logic.mjs";
 import { validationGroups } from "../scripts/lib/logic.mjs";
-import { buildPrompt } from "../scripts/lib/session.mjs";
+import { buildPrompt, fixClosingText } from "../scripts/lib/session.mjs";
 
 const template = readFileSync(join(PLUGIN_ROOT, "templates", "task-card.md"), "utf8");
 
@@ -203,4 +203,17 @@ test("decisions cut for length are not shown, so not recorded as read; the promp
   // A resumed pass answering findings gets the decisions as they fit; a fresh one has them in its card only.
   assert.deepEqual(answerFed({ fresh: false, decisions, listed: decisions, afterPush: false }).map((x) => x.key), ["comment:2", "comment:3"]);
   assert.deepEqual(answerFed({ fresh: true, decisions, listed: [], afterPush: false }).map((x) => x.key), ["comment:2", "comment:3"]);
+});
+
+test("the task card and the fix pass's ask list what the setup command runs, bounded, so a worker leaves it alone (#387)", () => {
+  const guard = { files: ["tools/boot.mjs", ".npmrc", "scripts/ci"], scripts: [{ pkg: "package.json", name: "bootstrap" }, { pkg: "*", name: "build" }], unresolved: [] };
+  const card = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: FACTORY_PROTECTED, setupGuard: guard });
+  assert.match(card, /Protected paths: [^\n]*\. Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`, `any package\.json scripts\.build`\. Setup runs them as the runner from the default branch, so Factory refuses a push that changes one\./);
+  assert.match(fixClosingText({ commands: ["make test"], setupGuard: guard }), /Setup's files, don't change them or anything under them: `\.npmrc`, `scripts\/ci`, `tools\/boot\.mjs`\. Setup's package\.json scripts, don't change them: `package\.json scripts\.bootstrap`/, "the fix pass's ask too");
+  const many = { files: Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.sh`), scripts: [], unresolved: [] };
+  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: many }).setup_files, /`f24\.sh` and 15 more\./, "bounded");
+  const none = buildPrompt({ templatePath: join(PLUGIN_ROOT, "templates", "task-card.md"), issue: 7, issueTitle: "t", issueBody: "b", maxUsd: 10, timeoutMinutes: 60, validation: [], budgetCommand: "", protectedList: FACTORY_PROTECTED });
+  assert.doesNotMatch(none, /Setup's files/, "no setup: nothing said");
+  assert.doesNotMatch(fixClosingText({ commands: [] }), /Setup's files/);
+  assert.match(taskCardValues({ issue: 1, maxUsd: 1, timeoutMinutes: 60, validation: [], protectedPaths: [], setupGuard: { files: [], scripts: [], unresolved: ["$X"] } }).setup_files, /^ Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command\.$/);
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixRunAllowed, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
 import { exitRecord } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -457,28 +457,6 @@ test("decideExit: a red validation names the command that failed", () => {
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
   assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 3, green: false } }).reason, "validation red after Factory's third pass");
 });
-
-test("fixRunAllowed: a red the required checks find first gets a fix run, even on the last pass; later reds stop at the cap", () => {
-  // Pass 1 red in the local commands, fixed; pass 2 green locally, then red in the required checks (a browser test only CI runs).
-  assert.equal(fixRunAllowed({ passes: 1, maxPasses: 2, fromChecks: false, checksFixed: false }), true);
-  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: true, checksFixed: false }), true, "the checks' first red is fixed");
-  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: true, checksFixed: true }), false, "pass 3 is the last");
-  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: false, checksFixed: true }), false);
-  // A local red on the last pass, or a second checks red, stops at the cap as before.
-  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: false, checksFixed: false }), false);
-  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: true, checksFixed: true }), false);
-});
-
-test("fixRunAllowed: each catch-up merge of Factory's own found red is one pass more, never the change's last (#10)", () => {
-  // Pass 1 was red in the checks and fixed; pass 2 is red on Factory's catch-up merge: it gets its fix run.
-  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: true, checksFixed: true, catchUps: 1 }), true);
-  // Pass 3, on the agent's own commit, is the last: a red there stops.
-  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: true, checksFixed: true, catchUps: 1 }), false);
-  // A second catch-up merge found red gets its own pass too; with none, the cap is as before.
-  assert.equal(fixRunAllowed({ passes: 3, maxPasses: 2, fromChecks: false, checksFixed: true, catchUps: 2 }), true);
-  assert.equal(fixRunAllowed({ passes: 2, maxPasses: 2, fromChecks: false, checksFixed: false }), false);
-});
-
 
 test("evaluateChecks: required checks from a head's check-runs, latest run per name, missing is not red", async () => {
   const { evaluateChecks } = await import("../scripts/lib/logic.mjs");
@@ -1140,20 +1118,22 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.equal(namesPath("node version from .nvmrc.", ".nvmrc"), true);
   assert.equal(namesPath("(web/yarn.lock)", "yarn.lock"), true);
   // The repository's own setup and install commands name its setup scripts: toolchain, unless the scope names them.
+  // Every argument word is a path to match (one naming no file matches nothing); absolute paths, ~, URLs and .. are none.
   assert.deepEqual(commandPaths(`bash scripts/setup.sh && FOO=1 sh "./tools/install-deps.sh" --dir=vendor/x; curl -fsSL https://x.test/a.sh | sh; source ~/.env; ../up.sh; make setup`), ["scripts/setup.sh", "tools/install-deps.sh", "vendor/x"]);
-  assert.deepEqual(setupPaths({ setup: "./scripts/setup.sh", install: "auto" }), ["scripts/setup.sh"]);
-  assert.deepEqual(commandPaths("sh configure; bash -e bootstrap && node -e run; python -m pip install x; ruby -e puts; make setup"), ["configure", "bootstrap"], "an interpreter's script operand is a path; inline code and modules are not");
-  assert.deepEqual(setupPaths({ setup: "", install: "bash tools/install-deps.sh" }), ["tools/install-deps.sh"]);
-  assert.deepEqual(setupPaths({ setup: "", install: "none" }), []);
+  assert.deepEqual(setupPaths({ setup: "./scripts/setup.sh", install: "auto" }).paths, ["scripts/setup.sh"]);
+  assert.deepEqual(commandPaths("sh configure; bash -e bootstrap; bash -c run.sh; python -m tools.gen"), ["configure", "bootstrap", "run.sh", "tools.gen"], "an interpreter's script operand is a path; every path-looking word of the text too");
+  assert.ok(setupPaths({ setup: "python -m tools.gen" }).paths.includes("tools/gen.py"), "the files a module runs are toolchain");
+  assert.deepEqual(setupPaths({ setup: "", install: "bash tools/install-deps.sh" }).paths, ["tools/install-deps.sh"]);
+  assert.deepEqual(setupPaths({ setup: "", install: "none" }), { paths: [], named: [], scripts: [], unresolved: [] });
   // A dependency list the install command reads is not toolchain: a fix pass that adds a dependency may change it.
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements.txt" }), []);
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements-dev.txt -c constraints.txt && npm ci --prefix web/package.json" }), []);
-  assert.deepEqual(setupPaths({ setup: "bash scripts/setup.sh", install: "poetry install -C api/pyproject.toml && bundle install --gemfile=Gemfile && cargo fetch --locked Cargo.lock" }), ["scripts/setup.sh"]);
-  assert.deepEqual(fixScopeRefused(["requirements.txt"], { texts: [plan, red], extra: setupPaths({ install: "pip install -r requirements.txt" }) }), []);
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements.txt" }).paths, []);
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements-dev.txt -c constraints.txt && npm ci --prefix web/package.json" }).paths.filter((p) => /requirements|constraints|package\.json$/.test(p)), []);
+  assert.deepEqual(setupPaths({ setup: "bash scripts/setup.sh", install: "poetry install -C api/pyproject.toml && bundle install --gemfile=Gemfile && cargo fetch --locked Cargo.lock" }).paths, ["scripts/setup.sh"]);
+  assert.deepEqual(fixScopeRefused(["requirements.txt"], { texts: [plan, red], extra: setupPaths({ install: "pip install -r requirements.txt" }).paths }), []);
   // The common layouts too: a requirements/ or constraints/ directory, a prefixed name. Other files there stay named.
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements/dev.txt -r dev-requirements.txt -c constraints/base.in -r test_requirements.txt" }), []);
-  assert.deepEqual(setupPaths({ install: "pip install -r requirements/build.sh -r tools/requirements-gen.py" }), ["requirements/build.sh", "tools/requirements-gen.py"]);
-  const extra = setupPaths({ setup: "bash scripts/setup.sh" });
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements/dev.txt -r dev-requirements.txt -c constraints/base.in -r test_requirements.txt" }).paths, []);
+  assert.deepEqual(setupPaths({ install: "pip install -r requirements/build.sh -r tools/requirements-gen.py" }).paths, ["requirements/build.sh", "tools/requirements-gen.py"]);
+  const extra = setupPaths({ setup: "bash scripts/setup.sh" }).paths;
   assert.deepEqual(fixScopeRefused(["src/parse.ts", "scripts/setup.sh", "scripts/other.sh"], { prior: ["src/parse.ts"], texts: [plan, red], extra }), ["scripts/setup.sh"]);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { texts: ["setup fails: scripts/setup.sh line 3"], extra }), []);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { prior: ["scripts/setup.sh"], extra }), []);

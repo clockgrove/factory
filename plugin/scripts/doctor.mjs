@@ -34,6 +34,7 @@ import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
 import { DRIFT_MODEL } from "./lib/drift.mjs";
 import { deciderKind } from "./lib/decider.mjs";
+import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
@@ -514,11 +515,11 @@ export function pluginVersionCheck(text, version = FACTORY_VERSION) {
  */
 export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   const kind = deciderKind({ inputs, env, home });
-  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, and a reply resolves its finding unjudged";
+  const offText = "every red goes to the fix pass, no drift check runs, every answer commit after the review gets a review pass, a reply resolves its finding unjudged, and a send-back's conflict pass is checked by matching commits";
   if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
-  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check): no AI Gateway key (${kind.code})`;
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check): no AI Gateway key (${kind.code})`;
   if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/factory/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/factory no harness can read), or remove it");
   return PASS("decision calls", text);
 }
@@ -1136,9 +1137,22 @@ export async function runnerChecks({ inputs, env = process.env }) {
     const home = await agentHomeProblem();
     out.push(home ? FAIL("agent home", home, `remove that user or give it the home ${AGENT_HOME}: Factory wipes that path before each job`) : PASS("agent home", `${AGENT_USER} at ${AGENT_HOME}`));
   }
-  out.push((await onPath("git")) ? PASS("git", "present") : FAIL("git", "git not on PATH", "install git"));
+  out.push(gitCheck(await onPath("git"), await gitVersion()));
   out.push(...(await claudeSandboxChecks({ inputs, env })));
   return out;
+}
+
+/**
+ * git where Factory runs: present, and at least MERGE_BASE_GIT, which `git merge-tree --merge-base` needs (the rebase
+ * check of a send-back's conflict pass, and what a review reads after a rebase). `version` from outbox.mjs gitVersion.
+ */
+export function gitCheck(present, version) {
+  if (!present) return FAIL("git", "git not on PATH", "install git");
+  const min = MERGE_BASE_GIT.join(".");
+  if (!version) return WARN("git", "present; its version could not be read", `use git ${min} or later`);
+  const v = version.join(".");
+  if (gitAtLeast(version, MERGE_BASE_GIT)) return PASS("git", v);
+  return WARN("git", `git ${v} is older than ${min} and has no \`git merge-tree --merge-base\`: with a decider (the AI Gateway's model, or the stage's harness) every send-back's conflict pass Blocks (with decision_route off its commits are matched), and a review after a rebase reads the whole PR again`, `install git ${min} or later`);
 }
 
 /** Per harness with a sandbox on a runner: its name in the checks, and the binaries it needs where the job runs. */

@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claudeSandboxChecks, credentialChecks, workflowText } from "../scripts/doctor.mjs";
+import { claudeSandboxChecks, credentialChecks, deciderCheck, gitCheck, workflowText } from "../scripts/doctor.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 // The fakes here fail some GitHub reads for good: the client's retries (#168) go at once, not after real backoff waits.
@@ -450,4 +450,21 @@ test("doctor: an unknown flag exits 64 naming it before any check; --checkout an
   } finally {
     server.close();
   }
+});
+
+test("doctor: git 2.40 or later for the rebase check's merge-tree, and the decision model's key said with what it turns on (#362)", () => {
+  assert.equal(gitCheck(false, null).status, "FAIL");
+  assert.deepEqual(gitCheck(true, [2, 53, 0]), { name: "git", status: "PASS", detail: "2.53.0", fix: "" });
+  assert.equal(gitCheck(true, [2, 40, 0]).status, "PASS");
+  const old = gitCheck(true, [2, 39, 5]);
+  assert.equal(old.status, "WARN");
+  assert.match(old.detail, /^git 2\.39\.5 is older than 2\.40 .*merge-tree --merge-base/);
+  assert.equal(gitCheck(true, null).status, "WARN");
+  // #379: the decision calls' row says which decider judges the rebase check, and what runs with none.
+  const on = deciderCheck({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true" } });
+  assert.equal(on.status, "PASS");
+  assert.match(on.detail, /the stage's own harness \(claude\) on its login, one short call with no tools per question \(triage, drift, the answer gate, the finding check, the rebase check\)/);
+  const off = deciderCheck({ inputs: { decisionRoute: "off" }, env: { GITHUB_ACTIONS: "true" } });
+  assert.equal(off.status, "PASS");
+  assert.match(off.detail, /^off \(decision_route off\): .*a send-back's conflict pass is checked by matching commits$/);
 });

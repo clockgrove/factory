@@ -6,10 +6,11 @@
 // (GitHub's blocked-by relations via REST when the endpoint answers, else
 // "Blocked by #N" lines in the body); drop Running, Blocked, Question and In review
 // (Project card Status, falling back to the factory:* labels the worker also sets);
-// order P0, P1, P2, then number; cap at max_concurrent minus running; hold one
-// whose known files overlap a Running or In-review one's heavily (lib/overlap.mjs); start
+// order P0, P1, P2, then number; cap at max_concurrent minus running; start
 // nothing when today's spend (usage artifacts uploaded today) has reached
-// daily_usd. Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
+// daily_usd. A PR whose hand-off to review waits for a sibling on the same files
+// gets its review label once no such sibling is In review (lib/overlap.mjs).
+// Prints the matrix JSON and writes it to $GITHUB_OUTPUT as `issues`.
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
@@ -23,7 +24,7 @@ import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
-import { announceStarts, orderSiblings, waitReason } from "./lib/overlap.mjs";
+import { WAIT_MAX_MS, announceStarts, orderSiblings, prFinder, reviewWaitResume, sayWaiting, waitReason } from "./lib/overlap.mjs";
 import { accountPin, routeAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { accountWaitResume } from "./lib/account-wait.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, restartObjective, stopCause } from "./lib/stop.mjs";
@@ -96,7 +97,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null }) {
   const repo = repoOf(inputs.repo);
@@ -741,9 +742,18 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const thirdPartyResumed = [];
   // PRs whose account-label wait ended this tick: their review label went back on.
   const accountResumed = [];
+  // Objectives whose hand-off to review waits for a sibling on the same files (overlap.mjs): still waiting this tick,
+  // and whose wait ended with the review label put on.
+  const reviewHeld = [];
+  const reviewResumed = [];
+  // The siblings those waits read this tick (overlap.mjs siblingState), and the PRs a person took out of the merge queue.
+  const siblingsRead = new Map();
+  const personHeld = new Set();
   // Each In-review Objective's open PR (null for none) as this pass read it.
   const prsSeen = {};
   const queue = await hasMergeQueue(repo, opts).catch(() => true);
+  // The open PRs of Objectives a waiting hand-off is compared with: one listing a tick, at most (overlap.mjs prFinder).
+  let prOfTick = null;
   {
     let liveJobs = null;
     // The fallback bound and the step history, read once for this tick's merge pass (as the queue watch reads them once
@@ -786,7 +796,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A send-back marker names the head it saw. One whose head is still the PR's head produced no push (the
       // worker job never ran, or died), so it is no rebase toward the bound; the issue is sent again.
       // A human recovery (re-applying factory:objective) starts the count over (session.mjs rebaseMarkers).
-      const { recent, already, since, record, stuck, unread, wait, accountWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
+      const { recent, already, since, record, stuck, unread, wait, accountWait, reviewWait } = await rebaseMarkers(repo, { issue: issue.number, pr, objectiveLabel: inputs.objectiveLabel }, opts);
       const reviewing = (pr?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === REVIEW_LABEL);
       // A review stage that ended waiting for a third-party reviewer (third-party-review.mjs): its PR is left as it is
       // (no merge pass, no update, no send-back) until that review of the head exists or the bound passes; then the
@@ -839,6 +849,37 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         }
         // Stale: removed, and the PR is handled as any In-review PR below.
         log(`  #${issue.number}: PR #${open.number}: a stale account-wait record (the review label went on since) was removed`);
+      }
+      // A hand-off to review waiting for a sibling on the same files (overlap.mjs reviewHold): nothing else runs on the PR
+      // (no send-back, no merge) while a sibling is ahead of it. Then its review label goes on or, when it conflicts by
+      // then, the send-back below takes it first, so it rebases once, before its review. Waiting hand-offs go in a fixed
+      // order (the oldest first wait first), so one rebases per sibling merge.
+      if (!reviewing && reviewWait && !reviewWait.released && pr) {
+        let how;
+        try {
+          how = await reviewWaitResume(repo, { issue, pr, wait: reviewWait, issues, statuses, landed, autoMerge: !!inputs.autoMerge, hold: inputs.siblingHold !== false, stuck: twoAccounts, prOf: (prOfTick ??= prFinder(repo, opts, prsSeen)), memo: siblingsRead }, opts, { dryRun, log });
+        } catch (e) {
+          log(`  #${issue.number}: the review wait on PR #${open.number} could not be settled (${String(e.message).slice(0, 120)}); the next tick tries again`);
+          retry(`#${issue.number}'s review wait`);
+          continue;
+        }
+        if (how.waiting) {
+          reviewHeld.push({ issue, pr: open.number, wait: how.waiting, since: reviewWait.since });
+          due(issue.number, "sibling-wait", reviewWait.since + WAIT_MAX_MS + WAKE_SLACK_MS);
+          continue;
+        }
+        if (how === "unsettled") {
+          log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over, but GitHub has not worked out whether it conflicts; the next tick decides`);
+          retry(`PR #${open.number}'s mergeable state`);
+          continue;
+        }
+        if (how === "released") {
+          reviewResumed.push(issue.number);
+          log(`  #${issue.number}: PR #${open.number}: no sibling is ahead of it now${Date.now() - reviewWait.since >= WAIT_MAX_MS ? " (or it waited the longest Factory holds one)" : ""}; the review goes on`);
+          continue;
+        }
+        if (how === "rebase") log(`  #${issue.number}: PR #${open.number}: its wait for a sibling is over and it conflicts; it rebases before its review`);
+        // "draft", "stale" (the review label went on since) or "rebase": handled as any In-review PR below.
       }
       // A labelled PR with no review start since its label lost its review launch: the sweep names it again.
       if (sandbox && reviewing && !pr.draft) {
@@ -936,6 +977,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
         if (how === "merged" || how === "queued") merged.push(issue.number);
         // Merged now (not only queued): no longer a sibling anything waits for this tick.
         if (how === "merged") landed.push(issue.number);
+        if (how === "held") personHeld.add(issue.number);
         if (report.watch) queueWatch.push(open.number);
         if (how && !["not-recorded", "pending", "queue-wait", "in-queue", "not-open", "held", "stopped"].includes(how)) log(`  #${issue.number}: PR #${open.number} ${how}`);
         const why = mergeBlockReason(how, report);
@@ -947,6 +989,12 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
 
+  // The waiting hand-offs' notes, once the merge pass has said which siblings a person holds out of the merge queue.
+  for (const h of reviewHeld) {
+    if (!h.wait.cause && personHeld.has(h.wait.on)) h.wait.cause = "a person took it out of the merge queue";
+    log(`  #${h.issue.number}: PR #${h.pr}: ${waitReason(h.wait)}`);
+    if (!dryRun) await sayWaiting(repo, h.issue, h.pr, h.wait, h.since, opts, { log });
+  }
   watch.mark("review");
   // max_concurrent caps the repository as a whole (LOCAL.md): the Running count is every route's Objectives (a local
   // loop's paused ones too, which stay Running), never only the ones this route picks from. Drafts are not in `issues`.
@@ -1014,20 +1062,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   });
   // Queued work daily_usd held back starts when the UTC day turns (a spend that could not be read is a retry, above).
   if (picked.reason === "daily_usd reached" && !usageError && picked.skipped.some((x) => /^daily_usd reached/.test(x.reason))) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
-  // Siblings on the same files (#277, lib/overlap.mjs): a pick whose known files overlap a Running or In-review
-  // Objective's heavily waits for it to merge, and its slot goes to the next Queued one. One named by hand never waits.
-  // Objectives Factory merges itself are waited for In review too; without auto_merge a person merges them, so not.
-  let order = null;
-  if (!inputs.issue && picked.ready.length) {
-    const waiting = picked.skipped.filter((x) => x.reason === "max_concurrent reached").map((x) => x.number);
-    order = await orderSiblings(repo, { issues, statuses, ready: picked.ready, waiting, slots: picked.ready.length, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { dryRun, log });
-    if (order.waits.length) {
-      const moved = new Set([...order.ready, ...order.waits.map((w) => w.number)]);
-      picked.skipped = [...picked.skipped.filter((x) => !moved.has(x.number)), ...order.waits.map((w) => ({ number: w.number, reason: waitReason(w) }))];
-      picked.ready = order.ready;
-      if (!picked.ready.length) picked.reason = "waiting for siblings on the same files";
-    }
-  }
+  // Siblings on the same files (#277, #340, lib/overlap.mjs): every pick starts, since each has work of its own to
+  // write; one whose known files overlap an active sibling's gets a note saying so (announceStarts, below). What
+  // waits is the hand-off to review (the In-review pass above).
+  // With sibling_hold off nothing waits and nothing is said: overlapping PRs rebase when they conflict.
+  const order = !inputs.issue && picked.ready.length && inputs.siblingHold !== false ? await orderSiblings(repo, { issues, statuses, ready: picked.ready, prs: prsSeen, autoMerge: !!inputs.autoMerge, landed }, opts, { log }) : null;
   // A PR sent back to rebase is nearest to merged: it takes a slot before new work.
   if (sentBack.length && !inputs.issue) {
     const slots = Math.max(0, inputs.maxConcurrent - running);
@@ -1178,7 +1217,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

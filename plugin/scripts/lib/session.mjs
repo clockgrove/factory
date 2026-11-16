@@ -2596,9 +2596,9 @@ export const queueRedClass = (job) => (job?.sig?.id ? `sig:${job.sig.id}` : `job
  * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), triage's flaky verdict (`flaky`,
  * triage.mjs classify), every failing job failing the same way on the default branch (`base`, reds.mjs allOnBase), else
  * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
- * (`none`), or triage is off and no failure names a file or test the PR changes (`unclassified`). Returns `{kind, sha,
- * reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures, detail, tail, lead, command, queue:
- * true}) and `sigs` (its classes, queueRedClass).
+ * (`none`), or triage is off and no failure names a file or test the PR changes (`unclassified`, triage.mjs
+ * namesChange). Returns `{kind, sha, reason}`; for `own` also `red` (what the answer pass is handed: {sha, failures,
+ * detail, tail, lead, command, queue: true}) and `sigs` (its classes, queueRedClass).
  */
 export async function queueRedOf({ repo, issue, prNumber, base, at, after = null, names = [], triage = null, token, actionsToken = token }) {
   const opts = { token };

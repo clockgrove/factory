@@ -27,7 +27,7 @@ import { pickRouteAccount, readHolds } from "./lib/route-holds.mjs";
  * {account, why, auto} (`why` the line logged when no account can be picked; the account is then NO_ACCOUNT, or "" when
  * `rendered`, the declaration setup rendered the jobs for, names other accounts). `harness`: the repository's (the
  * `with:` input, else FACTORY_HARNESS). With automatic choice on (`env`'s FACTORY_AUTO_ACCOUNT, accounts.mjs
- * routeAutoAccounts) and no pin, the account is route-holds.mjs pickRouteAccount's, and `auto` says why: {held: [{name, until}]} (the accounts it passed over, ISO), `until` when every
+ * routeAutoAccounts) and no pin, the account is route-holds.mjs pickRouteAccount's, and `auto` says why: {held: [{name, until}]} (the accounts it passed over, ISO), `left` (the share of its quota the pick has left by its last reading, #391, when one stands), `until` when every
  * one is held (the stage then runs on the one whose hold ends first, as with one account: the provider's own answer
  * decides, and a reset within the job's time is waited for in place), `unread` when the holds could not be read (it
  * picks as if none is held). `read` (issue, vouch, kept) is a test's own. Throws on a failed read of the issue or its
@@ -65,8 +65,9 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
     unread = String(e?.message || e).slice(0, 120);
   }
   const held = store ? names.map((name) => ({ name, until: store.avoidUntil(name, now) })).filter((x) => x.until !== null) : [];
-  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null }, issue: n, now });
-  return { account: pick.name, why: null, auto: { held: held.map((x) => ({ name: x.name, until: new Date(x.until).toISOString() })), ...(pick.until !== null ? { until: new Date(pick.until).toISOString() } : {}), ...(unread ? { unread } : {}) } };
+  const pick = pickRouteAccount({ names, store: store ?? { avoidUntil: () => null, limitedAt: () => null, left: () => null }, issue: n, now });
+  const left = store ? store.left(pick.name, now) : null;
+  return { account: pick.name, why: null, auto: { held: held.map((x) => ({ name: x.name, until: new Date(x.until).toISOString() })), ...(pick.until !== null ? { until: new Date(pick.until).toISOString() } : {}), ...(left !== null && pick.until === null ? { left } : {}), ...(unread ? { unread } : {}) } };
 }
 
 /** The log line for automatic choice's pick (stageAccount `auto`), naming the accounts it passed over. */
@@ -75,7 +76,8 @@ const autoLine = (r) => {
   if (a.unread) return `automatic account choice could not read the account holds (${a.unread}), so it picks as if none is held: account ${r.account}`;
   if (a.until) return `automatic account choice: every account of this harness is held, so this stage runs on account ${r.account}, whose hold ends first (${a.until}); the provider then decides, as with one account: a reset within the job's time is waited for, a later one Blocks`;
   const passed = a.held.map((x) => `${x.name} held until ${x.until}`).join(", ");
-  return `automatic account choice: account ${r.account}${passed ? ` (${passed})` : ""}`;
+  const left = a.left !== undefined ? `, ${Math.round(a.left * 100)}% of its quota left as its provider last reported` : "";
+  return `automatic account choice: account ${r.account}${left}${passed ? ` (${passed})` : ""}`;
 };
 
 /**

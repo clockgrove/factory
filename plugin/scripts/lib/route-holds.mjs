@@ -21,6 +21,12 @@
 // (a pass's end would cost a read on every stage): a back-off streak or a guess ends when its records are forgotten
 // instead.
 //
+// Each stage on these routes with the setting on also leaves its account's quota reading there at its end (#391): a
+// comment of its own (QUOTA_LINE) with how much of each usage window the provider reported used and when each resets
+// (usage.mjs quotaReading), which replaces the account's earlier reading (the writer deletes those), and which automatic
+// choice ranks the free accounts by. That is a read of the holds issue and a write at each such stage's end. A stage
+// whose harness reported none (Copilot, an API key) writes nothing.
+//
 // A person who can push lifts a hold with `factory hold release <account> --repo OWNER/NAME` (#376): a release record,
 // a comment of theirs on the holds issue (RELEASE_LINE), which ends every record of that account made before it, as a
 // local release does (holds.mjs standing). The issue is locked, so only people with write access can comment there; a
@@ -30,14 +36,14 @@ import { createHash } from "node:crypto";
 import { HARNESS_NAMES, chooseAccount, routeAutoAccounts } from "./accounts.mjs";
 import { waitOnAccounts } from "./account-wait.mjs";
 import { addLabels, collaboratorPermission, listComments, openRecordIssue, primeSelf, removeLabel, rest } from "./github.mjs";
-import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey } from "./holds.mjs";
+import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecord, holdKey, liveWindows, readingOf } from "./holds.mjs";
 import { log } from "./inputs.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
 /** Factory's holds issue: the label is a hint to find it, the exact title and Factory's own login are what count. */
 export const HOLDS_LABEL = "factory:holds";
 export const HOLDS_TITLE = "Factory: account holds";
-const HOLDS_BODY = "Factory keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, which automatic account choice (`FACTORY_AUTO_ACCOUNT`) reads. Factory reads only its own comments, and a release by a person who can push (`factory hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
+const HOLDS_BODY = "Factory keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, and each account's latest quota reading, which automatic account choice (`FACTORY_AUTO_ACCOUNT`) reads. Factory reads only its own comments, and a release by a person who can push (`factory hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
 
 const iso = (ms) => new Date(ms).toISOString();
 const LINE = /^<!-- factory:hold (\{[^\n]*\}) -->(?:\r?\n|$)/;
@@ -51,6 +57,22 @@ const rawRecord = (c, own = isSelf) => {
   if (!m) return null;
   try {
     return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+};
+
+/** A quota reading's first line (holds.mjs reading's record), Factory's own: `<` and `>` escaped, as a hold record's. */
+const QUOTA_LINE = /^<!-- factory:quota (\{[^\n]*\}) -->(?:\r?\n|$)/;
+export const quotaLine = (r) => `<!-- factory:quota ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+
+/** The quota reading a comment carries: Factory's own comment's, never edited, checked (holds.mjs readingOf); else null. */
+const quotaOf = (c, own = isSelf) => {
+  if (!own(c) || edited(c)) return null;
+  const m = QUOTA_LINE.exec(String(c.body || ""));
+  if (!m) return null;
+  try {
+    return readingOf(JSON.parse(m[1]));
   } catch {
     return null;
   }
@@ -91,19 +113,27 @@ async function releaseOf(c, canPush, now) {
 }
 
 /**
- * The holds recorded on issue `number` at `now`: {records (heldRecord's), releases (releaseOf's), forgotten (ids of
- * record comments a writer deletes: forgotten (holds.mjs), or Factory's own edited since written, which count for
- * nothing)}. `own`: whose comments are Factory's records (isSelf; a person's view names the issue's author).
+ * The holds recorded on issue `number` at `now`: {records (heldRecord's), releases (releaseOf's), readings (quotaOf's,
+ * each with its comment's `id`), forgotten (ids of record comments a writer deletes: forgotten (holds.mjs), a quota
+ * reading every window of which has reset, or Factory's own edited since written, which count for nothing)}. `own`:
+ * whose comments are Factory's records (isSelf; a person's view names the issue's author).
  */
 async function recordsOn(repo, number, opts, now, own = isSelf) {
   const records = [];
   const releases = [];
+  const readings = [];
   const forgotten = [];
   const canPush = pushCheck(repo, opts);
   if (number) {
     for (const c of await listComments(repo, number, opts)) {
-      if (own(c) && LINE.test(String(c.body || "")) && edited(c)) {
+      if (own(c) && (LINE.test(String(c.body || "")) || QUOTA_LINE.test(String(c.body || ""))) && edited(c)) {
         forgotten.push(c.id);
+        continue;
+      }
+      const q = quotaOf(c, own);
+      if (q) {
+        if (Object.keys(liveWindows([q], now)).length) readings.push({ ...q, id: c.id });
+        else forgotten.push(c.id);
         continue;
       }
       const rel = await releaseOf(c, canPush, now);
@@ -119,7 +149,7 @@ async function recordsOn(repo, number, opts, now, own = isSelf) {
       else if (Number.isSafeInteger(v.until) && forgottenAt(v, now)) forgotten.push(c.id);
     }
   }
-  return { records, releases, forgotten };
+  return { records, releases, readings, forgotten };
 }
 
 const selfKnown = async (opts) => {
@@ -151,11 +181,13 @@ export async function readHolds(repo, opts, { now = Date.now(), actions } = {}) 
   await selfKnown(opts);
   const issues = await labelledIssues(repo, opts, actions);
   const records = [];
+  const readings = [];
   for (const i of issues) {
     const r = await recordsOn(repo, i.number, opts, now);
     records.push(...r.records, ...r.releases);
+    readings.push(...r.readings);
   }
-  return { issue: issues[0]?.number ?? null, records, store: accountHolds({ seed: records }) };
+  return { issue: issues[0]?.number ?? null, records, store: accountHolds({ seed: records, readings }) };
 }
 
 /**
@@ -225,16 +257,11 @@ async function writerIssues(repo, opts, { actions = process.env.GITHUB_ACTIONS =
 }
 
 /**
- * Record that a stage on `account` met its usage limit: `kind` "limit", reset at `reset` (ms, the provider's), or "spent"
- * (no reset reported: a guess). The hold is holds.mjs's (limit, spent) over the records on the holds issues now; it is
- * written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
- * label was taken off is found again); with none there either, the issue is opened, closed and locked, then looked for
- * again: of two jobs that opened one each at once, both write to the oldest. Only once this writer's record is written:
- * its label goes back on, the forgotten and edited records go, and each stray's live records are copied to the record
- * issue before it is retired, so a hold another job wrote there is kept. Returns {until, store}: the hold's end and the
- * holds with it. A failed read or write throws.
+ * The writer's holds issues (writerIssues), the record issue found by its label, else by Factory's own issues, else
+ * opened, closed and locked, then looked for again: of two jobs that opened one each at once, both write to the oldest.
+ * A failed read or write throws.
  */
-export async function writeHold(repo, { kind, harness, account, reset = null, window = null, now = Date.now() }, opts, { actions } = {}) {
+async function recordIssue(repo, opts, { actions, now }) {
   await selfKnown(opts);
   let found = await writerIssues(repo, opts, { actions, scan: false, now });
   if (!found.record) found = await writerIssues(repo, opts, { actions, scan: true, now });
@@ -248,6 +275,41 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
     found = await writerIssues(repo, opts, { actions, scan: true, now });
     if (!found.record) throw new Error("Factory's holds issue was opened but is not found as its own, locked issue");
   }
+  return found;
+}
+
+/**
+ * Record the quota reading of a stage on `account` (#391): its provider's `windows` (usage.mjs quotaReading), merged with
+ * the account's reading on the record issue as holds.mjs reading merges them, written as a new comment there, after which
+ * the account's earlier readings on it, and every reading on it that has gone stale, are deleted. Returns the reading
+ * written, or null when `windows` holds none. A failed read or write throws.
+ */
+export async function writeReading(repo, { harness, account, windows, now = Date.now() }, opts, { actions } = {}) {
+  const found = await recordIssue(repo, opts, { actions, now });
+  const issue = found.record;
+  const read = await recordsOn(repo, issue, opts, now);
+  const r = accountHolds({ readings: read.readings.filter((x) => x.account === account) }).reading({ harness, account, now, windows });
+  if (!r) return null;
+  const pct = (w) => `${Math.round(w.used * 100)}%`;
+  const text = `Factory: account \`${account}\` (${HARNESS_NAMES[harness] || harness}) has used ${Object.entries(r.windows).map(([name, w]) => `${pct(w)} of ${name} until ${iso(w.resetsAt)}`).join(", ")}, as its provider last reported.`;
+  await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
+  if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
+  for (const id of [...read.readings.filter((x) => x.account === account).map((x) => x.id), ...read.forgotten]) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
+  return r;
+}
+
+/**
+ * Record that a stage on `account` met its usage limit: `kind` "limit", reset at `reset` (ms, the provider's), or "spent"
+ * (no reset reported: a guess). The hold is holds.mjs's (limit, spent) over the records on the holds issues now; it is
+ * written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
+ * label was taken off is found again); with none there either, the issue is opened, closed and locked, then looked for
+ * again: of two jobs that opened one each at once, both write to the oldest. Only once this writer's record is written:
+ * its label goes back on, the forgotten and edited records go, and each stray's live records are copied to the record
+ * issue before it is retired, so a hold another job wrote there is kept. Returns {until, store}: the hold's end and the
+ * holds with it. A failed read or write throws.
+ */
+export async function writeHold(repo, { kind, harness, account, reset = null, window = null, now = Date.now() }, opts, { actions } = {}) {
+  const found = await recordIssue(repo, opts, { actions, now });
   const issue = found.record;
   const read = await recordsOn(repo, issue, opts, now);
   const strays = [];
@@ -285,7 +347,8 @@ export const routeTurn = (issue, n) => createHash("sha256").update(String(Number
 /**
  * The account automatic choice starts a stage of Objective `issue` on, of a harness's declared `names` (in order), from
  * the holds `store` at `now`: accounts.mjs chooseAccount, an account free when neither a hold nor a guess is ahead
- * (avoidUntil); of the free ones the least recently limited, then the Objective's turn, then the first declared; with
+ * (avoidUntil); of the free ones the one with the most quota left by its last reading (one with none first: #391), then
+ * of equal shares the least recently limited, then the Objective's turn, then the first declared; with
  * every one held, the one whose hold ends first. These routes keep no round-robin record (a write at every stage start):
  * the turn is a hash of the Objective's number (routeTurn), so Objectives spread across the accounts with no state, and
  * each keeps its account while that one is free. Returns {name, until} (`until`: its hold's end when every account is
@@ -297,6 +360,7 @@ export function pickRouteAccount({ names, store, issue, now = Date.now() }) {
   const turn = routeTurn(issue, n);
   const a = chooseAccount(list, {
     until: (x) => store.avoidUntil(x.name, now),
+    left: (x) => store.left?.(x.name, now) ?? null,
     limitedAt: (x) => store.limitedAt(x.name, now),
     startedAt: (x) => (list.indexOf(x) - turn + n) % n,
   });
@@ -327,6 +391,8 @@ const heldText = (store, name, t) => {
  *   such move holds the account it leaves until its reset or guess, so an Objective's moves end once every account is
  *   held: it then Blocks once.
  * - `spent(limitRefused)`: the stage Blocked on a usage limit with no reset reported (session.mjs writeUsage): a guess.
+ * - `reading(quota)`: the stage ended with its provider's quota reading (session.mjs writeUsage `quota`), pinned or not:
+ *   kept on the holds issue (writeReading) for automatic choice; one of another harness, or none, writes nothing.
  */
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
@@ -366,6 +432,10 @@ export function routeLimits({ repo, issue, stage, pr = null, harness, account, p
     async spent(limitRefused) {
       const { until } = await writeHold(repo, { kind: "spent", harness, account, window: limitRefused?.limitType ?? null, now: now() }, opts);
       log(`${who} account ${account} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}`);
+    },
+    async reading(quota) {
+      if (!quota?.windows || quota.harness !== harness) return null;
+      return writeReading(repo, { harness, account, windows: quota.windows, now: now() }, opts);
     },
   };
 }

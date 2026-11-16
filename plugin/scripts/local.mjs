@@ -788,9 +788,10 @@ export class Local {
 
   /**
    * The account a `harness` stage with no account label runs on with automatic choice on (#266; lib/accounts.mjs
-   * chooseAccount): a free one (no hold, limitUntil), `prefer` first when it is free, else the one limited least recently,
-   * then the one started on least recently (the machine's round-robin, kept with the holds, and this loop's picks of the
-   * last PICK_MS, whose stages are still starting); with every one held, the one whose hold ends first. Held includes a
+   * chooseAccount): a free one (no hold, limitUntil), the one with the most quota left by its last reading kept with the
+   * holds (#391: holds.mjs left; one with none first); of equal shares, `prefer` first when it is free, else the one
+   * limited least recently, then the one started on least recently (the machine's round-robin, kept with the holds, and
+   * this loop's picks of the last PICK_MS, whose stages are still starting); with every one held, the one whose hold ends first. Held includes a
    * no-reset limit's guess (holds.mjs spent). Of those, the first that is ready here (accountReady); one that is not is
    * passed over. `pick`: a stage starts on it, so this loop counts it as just started meanwhile. {account, unready:
    * [{name, problems}]}, account null when none is ready. Throws as accountFor.
@@ -802,6 +803,7 @@ export class Local {
     const picked = (key) => (this.picked?.get(key) > now - PICK_MS ? this.picked.get(key) : -Infinity);
     const opts = {
       until: (a) => this.limitUntil(holds.get(a), { guess: true }),
+      left: (a) => this.holdStore(holds.get(a)).left(holds.get(a).key, now),
       limitedAt: (a) => this.holdStore(holds.get(a)).limitedAt(holds.get(a).key, now),
       startedAt: (a) => Math.max(this.holdStore(holds.get(a)).startedAt(holds.get(a).key, now) ?? -Infinity, picked(holds.get(a).key)),
       prefer,
@@ -1458,6 +1460,9 @@ export class Local {
           // A pass on its account completed (the provider served it, and no usage limit ended it): its back-off streak ends,
           // when the stage started after the newest limit met there (holds.mjs served).
           if (runs.account && result && servedPass(result)) this.holdStore(hold).served({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), started });
+          // The provider's quota reading for the account (session.mjs writeUsage `quota`): kept with the machine's holds,
+          // for every serve's automatic account choice (#391); only the stage's own harness's.
+          if (runs.account && result?.quota?.windows && result.quota.harness === runs.harness) this.holdStore(hold).reading({ harness: runs.harness, account: hold.key, now: (this.clock ?? Date.now)(), windows: result.quota.windows });
           // Blocked on its usage limit with no reset reported (session.mjs writeUsage `limitRefused`): automatic account
           // choice, in this serve and any other here that has it on, passes the account over for a while (holds.mjs spent);
           // nothing else holds on it, and a serve with it off writes no guess.

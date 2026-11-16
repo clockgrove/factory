@@ -629,6 +629,49 @@ test("#266: off, a stage runs on its pin or the default, as before; on, a stage 
   }
 });
 
+test("#391: on, a stage starts on the free account with the most quota left by the readings stages left in the machine's holds, in every serve; the turn decides only among accounts with none; a pinned stage's reading counts too", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN }, five_hour: { used: used / 2, resetsAt: t + 4 * 60 * MIN } } } });
+  try {
+    await withHome(h, async () => {
+      const one = autoServe(h, () => t);
+      const two = autoServe(h, () => t);
+      // No readings yet: each account in turn, and each stage leaves its account's reading.
+      const order = [];
+      for (const [loop, used] of [[one, 0.8], [two, 0.3], [one, 0.6]]) {
+        t += 1000;
+        loop.result = reading(used);
+        order.push((await loop.stage(8, "work", "worker.mjs", [])).account);
+      }
+      assert.deepEqual(order, ["alpha", "beta", "gamma"]);
+      assert.ok(Math.abs(one.holds.left("beta", t) - 0.7) < 1e-9, "the reading is kept with the machine's holds");
+      // Every account read: beta has the most left (0.7, against alpha's 0.2 and gamma's 0.4), though alpha's turn is next.
+      for (const loop of [two, one]) {
+        t += 1000;
+        loop.result = delivered;
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "in either serve");
+      }
+      // A pinned stage on gamma leaves its reading too: gamma now has the most left.
+      gh.apply("factory:account:gamma");
+      t += 1000;
+      one.result = reading(0.05);
+      assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      gh.remove("factory:account:gamma");
+      t += 1000;
+      two.result = delivered;
+      assert.equal((await two.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      // Past every window's reset the readings are stale: the accounts fall back to the turn (alpha, started longest ago).
+      t += 49 * 60 * MIN;
+      assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
 test("#266: on, a paused Objective resumes on a free account with no label and no person, prefers the account it paused on once that is free, and is held only while every account is", async () => {
   const h = fakeHome();
   const gh = fakeGitHub();

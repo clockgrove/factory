@@ -249,6 +249,47 @@ test("the account step: with the setting on, a stage with no pin starts on a fre
   assert.match(unread.log, /could not read the account holds .*picks as if none is held: account claude/);
 });
 
+test("#391: a stage's quota reading is kept on the holds issue, replacing its account's earlier one; the account step picks the free account with the most quota left, ahead of the Objective's turn; a stale or pasted reading counts for nothing", async () => {
+  setSelf(BOT);
+  const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };
+  const now = Date.now();
+  const q = (used, reset = now + 48 * H) => ({ harness: "claude", windows: { seven_day: { used, resetsAt: reset } } });
+  let issues;
+  await withGitHub({}, async (_reads, st) => {
+    const at = (account) => routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account, env, opts: { token: "t" } });
+    // No holds issue yet: the first reading opens it, closed and locked, as a first limit does.
+    await at("claude").reading(q(0.9));
+    await at("claude-2").reading(q(0.2));
+    await at("claude-3").reading(q(0.5, now + 4 * H));
+    const issue = st.issues.find((i) => i.title === HOLDS_TITLE);
+    assert.deepEqual([issue.state, issue.locked], ["closed", true]);
+    assert.match(issue.comments[0].body, /^<!-- factory:quota \{.*"account":"claude".*\} -->\nFactory: account `claude` \(Claude Code\) has used 90% of seven_day until /);
+    // A later reading of claude replaces its earlier one; another harness's reading, or none, writes nothing.
+    await at("claude").reading(q(0.95));
+    assert.equal(await at("claude").reading({ harness: "codex", windows: { "codex/primary": { used: 0, resetsAt: now + H } } }), null);
+    assert.equal(await at("claude").reading(null), null);
+    assert.deepEqual(issue.comments.map((c) => JSON.parse(/\{.*\}/.exec(c.body)[0]).account), ["claude-2", "claude-3", "claude"]);
+    const store = (await readHolds(REPO, { token: "t" }, { now, actions: true })).store;
+    assert.ok(Math.abs(store.left("claude", now) - 0.05) < 1e-9);
+    assert.equal(store.left("claude-3", now + 5 * H), null, "past its window's reset: stale");
+    issues = st.issues;
+  });
+  // Objective #8's turn is claude (routeTurn); claude-2 has the most left.
+  setSelf(null);
+  const r = await runStep({ issues });
+  assert.equal(r.outputs.account, "claude-2");
+  assert.match(r.log, /automatic account choice: account claude-2, 80% of its quota left as its provider last reported/);
+  // A reading pasted by a person, or edited since Factory wrote it, counts for nothing.
+  const pasted = (by, edited = false) => ({ id: 7, user: { login: by, type: by.endsWith("[bot]") ? "Bot" : "User" }, body: `<!-- factory:quota ${JSON.stringify({ harness: "claude", account: "claude-3", at: Date.now(), windows: { seven_day: { used: 0, resetsAt: now + H } } })} -->`, created_at: iso(now), updated_at: iso(now + (edited ? 60_000 : 0)) });
+  const kept = issues.map((i) => ({ ...i, comments: [...i.comments, pasted("kirk")] }));
+  assert.equal((await runStep({ issues: kept })).outputs.account, "claude-2");
+  const edited = issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT, true)] }));
+  assert.equal((await runStep({ issues: edited })).outputs.account, "claude-2");
+  assert.equal((await runStep({ issues: issues.map((i) => ({ ...i, comments: [...i.comments, pasted(BOT)] })) })).outputs.account, "claude-3", "Factory's own, as written: counted");
+  // The stages wire it: a stage's quota reading goes through routeLimits at its end.
+  for (const script of ["worker.mjs", "review.mjs"]) assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8"), /if \(limits && usage\.quota\) await limits\.reading\(usage\.quota\)/, script);
+});
+
 test("an Objective's turn is a hash of its number, so Objectives of one parity spread over two accounts, and each keeps its own (#268)", () => {
   const empty = { avoidUntil: () => null, limitedAt: () => null };
   const odd = Array.from({ length: 10 }, (_, i) => 2 * i + 1);

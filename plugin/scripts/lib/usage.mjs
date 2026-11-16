@@ -316,6 +316,64 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   return { harness, ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
+/** A usage window's name as a quota reading keeps it (the names holds.mjs windowOf accepts). */
+const QUOTA_WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
+/** The most windows one reading keeps: Claude Code names five or six, Codex two. */
+const QUOTA_WINDOWS_MAX = 8;
+
+/**
+ * How much of its subscription's usage limits a pass's account had used, as the harness reported it during the pass:
+ * {harness, windows: {<window>: {used, resetsAt}}}, `used` the fraction of the window spent (1 is all of it) and
+ * `resetsAt` (ms) when the window starts again; null when the harness reported none. Only a window with both numbers is
+ * kept: a reading with no reset could never be told stale. The structure read:
+ *   claude  : each `rate_limit_event` on the stream (Claude Code sends one for a claude.ai subscription; none on an API
+ *             key): its `rate_limit_info.unifiedWindows` (`five_hour`, `seven_day`, ...: {utilization, resetsAt}), and
+ *             its own `rateLimitType` with `utilization` and `resetsAt` when it names them; a later event's window
+ *             replaces an earlier one's
+ *   codex   : the last `token_count` line of the thread's rollout stamped at or after `since` (the pass's start) whose
+ *             `rate_limits` is the subscription's own limit group (`limit_id` "codex" or absent, as codexLimit reads):
+ *             its `primary` and `secondary` windows' `used_percent` and `resets_at`, kept as `codex/primary` and
+ *             `codex/secondary`. Codex writes it from each answer's headers on a ChatGPT login; an API key or the AI
+ *             Gateway gets none
+ *   copilot : reports none
+ */
+export function quotaReading(harness, stdout, { rollout = null, since = null } = {}) {
+  const windows = {};
+  const put = (name, used, reset) => {
+    const at = epochMs(reset);
+    if (typeof name !== "string" || !QUOTA_WINDOW.test(name) || num(used) === null || used < 0 || at === null) return;
+    if (!(name in windows) && Object.keys(windows).length >= QUOTA_WINDOWS_MAX) return;
+    windows[name] = { used, resetsAt: at };
+  };
+  if (harness === "claude") {
+    for (const e of jsonLines(stdout)) {
+      const info = e?.type === "rate_limit_event" ? e.rate_limit_info : null;
+      if (!info || typeof info !== "object") continue;
+      put(info.rateLimitType, info.utilization, info.resetsAt);
+      const uw = info.unifiedWindows;
+      if (uw && typeof uw === "object" && !Array.isArray(uw)) for (const [name, w] of Object.entries(uw)) put(name, w?.utilization, w?.resetsAt);
+    }
+  } else if (harness === "codex") {
+    const from = Date.parse(since);
+    if (typeof rollout !== "string" || !Number.isFinite(from)) return null;
+    let snap = null;
+    for (const line of rollout.split("\n")) {
+      if (!line.includes('"token_count"')) continue;
+      const o = jsonLines(line)[0];
+      if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
+      const at = Date.parse(o.timestamp);
+      const rl = o.payload.rate_limits;
+      if (Number.isFinite(at) && at >= from && rl && typeof rl === "object" && (rl.limit_id == null || rl.limit_id === "codex")) snap = rl;
+    }
+    if (!snap) return null;
+    for (const k of ["primary", "secondary"]) {
+      const w = snap[k];
+      if (w && typeof w === "object" && num(w.used_percent) !== null) put(`codex/${k}`, w.used_percent / 100, w.resets_at);
+    }
+  } else return null;
+  return Object.keys(windows).length ? { harness, windows } : null;
+}
+
 /**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Factory's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by

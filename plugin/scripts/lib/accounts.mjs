@@ -269,21 +269,23 @@ export const stageMoves = ({ local, limits = null, pinned = false, env = process
 
 /**
  * The account a stage with no account label starts on when automatic choice is on (#266), from `list` (harnessAccounts,
- * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones: `prefer` (a
- * name: the account the Objective's last stage paused on, whose session carries over there); else the one whose latest
- * usage limit was met least recently (`limitedAt(a)`, ms, null for none the machine remembers: those first); then the
- * one a stage last started on least recently (`startedAt(a)`, ms or null: the machine's round-robin); then the first
- * declared. With every account held, the one whose hold ends first: the stage is held on it until then.
+ * in declared order). An account is free when `until(a)` (its hold's end, ms) is null. Of the free ones, the one with the
+ * most quota left as its provider last reported it (`left(a)`, 0 to 1, null when no reading stands: holds.mjs left, #391);
+ * an account with no reading first, so each is measured once, and equal shares are ties. A tie, and every account of a
+ * harness that reports nothing (Copilot), goes to: `prefer` (a name: the account the Objective's last stage paused on,
+ * whose session carries over there); else the one whose latest usage limit was met least recently (`limitedAt(a)`, ms,
+ * null for none the machine remembers: those first); then the one a stage last started on least recently (`startedAt(a)`,
+ * ms or null: the machine's round-robin); then the first declared. With every account held, the one whose hold ends
+ * first: the stage is held on it until then.
  */
-export function chooseAccount(list, { until, limitedAt = () => null, startedAt = () => null, prefer = null }) {
+export function chooseAccount(list, { until, left = () => null, limitedAt = () => null, startedAt = () => null, prefer = null }) {
   const rows = list.map((a, i) => ({ a, i, until: until(a) }));
   const free = rows.filter((r) => r.until === null);
   if (!free.length) return rows.reduce((x, y) => (y.until < x.until ? y : x)).a;
-  const own = prefer ? free.find((r) => r.a.name === prefer) : null;
-  if (own) return own.a;
   const at = (v) => (Number.isFinite(v) ? v : -Infinity);
-  for (const r of free) [r.limited, r.started] = [at(limitedAt(r.a)), at(startedAt(r.a))];
-  return free.sort((x, y) => x.limited - y.limited || x.started - y.started || x.i - y.i)[0].a;
+  // No reading ranks above every share (Infinity), so an account no one has measured runs and is measured.
+  for (const r of free) [r.left, r.own, r.limited, r.started] = [Number.isFinite(left(r.a)) ? left(r.a) : Infinity, !!prefer && r.a.name === prefer, at(limitedAt(r.a)), at(startedAt(r.a))];
+  return free.sort((x, y) => (x.left === y.left ? 0 : y.left > x.left ? 1 : -1) || y.own - x.own || x.limited - y.limited || x.started - y.started || x.i - y.i)[0].a;
 }
 
 /** An account label as a notice shows it: code-quoted when its name is an account name, else not echoed at all. */

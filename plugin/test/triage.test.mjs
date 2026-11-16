@@ -142,6 +142,20 @@ test("changedPathIn: only a repository file the failure points at, equal to a ch
   assert.deepEqual(changeMentions(longer, yard).files, ["assets/yard.png"], "a mention for the model");
 });
 
+test("changedPathIn: a container's, Docker's or a subdirectory run's path to a changed file is that file; a bare file name is not (#369 review)", () => {
+  const at = (line, ...paths) => changedPathIn({ lines: [line], context: [] }, changedNames(paths.map((filename) => ({ filename }))));
+  assert.equal(at("    at f (/__w/app/app/src/a.ts:3:4)", "src/a.ts"), "src/a.ts", "a container job's checkout");
+  assert.equal(at("    at f (file:///app/src/a.ts:3:4)", "src/a.ts"), "src/a.ts", "a Docker image's /app");
+  assert.equal(at("    at f (/workspace/packages/web/src/lib/a.ts:3:4)", "packages/web/src/lib/a.ts"), "packages/web/src/lib/a.ts");
+  assert.equal(at(" FAIL  src/a.test.ts > adds", "packages/web/src/a.test.ts"), "packages/web/src/a.test.ts", "cd packages/web && vitest");
+  assert.equal(at("Error: boom at src\\a.ts:3:4", "src/a.ts"), "src/a.ts", "a Windows relative path");
+  assert.equal(at("error: changed src/b.ts,src/a.ts;", "src/a.ts"), "src/a.ts", "commas and semicolons delimit");
+  assert.equal(at("    math_test.go:12: Add(1, 2) = 4", "math/math_test.go"), null, "Go's bare file name stays a mention");
+  assert.equal(at(" FAIL  a.test.ts > adds", "packages/web/a.test.ts"), null, "any bare file name does");
+  assert.equal(at("    at f (/app/node_modules/x/src/a.ts:3:4)", "src/a.ts"), null, "a dependency's file is not the repository's");
+  assert.equal(at("    at f (packages/web/src/a.ts:3:4)", "src/a.ts"), null, "a longer relative path is another file");
+});
+
 test("triage records: written in the progress comment, read back only from Factory's own progress comments", () => {
   setSelf("factory-app[bot]");
   const rec = { reruns: new Set(["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"]), sigs: new Set(["0123456789ab"]) };

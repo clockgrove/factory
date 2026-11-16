@@ -168,10 +168,11 @@ const WIN_PATH = /(?:file:\/\/\/)?\b([A-Za-z]):([\\/][^\s'"()<>]*)/g;
 // <workspace>/_temp on every hosted runner) and Windows' user temp. The whole path is folded, file name included.
 const TEMP_PATH = new RegExp(`(?:file://)?(?:/private)?(?:/tmp|/var/folders|(?:/${PC}+?)?/_temp|/[A-Za-z]/Users/${PC}+/AppData/Local/Temp)(?:/${PC}*)?`, "g");
 // The runner's checkout prefix: `/home/runner/work/<repo>/<repo>/`, a self-hosted runner's `.../_work/<repo>/<repo>/`,
-// Windows' `D:\a\<repo>\<repo>\` (posix by now). What follows it is the repository-relative path.
+// a container job's `/__w/<repo>/<repo>/`, Windows' `D:\a\<repo>\<repo>\` (posix by now). What follows it is the
+// repository-relative path.
 // The runner's own directories under the workspace (actions' code, the tool cache) are never a checkout.
 const SEG = "(?!_(?:actions|tool|temp)/)[^\\s'\"()<>:/]+";
-const RUNNER_PREFIX = new RegExp(`(?:file://)?(?:/${PC}+?)?/_?work/${SEG}/${SEG}/|(?:file://)?/[A-Za-z]/a/${SEG}/${SEG}/`, "g");
+const RUNNER_PREFIX = new RegExp(`(?:file://)?(?:/${PC}+?)?/_?work/${SEG}/${SEG}/|(?:file://)?/__w/${SEG}/${SEG}/|(?:file://)?/[A-Za-z]/a/${SEG}/${SEG}/`, "g");
 
 /**
  * A line with the paths that differ from run to run folded, before anything is hashed: Windows paths made posix, temp
@@ -192,6 +193,9 @@ export function foldPaths(line) {
 /** One failure line with run-to-run noise folded: paths (foldPaths), hashes, numbers (durations, counts, ports, line numbers). */
 const fold = (l) => foldPaths(l).replace(/\b[0-9a-f]{7,}\b/gi, "#").replace(/\d+(?:\.\d+)?/g, "0").replace(/\s+/g, " ").trim();
 
+// A dependency's or the runner's own directory: never the repository's file.
+const DEPENDENCY = /(?:^|\/)(?:node_modules|site-packages|dist-packages|hostedtoolcache|_actions|_tool|go\/pkg\/mod)\//;
+
 /**
  * The repository files a line points at, as paths relative to the checkout (foldPaths: a runner's checkout prefix on
  * Linux, macOS, Windows or a self-hosted runner dropped, chunk hashes folded), other absolute paths cut to their last
@@ -202,7 +206,7 @@ export function repoRefs(line) {
   const out = [];
   for (const m of foldPaths(line).matchAll(REF)) {
     let p = m[1].replace(/^\.\//, "");
-    if (/(?:^|\/)(?:node_modules|site-packages|dist-packages|hostedtoolcache|_actions|_tool|go\/pkg\/mod)\//.test(p) || /^(?:node:|internal\/)/.test(p)) continue;
+    if (DEPENDENCY.test(p) || /^(?:node:|internal\/)/.test(p)) continue;
     if (p.startsWith("/")) p = p.split("/").slice(-3).join("/");
     out.push(p);
   }
@@ -278,19 +282,30 @@ export function changedNames(files) {
   return { paths, bases, tests };
 }
 
-// What delimits a whole path in a log line: whitespace, quotes, colons and brackets.
-const PATH_DELIM = /[\s'"`:()<>[\]{}]+/;
+// What delimits a whole path in a log line: whitespace, quotes, colons, commas, semicolons and brackets.
+const PATH_DELIM = /[\s'"`:,;()<>[\]{}]+/;
 
 /**
- * The one exact sign the change caused a failure: a path the PR changes, in full, among the repository files its
- * failure lines or their stack frames point at (repoRefs, as the signature reads them) or among their whole tokens
- * (PATH_DELIM; the runner's checkout prefix dropped, foldPaths), such as Git LFS's `Error downloading object: <path>`.
- * A changed path inside a longer one is no match. Returns that path, or null.
+ * Whether a path token from a log is the changed path `p` itself: equal to it; an absolute path ending in `/p` (a
+ * container's or Docker's checkout, `/app/p`); or a relative path with a directory in it that `p` ends with at a path
+ * boundary (a run inside a subdirectory, `cd packages/web && vitest` printing `src/a.test.ts`). A bare file name, or a
+ * relative path that only contains `p` (`media/p`), is not.
+ */
+const isPath = (t, p) => t === p || (t.startsWith("/") ? t.endsWith(`/${p}`) : t.includes("/") && p.endsWith(`/${t}`));
+
+/**
+ * The one exact sign the change caused a failure: a path the PR changes, named in full (isPath) by a whole token of its
+ * failure lines or their stack frames (PATH_DELIM; Windows separators made `/`, the runner's checkout prefix dropped,
+ * foldPaths), such as a stack frame's file or Git LFS's `Error downloading object: <path>`. Dependencies' paths
+ * (DEPENDENCY) are not the repository's. Returns that changed path, or null.
  */
 export function changedPathIn(sig, names) {
   for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) {
-    for (const p of repoRefs(l)) if (names.paths.has(p)) return p;
-    for (const t of foldPaths(l).split(PATH_DELIM)) if (names.paths.has(t.replace(/^\.\//, ""))) return t.replace(/^\.\//, "");
+    for (let t of foldPaths(String(l).replace(/\\/g, "/")).split(PATH_DELIM)) {
+      t = t.replace(/^(?:file:)?\/{2,}(?=\/)/, "").replace(/^\.\//, "");
+      if (!t || DEPENDENCY.test(t)) continue;
+      for (const p of names.paths) if (isPath(t, p)) return p;
+    }
   }
   return null;
 }
@@ -304,7 +319,8 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function changeMentions(sig, names) {
   const files = new Set();
   const tests = new Set();
-  for (const l of [...(sig?.lines || []), ...(sig?.context || [])]) {
+  for (const raw of [...(sig?.lines || []), ...(sig?.context || [])]) {
+    const l = String(raw).replace(/\\/g, "/");
     for (const p of names.paths) if (l.includes(p)) files.add(p);
     for (const [b, paths] of names.bases) if (new RegExp(`(?:^|[\\s/\\\\(\`'"])${escapeRe(b)}(?:$|[\\s:)\`'"])`).test(l)) for (const p of paths) files.add(p);
     for (const t of names.tests) if (l.includes(t)) tests.add(t);
@@ -1093,7 +1109,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
 
   // A red on a commit no rerun brings back (the merge queue's, after the queue dropped the PR: session.mjs queueRedOf):
   // each failing job asked as red() asks it, nothing rerun and no rerun recorded. `flaky` when red() would have rerun
-  // it (rerunWanted); `named` when a failure points at a file the PR changes (changedPathIn); `off` when no model was asked. The
+  // it (rerunWanted); `named` when a failure names what the PR changes (namesChange); `off` when no model was asked. The
   // verdicts go to the log and the progress comment.
   const classify = async ({ sha, failedRuns = [], required = [] }) => {
     if (!failedRuns.length) return { flaky: false };
@@ -1109,12 +1125,16 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     const jobs = await askJobs({ sha, failedRuns, required, seen: await known(), actionsJob });
     const flaky = rerunWanted(jobs);
     await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : "the change's: fix pass" }), {});
-    return { flaky, jobs, off: false, named: await pointsAtChange(failedRuns) };
+    return { flaky, jobs, off: false, named: await namesChange(failedRuns) };
   };
-  // Whether a failing job's failure points at a file the PR changes (changedPathIn).
-  const pointsAtChange = async (failedRuns) => {
+  // Whether a failing job's failure names what the PR changes: a changed path (changedPathIn), or a changed file or added
+  // test by name (changeMentions). Read only where no model weighs the names (session.mjs queueRedOf, triage off).
+  const namesChange = async (failedRuns) => {
     const { sigs, names } = await readRed(failedRuns);
-    return failedRuns.some((r) => !!changedPathIn(sigs.get(r.id), names));
+    return failedRuns.some((r) => {
+      const m = changeMentions(sigs.get(r.id), names);
+      return !!changedPathIn(sigs.get(r.id), names) || m.files.length > 0 || m.tests.length > 0;
+    });
   };
 
   // A fix pass that committed nothing left the red head as it was: its checks are not read again as a second red. The
@@ -1164,8 +1184,9 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     for (const r of failedRuns) if (!(await githubSide(sha, jobs.get(r.id), texts.get(r.id), sigs.get(r.id), names))) return false;
     return true;
   };
-  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure points at a file the PR changes.
-  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await pointsAtChange(r.failedRuns) : false });
+  // Triage off: no model to ask, so no red is called a flake; `named` says whether a failure names what the PR changes
+  // (namesChange: a changed path, or a changed file or added test by name), the only sign left that it is the PR's own.
+  const offClassify = async (r) => ((await offRed(r)), { flaky: false, off: true, named: r.failedRuns?.length ? await namesChange(r.failedRuns) : false });
   if (!decider && !key) return { model, off: code, red: offRed, again, infra, classify: offClassify };
   return { model, red, again, infra, classify };
 }

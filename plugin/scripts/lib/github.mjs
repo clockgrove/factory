@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, factoryReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
-import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, spentOn, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
+import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
 
 /** Run gh and throw on non-zero exit, with stderr on the error. */
 async function run(cmd, args, opts = {}) {
@@ -155,11 +155,25 @@ const notDone = (e) => e?.unsent === true || (e?.rateLimited === true && (e.stat
 const rateLimitOf = (status, headers, message) => status === 429 || (status === 403 && (headers.get("x-ratelimit-remaining") === "0" || headers.has("retry-after") || /secondary rate limit|abuse/i.test(String(message || ""))));
 
 /**
- * Mark a rate-limited GitHubError `err` as quota `quota`'s primary limit spent, when it is (network.mjs spentResetOf):
- * code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell, and the process's record of it (noteSpent).
+ * Mark a rate-limited GitHubError `err`, GitHub's answer to a request to `url` with `token`, as quota `quota`'s primary
+ * limit spent, when it is (network.mjs spentResetOf: GitHub's count of the quota, read with the same token from
+ * GET /rate_limit, decides): code RATE_LIMIT_SPENT and `resetAt` (ms), so any caller can tell, and the process's record
+ * of it (noteSpent). The count read is of the quota the answer names (its x-ratelimit-resource; else quotaResource of
+ * the path) and ends with the caller's `signal`. GET /rate_limit is not counted against the primary rate limit but can
+ * count toward the secondary one, so it is not read again while this process holds the quota spent until this answer's
+ * reset or later (the same spent window): the answer's own reset stands, the latest answer's as always.
  */
-function markSpent(err, quota, status, headers, message) {
-  const resetAt = err.rateLimited ? spentResetOf(status, headers, message, RETRY.now()) : null;
+async function markSpent(err, quota, url, token, headers, signal = null) {
+  if (!err.rateLimited || !spentCandidate(headers)) return;
+  const now = RETRY.now();
+  const held = spentUntil(quota);
+  const stated = spentResetOf(headers, null, now);
+  let resetAt = held !== null && stated !== null && held >= stated ? stated : null;
+  if (resetAt === null) {
+    const resource = headers.get("x-ratelimit-resource") || quotaResource(url);
+    const count = await call(`${API()}/rate_limit`, { token, signal }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), resource, r.headers.get("date")) : null)).catch(() => null);
+    resetAt = spentResetOf(headers, count, now);
+  }
   if (resetAt === null) return;
   err.code = RATE_LIMIT_SPENT;
   err.resetAt = resetAt;
@@ -482,7 +496,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     const err = new GitHubError(`${method} ${path} failed (${r.status}): ${msg}`, r.status, text, { rateLimited: limited });
     const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
     if (asked !== null) err.waitMs = asked;
-    markSpent(err, quota, r.status, r.headers, msg);
+    await markSpent(err, quota, url, sent.token, r.headers, signal);
     throw err;
   };
   const pages = [];
@@ -563,7 +577,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
       const err = new GitHubError(`graphql failed (${r.status}): ${(data?.message || text).slice(0, 300)}`, r.status, text, { rateLimited: limited });
       const asked = transientError(err) ? askedWaitMs(r.headers, RETRY.now()) : null;
       if (asked !== null) err.waitMs = asked;
-      markSpent(err, quota, r.status, r.headers, data?.message);
+      await markSpent(err, quota, url, sent.token, r.headers);
       throw err;
     }
     if (data?.errors?.length) {
@@ -573,7 +587,7 @@ export async function graphql(query, variables = {}, { token, deadlineAt = Infin
         err.unsent = true;
         const asked = askedWaitMs(r.headers, RETRY.now());
         if (asked !== null) err.waitMs = asked;
-        markSpent(err, quota, r.status, r.headers, err.message);
+        await markSpent(err, quota, url, sent.token, r.headers);
       }
       throw err;
     }
@@ -968,14 +982,131 @@ export function cleanLog(raw) {
 }
 
 /**
- * About `chars` of a cleaned job log: the runner's own error annotations mark where the job failed, and the window
- * around them beats the tail (post-job cleanup); without one, the tail.
+ * The lines of the step that failed: from the last `##[group]` (a step's header) before the first `##[error]` to the
+ * next `##[group]` after it. Warnings and failure-shaped lines from steps that passed (setup, caches) stay out of the
+ * signature. A log with no `##[error]`, or no group before it, is read whole.
  */
-export function logWindow(text, chars = 4000) {
-  const first = text.indexOf("##[error]");
-  if (first === -1) return text.slice(-chars);
-  const last = text.lastIndexOf("##[error]");
-  return text.slice(Math.max(0, first - Math.round(chars * 0.75)), Math.min(text.length, last + Math.round(chars * 0.25)));
+export function failingStep(lines) {
+  const err = lines.findIndex((l) => l.startsWith("##[error]"));
+  if (err < 0) return lines;
+  let start = -1;
+  for (let i = err - 1; i >= 0; i -= 1) if (lines[i].startsWith("##[group]")) {
+    start = i;
+    break;
+  }
+  if (start < 0) return lines;
+  const next = lines.findIndex((l, i) => i > err && l.startsWith("##[group]"));
+  return lines.slice(start, next < 0 ? lines.length : next);
+}
+
+/** The first failed step of an Actions job that ran ({name, number, conclusion, started_at, completed_at}, GitHub's `steps`), or null. */
+export const failedStep = (job) => (Array.isArray(job?.steps) ? (job.steps.find((x) => x?.conclusion === "failure") ?? null) : null);
+
+// A runner log line's own timestamp, to the second (ms), or NaN for a line without one.
+const lineSecond = (l) => {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z/.exec(l);
+  return m ? Date.parse(`${m[1]}Z`) : NaN;
+};
+
+/**
+ * The lines of `job`'s failed step (failedStep), cut from the raw log by time: every line the runner stamped within the
+ * step's started_at and completed_at, which GitHub states to the second, so both seconds are kept whole. At those two
+ * edges other steps can share a second. The first is trimmed only when GitHub's `steps` show an earlier step that ended
+ * in it: the step starts at its own `##[group]` header, the one after the headers of the earlier steps that started in
+ * that second; with no such step, or fewer headers than that, the whole second is kept. In the last second, lines after
+ * the step's last `##[error]` (the runner's own last line of a failed step) are later steps'. A step's own `::group::`
+ * output is no boundary. Cleaned
+ * (cleanLog). null with no job, no failed step with both times, or no line stamped in that range: the caller cuts by
+ * structure (failingStep).
+ */
+export function stepByTime(raw, job) {
+  const step = failedStep(job);
+  const from = Math.floor(Date.parse(step?.started_at) / 1000) * 1000;
+  const to = Math.floor(Date.parse(step?.completed_at) / 1000) * 1000;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return null;
+  const kept = [];
+  let sec = NaN;
+  for (const l of String(raw ?? "").split("\n")) {
+    const t = lineSecond(l);
+    // A line with no stamp of its own goes with the line before it.
+    if (Number.isFinite(t)) sec = t;
+    if (sec >= from && sec <= to) kept.push({ sec, line: cleanLog(l) });
+  }
+  if (!kept.length) return null;
+  // The first second is trimmed only when an earlier step ended in it. Each step that ran opens with a `##[group]`
+  // header, so the step's own header is the one after those of the earlier steps that started in that second. Where
+  // that count does not hold (an earlier step's own groups, a header stamped a second late), more is kept, not less.
+  const second = (x) => Math.floor(Date.parse(x) / 1000) * 1000;
+  const earlier = job.steps.filter((x) => x !== step && Number(x?.number) < Number(step.number) && x?.conclusion !== "skipped");
+  let head = -1;
+  if (earlier.some((x) => second(x?.completed_at) === from)) {
+    const before = earlier.filter((x) => second(x?.started_at) === from).length;
+    const groups = [];
+    for (let i = 0; i < kept.length && kept[i].sec === from; i += 1) if (kept[i].line.startsWith("##[group]")) groups.push(i);
+    if (groups.length > before) head = groups[before];
+  }
+  let lastError = -1;
+  for (let i = kept.length - 1; i >= 0; i -= 1) if (kept[i].line.startsWith("##[error]")) {
+    lastError = i;
+    break;
+  }
+  const end = lastError >= 0 && kept[lastError].sec === to ? lastError + 1 : kept.length;
+  const lines = kept.slice(Math.max(0, head), end).map((x) => x.line);
+  return lines.length ? lines : null;
+}
+
+/** The failed step's lines of a job log: by time when `job` says when it ran (stepByTime), else by structure (failingStep). */
+export const stepLines = (text, job = null) => stepByTime(text, job) ?? failingStep(cleanLog(text).split("\n"));
+
+// What a count of lines left out takes in a window, at most: its own line and newline.
+const OMITTED = 48;
+const omitted = (n) => (n > 0 ? [`(${n} lines of this step not shown)`] : []);
+
+/**
+ * Whole lines of `lines` from index `to` back towards `from` (exclusive) while they fit in `room` characters, newlines
+ * counted: {start, kept, used}. When not even line `to` fits, its end (`cut` "end") or start ("start") as far as the
+ * room goes, nothing when there is none.
+ */
+function linesBack(lines, from, to, room, cut = "end") {
+  const kept = [];
+  let used = 0;
+  let i = to;
+  for (; i > from && used + lines[i].length + 1 <= room; i -= 1) {
+    kept.unshift(lines[i]);
+    used += lines[i].length + 1;
+  }
+  if (!kept.length && to > from && room > 1) {
+    const part = cut === "end" ? lines[to].slice(-(room - 1)) : lines[to].slice(0, room - 1);
+    return { start: to, kept: [part], used: part.length + 1 };
+  }
+  return { start: i + 1, kept, used };
+}
+
+/**
+ * The lines of a job log that say why the job failed, in at most `chars` characters: the step that failed (stepLines: by
+ * the job's step times when `job`, GitHub's job with its `steps`, is given, else at the step's `##[group]` boundaries),
+ * so no other step's output (set-up warnings, caches, post-job cleanup) is in it, cleaned of colour codes and
+ * timestamps. A step longer than `chars` (what a prompt holds) keeps the start of its first line (the command it ran,
+ * at most a quarter of the room), the step's first `##[error]` with the lines just before it (what explains the failure
+ * when the step goes on after it), and as many of its last whole lines as fit (where the runner reports how it ended);
+ * the lines left out are counted.
+ */
+export function logWindow(text, chars = 4000, job = null) {
+  const step = stepLines(text, job);
+  const whole = step.join("\n");
+  if (whole.length <= chars) return whole;
+  const head = step[0].slice(0, Math.floor(chars / 4));
+  const room = chars - head.length - 2 * OMITTED;
+  const last = step.length - 1;
+  const firstError = step.findIndex((l, i) => i > 0 && l.startsWith("##[error]"));
+  const lead = Math.max(1, firstError - 3);
+  // The step's end, as far as all the room goes: enough when it reaches the first error's lead-in.
+  const tail = linesBack(step, 0, last, room);
+  if (firstError < 0 || tail.start <= lead) return [head, ...omitted(tail.start - 1), ...tail.kept].join("\n");
+  // Else the first error and the lines before it (the error line first), in up to half the room; the end in the rest.
+  const error = linesBack(step, lead - 1, firstError, Math.floor(room / 2), "start");
+  const end = firstError < last ? linesBack(step, firstError, last, room - error.used) : { start: last + 1, kept: [], used: 0 };
+  return [head, ...omitted(error.start - 1), ...error.kept, ...omitted(end.start - firstError - 1), ...end.kept].join("\n");
 }
 
 /** The most of one job log Factory holds: past it the head is cut while reading and the end kept. */
@@ -984,8 +1115,9 @@ export const JOB_LOG_CAP = 8 * 1024 * 1024;
 const LOGS = new Map();
 
 /**
- * An Actions job's whole log (a check-run's id is the job's id) up to JOB_LOG_CAP bytes, its end kept. The red's own
- * jobs (at most MAX_JOBS, read by triage and again by the fix pass's detail) are kept; `cache: false` for a log read once.
+ * An Actions job's whole log (a check-run's id is the job's id) up to JOB_LOG_CAP bytes, its end kept. The twelve
+ * newest read are kept (a red's own jobs, read by triage and again by the fix pass's detail); `cache: false` for a log
+ * read once.
  */
 export async function jobLog(repo, jobId, opts, { cache = true } = {}) {
   const key = `${repo.full}#${jobId}`;
@@ -998,10 +1130,10 @@ export async function jobLog(repo, jobId, opts, { cache = true } = {}) {
   return text;
 }
 
-/** The window of an Actions job's log around its failure (logWindow); empty when unavailable. */
+/** The failed step of an Actions job's log (logWindow); empty when unavailable. */
 export async function jobLogTail(repo, jobId, opts, chars = 4000) {
   try {
-    return logWindow(cleanLog(await jobLog(repo, jobId, opts)), chars);
+    return logWindow(await jobLog(repo, jobId, opts), chars);
   } catch {
     return "";
   }

@@ -30,6 +30,14 @@ export const MODEL_DEFAULTS = {
 /** This plugin's version (its manifest), the tag the Action default and setup's fallback pin name. */
 export const FACTORY_VERSION = JSON.parse(readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8")).version;
 
+/**
+ * image_max_age_days (lib/image.mjs imageDecision): its default, and its bounds. A person owns it: at least a day, and
+ * never more than IMAGE_MAX_AGE_MAX, so no image goes unrefreshed (its base image, the unpinned things setup fetches)
+ * without end. A value outside them is refused (VALUE_RULES) and reads as the default.
+ */
+export const IMAGE_MAX_AGE_DAYS = 7;
+export const IMAGE_MAX_AGE_MAX = 30;
+
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
@@ -57,6 +65,7 @@ export const DEFAULTS = {
   validation: "",
   budget_command: "",
   protected_paths: "",
+  toolchain_paths: "", // paths a fix pass may change only in its scope or on the fence check's yes, beside the exact lists (logic.mjs toolchainFile); empty: none
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Factory (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
   third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
@@ -96,6 +105,7 @@ export const DEFAULTS = {
   vercel_project_id: "",
   image_refresh: "merge", // merge | nightly (lib/image.mjs imageDecision)
   image_daily_minutes: "5",
+  image_max_age_days: String(IMAGE_MAX_AGE_DAYS), // lib/image.mjs imageDecision: the current image stands for a head while younger
   image_owed: "", // image.mjs: `true` when the dispatcher's tick found a build owed (lib/image.mjs imageOwed)
   sandbox_idle_days: "7", // sweep.mjs: a stopped sandbox of an Objective neither Running nor In review, this long, goes
   sweep_max_destroys: "5",
@@ -106,7 +116,27 @@ export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "c
  * Local mode's own settings a repository's workflow env block may set (docs/LOCAL.md, Configuration); the developer's
  * shell wins over each.
  */
-export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB"];
+export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB", "FACTORY_LOCAL_LAPSE_MAX", "FACTORY_LOCAL_TOKEN_PROBE_MAX"];
+/**
+ * Local mode's bounded whole-number settings (docs/LOCAL.md, Configuration), each its default, least and most:
+ * `FACTORY_LOCAL_LAPSE_MAX`, the lapse in a row that Blocks a stage the lapse check judges transient (local.mjs lapse);
+ * `FACTORY_LOCAL_TOKEN_PROBE_MAX`, the most repositories the local token's check probes (local.mjs checkToken).
+ */
+export const LOCAL_BOUNDS = Object.freeze({
+  FACTORY_LOCAL_LAPSE_MAX: Object.freeze({ fallback: 3, min: 2, max: 10 }),
+  FACTORY_LOCAL_TOKEN_PROBE_MAX: Object.freeze({ fallback: 100, min: 1, max: 1000 }),
+});
+/**
+ * A LOCAL_BOUNDS setting's value (`name`, as set: unset or empty is the default): `{value, problem}`, where a value that is
+ * no whole number within the bounds is the default and `problem` names it for the log.
+ */
+export function localBound(name, value) {
+  const b = LOCAL_BOUNDS[name];
+  const v = String(value ?? "").trim();
+  if (v === "") return { value: b.fallback, problem: null };
+  if (/^\d+$/.test(v) && Number(v) >= b.min && Number(v) <= b.max) return { value: Number(v), problem: null };
+  return { value: b.fallback, problem: `${name} ${JSON.stringify(v)} is not a whole number from ${b.min} to ${b.max}; using ${b.fallback}` };
+}
 /** DEFAULTS keys that are no input of the Action (action.yml): Factory's own, or a run's argument. */
 const NOT_INPUTS = ["action", "objective_label", "repo"];
 /**
@@ -241,6 +271,7 @@ const VALUE_RULES = (() => {
     FACTORY_DAILY_USD: atLeast0,
     FACTORY_MAX_USD: atLeast0,
     FACTORY_IMAGE_DAILY_MINUTES: atLeast0,
+    FACTORY_IMAGE_MAX_AGE_DAYS: [(v) => /^\s*\d+\s*$/.test(v) && Number(v) >= 1 && Number(v) <= IMAGE_MAX_AGE_MAX, `a whole number of days, 1 to ${IMAGE_MAX_AGE_MAX}`],
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
@@ -249,6 +280,7 @@ const VALUE_RULES = (() => {
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_TRIAGE_MIN_CONFIDENCE: [(v) => confidenceValue(v) !== null, "a number from 0 to 1"],
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
+    ...Object.fromEntries(Object.entries(LOCAL_BOUNDS).map(([k, b]) => [k, [(v) => localBound(k, v).problem === null, `a whole number from ${b.min} to ${b.max}`]])),
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
     FACTORY_SIBLING_HOLD: oneOf("on", "off"),
     FACTORY_DECISION_ROUTE: oneOf("auto", "gateway", "off"),
@@ -558,6 +590,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     validation: list(get("validation")),
     budgetCommand: get("budget_command"),
     protectedAdditions: list(get("protected_paths")),
+    toolchainPaths: list(get("toolchain_paths")),
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
     thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,
@@ -593,6 +626,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     imageRefresh: get("image_refresh").trim().toLowerCase() === "nightly" ? "nightly" : "merge",
     imageDailyMinutes: num(get("image_daily_minutes"), 5),
     imageOwed: get("image_owed").trim() === "true",
+    imageMaxAgeDays: ((d) => (Number.isInteger(d) && d >= 1 && d <= IMAGE_MAX_AGE_MAX ? d : IMAGE_MAX_AGE_DAYS))(num(get("image_max_age_days").trim() || "x", IMAGE_MAX_AGE_DAYS)),
     sandboxIdleDays: num(get("sandbox_idle_days"), 7),
     sweepMaxDestroys: Math.max(0, Math.floor(num(get("sweep_max_destroys"), 5))),
     nodeVersion: get("node_version").trim(),

@@ -9,8 +9,9 @@
 // its image issue, with a token minted for that alone (issues: write on this repository); images beyond the newest
 // two are destroyed, found from the vendor's listing only. Runs on a push to the default branch (until today's builds
 // pass image_daily_minutes), on the first dispatcher tick of a UTC day that finds a build owed (lib/image.mjs
-// imageOwed), on the nightly schedule (the backstop), or by hand on the default branch's head. The build sandbox gets
-// no secret: the vendor's credentials and the App key stay in this process, whose environment keeps none.
+// imageOwed), on the nightly schedule (the backstop), or by hand on the default branch's head; but a head whose changes
+// since the current image's touch nothing it is made from is recorded as covered, not built (imageChange). The build
+// sandbox gets no secret: the vendor's credentials and the App key stay in this process, whose environment keeps none.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -18,14 +19,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
-import { installCommand, runnerFileEnv } from "./lib/checkout.mjs";
+import { absentTools, installCommand, installTools, pluginDigest, runnerFileEnv } from "./lib/checkout.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { getRepo, onDefaultBranch, repoOf, rest } from "./lib/github.mjs";
 import { CLI } from "./lib/harness.mjs";
-import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imagePaths, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
+import { IMAGE_DIR, NIGHTLY_CRON, imageDecision, imageMade, imagePaths, imageTouch, imageWaits, owedAttempt, imageTags, currentBuild, listImages, prunableImages, recordCover, recordImage, staleImages, todaysBuildMs, vendorImages, verifiedRecords } from "./lib/image.mjs";
 import { SECRET_INPUTS, log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { setSelf } from "./lib/logic.mjs";
+import { setSelf, setupGuard } from "./lib/logic.mjs";
 import { armSweepWake } from "./dispatch.mjs";
+import { checkoutIo } from "./doctor.mjs";
 
 /** The build sandbox's limits: setup that takes longer than this is not an image build. */
 const BUILD_MS = 40 * 60_000;
@@ -109,7 +111,7 @@ export const PACKAGE_CLEAN = [
  * stopped, as the vendor's record). Returns the snapshot and its source sandbox; throws with `buildMs` and the step that
  * failed, the sandbox destroyed. Command output goes to the job log only.
  */
-export async function buildImage({ adapter, base, bundle, repo, branch, sha, setup, install, harnessVersion, tags }) {
+export async function buildImage({ adapter, base, bundle, repo, branch, sha, setup, install, tools = [], harnessVersion, versions = null, tags }) {
   const started = Date.now();
   const elapsed = () => Date.now() - started;
   const { checkout, envFile } = imagePaths(repo);
@@ -156,13 +158,22 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
         rmSync(local, { recursive: true, force: true });
       }
     }
-    if (install) await step("install", ["bash", "-c", install], { cwd: checkout, env: { CI: "true", ...setupEnv } });
-    const pkgs = Object.values(CLI).map((c) => `${c.pkg}@${harnessVersion || "latest"}`);
+    if (install) {
+      await step("install", ["bash", "-c", install], { cwd: checkout, env: { CI: "true", ...setupEnv } }).catch(async (e) => {
+        // A program the automatic install runs that setup did not bring (lib/checkout.mjs installTools): named.
+        const absent = [];
+        const has = (t) => adapter.run(id, { argv: ["bash", "-c", 'command -v -- "$1" >/dev/null', "factory-tool", t.tool], cwd: checkout, env: setupEnv, timeoutMs: 30_000 }).then((r) => r.exitCode === 0, () => true);
+        for (const t of tools) if (!(await has(t))) absent.push(t);
+        throw absent.length ? Object.assign(new Error(`${e.message}: ${absentTools(absent)}`), { step: e.step }) : e;
+      });
+    }
+    // The exact versions the build's `made` names (harnessVersions), else the setting as given.
+    const pkgs = Object.values(CLI).map((c) => `${c.pkg}@${versions?.[c.pkg] || harnessVersion || "latest"}`);
     // As on the runner (action.yml): Claude Code's postinstall puts its native binary in place, and npm 11 runs install
     // scripts only for packages allowed by name (npm 10, on node:22, ignores the flag and runs them all, as on the
     // runner). Each CLI must then answer --version, or the build fails.
     await step("harness CLIs", ["npm", "install", "-g", "--no-audit", "--no-fund", `--allow-scripts=${CLI.claude.pkg}`, ...pkgs], { user: "root" });
-    const versions = await step("harness versions", ["bash", "-c", `set -o pipefail; ${Object.values(CLI).map((c) => `${c.bin} --version | head -1`).join(" && ")}`]);
+    const answered = await step("harness versions", ["bash", "-c", `set -o pipefail; ${Object.values(CLI).map((c) => `${c.bin} --version | head -1`).join(" && ")}`]);
     const all = privilegedChanges(privilegedBefore, await step("privileged config after setup", ["bash", "-c", PRIVILEGED], { user: "root", env: privileged, quiet: true }));
     const where = { home, checkout };
     const candidates = [...new Set(all.map(changePath).filter((p) => packageMayOwn(p, where)))];
@@ -178,12 +189,84 @@ export async function buildImage({ adapter, base, bundle, repo, branch, sha, set
     const snap = await adapter.snapshot(id);
     const source = id;
     id = null;
-    return { ...snap, source, envNames: Object.keys(setupEnv), versions: versions.trim().split("\n"), buildMs: elapsed(), usd: snap.usage?.usd ?? null };
+    return { ...snap, source, envNames: Object.keys(setupEnv), versions: answered.trim().split("\n"), buildMs: elapsed(), usd: snap.usage?.usd ?? null };
   } catch (e) {
     throw Object.assign(e, { buildMs: elapsed() });
   } finally {
     if (id) await adapter.destroy(id).catch((e) => log(`image: destroying ${id} failed (${e.code ?? e.message})`));
   }
+}
+
+/**
+ * What changed between the image's head `from` and `head` in `checkout` (the job's clone, whole history) that the image
+ * is made from (lib/image.mjs imageTouch, with setupGuard's view of the `setup` and `install` commands read at `head`,
+ * and the repository's `toolchain_paths`):
+ * `{touched}`, the first such path or null when none, or `{unknown}` when git cannot list the diff.
+ */
+export async function imageChange(checkout, from, head, { setup = "", install = "", toolchainPaths = [], env = process.env } = {}) {
+  let files;
+  try {
+    files = execFileSync("git", ["-C", checkout, "diff", "--name-only", "--no-renames", "-z", from, head], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }).split("\0").filter(Boolean);
+  } catch {
+    return { unknown: `git cannot list the changes from ${from.slice(0, 7)} to ${head.slice(0, 7)}` };
+  }
+  const io = checkoutIo(checkout, env);
+  const guards = [];
+  for (const command of [setup, install]) if (command) guards.push(await setupGuard(command, io));
+  return { touched: imageTouch(files, guards, toolchainPaths) };
+}
+
+/** `npm view <pkg>@<spec> version`: the newest version the spec names, or null when the registry does not answer one. */
+function npmView(pkg, spec) {
+  try {
+    const j = JSON.parse(execFileSync("npm", ["view", `${pkg}@${spec}`, "version", "--json"], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] }));
+    const v = Array.isArray(j) ? j.at(-1) : j;
+    return typeof v === "string" && EXACT.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+const EXACT = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+/**
+ * Each harness CLI's exact version for `spec` (harness_version: a version, or a tag or range such as `latest`), as
+ * {package: version}: an exact version as given, anything else from the registry (`view`, npm view, as a stage's start
+ * script resolves `latest`). Null when one cannot be read.
+ */
+export function harnessVersions(spec, { view = npmView } = {}) {
+  const want = String(spec || "").trim() || "latest";
+  const out = {};
+  for (const c of Object.values(CLI)) {
+    const v = EXACT.test(want) ? want : view(c.pkg, want);
+    if (!v) return null;
+    out[c.pkg] = v;
+  }
+  return out;
+}
+
+/**
+ * What this image job does about `head` in `checkout` (its clone of the default branch): the install command and the
+ * INSTALLS entries it runs (`install`, `tools`), the harness CLIs' exact versions (`versions`, harnessVersions with
+ * `view`), what a build now would be made from (`made`, imageMade with Factory's own digest, `factory`), whether the
+ * head changes anything the current image is made from (`change`, imageChange: asked only of an image made the same
+ * way, for a head it neither is nor covers), imageDecision's answer (`decision`), what to log (`notes`), and, when the
+ * decision covers the head, what recordCover records (`cover`, with the owed job's own `attempt`). `builds`: the
+ * record, newest first; `current`: the newest confirmed, ready image.
+ */
+export async function imagePlan({ checkout, head, trigger, inputs, base, current, builds = [], attempt = null, todayMs = 0, factory = pluginDigest(), view, now = new Date(), env = process.env }) {
+  const install = installCommand(checkout, inputs.install);
+  const tools = installTools(checkout, inputs.install);
+  const versions = harnessVersions(inputs.harnessVersion, view ? { view } : {});
+  const made = imageMade({ setup: inputs.setup, install, versions, base, factory });
+  const notes = [];
+  if (!versions) notes.push(`the harness CLIs' versions for ${inputs.harnessVersion || "latest"} could not be read from the registry, so this head is not taken as unchanged`);
+  const comparable = !!current && current.sha !== head && !!made && current.made === made && current.covers !== head;
+  if (current && current.sha !== head && made && current.made !== made) notes.push(`${current.sha.slice(0, 7)}'s image was built otherwise (setup, install, a harness CLI's version, the base image or Factory itself), or before Factory recorded how`);
+  const change = comparable ? await imageChange(checkout, current.sha, head, { setup: inputs.setup, install, toolchainPaths: inputs.toolchainPaths, env }) : null;
+  if (change) notes.push(change.unknown ?? (change.touched ? `${change.touched} changed since ${current.sha.slice(0, 7)}` : `nothing the image is made from changed since ${current.sha.slice(0, 7)}`));
+  const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, made, unchanged: !!change && !change.unknown && change.touched === null, maxAgeDays: inputs.imageMaxAgeDays, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes, now });
+  if (current && !decision.skip && !(now.getTime() - Date.parse(current.builtAt) < inputs.imageMaxAgeDays * 86_400_000)) notes.push(`${current.sha.slice(0, 7)}'s image was built ${current.builtAt.slice(0, 10)}, image_max_age_days (${inputs.imageMaxAgeDays}) ago or more`);
+  return { install, tools, versions, made, change, decision, notes, cover: decision.covers ? { source: current.source, head, attempt } : null };
 }
 
 /**
@@ -256,7 +339,10 @@ async function main() {
   const verified = verifiedRecords(builds, vendor.images, adapter.name);
   const todayMs = todaysBuildMs(builds);
   const current = await currentBuild(adapter, repo, verified, { token });
-  const decision = imageDecision({ trigger, refresh: inputs.imageRefresh, head, current, lastAttemptAt: builds[0]?.builtAt ?? null, todayMs, dailyMinutes: inputs.imageDailyMinutes });
+  const base = adapter.baseImage(inputs.nodeVersion);
+  const { install, tools, versions, made, decision, notes, cover } = await imagePlan({ checkout, head, trigger, inputs, base, current, builds, attempt, todayMs });
+  for (const n of notes) log(`image: ${n}`);
+  if (cover) await recordCover(repo, cover, app).catch((e) => log(`image: recording that ${head.slice(0, 7)} changes nothing failed (${e.status ?? String(e.message).slice(0, 120)})`));
   if (decision.skip) {
     summary(`### Factory sandbox image\n\nSkipped: ${decision.skip}. Today's builds: ${(todayMs / 60_000).toFixed(1)} min.`);
     return done("skipped", decision.skip);
@@ -288,7 +374,6 @@ async function main() {
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
-  const base = adapter.baseImage(inputs.nodeVersion);
   log(`image: building ${repo.full}@${head.slice(0, 7)} (${trigger}) from ${base}; bundle ${(bundle.length / 1e6).toFixed(1)} MB`);
   const builtAt = attempt.builtAt;
   // The build's output is the repository's: no workflow command in it is honoured while it streams.
@@ -297,7 +382,7 @@ async function main() {
   let built;
   let failure = null;
   try {
-    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install: installCommand(checkout, inputs.install), harnessVersion: inputs.harnessVersion, tags: imageTags(repoId, head) });
+    built = await buildImage({ adapter, base, bundle, repo, branch, sha: head, setup: inputs.setup, install, tools, harnessVersion: inputs.harnessVersion, versions, tags: imageTags(repoId, head) });
   } catch (e) {
     failure = e;
   } finally {
@@ -312,7 +397,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const rec = { vendor: inputs.sandbox, snapshot: built.snapshot, source: built.source, sha: head, builtAt, buildMs: built.buildMs, sizeBytes: built.sizeBytes, usd: built.usd };
+  const rec = { vendor: inputs.sandbox, snapshot: built.snapshot, source: built.source, sha: head, builtAt, buildMs: built.buildMs, sizeBytes: built.sizeBytes, usd: built.usd, made };
   let issue;
   try {
     issue = await recordImage(repo, rec, app);

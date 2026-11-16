@@ -5,7 +5,7 @@
 // objectiveSha), so one added, removed or changed after the plan stops the Objective like an edit.
 // A `factory:host:<host>` label (#278) opens one more network host to that Objective's sandboxes alone, under the same
 // rule: it counts once a person who can push applied it, and the plan's record covers it.
-import { DEFAULTS, MODEL_DEFAULTS, resolveInputs } from "./inputs.mjs";
+import { DEFAULTS, resolveInputs } from "./inputs.mjs";
 import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
 import { isSandboxHost, wildcardRefusal } from "./local.mjs";
 
@@ -87,23 +87,20 @@ export function hostsOf(names = []) {
   return { ok: true, hosts: [...hosts].sort(), labels };
 }
 
-const CLAUDE_ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
-
 /**
- * Why `harness` cannot run `model` within Factory's caps, {reason, fix}, or null when it can: decided on the id's form
- * and Factory's price table, before any spend. Claude Code runs Anthropic's models (a `claude-` id or one of its aliases)
- * and reports its dollars itself. Codex runs a model Factory prices (codex-prices.json): with no price row max_usd could
- * not stop its runs; a provider prefix (`openai/`) is the AI Gateway's form only. Copilot takes its own catalog's names,
+ * Why `harness` cannot run `model` within Factory's caps, {reason, fix}, or null when it can: decided before any spend.
+ * Claude Code takes any id and reports its dollars itself: whether its login serves the model is the API's answer. For the
+ * worker and reviewer model that is a refusal before any token is billed, which the stage Blocks on (usage.mjs
+ * providerRefusal); for a sub-agent's, the sub-agent's refusal, at which the stage stops the run and Blocks naming the
+ * label (usage.mjs subAgentRefusal). Codex runs a model Factory
+ * prices (codex-prices.json): with no price row max_usd could not stop its runs; a provider prefix (`openai/`) is the
+ * AI Gateway's form only. Copilot takes its own catalog's names,
  * which vary by account and which Factory cannot read before a run: only the form is checked here (no provider prefix or spaces).
  */
 export function modelProblem(harness, model, { gateway = false } = {}) {
   const m = String(model ?? "").trim();
   const other = (h) => HARNESSES.filter((x) => x !== h).map((x) => tick(`factory:harness:${x}`)).join(" or ");
-  if (harness === "claude") {
-    const bare = m.replace(/\[1m\]$/i, "");
-    if (/^claude-[a-z0-9][a-z0-9.-]*$/i.test(bare) || CLAUDE_ALIASES.has(bare.toLowerCase())) return null;
-    return { reason: `Claude Code runs Anthropic's Claude models, and ${tick(m)} is not one`, fix: `Name a Claude model (such as \`${MODEL_DEFAULTS.claude.model}\`), or choose the harness that runs ${tick(m)} with ${other("claude")}.` };
-  }
+  if (harness === "claude") return null;
   if (harness === "codex") {
     if (m.includes("/") && !gateway) return { reason: `${tick(m)} has a provider prefix, which only the AI Gateway takes, and this repository runs Codex on CODEX_API_KEY`, fix: `Name the model without its prefix (${tick(bareModel(m))}).` };
     if (codexRate(CODEX_PRICES, m)) return null;

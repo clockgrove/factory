@@ -111,6 +111,9 @@ export async function localClaim(repo, issue, opts, now = Date.now()) {
 
 export const writeClaim = (repo, issue, holder, opts) => upsertComment(repo, issue, claimMarker(issue), claimBody(holder), opts);
 
+/** A heartbeat on the claim comment `commentId` this loop holds (localClaim read it): the same text writeClaim writes. */
+export const beatClaim = (repo, issue, commentId, holder, opts) => rest(`repos/${repo.full}/issues/comments/${commentId}`, { ...opts, method: "PATCH", body: { body: `${claimMarker(issue)}\n${claimBody(holder)}` } });
+
 /** Drop the claim only when this loop holds it: another loop's claim is not ours to clear. */
 export async function dropClaim(repo, issue, holder, opts) {
   const c = await localClaim(repo, issue, opts).catch(() => null);
@@ -1571,18 +1574,21 @@ export function writeBwrapTun(dir, bwrap = whichPath("bwrap", process.env), tun 
 /**
  * What Copilot's sandbox needs inside the outer one, checked as it would use it: the TUN device, its tools, and
  * slirp4netns wiring a fresh user and network namespace. Exit 0 and `ok` when all hold, else the first that does not.
+ * Each step waits on the answer itself, never a clock: the namespace's process says on a pipe that it is inside it, and
+ * slirp4netns writes its --ready-fd once the interface is configured (or exits, closing it, when it cannot). Each wait
+ * is bounded (OUTER_PROBE_WAIT_S, through `timeout`): one that hangs is a no then, well inside runOuterProbe's own limit,
+ * since the probe blocks the loop that runs it.
  */
+export const OUTER_PROBE_WAIT_S = 30;
 export const COPILOT_OUTER_PROBE = `test -c /dev/net/tun || { echo "no /dev/net/tun" >&2; exit 2; }
-for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
+for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore mkfifo timeout; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
 unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" true 2>/dev/null || { echo "unshare cannot make a user and network namespace mapping the user (util-linux 2.36 or later)" >&2; exit 5; }
-unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" --keep-caps sleep 10 & ns=$!
-sleep 0.5
-slirp4netns --configure --mtu=65520 "$ns" tap0 >/dev/null 2>"$TMPDIR/slirp.err" & sl=$!
+mkfifo "$TMPDIR/ns.ready" "$TMPDIR/slirp.ready" || { echo "mkfifo cannot make a pipe in $TMPDIR" >&2; exit 6; }
+unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" --keep-caps sh -c 'echo in >&3; exec 3>&-; exec sleep 120' 3>"$TMPDIR/ns.ready" & ns=$!
+[ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/ns.ready")" = in ] || { kill "$ns" 2>/dev/null; echo "unshare did not start its namespace's process" >&2; exit 5; }
+slirp4netns --configure --mtu=65520 --ready-fd=3 "$ns" tap0 3>"$TMPDIR/slirp.ready" >/dev/null 2>"$TMPDIR/slirp.err" & sl=$!
 ok=""
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; break; fi
-  sleep 0.3
-done
+if [ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/slirp.ready")" = 1 ] && nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; fi
 kill "$sl" "$ns" 2>/dev/null
 [ -n "$ok" ] || { echo "slirp4netns did not configure its interface: $(tail -1 "$TMPDIR/slirp.err" 2>/dev/null)" >&2; exit 4; }
 echo ok
@@ -1642,10 +1648,7 @@ export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env
     // none yet
   }
   if (cache[key]?.on === true) return { ...cache[key], cached: true, cacheFile };
-  let result = probe(harness, { domains, env, home });
-  // Copilot is refused without it (local.mjs preflight and stageEnv): a no is probed once more, so one slow probe (a
-  // busy box, slirp4netns late to configure) neither stops serve nor Blocks a stage.
-  if (!result.on && harness === "copilot") result = probe(harness, { domains, env, home });
+  const result = probe(harness, { domains, env, home });
   // A no from an older Factory is dropped with the rewrite.
   const kept = Object.fromEntries(Object.entries(cache).filter(([, v]) => v?.on === true));
   if (result.on || Object.keys(kept).length !== Object.keys(cache).length) {

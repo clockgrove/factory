@@ -387,6 +387,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     default_branch: sandbox ? { raw: JSON.stringify(defaultBranch) } : "",
     image_refresh: inputs.imageRefresh,
     image_daily_minutes: String(inputs.imageDailyMinutes),
+    image_max_age_days: String(inputs.imageMaxAgeDays),
     sandbox_idle_days: String(inputs.sandboxIdleDays),
     sweep_max_destroys: String(inputs.sweepMaxDestroys),
     // The declaration the credential inputs below are rendered for: the account steps pick none under another.
@@ -523,6 +524,22 @@ export async function protectSetup(inputs, checkout) {
   return { scripts, unresolved, adding, protectedList: [...inputs.protectedAdditions, ...adding] };
 }
 
+/**
+ * The runner note's clause when doctor's runner row will warn on the runner setup picked from `ci` (the --ci-workflow
+ * workflow), else "": doctor compares against the workflows on pull_request that make the branch's required checks
+ * (else the one on pull_request), read as doctor reads them (the required checks, not FACTORY_CI_CHECKS), and told
+ * apart from `ci` by path.
+ */
+export async function doctorRunnerNote({ repo, opts, ci, runsOn, hints, ciChecks = [] }) {
+  const required = await requiredChecks(repo, opts).catch(() => []);
+  const pr = await ciWorkflowTriggers(repo, opts, { checks: required }).catch(() => ({}));
+  const paths = pr.paths ?? (pr.path ? [pr.path] : []);
+  if (!pr.found || (paths.length === 1 && paths[0] === ci.path)) return "";
+  const theirs = ciRunner(pr, { ...hints, checks: [...required, ...ciChecks] });
+  if (!theirs || theirs.runner === runsOn) return "";
+  return `; doctor compares against ${pr.name} (${required.length ? "the workflows on pull_request that make the required checks" : "the workflow on pull_request"}), which runs on ${theirs.runner}, so it will warn`;
+}
+
 async function applyWorkflow({ inputs, args, explicit, before, template, checkout, latest, repo, opts }) {
   const notify = keptNotify(before, explicit) || (await pinnedLogin(inputs.notify));
   const sandbox = String(args.sandbox || "").trim().toLowerCase();
@@ -536,12 +553,8 @@ async function applyWorkflow({ inputs, args, explicit, before, template, checkou
   // The same hints doctor's runner check uses: the setup and validation commands, and the required checks.
   const hints = { commands: [inputs.setup, ...inputs.validation], checks: sandbox || inputs.ciChecks.length || !ci.found ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []) };
   const runner = sandbox ? null : pickRunner(args.runs_on, ci, hints, explicit.runs_on === undefined && args.runs_on ? "kept from the existing file" : "--runs-on");
-  // Doctor compares against the workflow on pull_request, which --ci-workflow may not name: say so when they disagree.
-  if (runner && args.ci_workflow && ci.found) {
-    const pr = await ciWorkflowTriggers(repo, opts).catch(() => ({}));
-    const theirs = pr.found && pr.name !== ci.name ? ciRunner(pr, hints) : null;
-    if (theirs && theirs.runner !== runner.runsOn) runner.note += `; doctor compares against ${pr.name} (the workflow on pull_request), which runs on ${theirs.runner}, so it will warn`;
-  }
+  // Doctor compares against another workflow than --ci-workflow may name: say so when they disagree.
+  if (runner && args.ci_workflow && ci.found) runner.note += await doctorRunnerNote({ repo, opts, ci, runsOn: runner.runsOn, hints, ciChecks: inputs.ciChecks });
   const { scripts, unresolved, adding, protectedList } = await protectSetup(inputs, checkout);
   const defaultBranch = sandbox ? (await getRepo(repo, opts)).default_branch : "";
   const out = resolve(args.out || join(checkout, ".github", "workflows", "factory.yml"));

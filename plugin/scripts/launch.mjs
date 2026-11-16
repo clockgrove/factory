@@ -19,15 +19,15 @@
 //   requeue an answered Question goes back to Queued for the dispatcher, the one place caps are decided
 // The vendor SDK runs in this process. GitHub comments carry codes and times only, never a command's or a vendor's words.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { workflowTokenChecks } from "./doctor.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { harnessBudgetUsd, openSandbox, sessionCeilingUsd, stageVendorCost, storedUsd } from "./lib/adapters/sandbox.mjs";
-import { PLUGIN_ROOT } from "./lib/checkout.mjs";
+import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
@@ -310,19 +310,8 @@ export async function mintTokens(inputs, repo, { read = false } = {}) {
 
 /** Factory's plugin as a tarball for the sandbox, and a digest of its files (not the tarball's bytes, which carry times). */
 export function pluginPackage(root = PLUGIN_ROOT) {
-  const hash = createHash("sha256");
-  const walk = (dir) => {
-    for (const name of readdirSync(dir).sort()) {
-      if (name === "node_modules" || name === "test") continue;
-      const p = join(dir, name);
-      const st = statSync(p);
-      if (st.isDirectory()) walk(p);
-      else if (st.isFile()) hash.update(`${p.slice(root.length)}\0`).update(readFileSync(p)).update("\0");
-    }
-  };
-  walk(root);
   const tgz = execFileSync("tar", ["czf", "-", "--exclude=./node_modules", "--exclude=./test", "-C", root, "."], { maxBuffer: 64 * 1024 * 1024 });
-  return { tgz, digest: hash.digest("hex").slice(0, 16) };
+  return { tgz, digest: pluginDigest(root).slice(0, 16) };
 }
 
 /**

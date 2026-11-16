@@ -144,9 +144,10 @@ export function noReviewReason(recs, reviewOf) {
  * post a review that did not happen (reviewAnswer; the review job Blocks instead). `foundation`: a foundation Objective's
  * second pass (review.mjs foundationReview), parsed: its comments go up with the first pass's, the body counts them and
  * carries the foundation marker (reviewsCover). `review` null with `foundation`: the foundation pass alone, on a PR whose
- * first pass was posted before the Objective was labelled a foundation one; it judges no entry.
+ * first pass was posted before the Objective was labelled a foundation one; it judges no entry. `since`: the head
+ * Factory's review covered when this pass read only the commits written after it (review.mjs, #350); the body says so.
  */
-export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null }) {
+export function reviewPost({ issue, review, diff, entries = [], ok = true, splitPart = false, foundation = null, since = null }) {
   if (!ok) throw new Error("no review to post: the reviewer call failed");
   if (!review && !foundation) throw new Error("no review to post: no pass answered");
   if (review?.parsed === false) throw new Error("no review to post: the reviewer's answer held no findings JSON");
@@ -178,10 +179,11 @@ export function reviewPost({ issue, review, diff, entries = [], ok = true, split
     comments = [{ path: first?.[0] ?? null, line: first ? (first[1].first ?? Math.min(...first[1].lines)) : null, side: "RIGHT", body: `${PLACEHOLDER_MARKER}\nFactory reviewer: ${said}` }];
   }
   const checked = "checked the shared contracts the diff changes against their callers";
+  const on = since ? ` on the commits since ${since.slice(0, 7)}` : "";
   const lines = !foundation
-    ? [marker(issue, "review"), `Factory reviewer: one comment-only pass, ${comments.length} comment(s).`]
+    ? [marker(issue, "review"), `Factory reviewer: one comment-only pass${on}, ${comments.length} comment(s).`]
     : review
-      ? [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: one comment-only review of two passes, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
+      ? [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: one comment-only review of two passes${on}, ${comments.length} comment(s); the foundation pass ${checked} and raised ${extra.length}.`]
       : [marker(issue, "review"), marker(issue, "foundation"), `Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), ${comments.length} comment(s); it ${checked}.`];
   if (review && (judged.length || entries.length)) {
     lines.push("", judged.length ? "Acceptance as the reviewer judged it:" : "The reviewer judged no acceptance entry.", ...judged.slice(0, 60).map((a) => judgedLine(a, splitPart)));

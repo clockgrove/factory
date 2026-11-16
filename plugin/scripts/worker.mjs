@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -492,7 +492,9 @@ async function main() {
   // a relabel after a Question or Blocked exit brings new decisions and runs the harness.
   // Factory's own marker only (isSelf): a writer's pasted one is no send-back.
   if (openPr) await progress.self();
-  const sentBack = openPr ? (await listComments(repo, openPr.number, token).catch(() => [])).some((c) => isSelf(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, ""))) : false;
+  // Read once: the covered record on it says what Factory's review covers (session.mjs coveredHead).
+  const prComments = openPr ? await listComments(repo, openPr.number, token).catch(() => []) : [];
+  const sentBack = prComments.some((c) => isSelf(c) && (c.body || "").includes(marker(issue, "rebase").replace(/ -->$/, "")));
   // A plan made again needs the harness: no rebase-only stage for it. A continued pause was no send-back: it goes on.
   if (openPr && sentBack && planned.state !== "replan" && !continued) {
     const behind = await outbox.behind();
@@ -961,8 +963,18 @@ async function main() {
     // goes back to the reviewer, and nothing of it is recorded mergeable.
     // A foundation Objective's review covers the foundation pass too (handoff.mjs reviewsCover): one reviewed before the
     // label goes back to the review job, which runs that pass alone.
-    const cover = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? reviewsCover(await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => []), issue) : null;
+    // And only a rebase of the head that review covers (#350): commits written after it (a Question's answer the work
+    // stage wrote before this send-back) go to the review job, whose reviewer reads them.
+    const prReviews = rebaseMode && rebasedTo && outbox.expected() === rebasedTo ? await rest(`repos/${repo.full}/pulls/${pr.number}/reviews?per_page=100`, { ...token, paginate: true }).catch(() => []) : null;
+    const cover = prReviews ? reviewsCover(prReviews, issue) : null;
     let reviewed = !!cover?.reviewed && (!foundation || cover.foundation);
+    if (reviewed) {
+      const scope = await reviewScope(outbox.git, { reviews: prReviews, comments: prComments, issue, base: outbox.base, head: rebasedTo });
+      if (!scope.covered) {
+        log(`PR #${pr.number}: commits since the head Factory's review covers (${String(scope.since || "").slice(0, 7) || "none"}) are more than this rebase; the review job reviews them`);
+        reviewed = false;
+      }
+    }
     // A maintainer's comment no pass has read (a change asked for after the review) has not reached the code: no merge.
     // The review job runs instead (relabel below) and its answer pass applies it. Unreadable comments Block.
     if (rebaseMode && reviewed) {

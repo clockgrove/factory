@@ -218,14 +218,20 @@ test("headMarks: the worker's hand-off marker and the validated marker are read 
     }
     return json(comments);
   };
+  // The list read comes back too, for the PR's other records (the covered head, #350).
+  const marks = async (sha) => {
+    const { validated, handedOff, comments: read } = await headMarks(repo, 5, 4, sha, { token: "t" });
+    assert.deepEqual(read, comments);
+    return { validated, handedOff };
+  };
   try {
-    assert.deepEqual(await headMarks(repo, 5, 4, SHA, { token: "t" }), { validated: false, handedOff: false });
+    assert.deepEqual(await marks(SHA), { validated: false, handedOff: false });
     await postHandedOff(repo, 5, 4, SHA, { token: "t" });
     assert.ok(comments[0].body.startsWith(handedOffMarker(4, SHA)));
-    assert.deepEqual(await headMarks(repo, 5, 4, SHA, { token: "t" }), { validated: false, handedOff: true });
+    assert.deepEqual(await marks(SHA), { validated: false, handedOff: true });
     comments.push({ id: 9, user: { login: "stranger" }, author_association: "NONE", body: validatedMarker(4, SHA) });
-    assert.deepEqual(await headMarks(repo, 5, 4, SHA, { token: "t" }), { validated: false, handedOff: true }, "a pasted marker counts for nothing");
-    assert.deepEqual(await headMarks(repo, 5, 4, "b".repeat(40), { token: "t" }), { validated: false, handedOff: false }, "another head");
+    assert.deepEqual(await marks(SHA), { validated: false, handedOff: true }, "a pasted marker counts for nothing");
+    assert.deepEqual(await marks("b".repeat(40)), { validated: false, handedOff: false }, "another head");
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;

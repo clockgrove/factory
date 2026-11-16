@@ -13,7 +13,7 @@ const { RETRY } = await import("../scripts/lib/github.mjs");
 const { routeAccountsText, routeAutoAccounts, routeAutoSetting } = await import("../scripts/lib/accounts.mjs");
 const { accountStep } = await import("../scripts/objective-account.mjs");
 const { routeAccountCheck } = await import("../scripts/lib/objective-trust.mjs");
-const { HOLDS_TITLE, holdLine, pickRouteAccount, readHolds, routeLimits, routeTurn, writeHold } = await import("../scripts/lib/route-holds.mjs");
+const { HOLDS_TITLE, holdLine, personHolds, pickRouteAccount, readHolds, releaseLine, releaseRouteHold, routeLimits, routeTurn, writeHold } = await import("../scripts/lib/route-holds.mjs");
 const { usageLimitExit } = await import("../scripts/lib/session.mjs");
 const { USAGE_LIMIT } = await import("../scripts/lib/harness.mjs");
 const { accountWaitOf, accountWaitResume } = await import("../scripts/lib/account-wait.mjs");
@@ -78,7 +78,9 @@ async function withGitHub({ labels = ["factory:objective"], prLabels = ["factory
     if (own && rec[2] === "/comments" && method === "GET") return own.comments ? json(own.comments) : json({ message: "Forbidden" }, 403);
     if (own && rec[2] === "/comments" && method === "POST") {
       const at = iso(Date.now());
-      return own.comments.push({ id: ++id, user: { login: BOT, type: "Bot" }, body: body.body, created_at: at, updated_at: at }), json(own.comments.at(-1), 201);
+      // A person's token (factory hold --repo, #376) posts as them: `state.poster`.
+      const user = state.poster ? { login: state.poster.login, type: "User" } : { login: BOT, type: "Bot" };
+      return own.comments.push({ id: ++id, user, ...(state.poster?.association ? { author_association: state.poster.association } : {}), body: body.body, created_at: at, updated_at: at }), json(own.comments.at(-1), 201);
     }
     const one = /^\/repos\/acme\/app\/issues\/comments\/(\d+)$/.exec(p);
     // An edit (by anyone who can edit comments) moves the comment's updated_at past its created_at, as GitHub does.
@@ -638,4 +640,90 @@ test("a guess on the holds issue is kept a day past its end, so a limit again wi
     assert.ok(ids.includes(1), "the recent guess is kept");
     assert.ok(!ids.includes(2) && !ids.includes(3), "the day-old guess and the hour-old hold are deleted");
   });
+});
+
+test("#376: a person who can push releases an account's holds on GitHub: their release record ends its hold, guess and back-off count for the next job; one by anyone else, or edited, ends nothing", async () => {
+  setSelf(BOT);
+  const now = Date.now();
+  const t0 = now - 3 * H;
+  const issues = [
+    holdsIssue([
+      holdComment(1, { account: "claude-2", until: now + 20 * H, at: t0, window: "seven_day" }),
+      holdComment(2, { account: "claude-2", until: now - H + 2 * 60_000, at: now - H, streak: 2 }),
+      holdComment(3, { account: "claude-3", until: now + H, at: now - 60_000, guess: true, streak: 1 }),
+      holdComment(4, { account: "claude", until: now + 2 * H, at: now - 60_000 }),
+    ]),
+  ];
+  await withGitHub({ issues }, async (reads, st) => {
+    // The person's view, with no knowledge of the App's login: the App's records on its locked issue.
+    const view = await personHolds(REPO, { token: "p" }, { now });
+    assert.equal(view.issue, 50);
+    assert.deepEqual(view.store.list(now).map((h) => [h.account, h.streak]), [["claude", 0], ["claude-2", 2], ["claude-3", 0]]);
+    // A name nothing holds: refused, naming the ones that are, and nothing written.
+    const none = await releaseRouteHold(REPO, "claude-9", { token: "p" }, { now });
+    assert.deepEqual([none.released, none.known], [null, ["claude", "claude-2", "claude-3"]]);
+    assert.ok(!reads.some((r) => r.startsWith("POST")));
+    // A stranger's release (the issue unlocked meanwhile, say): ends nothing.
+    st.poster = { login: "stranger", association: "CONTRIBUTOR" };
+    st.issues[0].comments.push({ id: 70, user: { login: "stranger", type: "User" }, author_association: "CONTRIBUTOR", body: `${releaseLine("claude-2")}\nx`, created_at: iso(now - 1000), updated_at: iso(now - 1000) });
+    assert.equal((await readHolds(REPO, { token: "t" }, { now, actions: true })).store.until("claude-2", now), now + 20 * H);
+    // kirk can push: his release ends claude-2's hold and back-off count, and leaves the others.
+    st.poster = { login: "kirk", association: "COLLABORATOR" };
+    const rel = await releaseRouteHold(REPO, "claude-2", { token: "p" }, { now });
+    assert.equal(rel.released.account, "claude-2");
+    const posted = st.issues[0].comments.at(-1);
+    assert.equal(posted.user.login, "kirk");
+    assert.match(posted.body, /^<!-- factory:release \{"account":"claude-2"\} -->\nFactory: account `claude-2` \(Claude Code\) released by a person/);
+    const later = Date.parse(posted.created_at) + 1000;
+    const { store } = await readHolds(REPO, { token: "t" }, { now: later, actions: true });
+    assert.equal(store.avoidUntil("claude-2", later), null);
+    assert.equal(store.until("claude", later), now + 2 * H);
+    assert.equal(store.avoidUntil("claude-3", later), now + H);
+    // The next limit on it counts from one: a refusal past its reset is held the first back-off step.
+    st.poster = null;
+    const next = await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude-2", reset: later - 60_000, now: later }, { token: "t" }, { actions: true });
+    assert.equal(next.until, later + 2 * 60_000);
+    // Kept as long as a record it ends could be (nine days), then deleted by the next writer.
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: later + 8 * 24 * H, now: later + 8 * 24 * H }, { token: "t" }, { actions: true });
+    assert.ok(st.issues[0].comments.some((c) => c.id === posted.id), "eight days on: kept");
+    await writeHold(REPO, { kind: "limit", harness: "claude", account: "claude", reset: later + 10 * 24 * H, now: later + 10 * 24 * H }, { token: "t" }, { actions: true });
+    assert.ok(!st.issues[0].comments.some((c) => c.id === posted.id), "ten days on: deleted");
+    // Edited since written, a release counts for nothing; one by a person without association but with write
+    // permission (read once) counts.
+    const edited = { ...posted, updated_at: iso(later) };
+    const by = (c) => withGitHub({ issues: [holdsIssue([holdComment(1, { account: "claude", until: now + 2 * H, at: now - 60_000 }), c])] }, () => readHolds(REPO, { token: "t" }, { now: later, actions: true }));
+    assert.equal((await by(edited)).store.until("claude-2", later), null, "no record of claude-2 there");
+    const editedClaude = { ...edited, body: `${releaseLine("claude")}\nx` };
+    assert.equal((await by(editedClaude)).store.until("claude", later), now + 2 * H, "an edited release ends nothing");
+    const noAssoc = { ...editedClaude, updated_at: editedClaude.created_at, author_association: "NONE" };
+    assert.equal((await by(noAssoc)).store.until("claude", later), null, "kirk's permission is write: it counts");
+    assert.equal((await by({ ...noAssoc, user: { login: "reader", type: "User" } })).store.until("claude", later), now + 2 * H, "read permission: it does not");
+  });
+});
+
+test("#376: factory hold --repo lists and releases on the holds issue with the person's own token", async () => {
+  setSelf(BOT);
+  const { holdCommand } = await import("../scripts/local.mjs");
+  const now = Date.now();
+  const issues = [holdsIssue([holdComment(1, { account: "claude-2", until: now + 2 * H, at: now - 60_000, window: "five_hour" })])];
+  const saved = process.env.FACTORY_LOCAL_TOKEN;
+  process.env.FACTORY_LOCAL_TOKEN = "github_pat_fake";
+  try {
+    await withGitHub({ issues }, async (reads, st) => {
+      const said = [];
+      const io = { now, out: (s) => said.push(s), err: (s) => said.push(`ERR ${s}`) };
+      assert.equal(await holdCommand({ _: ["hold", "list"], repo: "acme/app" }, io), 0);
+      assert.match(said.pop(), /^claude-2 \(Claude Code\): held until \S+ \(five_hour\), back-off count 0\n$/);
+      assert.equal(await holdCommand({ _: ["hold", "release", "claude"], repo: "acme/app" }, io), 1);
+      assert.match(said.pop(), /^ERR factory: nothing is held or passed over for "claude" on acme\/app's holds issue .*; the accounts that are: claude-2\n$/);
+      st.poster = { login: "kirk", association: "COLLABORATOR" };
+      assert.equal(await holdCommand({ _: ["hold", "release", "claude-2"], repo: "acme/app" }, io), 0);
+      assert.match(said.pop(), /^released claude-2 \(Claude Code\), which was held until /);
+      assert.equal(reads.filter((r) => r.startsWith("POST")).length, 1);
+      assert.match(st.issues[0].comments.at(-1).body, /^<!-- factory:release \{"account":"claude-2"\} -->/);
+    });
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_LOCAL_TOKEN;
+    else process.env.FACTORY_LOCAL_TOKEN = saved;
+  }
 });

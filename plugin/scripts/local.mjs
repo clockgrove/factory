@@ -63,6 +63,7 @@ import { runningStint, timelineOf } from "./lib/relaunch.mjs";
 import { AUTO_ACCOUNT_ENV, HARNESS_NAMES, STAGE_AUTO_ENV, accountEnv, accountLabels, accountPin, accountReason, accountToken, autoAccountSetting, chooseAccount, defaultAccount, harnessAccounts, implicitAccount, loadAccounts, pinLabelText, pinnedAccount, sandboxRoots, validAccountName } from "./lib/accounts.mjs";
 import { lastStage } from "./lib/continue.mjs";
 import { accountHolds, holdsDir, windowOf } from "./lib/holds.mjs";
+import { personHolds, releaseRouteHold } from "./lib/route-holds.mjs";
 import { WAIT_KINDS, WAIT_POLL_MS, WAIT_TIMEOUT_EXIT, jsonLine, parseCursor, parseKinds, waitQueue } from "./lib/wait.mjs";
 
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
@@ -170,8 +171,22 @@ export const COMMANDS = {
     check: (f) => (f.since !== undefined && !parseCursor(f.since) ? `--since needs a cursor a line printed or a time with its zone, not ${JSON.stringify(f.since)}` : f.on !== undefined && !parseKinds(f.on) ? `--on takes ${WAIT_KINDS.join(", ")}, not ${JSON.stringify(f.on)}` : null),
     about: `one JSON line per event on the queue (or the issues named): ${WAIT_KINDS.join(", ")}; exits 0 after the first, ${WAIT_TIMEOUT_EXIT} at --timeout (with --follow, keeps going)`,
   },
+  hold: {
+    args: ["list|release"],
+    more: "account",
+    flags: { repo: WHERE.repo },
+    usage: "factory hold list [--repo OWNER/NAME] | factory hold release <account> [--repo OWNER/NAME]",
+    check: (f) => {
+      const [, what, ...others] = f._;
+      if (what !== "list" && what !== "release") return `hold takes list or release, not ${JSON.stringify(what)}`;
+      if (what === "list" && others.length) return `unexpected argument ${JSON.stringify(others[0])}`;
+      if (what === "release" && others.length !== 1) return others.length ? `unexpected argument ${JSON.stringify(others[1])}` : "missing <account>";
+      return null;
+    },
+    about: "the usage-limit holds of this machine's accounts (with --repo, of GitHub Actions and the cloud sandbox), or release one account's: every serve may start on it again at its next tick",
+  },
 };
-const usageOf = (cmd) => `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
+const usageOf = (cmd) => COMMANDS[cmd].usage ?? `factory ${cmd} ${[...COMMANDS[cmd].args.map((a) => `<${a}>`), ...(COMMANDS[cmd].more ? [`[<${COMMANDS[cmd].more}>...]`] : []), ...Object.entries(COMMANDS[cmd].flags).map(([k, t]) => `[--${k}${t === "bool" ? "" : ` ${t.value}`}]`)].join(" ")}`;
 /** The usage text: one command's, or every command's. */
 export const usage = (cmd = null) => (cmd ? `usage: ${usageOf(cmd)}\n  ${COMMANDS[cmd].about}\n` : `usage:\n${Object.keys(COMMANDS).map((c) => `  ${usageOf(c)}\n      ${COMMANDS[c].about}\n`).join("")}`);
 
@@ -1928,6 +1943,21 @@ export class Local {
   }
 
   /**
+   * Whether the account an Objective paused on (`off`, limitPaused) is no longer held before the reset the pause kept: its
+   * hold and guess are read again from the store each tick (this machine's files, or this loop's memory for a hold kept
+   * there), so a person's release (`factory hold release`, holds.mjs release), the folder cleared by hand, or any other
+   * end of the hold resumes it at the next tick, on that account. Said once, as it resumes.
+   */
+  heldNoMore(issue, off, now) {
+    const stores = [this.holdStore(), this.ownHolds].filter(Boolean);
+    if (stores.some((st) => st.avoidUntil(off.hold, now) !== null)) return false;
+    const at = this.holdStore().releasedAt?.(off.hold, now) ?? null;
+    const how = at !== null && at > off.since ? `was released (factory hold release) at ${new Date(at).toISOString()}` : "is no longer held on this machine";
+    log(`#${issue}: ${limitName(off.harness, off.account)} ${how}; resuming it now, before the reset it paused for`);
+    return true;
+  }
+
+  /**
    * Where `hold`'s record is kept (holdOf): this machine's holds (lib/holds.mjs), else this loop's memory. A loop made
    * without the constructor (a test's) keeps all of them in its memory.
    */
@@ -2081,7 +2111,7 @@ export class Local {
         // Paused on GitHub's 5xx: resumed after its doubling wait (serverWait), not on a probe, which answers while one
         // endpoint fails; taken up at once past OUTAGE.serverResumes resumes, so resume Blocks it.
         const server = serverDown(off.code) && off.server ? off.server.pauses > OUTAGE.serverResumes || now - off.since >= OUTAGE.blockMs || now >= off.server.at + serverWait(off.server.pauses) : null;
-        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
+        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (this.heldNoMore(issue.number, off, now) || (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null)))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
         if (due) out.push(issue.number);
         // Waiting on a usage limit's reset, on its account labels or on GitHub's 5xx: its claim kept alive while this loop is.
         else if (off.harness || server !== null) await this.beatPaused(issue.number, c);
@@ -3113,6 +3143,55 @@ export class Local {
   }
 }
 
+/** One account's holds as `factory hold` says them (holds.mjs list's entry), at `now`: `state` alone, its state's words. */
+export function holdText(h, now, { state = false } = {}) {
+  const iso = (ms) => new Date(ms).toISOString();
+  const parts = [];
+  if (h.until !== null) parts.push(`${h.until > now ? `held until ${iso(h.until)}${h.window ? ` (${h.window})` : ""}` : `hold ended ${iso(h.until)}`}, back-off count ${h.streak}`);
+  if (h.guess) parts.push(`${h.guess.until > now ? `passed over until about ${iso(h.guess.until)}` : `guess ended ${iso(h.guess.until)}`} (no reset reported), ${h.guess.streak} in a row`);
+  return state ? parts.join("; ") : `${h.account} (${HARNESS_NAMES[h.harness] || h.harness}): ${parts.join("; ")}`;
+}
+
+/**
+ * `factory hold list | release <account> [--repo OWNER/NAME]` (#376): the usage-limit holds this machine's serves share
+ * (lib/holds.mjs, read with the same checks as serve), or with --repo those of GitHub Actions and the cloud sandbox
+ * (lib/route-holds.mjs, read and written with the person's own token: local mode's, else their gh login). `release`
+ * writes one release record for the account named exactly as `list` shows it, which ends its holds and guesses and its
+ * back-off count for every reader at once; it removes no file and changes no other account. A name with nothing held
+ * is refused (exit 1), naming the ones that are. `home`, `now` and `out`/`err` are a test's own.
+ */
+export async function holdCommand(flags, { home = homedir(), now = Date.now(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s) } = {}) {
+  const [, what, account] = flags._;
+  const repo = flags.repo ? repoOf(flags.repo) : null;
+  const where = repo ? `on ${repo.full}'s holds issue (GitHub Actions and the cloud sandbox)` : `on this machine (${holdsDir(home)})`;
+  const opts = repo ? { token: sessionToken(repo.full) } : null;
+  if (what === "list") {
+    const list = repo ? (await personHolds(repo, opts, { now })).store.list(now) : accountHolds({ dir: holdsDir(home), onError: () => {} }).list(now);
+    out(list.length ? `${list.map((h) => holdText(h, now)).join("\n")}\n` : `no account is held or passed over ${where}\n`);
+    return 0;
+  }
+  let released;
+  let known;
+  if (repo) ({ released, known } = await releaseRouteHold(repo, account, opts, { now }));
+  else {
+    let failed = null;
+    const store = accountHolds({ dir: holdsDir(home), onError: (e) => (failed = e) });
+    known = store.list(now).map((h) => h.account);
+    released = store.release({ account, now });
+    // A record that could not be written to the folder is kept in this process alone, which ends with it: nothing released.
+    if (failed) {
+      err(`factory: the release could not be written to ${holdsDir(home)} (${String(failed?.message || failed).slice(0, 160)}); nothing was released\n`);
+      return 1;
+    }
+  }
+  if (!released) {
+    err(`factory: nothing is held or passed over for ${JSON.stringify(account)} ${where}; ${known.length ? `the accounts that are: ${known.join(", ")}` : "no account is"}\n`);
+    return 1;
+  }
+  out(`released ${released.account} (${HARNESS_NAMES[released.harness] || released.harness}), which was ${holdText(released, now, { state: true })}\n${repo ? "the next stage on GitHub Actions or the cloud sandbox may start on it" : "every serve on this machine may start on it at its next tick, and an Objective paused on it resumes then"}\n`);
+  return 0;
+}
+
 /**
  * The token for Factory's own writes from a session (`deliver`, `post-review`): the local token when set up, else the
  * developer's gh login. These commands run no model, so the writes are Factory's, made on the developer's behalf.
@@ -3640,6 +3719,10 @@ async function main() {
   }
   if (cmd === "wait") {
     process.exitCode = await waitForQueue(flags);
+    return;
+  }
+  if (cmd === "hold") {
+    process.exitCode = await holdCommand(flags);
     return;
   }
   if (cmd === "serve") await (await new Local(flags).init({ serve: true })).serve({ once: !!flags.once, intervalMs: (flags.interval ?? 30) * 1000 });

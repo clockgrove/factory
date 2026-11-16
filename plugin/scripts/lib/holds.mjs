@@ -8,7 +8,9 @@
 // choice on (#266), each account also has one `<key>.started.json`, replaced whole at each stage start on it: the
 // machine's round-robin, where the last writer wins and nothing else depends on it. The folder is outside
 // every directory a sandbox may write, and the outer sandbox denies writing it (lib/local.mjs harnessOuterSettings). A
-// file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read.
+// file a sandbox or another user could have made (a link, another owner, group or world write bits) is not read. A
+// person lifts an account's hold with `factory hold release` (#376): one more file, a release record, that ends every
+// record made on the account before it, for every serve, and resets its back-off count; no file need be removed.
 import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +27,10 @@ export const HOLD_FORGET_MS = 60 * 60_000;
  * for longer (a monthly quota) is retried less and less often rather than every hour or two (#332).
  */
 export const GUESS_FORGET_MS = 24 * 60 * 60_000;
-/** Whether record `r` is forgotten at `now`: HOLD_FORGET_MS past its end, GUESS_FORGET_MS for a guess or a served pass's. */
+/**
+ * Whether record `r` is forgotten at `now`: HOLD_FORGET_MS past its end, GUESS_FORGET_MS for a guess or a served pass's
+ * (a release record is one too: `release`).
+ */
 export const forgotten = (r, now) => now - r.until > (r.guess === true || r.served === true ? GUESS_FORGET_MS : HOLD_FORGET_MS);
 /** The longest a hold lasts past now: a week's window and a day more. A record naming a later end is held to it. */
 export const HOLD_MAX_MS = 8 * 24 * 60 * 60_000;
@@ -46,6 +51,8 @@ const NAME = /^[a-z0-9][a-z0-9-]{0,49}$/;
 /** A hold's key: a declared account's name, or a harness's login (`<harness>@<12 hex>`, or `@env` for a token in serve's env). */
 const KEY_SRC = "[a-z0-9][a-z0-9-]{0,49}(?:@(?:[0-9a-f]{12}|env))?";
 const KEY = new RegExp(`^${KEY_SRC}$`);
+/** Whether `k` is a hold's key a record may carry (a declared account's name, or a login's). */
+export const holdKey = (k) => typeof k === "string" && KEY.test(k);
 const FILE = new RegExp(`^(${KEY_SRC})\\.[0-9a-f]{16}\\.json$`);
 const TEMP = new RegExp(`^\\.${KEY_SRC}\\.[0-9a-f]{16}\\.tmp$`);
 const STARTED = new RegExp(`^(${KEY_SRC})\\.started\\.json$`);
@@ -55,13 +62,13 @@ const MAX_BYTES = 4096;
 const WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 export const windowOf = (w) => (typeof w === "string" && WINDOW.test(w) ? w : null);
 
-/** One record, checked: {harness, account, until, streak, at, window?, served?, guess?}, or null. */
+/** One record, checked: {harness, account, until, streak, at, window?, served?, guess?, released?}, or null. */
 function recordOf(v, account) {
   if (!v || typeof v !== "object" || v.account !== account || typeof v.harness !== "string" || !NAME.test(v.harness)) return null;
   const { until, at, streak } = v;
   if (![until, at].every(Number.isSafeInteger) || !Number.isSafeInteger(streak) || streak < 0) return null;
   const window = windowOf(v.window);
-  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}), ...(v.served === true ? { served: true } : {}), ...(v.guess === true ? { guess: true } : {}) };
+  return { harness: v.harness, account, until, streak, at, ...(window ? { window } : {}), ...(v.served === true ? { served: true } : {}), ...(v.guess === true ? { guess: true } : {}), ...(v.released === true ? { released: true } : {}) };
 }
 
 /**
@@ -79,6 +86,16 @@ export function heldRecord(v, now) {
   if (typeof v?.account !== "string" || !KEY.test(v.account)) return null;
   const r = recordOf(v, v.account);
   return r && !forgotten(r, now) ? clamped(r, now) : null;
+}
+
+/**
+ * The records that stand: every release record (`release`) ends each record of its account made at or before it, and
+ * goes itself. A release made "after now" (another clock's) was clamped to the oldest, so it ends nothing.
+ */
+export function standing(records) {
+  const released = new Map();
+  for (const r of records) if (r.released && r.at > (released.get(r.account) ?? -Infinity)) released.set(r.account, r.at);
+  return records.filter((r) => !r.released && !(r.at <= (released.get(r.account) ?? -Infinity)));
 }
 
 /** Whether `st` is a file or folder this user made that no one else may write: never a link. */
@@ -176,6 +193,14 @@ const START = (key) => `${key}.started.json`;
  *   a login's (`<harness>@…`) goes START_FORGET_MS after its last start, since another serve may run on it.
  * - `startedAt(account, now)`: when a stage last started on the account (ms), or null; a time after `now` (another clock's,
  *   or a hand-made file) counts as long ago, as a hold record's does.
+ * - `list(now)`: every account the records remember a hold or a guess of, by key: {account, harness, until (the hold's
+ *   end, past or ahead; null with only guesses), window, streak (the back-off count), guess ({until, streak}, or null)}.
+ * - `release({account, now})`: a person lifts the account's holds and guesses (`factory hold release`, #376): one record
+ *   that ends every record of the account made before it (standing), for every serve here, so its hold, its guess and
+ *   its back-off count are gone, and a later limit counts from one. It is a served pass's record too, so a serve on an
+ *   older Factory, which knows no release, at least ends the guess and the count. Returns what it ended (`list`'s entry),
+ *   or null when the records remember nothing of the account, and writes nothing then.
+ * - `releasedAt(account, now)`: when the account was last released (ms), while that record is kept; else null.
  * `account` is the hold's key: a declared account's name, or a login's (local.mjs holdOf).
  * With no `dir`, `seed` is the records already kept elsewhere (heldRecord's), and `onPut` hears each record this store
  * makes, for its caller to keep there (route-holds.mjs).
@@ -191,10 +216,12 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
   }
   let kept = dir ? [] : [...seed];
   const starts = new Map();
-  const records = (now) => {
+  // Every record kept, release records too; `records` is those that stand (standing).
+  const all = (now) => {
     kept = kept.filter((r) => !forgotten(r, now));
     return dir ? [...kept, ...readDir(dir, now, uid)] : kept;
   };
+  const records = (now) => standing(all(now));
   const put = (r) => {
     if (!dir || !KEY.test(r.account) || !NAME.test(r.harness)) {
       kept.push(r);
@@ -258,6 +285,23 @@ export function accountHolds({ dir = null, uid = process.getuid?.(), onError = (
     },
     limitedAt(account, now) {
       return of(account, now)?.limitedAt ?? null;
+    },
+    list(now) {
+      const keys = [...new Set(records(now).map((r) => r.account))].sort();
+      return keys.flatMap((account) => {
+        const h = of(account, now);
+        return h && (h.until !== null || h.guess) ? [{ account, harness: h.harness, until: h.until, window: h.window, streak: h.streak, guess: h.guess }] : [];
+      });
+    },
+    release({ account, now }) {
+      const h = this.list(now).find((x) => x.account === account);
+      if (!h) return null;
+      put({ harness: h.harness, account, until: now + HOLD_MAX_MS, streak: 0, at: now, served: true, released: true });
+      return h;
+    },
+    releasedAt(account, now) {
+      const at = all(now).filter((r) => r.released && r.account === account).map((r) => r.at);
+      return at.length ? Math.max(...at) : null;
     },
     started({ harness, account, now }) {
       starts.set(account, now);

@@ -14,9 +14,9 @@
       }
     },
     "factory-doctor": {
-      "sha256": "790700898b1764fafe7cc7a348a2cf37b5a9fb32944778240323907aa670bc76",
+      "sha256": "4d5b8ce441cf9c74e68276c54c1f926632b36e648c1c9c6e705bff83b18759dc",
       "lines": 43,
-      "words": 698
+      "words": 700
     },
     "factory-draft": {
       "sha256": "a9af8316d55c803f4f04e875cd8033843e953d5aa4b5015f8256b52ec49c46a1",
@@ -110,14 +110,14 @@
       "words": 699
     },
     "factory-setup": {
-      "sha256": "06f8f9f9e02ac9d08a827d8fc1f0461b9a30c1b0fc569f09a06be333a4d805f4",
+      "sha256": "e5257596abe1e82f6d086398f5b9e721a2837f4270697f0cf7d3a3406d06ce7b",
       "lines": 47,
       "words": 700,
       "files": {
         "reference.md": {
-          "sha256": "196a7f9f0c1f3a4ecb18fc3fd29dc2a92e4a40c25300657625fb1bd28a52afc1",
-          "lines": 36,
-          "words": 680
+          "sha256": "f67b112475cf5c41c09ddf4a643028f8494cbbd1a03a82c15f0d8031716229bc",
+          "lines": 44,
+          "words": 835
         }
       }
     },

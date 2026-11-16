@@ -239,6 +239,39 @@ test("freshProbe connects to no private, loopback or link-local address: an addr
   }
 });
 
+test("freshProbe reaches the network as the GitHub client does: through the stage's own proxy when NODE_USE_ENV_PROXY is on, a fresh connection each time", async () => {
+  const seen = [];
+  let connections = 0;
+  const proxy = createServer((req, res) => (seen.push(`${req.method} ${req.url}`), res.end()));
+  proxy.on("connect", (req, sock) => (seen.push(`CONNECT ${req.url}`), sock.end("HTTP/1.1 502 Bad Gateway\r\n\r\n")));
+  proxy.on("connection", () => (connections += 1));
+  await new Promise((r) => proxy.listen(0, "127.0.0.1", r));
+  const at = `http://127.0.0.1:${proxy.address().port}`;
+  const lookups = [];
+  const saved = OUTAGE.lookup;
+  OUTAGE.lookup = (host, opts, cb) => (lookups.push(host), queueMicrotask(() => cb(again(host))));
+  try {
+    const env = { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: at, HTTPS_PROXY: at, NO_PROXY: "direct.test" };
+    // The proxy answers for the origin, which this machine never looks up; two checks, two connections.
+    assert.equal(await freshProbe("http://api.github.test", env), null);
+    assert.equal(await freshProbe("http://api.github.test", env), null);
+    assert.equal(connections, 2, "no kept-alive socket answers for the next check");
+    // A tunnel the proxy could not open (its 502): the origin unreached.
+    assert.equal(await freshProbe("https://api.github.test", env), "ERR_PROXY_TUNNEL");
+    assert.deepEqual(seen, ["HEAD http://api.github.test/", "HEAD http://api.github.test/", "CONNECT api.github.test:443"]);
+    assert.deepEqual(lookups, []);
+    // NO_PROXY's origin, and any origin with NODE_USE_ENV_PROXY off (Node's fetch ignores HTTPS_PROXY then too): direct,
+    // with its own lookup.
+    assert.equal(await freshProbe("http://direct.test", env), "EAI_AGAIN");
+    assert.equal(await freshProbe("http://api.github.test", { HTTP_PROXY: at, HTTPS_PROXY: at }), "EAI_AGAIN");
+    assert.deepEqual(lookups, ["direct.test", "api.github.test"]);
+    assert.equal(seen.length, 3, "the proxy saw neither");
+  } finally {
+    OUTAGE.lookup = saved;
+    await new Promise((r) => proxy.close(r));
+  }
+});
+
 test("setup: a run that met an outage gets one more once the network is back; a Block after it says its first run met an outage and the network was up", async () => {
   const c = checkout({ fails: 2 });
   let down = true;

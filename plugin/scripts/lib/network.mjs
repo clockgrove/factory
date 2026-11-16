@@ -545,17 +545,27 @@ export const TEMPORARY_DNS = new Set(["EAI_AGAIN"]);
 /** The most allowed hosts a set-up step's judgement looks up. */
 export const STEP_HOSTS_MAX = 4;
 
+// The proxy settings Node reads when NODE_USE_ENV_PROXY is on, as the stage process's own environment holds them.
+const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
+
 /**
- * One reachability check on a fresh connection: its own DNS lookup (OUTAGE.lookup) and its own socket (no agent, so no
- * pooled connection answers for a network that is gone), a HEAD to `origin`. null when it gets any HTTP answer, else
- * why not (a connect-level code, or "no answer"). An origin whose name resolves to a private, loopback or link-local
- * address (privateAddress) is not connected to: null, no claim either way.
+ * One reachability check on a fresh connection: a new agent with no kept-alive socket, so no pooled connection answers
+ * for a network that is gone, and a HEAD to `origin`. It reaches the network as Factory's GitHub client does (Node's
+ * fetch): through the proxy the stage process's own environment names (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) when
+ * NODE_USE_ENV_PROXY is 1, as local mode's stages run, else directly; never a setting of the checkout's. Directly, it
+ * makes its own DNS lookup (OUTAGE.lookup) and connects to no private, loopback or link-local address (privateAddress):
+ * such an origin gets null, no claim either way. Through the proxy, the proxy resolves the origin, and a tunnel the
+ * proxy could not open (ERR_PROXY_TUNNEL, its 502) is the origin unreached. null on any HTTP answer from the origin,
+ * else why not (a connect-level code, or "no answer").
  */
-export function freshProbe(origin) {
+export function freshProbe(origin, env = process.env) {
   const u = new URL(origin);
   // An address given as such is never looked up: judged as written.
   const literal = u.hostname.replace(/^\[|\]$/g, "");
   if (isIP(literal) && privateAddress(literal)) return Promise.resolve(null);
+  const mod = u.protocol === "https:" ? https : http;
+  const proxyEnv = env.NODE_USE_ENV_PROXY === "1" ? Object.fromEntries(PROXY_VARS.filter((k) => env[k]).map((k) => [k, env[k]])) : null;
+  const agent = new mod.Agent({ keepAlive: false, ...(proxyEnv ? { proxyEnv } : {}) });
   return new Promise((resolve) => {
     let refused = false;
     const lookup = (host, opts, cb) =>
@@ -568,12 +578,13 @@ export function freshProbe(origin) {
         }
         cb(null, address, family);
       });
-    const req = (u.protocol === "https:" ? https : http).request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent: false, lookup, headers: { "user-agent": "clockgrove-factory" } }, (res) => {
+    const req = mod.request({ protocol: u.protocol, hostname: u.hostname, port: u.port || undefined, path: "/", method: "HEAD", agent, lookup, headers: { "user-agent": "clockgrove-factory" } }, (res) => {
       res.resume();
       resolve(null);
     });
     req.setTimeout(OUTAGE.probeTimeoutMs, () => req.destroy(Object.assign(new Error("no answer"), { code: "" })));
     req.on("error", (e) => resolve(refused ? null : causeCode(e) || "no answer"));
+    req.on("close", () => agent.destroy());
     req.end();
   });
 }

@@ -1,14 +1,14 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { harnessActivity } from "../scripts/lib/logic.mjs";
 import { readFileSync } from "node:fs";
-import { agentRoute, cpuTimeMs, exec, hangVerdict, runReading } from "../scripts/lib/proc.mjs";
+import { agentRoute, cpuTimeMs, exec, hangVerdict, harnessHome, runReading } from "../scripts/lib/proc.mjs";
 import { runHarness } from "../scripts/lib/harness.mjs";
 
 // A silent run is judged from its own state, never the silence (#388). The window here is short; every process is real:
@@ -55,7 +55,7 @@ test("exec: an open command item whose command uses no CPU and does no I/O is hu
 // A harness waiting on its model with no command open: its own timers use CPU and it reads its own files (an idle Claude
 // Code reads ~157 KB a minute), so only the answer's own lines tell a live stream from a stalled one.
 const delta = line({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "x" } } });
-const waiting = (deltas) => `let n = 0; const t = setInterval(() => { if (n++ < ${deltas}) console.log(${JSON.stringify(delta)}); }, 50); const fs = require("node:fs"); const fd = fs.openSync(process.execPath, "r"); const buf = Buffer.alloc(65536); setInterval(() => { let x = 0; for (let i = 0; i < 2e6; i++) x += i; fs.readSync(fd, buf, 0, buf.length, 0); }, 20); setTimeout(() => process.exit(0), ${WINDOW * 8});`;
+const waiting = (deltas, exitMs = WINDOW * 40) => `let n = 0; const t = setInterval(() => { if (n++ < ${deltas}) console.log(${JSON.stringify(delta)}); }, 50); const fs = require("node:fs"); const fd = fs.openSync(process.execPath, "r"); const buf = Buffer.alloc(65536); setInterval(() => { let x = 0; for (let i = 0; i < 2e6; i++) x += i; fs.readSync(fd, buf, 0, buf.length, 0); }, 20); setTimeout(() => process.exit(0), ${exitMs});`;
 
 test("exec: with no item open, a harness that streams its answer is hung once the stream stalls, whatever its CPU and reads", async () => {
   const seen = [];
@@ -63,8 +63,50 @@ test("exec: with no item open, a harness that streams its answer is hung once th
   assert.deepEqual([r.idle, r.idleOpen, !!r.signal], [true, 0, true]);
   assert.deepEqual([seen.length, r.stdout], [1, `${seen[0]}\n`], "the deltas count as output and go no further");
   // A harness that streams no answer (Codex: it ends a stalled stream itself): the silence decides nothing.
-  const codex = await exec(process.execPath, ["-e", waiting(0)], { idleMs: WINDOW, fileStdio: true });
+  const codex = await exec(process.execPath, ["-e", waiting(0, WINDOW * 8)], { idleMs: WINDOW, fileStdio: true });
   assert.deepEqual([codex.code, codex.idle], [0, false]);
+});
+
+test("exec: a helper the harness ships beside its own binary is the harness's, so its pipe I/O does not keep an idle command alive", async () => {
+  // Codex runs codex-code-mode-host from its own install directory and talks to it over pipes on every turn.
+  const home = mkdtempSync(join(tmpdir(), "factory-harness-home-"));
+  const helper = join(home, "code-mode-host");
+  // A real binary in that directory (the kernel names a process's executable by the path it ran).
+  try {
+    linkSync(process.execPath, helper);
+  } catch {
+    copyFileSync(process.execPath, helper);
+  }
+  const script = `const cp = require("node:child_process"); console.log(${JSON.stringify(started)}); const h = cp.spawn(${JSON.stringify(helper)}, ["-e", "process.stdin.pipe(process.stdout)"], { stdio: ["pipe", "pipe", "ignore"] }); h.stdout.on("data", () => {}); setInterval(() => h.stdin.write("x"), 50); cp.spawn("sleep", ["60"], { stdio: ["ignore", "pipe", "ignore"] });`;
+  try {
+    const a = harnessActivity();
+    const r = await exec(process.execPath, ["-e", script], { idleMs: WINDOW, onLine: a.feed, openItems: a.open, fileStdio: true, group: true, harnessHome: home });
+    assert.deepEqual([r.idle, r.idleOpen], [true, 1], "the idle command is judged on its own");
+    // Without the harness's install directory the helper reads as a command, and its I/O as the command's progress.
+    const b = harnessActivity();
+    const blind = await exec(process.execPath, ["-e", `${script} setTimeout(() => process.exit(0), ${WINDOW * 6});`], { idleMs: WINDOW, onLine: b.feed, openItems: b.open, fileStdio: true, group: true });
+    assert.deepEqual([blind.code, blind.idle], [0, false]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("harnessHome: a CLI's install directory, symlinks resolved: its npm package, else its own directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-home-"));
+  try {
+    const pkg = join(root, "lib", "node_modules", "@openai", "codex");
+    mkdirSync(join(pkg, "bin"), { recursive: true });
+    writeFileSync(join(pkg, "bin", "codex.js"), "");
+    mkdirSync(join(root, "bin"));
+    symlinkSync(join(pkg, "bin", "codex.js"), join(root, "bin", "codex"));
+    const plain = join(root, "releases", "1.0", "bin");
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, "codex"), "");
+    symlinkSync(join(plain, "codex"), join(root, "bin", "codex2"));
+    assert.deepEqual([harnessHome(join(root, "bin", "codex")), harnessHome(join(root, "bin", "codex2")), harnessHome(join(root, "none"))], [pkg, plain, null].map((p) => (p ? realpathSync(p) : null)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("exec: a command that left the run's group and tree (setsid, double fork) is found by the run's tag", async () => {
@@ -98,8 +140,8 @@ test("runReading: /proc, and ps with lsof, find a run's harness and its commands
     // The harness's stdout is its own; its command's is not (as a harness captures what its commands print).
     const command = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(busy(15_000))}], { stdio: "ignore" }); setTimeout(() => {}, 15_000);`;
     const child = spawn(process.execPath, ["-e", command], { stdio: ["ignore", "pipe", "ignore"] });
-    await wait(200);
-    const before = await runReading(child.pid, { procfs });
+    let before = null;
+    for (const end = Date.now() + 10_000; Date.now() < end && !(before?.procs.size >= 2); await wait(50)) before = await runReading(child.pid, { procfs });
     const roles = [...before.procs.values()].map((p) => [p.pid === child.pid, p.role]);
     assert.deepEqual(roles.sort(), [[false, "command"], [true, "harness"]], `procfs ${procfs}`);
     assert.equal(before.ioRead, procfs);

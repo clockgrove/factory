@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentUser, asAgent, exec, onPath, sudoEnv } from "./proc.mjs";
+import { agentUser, asAgent, exec, harnessHome, onPath, sudoEnv, whichSync } from "./proc.mjs";
 import { readAgentFiles } from "./handoff.mjs";
 import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./claude-local-probe.mjs";
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
@@ -398,6 +398,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // Every route: the credentials (SHELL_SECRET_KEYS, its own COPILOT_GITHUB_TOKEN included) are removed from its shell
       // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
       // --stream on: the model's answer shows on stdout as it arrives (`assistant.*_delta` events), as Claude Code's above.
+      // Copilot streams by default; the flag overrides a user config with `stream: false`.
       const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json", "--stream", "on"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
@@ -1315,7 +1316,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     onLine?.(l);
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, answerStreams: !!HARNESS_DELTAS[harness], harnessHome: harnessHome(whichSync(cmd, childEnv) || cmd), dropLine: HARNESS_DELTAS[harness] ? (l) => deltaLine(harness, l) : null, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the

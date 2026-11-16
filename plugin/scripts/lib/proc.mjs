@@ -2,10 +2,10 @@
 // stdout/stderr. Used for gh, git and the harness CLIs. No dependencies.
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
 import { appendOwn } from "./fsafe.mjs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, readlink, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
@@ -300,7 +300,7 @@ function fileStdio(limit) {
  * open at the kill. `dropLine`: stdout lines that count as output for that check and are not kept, teed or handed to
  * `onLine` (a harness's answer deltas).
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, dropLine = null, idleMs = 0, openItems = null, answerStreams = false, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, dropLine = null, idleMs = 0, openItems = null, answerStreams = false, harnessHome = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -374,7 +374,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     let exited = false;
     let baseline = null;
     if (idleMs > 0 && child.pid) {
-      const opts = { group, tag, agent: agentRoute(args), streamFd: files ? files.streamFd : null };
+      const opts = { group, tag, agent: agentRoute(args), streamFd: files ? files.streamFd : null, harnessHome };
       const read = () => runReading(child.pid, opts).catch(() => null);
       let before = null;
       let ticking = false;
@@ -661,6 +661,24 @@ export function agentRoute(args) {
   return args.includes("factory-agent-wrap") ? { cgroup: AGENT_CGROUP } : null;
 }
 
+/**
+ * The install directory of the harness CLI `file` (as PATH finds it), symlinks resolved: the npm package it belongs to
+ * (the last `node_modules/<name>` or `node_modules/@scope/<name>` in its real path, where its native binary and
+ * helpers live), else its own directory. Null when it cannot be resolved.
+ */
+export function harnessHome(file) {
+  let real;
+  try {
+    real = realpathSync(file);
+  } catch {
+    return null;
+  }
+  const parts = real.split("/");
+  const at = parts.lastIndexOf("node_modules");
+  if (at >= 0 && parts.length > at + 2) return parts.slice(0, at + (parts[at + 1].startsWith("@") ? 3 : 2)).join("/");
+  return parts.slice(0, -1).join("/");
+}
+
 /** A systemd unit's cgroup directory (/sys/fs/cgroup/system.slice/<unit>.service), as its manager reports it; null while it has none. */
 async function unitCgroup({ name, user = false }) {
   const out = await runOut("systemctl", [...(user ? ["--user"] : []), "show", "--property=ControlGroup", "--value", `${name}.service`], { env: { ...process.env, PATH: SAFE_PATH } });
@@ -686,14 +704,15 @@ const ioCounts = (text) => {
 };
 
 /**
- * Linux: each pid's I/O counts (rchar, wchar) and what its stdout is ("<dev>:<ino>", or "stream" when it is the run's
- * own stdout, `stream`: Factory's descriptor of it). Read directly; with `privileged` (an agent route, whose processes
+ * Linux: each pid's I/O counts (rchar, wchar), what its stdout is ("<dev>:<ino>", or "stream" when it is the run's
+ * own stdout, `streamFd`: Factory's descriptor of it) and its executable (the kernel's resolved path). Read directly; with `privileged` (an agent route, whose processes
  * are another uid's and need ptrace access), what that cannot read is read through `sudo -n`, with no shell, and the
  * stream through it too, so both sides of the comparison come from one reader. Whatever neither reads stays null.
  */
 async function procIo(pids, streamFd, privileged) {
   const io = new Map();
   const fd1 = new Map();
+  const exe = new Map();
   const id = (st) => `${st.dev}:${st.ino}`;
   const streams = new Set();
   if (streamFd !== null) streams.add(await stat(`/proc/self/fd/${streamFd}`).then(id, () => null));
@@ -701,14 +720,21 @@ async function procIo(pids, streamFd, privileged) {
     pids.map(async (p) => {
       io.set(p, ioCounts(await readFile(`/proc/${p}/io`, "utf8").catch(() => null)));
       fd1.set(p, await stat(`/proc/${p}/fd/1`).then(id, () => null));
+      exe.set(p, await readlink(`/proc/${p}/exe`).catch(() => null));
     }),
   );
-  const missed = pids.filter((p) => io.get(p) === null || fd1.get(p) === null);
+  const missed = pids.filter((p) => io.get(p) === null || fd1.get(p) === null || exe.get(p) === null);
   if (privileged && missed.length) {
     // Each line names its file, so a pid gone meanwhile fails alone. Factory's own descriptor goes by its pid.
     const ours = streamFd !== null ? `/proc/${process.pid}/fd/${streamFd}` : null;
     const grep = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/grep", "-H", "-E", "^(rchar|wchar):", ...missed.map((p) => `/proc/${p}/io`)]);
     const st = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/stat", "-L", "-c", "%n %d %i", ...(ours ? [ours] : []), ...missed.map((p) => `/proc/${p}/fd/1`)]);
+    const found = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/find", ...missed.map((p) => `/proc/${p}/exe`), "-maxdepth", "0", "-printf", "%p\t%l\n"]);
+    const exes = new Map();
+    for (const l of String(found || "").split("\n")) {
+      const m = /^\/proc\/(\d+)\/exe\t(.+)$/.exec(l);
+      if (m) exes.set(Number(m[1]), m[2]);
+    }
     const lines = new Map();
     for (const l of String(grep || "").split("\n")) {
       const m = /^\/proc\/(\d+)\/io:(.*)$/.exec(l);
@@ -723,38 +749,41 @@ async function procIo(pids, streamFd, privileged) {
     for (const p of missed) {
       if (io.get(p) === null) io.set(p, ioCounts(lines.get(p)));
       if (fd1.get(p) === null) fd1.set(p, ids.get(`/proc/${p}/fd/1`) ?? null);
+      if (exe.get(p) === null) exe.set(p, exes.get(p) ?? null);
     }
   }
   streams.delete(null);
   for (const [p, v] of fd1) if (v !== null && streams.has(v)) fd1.set(p, "stream");
-  return { io, fd1 };
+  return { io, fd1, exe };
 }
 
-/** Elsewhere (no /proc): what each pid's stdout is, from `lsof` with the run's stream read beside it; no I/O counts. */
-async function lsofFd1(pids, streamFd) {
+/** Elsewhere (no /proc): each pid's stdout and executable, from `lsof` with the run's stream read beside them; no I/O counts. */
+async function lsofFiles(pids, streamFd) {
   const fd1 = new Map(pids.map((p) => [p, null]));
-  if (!pids.length) return fd1;
-  const out = await runOut("lsof", ["-n", "-P", "-a", "-d", `1${streamFd !== null ? `,${streamFd}` : ""}`, "-F", "pfDi", "-p", [process.pid, ...pids].join(",")]);
+  const exe = new Map(pids.map((p) => [p, null]));
+  if (!pids.length) return { fd1, exe };
+  const out = await runOut("lsof", ["-n", "-P", "-a", "-d", `1,txt${streamFd !== null ? `,${streamFd}` : ""}`, "-F", "pfDin", "-p", [process.pid, ...pids].join(",")]);
   let pid = null;
   let fd = null;
-  const seen = new Map();
   let dev = null;
+  const seen = new Map();
   for (const l of String(out || "").split("\n")) {
     const v = l.slice(1);
     if (l[0] === "p") pid = Number(v);
     else if (l[0] === "f") {
       fd = v;
       dev = null;
-    }
-    else if (l[0] === "D") dev = v;
+    } else if (l[0] === "D") dev = v;
     else if (l[0] === "i") seen.set(`${pid}/${fd}`, `${dev}:${v}`);
+    // The first `txt` file is the executable.
+    else if (l[0] === "n" && fd === "txt" && exe.get(pid) === null) exe.set(pid, v);
   }
   const stream = streamFd !== null ? (seen.get(`${process.pid}/${streamFd}`) ?? null) : null;
   for (const p of pids) {
     const v = seen.get(`${p}/1`);
     if (v) fd1.set(p, stream && v === stream ? "stream" : v);
   }
-  return fd1;
+  return { fd1, exe };
 }
 
 /**
@@ -767,10 +796,12 @@ async function lsofFd1(pids, streamFd) {
  * Role: the harness and its launchers (sudo, systemd-run's unit, srt, bwrap) write the run's stdout and pass it on
  * unchanged, so a process is `harness` when it is a root of the run (its parent outside it) whose stdout is the run's
  * stream (or `pid` itself), or a child of a `harness` with its parent's stdout; every other process is a `command` the
- * harness started; null when its stdout cannot be read. Null altogether when the run cannot be found: `pid` absent from
+ * harness started, unless its executable lies in `harnessHome` (the harness CLI's install directory, harnessHome()):
+ * a helper the harness ships and talks to over pipes is the harness's. Null when its stdout or that executable cannot
+ * be read. Null altogether when the run cannot be found: `pid` absent from
  * the processes read (a hidepid /proc, an unparsed row), or an agent route's cgroup unread or empty.
  */
-export async function runReading(pid, { group = false, tag = null, agent = null, streamFd = null, procfs = process.platform === "linux" } = {}) {
+export async function runReading(pid, { group = false, tag = null, agent = null, streamFd = null, harnessHome = null, procfs = process.platform === "linux" } = {}) {
   const rows = procfs ? await procRows() : await psRows();
   if (!rows) return null;
   let members;
@@ -799,7 +830,8 @@ export async function runReading(pid, { group = false, tag = null, agent = null,
     }
   }
   const pids = [...members];
-  const { io, fd1 } = procfs ? await procIo(pids, streamFd, !!agent) : { io: new Map(), fd1: await lsofFd1(pids, streamFd) };
+  const { io, fd1, exe } = procfs ? await procIo(pids, streamFd, !!agent) : { io: new Map(), ...(await lsofFiles(pids, streamFd)) };
+  const home = harnessHome ? `${harnessHome.replace(/\/+$/, "")}/` : null;
   // Roles, parents first. An unread stdout (null) leaves the role unknown, unless it is the run's own stream.
   const role = new Map();
   const roleOf = (p) => {
@@ -811,7 +843,11 @@ export async function runReading(pid, { group = false, tag = null, agent = null,
     else if (own === "stream") r = members.has(parent) && roleOf(parent) !== "harness" ? roleOf(parent) : "harness";
     else if (!members.has(parent)) r = own === null ? null : "command";
     else if (roleOf(parent) !== "harness") r = roleOf(parent);
-    else r = own === null || (fd1.get(parent) ?? null) === null ? null : own === fd1.get(parent) ? "harness" : "command";
+    else if (own === null || (fd1.get(parent) ?? null) === null) r = null;
+    else if (own === fd1.get(parent)) r = "harness";
+    // A helper the harness ships beside its own binary (Codex's codex-code-mode-host) talks to it over pipes of its own.
+    else if (!home) r = "command";
+    else r = exe.get(p) ? (exe.get(p).startsWith(home) ? "harness" : "command") : null;
     role.set(p, r);
     return r;
   };

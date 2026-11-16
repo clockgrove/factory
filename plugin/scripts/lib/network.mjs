@@ -73,8 +73,19 @@ export function spentResetOf(status, headers, message, now = OUTAGE.now()) {
  */
 export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(causeCode(e)));
 
-/** Whether an outage's code is GitHub answering 5xx past the client's retries ("HTTP 500"), not a lost network. */
-export const serverDown = (code) => /^HTTP 5\d\d$/.test(String(code));
+/**
+ * Whether an outage's code is a host that answered, and failed or was busy, past the retries ("HTTP 500"): GitHub's 5xx
+ * past the client's, or a model provider's busy answer (408, 425, 429 or 5xx: usage.mjs providerBusy) past runHarness's
+ * waits. Not a lost network. The code alone does not say whose: the outage's origin does (GitHub's is githubOrigin(); a
+ * provider pause carries the provider's, harness.mjs providerOrigin), so anything that judges GitHub guards on it.
+ */
+export const serverDown = (code) => /^HTTP (5\d\d|408|425|429)$/.test(String(code));
+
+/**
+ * The wait before going again after the `pauses`th busy or failed answer from a host (serverDown): 1, 2, 4… minutes, up
+ * to OUTAGE.serverResumeMaxMs. serve's resume of such a pause, and runHarness's wait for a busy provider in place.
+ */
+export const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
 
 /**
  * How an outage of `host` with `code` reads in a reason: GitHub's 5xx (on `endpoint`, the request that met it, when
@@ -97,10 +108,12 @@ export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${
  * still refused after its stated reset waits `probeMs` (doubling) instead. `exitWaitMs`: how long past its deadline a
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
  * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
- * after). `serverResumeMs`, `serverResumeMaxMs`: serve resumes an Objective paused on GitHub answering 5xx past the
- * client's retries (serverDown) after 1, 2, 4… minutes, doubling up to half an hour, since a probe of the host answers
- * while one endpoint fails; whether it goes on waiting (up to `blockMs`) or Blocks is GitHub's status page's answer
- * (adapters/github-status.mjs, local.mjs resume). `now`, `sleep` and `random` are replaced in tests.
+ * after). `serverResumeMs`, `serverResumeMaxMs`: serve resumes an Objective paused on a host that answered, and failed
+ * or was busy, past the retries (serverDown: GitHub's 5xx, a model provider's busy answer) after 1, 2, 4… minutes,
+ * doubling up to half an hour (serverWait), since a probe of the host answers while one endpoint fails; it waits on up
+ * to `blockMs`, and for GitHub's own 5xx GitHub's status page decides whether the request gets one more try and then
+ * Blocks (adapters/github-status.mjs, local.mjs resume). runHarness waits a busy provider out in place on the same
+ * doubling. `now`, `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
@@ -167,7 +180,7 @@ export const originOf = (url) => {
 export class NetworkDown extends Error {
   constructor({ origin, code, since, resetAt = null, key = null }) {
     const spent = Number.isFinite(resetAt);
-    super(spent ? `${limitName(origin, key)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
+    super(spent ? `${limitName(origin, key)} is spent until ${iso(resetAt)} (met at ${iso(since)})` : serverDown(code) ? `${hostOf(origin)} answered ${code} to every try since ${iso(since)}` : `${hostOf(origin)} unreachable from this machine since ${iso(since)} (${code || "no answer"})`);
     this.name = "NetworkDown";
     Object.assign(this, { offline: true, transport: true, unsent: true, status: 0, origin, code: spent ? RATE_LIMIT_SPENT : code || "", since, ...(spent ? { resetAt, key } : {}) });
   }
@@ -177,8 +190,9 @@ export class NetworkDown extends Error {
 let MODE = null;
 let STOPPED = false;
 const EPISODES = new Map();
-// The outages on hosts this process lost that have ended, newest last ({origin, code, since, back}, ms; the last 20):
-// what passCutOff reads for an outage met while a pass ran.
+// The outages this process met that have ended, newest last ({origin, code, since, back, kind}, ms; the last 20): a host
+// lost to this machine's network (`network`), or a model provider's busy answer (`busy`, noteBusy). What passCutOff
+// reads for an outage met while a pass ran.
 const PAST = [];
 // The outage each host was in when this process stopped waiting for it (given up, or stopWaiting): what a later request
 // to it, or the stage's end, names (downFor, outageOf), so the host and the first loss are never lost to a caller that
@@ -356,7 +370,7 @@ function episode(origin, code, resetAt = null, key = origin) {
   })().finally(() => {
     if (gen !== GEN) return;
     EPISODES.delete(origin);
-    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now() });
+    PAST.push({ origin, code: ep.code, since, back: ep.back ?? OUTAGE.now(), kind: "network" });
     if (PAST.length > 20) PAST.shift();
   });
   return ep;
@@ -440,25 +454,38 @@ export async function networkBack(origin, code, { deadlineAt = Infinity, resetAt
 export const outageOn = (origin) => (origin && EPISODES.get(origin)) || null;
 
 /**
+ * Record that a model provider (`origin`) answered a pass busy (`code`, `HTTP 429`) at `at` (ms): an outage of that host
+ * as passCutOff reads one met while another pass ran (harness.mjs runBusy).
+ */
+export function noteBusy(origin, code, at = OUTAGE.now()) {
+  if (!origin) return;
+  PAST.push({ origin, code, since: at, back: at, kind: "busy" });
+  if (PAST.length > 20) PAST.shift();
+}
+
+/**
  * Whether a failed harness pass, run from `startedMs` to `endedMs`, was cut off by its provider or this machine's
  * network, `origin` being the provider's API: {origin, code, since, ongoing}, else null. `failure` is the provider or
  * network failure its harness reported as its own structured error (a record's `providerOutage`, usage.mjs outageError),
  * or null for a pass whose harness reported none (a harness that prints a 5xx or a lost connection as prose only, a
  * crash, a structured error with no status that names no outage). Such a pass is decided on exact facts instead: an
- * outage this process itself met on any host between the pass's start and its end (one under way, or one that ended
- * since the pass began; a spent rate limit is GitHub refusing, no outage), else the provider's API not answering a probe
- * now. Ongoing when the outage is under way or the provider does not answer: the pass waits for it (networkBack) before
- * it runs again. With the provider answering, a reported failure (its 5xx) runs the pass again at once, its code the
- * failure's status (`HTTP 529`), else its type.
+ * outage this process met between the pass's start and its end (one under way, or one that ended since the pass began),
+ * of any kind on the provider's own host (lost, or a busy answer: noteBusy), or on any host a connect-level loss (this
+ * machine's network down); a GitHub 5xx or any other host's answer is none. Else the provider's API not answering a
+ * probe now. Ongoing when the outage is under way or the provider does not answer: the pass waits for it (networkBack)
+ * before it runs again. With the provider answering, a reported failure runs the pass again at once, its code the
+ * failure's status, else its code or type.
  */
 export async function passCutOff(failure, origin, { startedMs = null, endedMs = null } = {}) {
-  const own = origin ? EPISODES.get(origin) : null;
+  const own = origin ? [...EPISODES.values()].find((o) => o.origin === origin) : null;
   if (own) return { origin, code: own.code, since: own.since, ongoing: true };
   if (!failure) {
     const end = Number.isFinite(endedMs) ? endedMs : OUTAGE.now();
+    // A host lost to this machine's network (every episode but a spent rate limit's), on any host.
     const live = [...EPISODES.values()].find((o) => !Number.isFinite(o.resetAt) && o.since <= end);
     if (live) return { origin: live.origin, code: live.code, since: live.since, ongoing: true };
-    const past = Number.isFinite(startedMs) ? PAST.findLast((p) => p.back >= startedMs && p.since <= end) : null;
+    const counts = (p) => p.origin === origin || p.kind === "network";
+    const past = Number.isFinite(startedMs) ? PAST.findLast((p) => p.back >= startedMs && p.since <= end && counts(p)) : null;
     if (past) return { origin: past.origin, code: past.code, since: past.since, ongoing: false };
   }
   const code = origin ? await probe(origin) : null;

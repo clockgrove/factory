@@ -3,7 +3,7 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFileSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
@@ -14,8 +14,8 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, answeredError, mergeUsage, noResetLimit, parseUsage, refusalFields, sinceSession, usageLimited } from "./usage.mjs";
-import { OUTAGE, givenUp, minutesText, networkBack, passCutOff, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
+import { COPILOT_CREDIT_USD, answeredError, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, usageLimited } from "./usage.mjs";
+import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
@@ -262,6 +262,18 @@ export function promptCacheTtl(harness, env = {}) {
 }
 
 /**
+ * How long a pass's prompt cache stays warm after it ends, by the TTL Factory sets (promptCacheTtl), in ms: `1h` or `5m`
+ * as set; with none set, Claude Code's own default, which the comment above states: an hour on a plan token or a CLI
+ * login, five minutes on an API key (ANTHROPIC_API_KEY). Null for Codex and Copilot, whose caches Factory sets no
+ * lifetime for. Automatic account choice prefers the account of the Objective's previous stage while it lasts (#391).
+ */
+export function cacheLifetimeMs(harness, env = {}) {
+  if (harness !== "claude") return null;
+  const ttl = promptCacheTtl(harness, env) ?? (env.ANTHROPIC_API_KEY ? "5m" : "1h");
+  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
+}
+
+/**
  * A runner's Claude Code run (Actions, a cloud sandbox VM): the agent's checkout (`clone`), the runner layout
  * (lib/claude-runner.mjs: Factory's HOME for Claude Code, its per-start state, the caches) and the hosts its commands
  * may reach (`allowed_domains`, and the Objective's own host labels: local.mjs openedStageHosts). Null for any other harness, in local mode and before the agent uid exists.
@@ -439,7 +451,7 @@ const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 // This process's stage spend as Factory has read it: each finished pass's own dollars, and each running pass's live meter
 // (live-spend.mjs) with the session it resumed. What the progress comment's spend line carries until the stage records its
 // final figure. `dir` and `harness`: the stage's usage directory and harness, from its first pass.
-const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, harness: null };
+const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, harness: null, decisions: 0 };
 
 /**
  * The file in a stage's usage directory that holds each session's running total as the stage's progress comment last
@@ -526,8 +538,8 @@ function stageSpendOf(base, reads) {
  * A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are
  * none). `session`: the session it resumes, null for a fresh one.
  */
-export function meterPass(meter, { session = null, label = "run", harness = null, model = null } = {}) {
-  STAGE_SPEND.open.set(meter, { session, label, harness, model });
+export function meterPass(meter, { session = null, label = "run", harness = null, model = null, decision = false } = {}) {
+  STAGE_SPEND.open.set(meter, { session, label, harness, model, decision });
   return {
     end: async (usd) => {
       if (!STAGE_SPEND.open.delete(meter)) return;
@@ -847,11 +859,15 @@ let RUNNING = 0;
 export const passesRunning = () => RUNNING;
 
 /**
- * Run the harness once; see runOnce. A Codex resume the provider refused because the thread was written through another
- * credential (usage.mjs rotatedPin: an AI Gateway pin that moved between passes) runs once more as a fresh thread with
- * the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line; never twice. Only with a `freshPrompt`:
- * a resumed prompt alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal
- * stands and the stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
+ * Run the harness once; see runOnce. A resume the provider refused for the session alone (runResumable: a Codex thread
+ * written through another credential, usage.mjs rotatedPin, as an AI Gateway pin that moved between passes; or a 400,
+ * 413 or 422 with no auth, permission, quota or billing kind, usage.mjs requestRefused) runs once more as a fresh
+ * session with the caller's `freshPrompt` (the full prompt a fresh run needs) and a log line: once for each resumed
+ * run, so a pass rerun from its session after a wait (a busy provider, a cut-off, a usage limit) may get its own fresh
+ * try. A first pass that was itself fresh gives its own `prompt` as the `freshPrompt` of those reruns. A pass whose
+ * provider answered busy is no death: it waits and runs again (runBusy). Only with a `freshPrompt`: a resumed prompt
+ * alone (the exit-record ask's) would start a fresh thread with no context, so without one the refusal stands and the
+ * stage Blocks with it. `reviewer: true` marks a reviewer call: it gets no worker secret (worker-secrets.mjs
  * harnessShell). A pass this machine's network cut off runs again once the network is back (runCutOff), as one record.
  * A pass that ended on its subscription's usage limit (usage.mjs usageLimited) is no death, and no other model runs it,
  * since every model of the subscription draws on the same limit. In a stage (a process that waits outages out) whose
@@ -866,7 +882,9 @@ export const passesRunning = () => RUNNING;
 export async function runHarness(opts) {
   const startedAt = Date.now();
   const limited = [];
-  let rec = await runCutOff(opts);
+  // A fresh first pass's own prompt is the full prompt a fresh try of its resumed reruns needs.
+  if (!opts.resume && typeof opts.freshPrompt !== "string") opts = { ...opts, freshPrompt: opts.prompt };
+  let rec = await runBusy(opts);
   for (;;) {
     const r = rec.refusal;
     // No reset to wait for: the stage ends here, and its route moves the Objective to a free account or Blocks (#332).
@@ -894,7 +912,7 @@ export async function runHarness(opts) {
     }
     limited.push(rec);
     const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
-    rec = await runCutOff({ ...opts, maxUsd: opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: LIMIT_PASS_PROMPT } : {}) });
+    rec = await runBusy({ ...opts, maxUsd: opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: LIMIT_PASS_PROMPT } : {}) });
   }
   return limited.length ? joinLost(limited, rec, { limit: true }) : rec;
 }
@@ -908,9 +926,12 @@ export async function runHarness(opts) {
  * afresh on the branch (its session does not continue on another account there), so a nearer reset is worth its wait.
  * `moves`: set by a stage whose account automatic choice picked (no pin; accounts.mjs stageMoves, #332), so a usage
  * limit or quota with no reset reported ends the stage at once, for its route to move the Objective to a free account
- * or Block naming every account's hold (local.mjs spentPaused, route-holds.mjs routeLimits `limit`).
+ * or Block naming every account's hold (local.mjs spentPaused, route-holds.mjs routeLimits `limit`). `hold`: null, or,
+ * set beside `elsewhere`, an async write of the stage's account's hold until a refusal's `resetAt` (route-holds.mjs
+ * routeLimits `hold`), for a busy provider's time the stage waits out in place past `movePastMs` (runBusy), so no other
+ * Objective starts on that account meanwhile.
  */
-export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, movePastMs: 60 * 60_000, moves: false };
+export const LIMIT = { slackMs: 60_000, waits: 2, minRunMs: 5 * 60_000, elsewhere: null, hold: null, movePastMs: 60 * 60_000, moves: false };
 
 /** What a pass that waited out its usage limit is told when its session runs again. */
 export const LIMIT_PASS_PROMPT = "Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped; do not redo finished steps.";
@@ -930,6 +951,74 @@ export class UsageLimitReached extends Error {
     Object.assign(this, { code: USAGE_LIMIT, refusal, resetAt: reset, since });
   }
 }
+
+/**
+ * runHarness's pass with its reruns after its provider answered busy (usage.mjs providerBusy: 408, 425, 429 or a 5xx,
+ * with no refusal type or code), which is no death. In a process that waits outages out, the pass waits, then runs
+ * again, from its session when it has one (a reviewer's from its own prompt), on what is left of its budget and wall
+ * clock. The wait is the outage doubling (network.mjs serverWait: 1, 2, 4… minutes, up to half an hour), or the
+ * provider's own time to go again when its error gave one (`retryAt`) and that is later, so a time of 0 or one already
+ * past never reruns at once. The stage's own time bounds it, no count: a wait that ends past the stage's bound (waitBound,
+ * from the first busy answer), or leaves the pass under LIMIT.minRunMs of its wall clock, ends the stage instead. Ended
+ * so with the provider's time at least LIMIT.minRunMs away, that time is a usage limit's reset: it throws
+ * UsageLimitReached, and the stage ends as on any usage limit (session.mjs usageLimitExit: the account held until then,
+ * locally and on the route's holds record). Otherwise (no time given, or a short one near the wall clock) it throws a
+ * NetworkDown of the provider's host with the status as its code, and the stage ends as on GitHub's 5xx (session.mjs
+ * outageExit: paused locally, and serve resumes it on the same doubling; an `outage` Block elsewhere, which the
+ * dispatcher relaunches); the provider's origin tells it from GitHub's. A provider's time the stage would wait past
+ * LIMIT.movePastMs goes through the usage limit's gate first: with another account free (LIMIT.elsewhere) the stage ends
+ * on it as a usage limit, so the Objective moves there; else the stage's account is held until then (LIMIT.hold) while
+ * it waits. Outside such a process the busy pass is returned as it is.
+ */
+async function runBusy(opts) {
+  const startedAt = Date.now();
+  const busy = [];
+  let since = null;
+  let rec = await runCutOff(opts);
+  while (rec.busy && waitingOutages()) {
+    const now = OUTAGE.now();
+    since ??= now;
+    const r = rec.busy;
+    const given = Number.isFinite(r.retryAt) ? r.retryAt - now : null;
+    const waitMs = Math.max(given ?? 0, serverWait(busy.length + 1));
+    // Nothing left of the dollar cap to run it again with: the pass ends at the cap (a cap of 0 would run uncapped).
+    const spent = [...busy, rec].reduce((s, x) => s + (Number.isFinite(x.usd) ? Math.max(0, x.usd) : 0), 0);
+    if (opts.maxUsd > 0 && opts.maxUsd - spent <= 0) {
+      rec = { ...rec, ok: false, budgetExceeded: true, error: "dollar cap reached" };
+      break;
+    }
+    const origin = providerOrigin(opts.harness, opts.env);
+    if (!origin) break;
+    // An outage of the provider's host for any other pass of this process that fails meanwhile (network.mjs passCutOff).
+    noteBusy(origin, `HTTP ${r.status}`, now);
+    const label = opts.label || "run";
+    const limit = given !== null && given >= LIMIT.minRunMs ? { ...r, resetAt: r.retryAt } : null;
+    const bound = waitBound(since);
+    const left = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) - waitMs : Infinity;
+    if (bound === null || now + waitMs > bound || left < LIMIT.minRunMs) {
+      if (limit) throw new UsageLimitReached(limit, { since: now, label });
+      throw new NetworkDown({ origin, code: `HTTP ${r.status}`, since });
+    }
+    if (limit && waitMs > LIMIT.movePastMs) {
+      if (LIMIT.elsewhere && (await LIMIT.elsewhere(limit))) throw new UsageLimitReached(limit, { since: now, label });
+      if (LIMIT.hold) await LIMIT.hold(limit).catch((e) => log(`${label}: the account's hold until ${new Date(limit.resetAt).toISOString()} could not be written (${String(e?.message || e).slice(0, 120)}); waiting anyway`));
+    }
+    log(`${label}: ${r.harness}'s provider was busy (${refusalFields(r)}); ${given !== null ? "waiting for the time it gave" : "waiting"} (${minutesText(waitMs)}), then running the pass again`);
+    const end = now + waitMs;
+    while (OUTAGE.now() < end) {
+      await OUTAGE.sleep(Math.min(60_000, end - OUTAGE.now()));
+      // A stop meanwhile: the stop writes the stage's end (session.mjs stopStage), and nothing more runs.
+      if (stopping()) await parked();
+    }
+    busy.push(rec);
+    const session = !opts.reviewer && rec.sessionId ? rec.sessionId : null;
+    rec = await runCutOff({ ...opts, maxUsd: opts.maxUsd > 0 ? opts.maxUsd - spent : opts.maxUsd, timeoutMs: Number.isFinite(opts.timeoutMs) ? opts.timeoutMs - (Date.now() - startedAt) : opts.timeoutMs, ...(session ? { resume: session, prompt: BUSY_PASS_PROMPT } : {}) });
+  }
+  return busy.length ? joinLost(busy, rec, { busy: true }) : rec;
+}
+
+/** What a pass whose provider was busy is told when its session runs again. */
+export const BUSY_PASS_PROMPT = "Your previous run stopped because the model provider was busy. Continue the same task from where it stopped; do not redo finished steps.";
 
 /** runHarness's pass with its reruns after this machine's network cut it off. */
 async function runCutOff(opts) {
@@ -986,18 +1075,19 @@ export function providerOrigin(harness, env = {}) {
 
 /**
  * Whether a pass was cut off by its provider or this machine's network, in a process that waits outages out. Only a pass
- * that failed (no answer, no cap, no stop, no provider refusal) is asked, on its harness's structured error (usage.mjs
- * providerError): a provider or network failure (`providerOutage`: a 5xx, or a connection it could not make) is a cut,
- * and the provider's API is probed only to know whether to wait for it before the pass runs again; a 4xx (the provider
- * answered and said why: answeredError) is no cut, and nothing probes. Any other pass (no structured error at all: a
- * harness that prints a 5xx or a lost connection as prose only, a crash; or one with no status that names no outage) is
- * a cut exactly when this process met an outage while it ran, or its provider's API does not answer a probe now
- * (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a pass while a host it gave up on
- * still does not answer (network.mjs givenUp) runs no more: it throws that outage, which the stage ends on (session.mjs
- * outageExit). With every such host answering again, it is judged as any other would be.
+ * that failed (no answer, no cap, no stop, no provider refusal, and no busy answer: a 5xx or 429 with its status is
+ * runBusy's) is asked, on its harness's structured error (usage.mjs providerError): a provider or network failure with
+ * no status (`providerOutage`: a connection it could not make, a timeout) is a cut, and the provider's API is probed only
+ * to know whether to wait for it before the pass runs again; a 4xx (the provider answered and said why: answeredError) is
+ * no cut, and nothing probes. Any other pass (no structured error at all: a harness that prints a 5xx or a lost
+ * connection as prose only, a crash; or one with no status that names no outage) is a cut exactly when, while it ran,
+ * this process met an outage on its provider's host or lost a host to this machine's network, or when its provider's API
+ * does not answer a probe now (network.mjs passCutOff). In a process that gave up waiting (stoppedWaiting), such a pass
+ * while a host it gave up on still does not answer (network.mjs givenUp) runs no more: it throws that outage, which the
+ * stage ends on (session.mjs outageExit). With every such host answering again, it is judged as any other would be.
  */
 async function outageCut(rec, { harness, env }) {
-  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.noRun) return null;
+  if (rec.ok || rec.timedOut || rec.budgetExceeded || rec.stopped || rec.refusal || rec.busy || rec.noRun) return null;
   if (!rec.providerOutage && answeredError(rec.providerError)) return null;
   const gaveUp = stoppedWaiting();
   if (gaveUp) {
@@ -1016,7 +1106,7 @@ async function outageCut(rec, { harness, env }) {
  * mergeUsage), its relayed key spend and sub-agent threads, from the first run's start. `lostToOutage` (or `limitWaits`)
  * counts the earlier runs.
  */
-export function joinLost(lost, rec, { limit = false } = {}) {
+export function joinLost(lost, rec, { limit = false, busy = false } = {}) {
   const all = [...lost, rec];
   const m = mergeUsage(all);
   const keyed = all.filter((r) => typeof r.workerKeyUsd === "number");
@@ -1034,16 +1124,20 @@ export function joinLost(lost, rec, { limit = false } = {}) {
     ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
     ...(subs.length ? { subAgents: subs } : {}),
     started: lost[0].started ?? rec.started,
-    ...(limit ? { limitWaits: lost.length } : { lostToOutage: lost.length }),
-    basis: `${rec.basis}; with ${lost.length} earlier run${lost.length === 1 ? "" : "s"} of this pass ${limit ? "ended at its subscription's usage limit" : "cut off by this machine's network"}`,
+    ...(limit ? { limitWaits: lost.length } : busy ? { busyWaits: lost.length } : { lostToOutage: lost.length }),
+    basis: `${rec.basis}; with ${lost.length} earlier run${lost.length === 1 ? "" : "s"} of this pass ${limit ? "ended at its subscription's usage limit" : busy ? "ended on its provider being busy" : "cut off by this machine's network"}`,
   };
 }
 
-/** runHarness's single pass: runOnce, and the fresh thread once after a refused resume. */
+/**
+ * runHarness's single pass: runOnce, and a fresh session once after a refused resume: a Codex thread written through
+ * another credential (usage.mjs rotatedPin), or a refusal of the request the session sends alone (usage.mjs
+ * requestRefused: a 400, 413 or 422 with no auth, permission, quota or billing kind). The fresh pass's own refusal stands.
+ */
 async function runResumable(opts) {
   const rec = await runOnce(opts);
-  if (!opts.resume || !rec.pinRotated || typeof opts.freshPrompt !== "string" || !opts.freshPrompt) return rec;
-  log(`${opts.label || "run"}: the provider refused to resume ${opts.resume.slice(0, 8)} (${rec.refusal ? refusalFields(rec.refusal) : "rotated credential"}): its thread was written through another credential; running a fresh thread once`);
+  if (!opts.resume || !(rec.pinRotated || requestRefused(rec.refusal)) || typeof opts.freshPrompt !== "string" || !opts.freshPrompt) return rec;
+  log(`${opts.label || "run"}: the provider refused to resume ${opts.resume.slice(0, 8)} (${rec.refusal ? refusalFields(rec.refusal) : "rotated credential"}): ${rec.pinRotated ? "its thread was written through another credential" : "the refusal may be its session's alone"}; running a fresh session once`);
   const fresh = await runOnce({ ...opts, resume: null, prompt: opts.freshPrompt });
   return { ...fresh, resumeRefused: { session: opts.resume, ...(rec.refusal ? { status: rec.refusal.status, type: rec.refusal.type, code: rec.refusal.code } : {}) } };
 }
@@ -1069,14 +1163,14 @@ async function runOnce(opts) {
  */
 export function openPasses() {
   const out = [];
-  for (const [m, { label = "run", harness = null, model = null }] of STAGE_SPEND.open) {
+  for (const [m, { label = "run", harness = null, model = null, decision = false }] of STAGE_SPEND.open) {
     let usd = 0;
     try {
       usd = Math.max(0, Number(m.now?.()?.usd) || 0);
     } catch {
       usd = 0;
     }
-    out.push({ harness, model, label, usd, usdLowerBound: true, ok: false, stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
+    out.push({ harness, model, label, usd, usdLowerBound: true, ...(decision ? { decision: true, ok: true } : { ok: false }), stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
   }
   return out;
 }
@@ -1140,7 +1234,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
       relay.probed = { ...relay.probed, codex: true };
     }
   }
-  if (!(await onPath(cmd))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+  // On the PATH the harness launches with (its env's, the stage's), not this process's.
+  if (!(await onPath(cmd, { ...env, ...extraEnv }))) throw new Error(`${cmd} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   if (eventsFile) {
     mkdirSync(dirname(eventsFile), { recursive: true });
     appendOwn(eventsFile, `${JSON.stringify({ type: "factory.run", label, harness, model: model || null, effort: effort || null, started: new Date().toISOString(), resume: !!resume })}\n`);
@@ -1206,9 +1301,10 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
   const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
-  // A failed Codex run's usage limit is in its rollout only (usage.mjs providerRefusal): read when the stream names no
-  // refusal of its own, from the copy just captured on a runner.
-  const rollout = harness === "codex" && ranSession && !ran.ok && !ran.refusal ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
+  // A Codex run's rate-limit snapshots are in its rollout only, from the copy just captured on a runner: every pass's
+  // quota reading (usage.mjs quotaReading), and a failed run's usage limit when the stream names no refusal of its own
+  // (usage.mjs providerRefusal).
+  const rollout = harness === "codex" && ranSession ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
   const found = harness === "codex" && ranSession ? await subAgentThreads(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : { threads: [], missed: [] };
@@ -1219,7 +1315,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout, since: started });
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, since: started });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
   const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
@@ -1269,9 +1365,14 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
       log(`${label}: the harness ran commands, but none came up with the gateway relay's forwarder (its sandbox did not start them through Factory's bwrap shim); the relay was out of their reach`);
     }
   }
+  // How much of its account's usage limits the provider reported used (automatic account choice prefers the most left).
+  const quota = quotaReading(harness, r.stdout, { rollout, since: started });
+  if (quota) rec.quota = quota;
   rec.label = label;
   rec.resumed = !!resume;
   rec.cacheTtl = cacheTtl;
+  // How long its prompt cache stays warm past `ended` (cacheLifetimeMs): the stage's `cacheWarmUntil`.
+  rec.cacheWarmMs = cacheLifetimeMs(harness, env);
   rec.finalText = finalText(harness, r.stdout);
   rec.started = started;
   rec.ended = ended;
@@ -1332,7 +1433,7 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
   }
 }
 /**
- * A Codex run's own rollout, its `token_count` lines only, for its usage limit (usage.mjs providerRefusal): on a runner
+ * A Codex run's own rollout, its `token_count` lines only, for its rate limits (usage.mjs quotaReading, providerRefusal): on a runner
  * from the copy Factory captured right after the run (never what the agent's home holds by then), locally from the
  * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
  * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
@@ -1360,7 +1461,7 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
     if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
     return counts(readFileSync(join(root, newest.f), "utf8"));
   } catch (e) {
-    log(`${label}: Codex's rollout could not be read for a usage limit (${String(e?.message || e).slice(0, 160)})`);
+    log(`${label}: Codex's rollout could not be read for its rate limits (${String(e?.message || e).slice(0, 160)})`);
     return null;
   }
 }
@@ -1478,3 +1579,191 @@ export function finalText(harness, stdout) {
   const texts = parsed.filter((e) => e.type === "assistant.message" && typeof e.data?.content === "string").map((e) => e.data.content);
   return texts.length ? texts.join("\n") : String(stdout || "");
 }
+
+// ------------------------------------------------------------------ decision calls
+
+/**
+ * A decision call's bounds (adapters/decider-harness.mjs): its wall clock, its dollar cap (Claude Code's
+ * --max-budget-usd, Copilot's AI credits at their 30-credit minimum) and Claude Code's turns. Codex has no cap flag: with
+ * no tool it answers in one turn, and the wall clock bounds it.
+ */
+export const DECISION_RUN = { timeoutMs: 120_000, maxUsd: 0.3, maxTurns: 2 };
+
+/**
+ * Copilot's built-in tools, all excluded from a decision call beside `--available-tools=` (an empty list): its shell,
+ * file and fetch tools (as drift.mjs reads them from its stream) and its sub-agents.
+ */
+const COPILOT_TOOLS = ["bash", "shell", "powershell", "view", "read", "grep", "glob", "rg", "edit", "create", "write", "str_replace", "str_replace_editor", "apply_patch", "web_fetch", "fetch", "task", "agent"];
+
+/**
+ * The command line for one decision call (runDecision): the question on stdin, no tool, no file write, no session kept,
+ * nothing of the user's or the repository's configuration loaded, and `effort` (low; null leaves the model's default).
+ * Claude Code: no tools (`--tools ""`), no setting source, MCP server, slash command or CLAUDE.md, and no session file.
+ * Codex: a read-only sandbox with its shell tool and sub-agents off, no web search, no user config, rules or AGENTS.md,
+ * and the AI Gateway provider when the stage's Codex runs through it; its thread is ephemeral only where `ephemeral` (a
+ * runner, where Codex runs on an API key: no subscription limit to read from the rollout). Copilot: no tool available,
+ * each built-in tool excluded, shell, write and URL permissions denied, no temp directory, no built-in MCP server, no
+ * custom instructions and no question form.
+ */
+export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.maxUsd, gateway = null, creditUsd = COPILOT_CREDIT_USD, effort = "low", ephemeral = true }) {
+  const hidden = hiddenFromShell([]);
+  switch (harness) {
+    case "claude": {
+      const args = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--max-turns", String(DECISION_RUN.maxTurns), "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--exclude-dynamic-system-prompt-sections"];
+      if (effort) args.push("--effort", effort);
+      if (model) args.push("--model", model);
+      if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
+      return { cmd: "claude", args, stdin: prompt, env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } };
+    }
+    case "codex": {
+      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", ...(ephemeral ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0"];
+      if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
+      if (gateway) args.push(...codexGatewayArgs(gateway));
+      if (model) args.push("-m", gateway ? gatewayModel(model) : model);
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, env: gateway?.session ? { FACTORY_GATEWAY_SESSION: gateway.session } : {} };
+    }
+    case "copilot": {
+      const args = ["--available-tools=", `--excluded-tools=${COPILOT_TOOLS.join(",")}`, "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disallow-temp-dir", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
+      if (model) args.push("--model", model);
+      if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
+      return { cmd: "copilot", args, stdin: prompt, env: {} };
+    }
+    default:
+      throw new Error(`unknown harness ${harness}`);
+  }
+}
+
+/**
+ * On a runner (the agent uid: GitHub Actions, a cloud sandbox VM) a decision call runs as the agent in a home of its own,
+ * made in the unit's private /tmp, which nothing the agent ran before can reach: never the running pass's state, which
+ * each pass's start makes afresh.
+ */
+export const DECISION_SH = ['set -eu', 'd=$(mktemp -d /tmp/factory-decision.XXXXXX)', 'mkdir -m 700 "$d/.claude" "$d/.codex" "$d/.copilot"', 'cd "$d"', 'export HOME="$d" TMPDIR="$d" CLAUDE_CONFIG_DIR="$d/.claude" CODEX_HOME="$d/.codex" COPILOT_HOME="$d/.copilot"', 'exec "$@"'].join("\n");
+
+/** The variables that would make Copilot trust the folder or load its hooks and extensions (runPass removes the same). */
+const copilotTrust = (k) => k === "COPILOT_ALLOW_ALL" || k.startsWith("GITHUB_COPILOT_PROMPT_MODE_");
+
+/**
+ * How one decision call starts, `{cmd, args, env, stdin, cwd}`, with nothing run: decisionCommand's command and the
+ * stage's harness env (`env`: its credential, and locally its account's login folder), less every worker secret, by
+ * name and by value (worker-secrets.mjs harnessShell, as a reviewer call), and less Copilot's trust variables. On a
+ * runner (`agent`) as the agent through DECISION_SH (proc.mjs asAgent: only the agent's variables and the credential
+ * names pass), with a PATH of absolute entries outside the agent's home; locally in the harness's outer sandbox
+ * (`outer`, the stage's srt settings) with the stage's TMPDIR; else as is. `dir`: the call's own working directory.
+ */
+export function decisionLaunch({ harness, model = null, prompt, env: given = process.env, maxUsd = DECISION_RUN.maxUsd, creditUsd = COPILOT_CREDIT_USD, effort = "low", agent = agentUser(), outer = null, dir = null }) {
+  const { env } = harnessShell(given, { reviewer: true });
+  for (const k of Object.keys(env)) if (copilotTrust(k)) delete env[k];
+  const { cmd, args, stdin, env: extra } = decisionCommand({ harness, model, prompt, maxUsd, gateway: codexGatewayOf(harness, env), creditUsd, effort, ephemeral: !!agent });
+  if (agent) {
+    // Absolute PATH entries outside the agent's home only (claude-runner.mjs runnerLaunch).
+    const path = String(env.PATH || process.env.PATH || "").split(":").filter((d) => d.startsWith("/") && d !== agent.home && !d.startsWith(`${agent.home}/`)).join(":");
+    const [c, a, e] = asAgent("/bin/sh", ["-c", DECISION_SH, "factory-decision", cmd, ...args], { ...env, ...extra, PATH: path }, [...MODEL_SECRET_KEYS, ...Object.keys(extra)]);
+    return { cmd: c, args: a, env: e, stdin, cwd: null };
+  }
+  const childEnv = { ...env, ...extra };
+  if (outer) return { cmd: "srt", args: ["-s", outer, "--", "env", `TMPDIR=${childEnv.TMPDIR || dir}`, cmd, ...args], env: childEnv, stdin, cwd: dir };
+  return { cmd, args, env: childEnv, stdin, cwd: dir };
+}
+
+/** The last answer a harness gave: Claude Code's result text, Codex's last agent message, Copilot's last assistant message; never the prompt. */
+export function answerText(harness, stdout) {
+  const events = String(stdout || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("{")).flatMap((l) => {
+    try {
+      return [JSON.parse(l)];
+    } catch {
+      return [];
+    }
+  });
+  if (harness === "claude") {
+    const res = events.findLast((e) => e?.type === "result");
+    if (typeof res?.result === "string") return res.result;
+    return events.filter((e) => e?.type === "assistant" && !e.parent_tool_use_id).flatMap((e) => e.message?.content || []).filter((c) => c?.type === "text").at(-1)?.text ?? "";
+  }
+  if (harness === "codex") return events.findLast((e) => e?.type === "item.completed" && e.item?.type === "agent_message")?.item.text ?? "";
+  return events.findLast((e) => e?.type === "assistant.message" && typeof e.data?.content === "string")?.data.content ?? "";
+}
+
+/** Whether a refusal is the provider rejecting the reasoning effort Factory set (Codex's `param`, structure only). */
+export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reasoning.effort";
+
+/**
+ * One decision call on the stage's own harness and login (adapters/decider-harness.mjs): decisionLaunch's command with
+ * `prompt` on stdin, under DECISION_RUN's bounds. Locally in a temp directory of its own. Never resumed, never waited
+ * out: a usage limit is a refusal like any other. A Codex thread off a runner keeps its rollout only for this read: a
+ * failed run's usage limit is there alone (usage.mjs codexLimit), and the thread's rollout files are removed after it.
+ * A model that refuses the low effort is asked once more with none (`effortRefused`). `signal` ends it early. Its spend
+ * counts in the stage's spend so far (and decisionSpend); the adapter keeps its record (keepDecision). Returns the usage
+ * record with `answer` (answerText).
+ */
+export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null }) {
+  const at = () => new Date().toISOString();
+  const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
+  if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
+  const creditUsd = copilotCreditUsd();
+  const agent = agentUser();
+  const local = backend(given).name === "local";
+  if (!agent && !(await onPath(CLI[harness].bin, given))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
+  const dir = agent ? null : local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "factory-decision-"));
+  const launch = decisionLaunch({ harness, model, prompt, env: given, maxUsd, creditUsd, effort, agent, outer: local && !agent ? backend(given).sandbox.outer(given) : null, dir });
+  const live = liveSpend(harness, model || null, { creditUsd });
+  const metered = meterPass(live, { label, harness, model: model || null, decision: true });
+  const started = at();
+  let r;
+  try {
+    // The stage's stop ends it, and so does the caller's own `signal` (the drift advisory's stop at a pass's end).
+    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, onLine: live.line, group: local, signal: signal ? AbortSignal.any([signal, stageStopSignal()]) : stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
+  } catch (e) {
+    await metered.end(0);
+    return { ...none(`${CLI[harness].bin} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
+  } finally {
+    if (dir) local ? dropOwned(dir) : rmSync(dir, { recursive: true, force: true });
+  }
+  let rollout = null;
+  if (harness === "codex" && !agent) {
+    const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
+    if (thread && r.code !== 0) rollout = await codexPassRollout(thread, null, launch.env, { label });
+    // Only this call's own thread: an id that is no plain thread id names no file (as codexPassRollout reads it).
+    if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
+  }
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
+  await metered.end(rec.usd);
+  if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
+  Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
+  if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
+  else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Factory" });
+  else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${CLI[harness].bin} exited ${r.code ?? r.signal}` });
+  if (effort && effortRefused(rec.refusal)) {
+    log(`${label}: ${harness} refused the ${effort} reasoning effort for ${model || "its default model"}; asking once more with the model's own`);
+    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null, signal });
+    // The refused run's own spend stays with it (`earlier`), for the adapter to keep beside the second's; `effortRefused`
+    // tells the adapter to ask no later call with that effort.
+    return { ...again, earlier: keepDecision(rec), effortRefused: true };
+  }
+  return rec;
+}
+
+/**
+ * A decision call's record as the stage's usage keeps it: its spend, tokens and times, labelled `decision`, with no
+ * session (a decision is never resumed, and the stage's saved session is its passes'), no refusal (a usage limit on a
+ * decision call holds no account and Blocks nothing) and no answer text. `ok` is the stage's, not the answer's: a
+ * decision with no answer fails no pass. The adapter folds a stage's calls into one such record (foldDecision), kept
+ * with the stage's passes (keepDecisionPass) so a stopped stage counts it (stop.mjs stoppedRecords).
+ */
+export function keepDecision(rec) {
+  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...(rec.usdLowerBound ? { usdLowerBound: true } : {}), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
+}
+
+/** One more call (`one`, keepDecision's) folded into the stage's decision record `kept`, in place: spend, tokens, credits, turns, end. */
+export function foldDecision(kept, one) {
+  const calls = (kept.calls ?? 1) + (one.calls ?? 1);
+  return Object.assign(kept, mergeUsage([kept, one]), { label: "decision", ok: true, decision: true, calls, started: kept.started, basis: kept.basis });
+}
+
+/** The dollars this stage's decision calls have reported so far: what the validation loop's budget takes off (session.mjs). */
+export const decisionSpend = () => STAGE_SPEND.decisions;
+
+/** The stage's decision record among its passes (stagePasses), once: what a stopped stage's usage counts. */
+export const keepDecisionPass = (rec) => {
+  if (!PASSES.includes(rec)) PASSES.push(rec);
+};

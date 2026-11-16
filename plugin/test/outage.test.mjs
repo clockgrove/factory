@@ -192,9 +192,10 @@ test("outageExit: locally the stage ends paused with the outage and writes nothi
   }
 });
 
-// A Codex run whose turn failed on its provider's 503, as Codex reports a provider's JSON error body (its turn.failed
-// message), the structure usage.mjs providerOutage reads.
-const SERVER_DOWN = JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "server_error", code: null, message: "Service Unavailable" }, status: 503 }) } });
+// A Codex run whose turn failed on its provider failing, as a JSON error body with no status and the type
+// `server_error` (its turn.failed message): the structure usage.mjs outageError reads. With a status it would be the
+// provider busy instead (providerBusy).
+const SERVER_DOWN = JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "server_error", code: null, message: "Service Unavailable" } }) } });
 const LOST_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${SERVER_DOWN}\n`;
 // A run that did a turn's work (its usage reported) before its provider failed.
 const SPENT_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"turn.completed","usage":{"input_tokens":16151,"cached_input_tokens":12288,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}\n{"type":"turn.started"}\n${SERVER_DOWN}\n`;
@@ -259,8 +260,8 @@ test("runHarness: without the outage wait (a process that does not wait outages 
 
 // Codex 0.167 against a provider answering 503: prose only (captured against a local fake server).
 const PROSE_503 = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n{"type":"error","message":"unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses"}\n{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable: Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses"}}\n`;
-// A structured error that is no outage: the provider's JSON body with a 429.
-const LIMITED_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "rate_limit_error", code: "rate_limit_exceeded", message: "m" }, status: 429 }) } })}\n`;
+// A structured 4xx that is neither a refusal nor busy: the provider's JSON body with a 409.
+const LIMITED_RUN = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-0000000000a1"}\n{"type":"turn.started"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "conflict", code: null, message: "m" }, status: 409 }) } })}\n`;
 
 // The AI Gateway's bare body for an unavailable provider: a structured error with no status and a type that is not
 // `server_error`, so it names no outage by itself and goes to the probe as a pass with no structure does.
@@ -297,7 +298,7 @@ for (const [what, lost, up] of [["printed its 503 as prose only", PROSE_503, fal
   });
 }
 
-test("passCutOff: a pass with no structured error is a cut when this process met an outage on any host while it ran, though every host answers now", async () => {
+test("passCutOff: a pass with no structured error is a cut when this process lost any host to its network while it ran, though every host answers now", async () => {
   let down = true;
   await offline(
     (req) => (req.origin === "https://api.github.test" && down ? Promise.reject(dns()) : new Response(null, { status: 200 })),
@@ -317,7 +318,27 @@ test("passCutOff: a pass with no structured error is a cut when this process met
   );
 });
 
-test("runHarness: a pass that ended on a structured error that is no outage (a 429) is no cut, and nothing probes, though its provider does not answer", async () => {
+test("passCutOff: GitHub answering 5xx while a pass ran is no cut of it; its provider answering busy meanwhile is, another provider's is not", async () => {
+  const net = await import("../scripts/lib/network.mjs");
+  await offline(
+    (req) => (req.origin === "https://api.github.test" && !req.probe ? json({ message: "Bad Gateway" }, 502) : new Response(null, { status: 200 })),
+    async ({ now }) => {
+      waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
+      const start = now();
+      // GitHub answers 502 to every try of a request while the pass runs: GitHub failing, not this machine's network.
+      const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => assert.fail("answered"), (x) => x);
+      assert.match(String(e.code), /^HTTP 502$/);
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), null, "a GitHub 5xx is no cut of a Codex pass");
+      // The pass's own provider answered another pass busy meanwhile: an outage of its host.
+      net.noteBusy("https://api.anthropic.test", "HTTP 529", now());
+      assert.equal(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), null, "another provider's busy answer is none");
+      net.noteBusy("https://chatgpt.com", "HTTP 429", now());
+      assert.deepEqual(await passCutOff(null, "https://chatgpt.com", { startedMs: start, endedMs: now() + 1_000 }), { origin: "https://chatgpt.com", code: "HTTP 429", since: now(), ongoing: false });
+    },
+  );
+});
+
+test("runHarness: a pass that ended on a structured 4xx (a 409) is no cut, and nothing probes, though its provider does not answer", async () => {
   const { bin, calls } = fakeCodex({ lost: LIMITED_RUN });
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;

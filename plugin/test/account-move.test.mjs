@@ -221,7 +221,7 @@ test("#264/#265: a hold keeps the limit's window, and the pause notice names the
 
 
 const reads = (gh) => gh.state.timelineReads;
-const delivered = { exit: "delivered", tokens: { output: 10 } };
+const delivered = { exit: "delivered", tokens: { output: 10 }, servedPasses: 1 };
 
 test("#265: a pause posts one notice, updated in place; a trusted label moves the paused Objective to a free account at once, read once per label change; a held pin waits for its reset; a removal by someone who can push goes back to the default", async () => {
   const h = fakeHome();
@@ -623,6 +623,138 @@ test("#266: off, a stage runs on its pin or the default, as before; on, a stage 
       step();
       assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "beta", "back to the turns");
       assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, a stage starts on the free account with the most quota left by the readings stages left in the machine's holds, in every serve; the turn decides only among accounts with none; a pinned stage's reading counts too", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN }, five_hour: { used: used / 2, resetsAt: t + 4 * 60 * MIN } } } });
+  try {
+    await withHome(h, async () => {
+      const one = autoServe(h, () => t);
+      const two = autoServe(h, () => t);
+      // No readings yet: each account in turn, and each stage leaves its account's reading.
+      const order = [];
+      for (const [loop, used] of [[one, 0.8], [two, 0.3], [one, 0.6]]) {
+        t += 1000;
+        loop.result = reading(used);
+        order.push((await loop.stage(8, "work", "worker.mjs", [])).account);
+      }
+      assert.deepEqual(order, ["alpha", "beta", "gamma"]);
+      assert.ok(Math.abs(one.holds.left("beta", t) - 0.7) < 1e-9, "the reading is kept with the machine's holds");
+      // Every account read: beta has the most left (0.7, against alpha's 0.2 and gamma's 0.4), though alpha's turn is next.
+      for (const loop of [two, one]) {
+        t += 1000;
+        loop.result = reading(0.3);
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "in either serve");
+      }
+      // A pinned stage on gamma leaves its reading too: gamma now has the most left.
+      gh.apply("factory:account:gamma");
+      t += 1000;
+      one.result = reading(0.05);
+      assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      gh.remove("factory:account:gamma");
+      t += 1000;
+      two.result = reading(0.05);
+      assert.equal((await two.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      // Past every window's reset the readings are stale, so no account is measured: the turn (alpha, started longest ago).
+      t += 49 * 60 * MIN;
+      assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, an account whose served stage reported no quota reading (an API key) is recorded so, and comes after every account with a reading, however little that one has left; one never measured comes first; a paused Objective resumes on its own account first", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } } });
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      const order = [];
+      for (const r of [delivered, reading(0.95)]) {
+        t += 1000;
+        loop.result = r;
+        order.push((await loop.stage(8, "work", "worker.mjs", [])).account);
+      }
+      assert.deepEqual(order, ["alpha", "beta"]);
+      assert.equal(loop.holds.reportsNothing("alpha", t), true, "alpha ran a stage and reported nothing: kept as a fact");
+      assert.equal(loop.holds.reportsNothing("gamma", t), false, "gamma never ran: not measured, which is not the same");
+      // gamma, never measured, first; then beta's 5% left beats alpha's silence, though alpha's turn is next.
+      t += 1000;
+      loop.result = reading(0.99);
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "gamma");
+      for (let i = 0; i < 2; i++) {
+        t += 1000;
+        loop.result = reading(0.95);
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
+      }
+      // An Objective paused on alpha resumes there when it is free: its session lives there.
+      assert.equal(loop.autoAccount("claude", { prefer: "alpha" }).account.name, "alpha");
+      // Held, it is passed over: quota decides among the rest.
+      loop.holds.limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
+      assert.equal(loop.autoAccount("claude", { prefer: "alpha" }).account.name, "beta");
+      assert.equal(gh.blocked().length, 0);
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, the Objective's next stage stays on its previous stage's account while that stage's prompt cache is warm, ahead of quota; then quota decides", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  let t = Date.now();
+  const reading = (used, warm = null) => ({ ...delivered, quota: { harness: "claude", windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } }, ...(warm ? { cacheWarmUntil: warm } : {}) });
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      // Each account measured through a pin: beta has the most left; alpha's stage is the last, its cache warm an hour.
+      for (const [name, used] of [["beta", 0.1], ["gamma", 0.5], ["alpha", 0.8]]) {
+        gh.apply(`factory:account:${name}`);
+        t += 1000;
+        loop.result = reading(used, name === "alpha" ? t + 60 * MIN : null);
+        assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, name);
+        gh.remove(`factory:account:${name}`);
+      }
+      t += 1000;
+      loop.result = reading(0.8, t + 60 * MIN);
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha", "warm: it stays, though beta has more left");
+      t += 61 * MIN;
+      loop.result = delivered;
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "the cache gone cold: quota decides");
+    });
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#391: on, picks made before any of their stages starts spread over the measured accounts, the most left first in each round; a start counts until the account's next reading", async () => {
+  const h = fakeHome();
+  const gh = fakeGitHub();
+  const t = Date.now();
+  try {
+    await withHome(h, async () => {
+      const loop = autoServe(h, () => t);
+      for (const [name, used] of [["alpha", 0.4], ["beta", 0.41], ["gamma", 0.7]]) loop.holds.reading({ harness: "claude", account: name, now: t - 1000, windows: { seven_day: { used, resetsAt: t + 48 * 60 * MIN } } });
+      const picks = [];
+      for (let i = 0; i < 6; i++) picks.push(loop.autoAccount("claude", { pick: true }).account.name);
+      assert.deepEqual(picks, ["alpha", "beta", "gamma", "alpha", "beta", "gamma"]);
+      // Their stages start: the count moves to the machine's start records, shared with every serve.
+      for (const n of picks) loop.startedOn({ name: n, harness: "claude", declared: true });
+      assert.equal(autoServe(h, () => t).holds.startsSince("alpha", t), 2);
+      assert.equal(loop.autoAccount("claude").account.name, "alpha", "two each: the most left");
+      loop.holds.reading({ harness: "claude", account: "gamma", now: t, windows: { seven_day: { used: 0.7, resetsAt: t + 48 * 60 * MIN } } });
+      assert.equal(loop.autoAccount("claude").account.name, "gamma", "gamma's new reading covers its starts: none since");
     });
   } finally {
     gh.restore();

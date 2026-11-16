@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolveFactoryThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
@@ -36,8 +36,8 @@ import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-t
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
-import { MIN_CONFIDENCE, TRIAGE_MODEL, openTriage, triageKey, triageKeyState } from "./lib/triage.mjs";
-import { openDecider } from "./lib/adapters/decider.mjs";
+import { MIN_CONFIDENCE, TRIAGE_MODEL, openTriage, triageKey } from "./lib/triage.mjs";
+import { openDecider } from "./lib/decider.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
@@ -60,6 +60,7 @@ import {
   exitStep,
   outageExit,
   outageFirst,
+  servedSilent,
   usageLimitExit,
   restoreTranscript,
   saveTranscript,
@@ -457,18 +458,13 @@ export function answerInput({ comments = [], checks = [], diff }) {
 const BINARY_DIFF = /^(?:Binary files .* differ|GIT binary patch)$/m;
 
 /**
- * The decision model the answer gate asks: red-check triage's (triage.mjs: the same AI Gateway key, the `triage_model`
- * setting and the decider adapter), opened at the first question. `off`: the key's code (triage.mjs triageKeyState)
- * when there is no key, and then no decider. `decider` stands in for the adapter (tests).
+ * The decision model the answer gate asks: red-check triage's `triage_model` with an AI Gateway key, else the stage's
+ * own harness (`stage`), through the one decision interface (decider.mjs openDecider), opened at the first question.
+ * `off`: why there is none (the key's code, or `route-off`), and then no decider. `decider` stands in for the vendor (tests).
  */
-export function answerDecider({ inputs, env = process.env, home = homedir(), decider = null }) {
-  const model = inputs?.triageModel || TRIAGE_MODEL;
-  if (decider) return { model, off: null, decider };
-  const { key, code } = triageKeyState({ inputs, env, home });
-  if (!key) return { model, off: code, decider: null };
-  mask(key);
-  let opened = null;
-  return { model, off: null, decider: { decide: async (input, question) => (opened ??= await openDecider({ key, model })).decide(input, question) } };
+export function answerDecider({ inputs, env = process.env, home = homedir(), stage = null, decider = null }) {
+  const d = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
+  return { model: d.model, off: d.off, decider: d.off ? null : d };
 }
 
 /**
@@ -792,6 +788,8 @@ async function main() {
     log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
+    // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
+    if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
@@ -976,6 +974,7 @@ async function main() {
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "review", pr: pr.number, harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
+  if (limits) LIMIT.hold = limits.hold;
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
@@ -1101,13 +1100,16 @@ async function main() {
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
-  // The drift advisory (lib/drift.mjs) on the answer and fix passes: off without an AI Gateway key; advice only.
-  const drift = openDrift({ inputs, progress });
-  // The answer gate's decision model (answerDecider): red-check triage's key and model; without a key, every answer that
-  // committed gets a review pass.
-  const answerAsk = answerDecider({ inputs });
   io.set({ decisions, prNumber: pr.number });
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl };
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, on
+  // the reviewer's model (the independent one) and env (no worker secret), each call's spend in the stage's usage.
+  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
+  const drift = openDrift({ inputs, progress, stage: decisionStage });
+  // The answer gate's decision model (answerDecider): triage's model, through the stage's decider; with none, every
+  // answer that committed gets a review pass.
+  const answerAsk = answerDecider({ inputs, stage: decisionStage });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): the fix and answer passes
   // continue the worker's session, so they get them as the work stage's passes do (passEnv). The reviewer never does: it
   // runs on harnessEnv, and its calls are marked `reviewer` (runHarness strips them there too).
@@ -1243,7 +1245,7 @@ async function main() {
   else if (scope.since) log(`PR #${pr.number}: commits since the head Factory's review covers (${scope.since.slice(0, 7)}) go to the reviewer${scope.diff === null ? `, the whole PR (${scope.why})` : ", the changes since that head"}`);
   if (!marks.validated) {
     log(`head ${pr.head.sha.slice(0, 7)} has no validation marker${marks.handedOff ? " (handed off with its required checks running)" : ""}; running Factory's validation ${inputs.ciChecks.length && !alreadyReviewed ? "beside" : "before"} the review`);
-    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress) }), drift, checksOnlyFirst: marks.handedOff };
+    const preArgs = { onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: 0, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "pre-review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress: Object.assign((l) => (overlap ? overlap.phase(l) : progress(l)), progress), stage: decisionStage }), drift, checksOnlyFirst: marks.handedOff };
     let pre;
     if (preArgs.checks && !alreadyReviewed) {
       overlap = reviewOverlap({ run: (more) => validationLoop({ ...preArgs, ...more }), progress, head: () => outbox.expected() || pr.head.sha, conflicted: async () => (await getPr(repo, pr.number, token)).mergeable_state === "dirty" });
@@ -1265,7 +1267,7 @@ async function main() {
   // the merge below enqueues it again as any drop (or Blocks at the queue's bound).
   const queued = heldRed
     ? null
-    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
+    : await readQueueRed({ repo, issue, prNumber: pr.number, base: defaultBranch, head: outbox.expected() || pr.head.sha, objectiveLabel: inputs.objectiveLabel, names: async () => (inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, token).catch(() => [])), triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), token: token.token, actionsToken: inputs.githubToken || token.token }).catch((e) => {
         // Unread, the drop stays handed: the merge pass hands it to the next review stage.
         log(`the merge queue's red run could not be read: ${String(e?.message || e).slice(0, 160)}`);
         return null;
@@ -1333,7 +1335,7 @@ async function main() {
     // The pass beside it ending the stage (a conflict, checks that never start, a red that stays) ends the reviewer too.
     ...(overlap ? { signal: overlap.signal } : {}),
   });
-  reviewLive?.finish();
+  await reviewLive?.finish();
   if (!alreadyReviewed) mark(reviewRec, reviewRec);
   // The pass beside the reviewer ended the stage: its end, with nothing posted (the next stage reviews the head it works on).
   const overlapEnded = async (...recs) => {
@@ -1432,7 +1434,7 @@ async function main() {
         return rec;
       },
     });
-    foundationLive.finish();
+    await foundationLive.finish();
     if (overlap?.ends()) return overlapEnded();
     if (found.stop === "cap") return blockedAtCap("the foundation pass");
     if (found.stop === "time") return blockedAtTime("the foundation pass");
@@ -1535,7 +1537,7 @@ async function main() {
   // comments too.
   // The finding check (#368): what it judges each answer by, and its answers the gateway gave no verdict on (`unjudged`,
   // over this stage). The repository's rules: AGENTS.md at the head, the protected paths and the validation commands.
-  const findingCheck = openFindingCheck({ inputs });
+  const findingCheck = openFindingCheck({ inputs, stage: decisionStage });
   const unjudged = [];
   const findingRules = async (head) => {
     const agents = head ? await outbox.git(["show", `${head}:AGENTS.md`], { maxBytes: 64 * 1024 }).catch(() => null) : null;
@@ -1610,7 +1612,7 @@ async function main() {
         ...workerRun(inputs),
         resume,
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
-        // A resume the provider refuses for a rotated credential runs fresh with the full card (harness.mjs runHarness).
+        // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
         maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
         cwd: checkout,
@@ -1634,7 +1636,7 @@ async function main() {
     // It ran fresh: the decisions it read are a fresh pass's.
     if (rec.resumeRefused) {
       fed = answerFed({ fresh: true, decisions, listed: listedFor(null), afterPush: afterPush.length > 0 });
-      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider (another credential)" };
+      reentry = { ...(reentry || {}), resumed: false, reason: "resume refused by the provider" };
     }
     // A resumed session the CLI could not continue falls back to a fresh answer pass with the full card, budget left.
     if (answerFreshAfter(resumeAnswer, rec) && !mark(rec, rec).budgetExceeded) {
@@ -1646,7 +1648,7 @@ async function main() {
       rec = await runHarness(answerArgs(null));
     }
     mark(rec, rec);
-    answerLive.finish();
+    await answerLive.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
     answerRun = rec;
@@ -1703,7 +1705,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }), drift })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;
@@ -1781,7 +1783,10 @@ async function main() {
   await dropLabel();
   // Findings still open after the answer pass (no answer, or one the finding check did not read as resolving them), with
   // the rest of the exit delivered: another answer round within the bound, else the Block names them (session.mjs).
-  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged }, token);
+  if (decision.findingsOpen && !publishRefused && !overBudget && !conflict && decideExit({ ...exitArgs, reviewUnaddressed: 0 }).exit === "delivered") await openFindingsExit(decision, { repo, issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel, open: stillOpen, unjudged, decider: findingCheck.asked?.() ?? null, limit: findingCheck.limited?.() ?? null }, token);
+  // The finding check met the stage harness's usage limit with nothing else to answer: the stage ends as a pass meeting
+  // it does (paused locally until the reset, held or Blocked `provider-quota` elsewhere), never the check's own Block.
+  if (decision.usageLimit) throw new UsageLimitReached(decision.usageLimit, { since: Date.now(), label: "finding check" });
   // On Actions, a Question answered while this job ran (a writer's decision and a person's ready mark, both) is not put
   // back to draft (locally the Question stands: logic.mjs answerDuring). The PR stays ready and unlabelled: the review job the ready mark started runs next, and its answer pass
   // applies the answer (or, with nothing new since the Question, makes it a Question again). Either alone, or

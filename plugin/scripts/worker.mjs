@@ -16,12 +16,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, runnerFileEnv, sh } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageSpendSoFar } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -59,11 +59,21 @@ export function conflictPassPrompt({ prompt, branch, defaultBranch, cause = "aft
  * Before a send-back's conflict pass is pushed, whatever ended it (a cap, a death, a refusal included): why what it left
  * is not the branch rebased onto `onto.base` (outbox.mjs rebaseLeft), with the outbox blocked so nothing of it goes out,
  * or "" (no send-back conflict, `onto` null, or a good rebase). `judge`: the decision model for a file not exactly the
- * branch's (kept.mjs openKeptCheck), null without a key; `progress`: where the check's note goes (outbox rebaseNote).
+ * branch's (kept.mjs openKeptCheck), null with no decider; `progress`: where the check's note goes (outbox rebaseNote).
+ * `limited()`: the stage harness's usage limit that stopped the check's questions (kept.mjs). Then nothing is pushed and
+ * it throws UsageLimitReached: the stage ends as a pass meeting the limit does (paused locally until the reset, held or
+ * Blocked `provider-quota` elsewhere), and an unanswered question never reads as a change not kept.
  */
-export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null }) {
+export async function sendBackGuard({ outbox, onto, defaultBranch, judge = null, progress = null, limited = null }) {
   if (!onto) return "";
   const left = await outbox.rebaseLeft({ from: onto.from, onto: onto.base, judge });
+  const limit = limited?.() ?? null;
+  if (limit) {
+    const why = `the rebase check met ${limit.harness}'s usage limit; nothing of the send-back's conflict pass was pushed, and it is checked again after the reset`;
+    outbox.block(why);
+    log(why);
+    throw new UsageLimitReached(limit, { since: Date.now(), label: "rebase check" });
+  }
   // A change the branch undid that the head carries anyway: said on the progress comment when the branch goes out.
   if (!left && outbox.rebaseNote) {
     log(`rebase check: ${outbox.rebaseNote}`);
@@ -191,6 +201,8 @@ async function main() {
     log(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}; basis ${usage.basis}`);
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
+    // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
+    if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
@@ -205,7 +217,7 @@ async function main() {
       // The earlier rebases are read from the issue, but not through an outage this stage is ending on; unread, the
       // line names this rebase alone. The rebase line is set before that read, so a stop's write carries it.
       const read = outage ? null : () => listComments(repo, issue, token);
-      const passesRan = records.filter((r) => r && !r.noRun).length;
+      const passesRan = records.filter((r) => r && !r.noRun && !r.decision).length;
       rebaseText = `; ${await rebaseExitLine(progress, issue, { cost, conflict: rebaseStage.conflict, passes: passesRan }, read)}`;
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}${rebaseText}`);
@@ -376,6 +388,7 @@ async function main() {
   progress.ran(ranWith(inputs, chosenLabels, process.env.FACTORY_STAGE_ACCOUNT));
   limits = local || !acct.account ? null : routeLimits({ repo, issue, stage: "work", harness: inputs.harness, account: acct.account, pinned: acct.pinned, opts: token });
   if (limits) LIMIT.elsewhere = limits.elsewhere;
+  if (limits) LIMIT.hold = limits.hold;
   // Automatic choice picked the account: a limit with no reset ends the stage, to move the Objective or Block (#332).
   LIMIT.moves = stageMoves({ local, limits, pinned: acct.pinned });
   // An account label with no accounts declared for this route does nothing: the progress says so, once.
@@ -592,8 +605,6 @@ async function main() {
   credentialBasis = cred.basis;
   // $FACTORY_IN and $FACTORY_OUT: fresh for this stage, so no record from an earlier attempt speaks for this one.
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
-  // The drift advisory (lib/drift.mjs): off without an AI Gateway key; a line on the progress comment, never an action.
-  const drift = openDrift({ inputs, progress });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
   // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
   const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { factoryKey: () => triageKey({ inputs }) }), usageDir });
@@ -607,6 +618,11 @@ async function main() {
     return;
   }
   const harnessEnv = { ...childBase, ...cred.env, ...io.env, FACTORY_ISSUE: String(issue), FACTORY_BRANCH: branch, ...(inputs.compactionWindow ? { FACTORY_COMPACTION_WINDOW: inputs.compactionWindow } : {}), FACTORY_PROMPT_CACHE_TTL: inputs.promptCacheTtl, ...packShellSecrets(shellSecrets) };
+  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
+  // call's spend in the stage's usage.
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: harnessEnv, record: (r) => records.push(r) };
+  // The drift advisory (lib/drift.mjs): a line on the progress comment, never an action.
+  const drift = openDrift({ inputs, progress, stage: decisionStage });
   // A rerun after a Question or Blocked exit: the maintainers' answers may be comments on the issue or the open PR.
   const decisions = await objectiveDecisions(repo, { issue, prNumber: openPr?.number ?? null }, token);
   if (decisions.length) log(`${decisions.length} maintainer decision(s) from the issue and PR comments go to the harness`);
@@ -724,7 +740,7 @@ async function main() {
       model: inputs.model,
       effort: inputs.effort,
       prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $FACTORY_OUT/plan.md stand; do not redo finished items.",
-      // A resume the provider refuses for a rotated credential runs fresh with the whole card (harness.mjs runHarness).
+      // A resume the provider refuses for the session alone runs fresh with the whole card (harness.mjs runHarness).
       freshPrompt: (attempt === 1 && restored?.id && !continued) || rebaseConflict ? conflictPrompt : workPrompt,
       maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
@@ -735,12 +751,12 @@ async function main() {
       label: `work-${attempt}`,
       signal: planStop.signal,
     });
-    live.finish();
+    await live.finish();
     records.push(rec);
     if (rec.sessionId) session.id = rec.sessionId;
-    // The restored session ran fresh instead (harness.mjs runHarness: the provider refused it for a rotated credential).
+    // The restored session ran fresh instead (harness.mjs runHarness: the provider refused its resume).
     if (rec.resumeRefused && attempt === 1 && restored?.id) {
-      restored = { ...restored, id: null, reason: "resume refused by the provider (another credential)" };
+      restored = { ...restored, id: null, reason: "resume refused by the provider" };
       reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: restored.reason };
     }
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported
@@ -784,8 +800,8 @@ async function main() {
   // nothing of it is pushed, whatever ended the pass. Blocked naming the files and the changes, with no validation run;
   // a cap, death or refusal that ended it stays the reason (decideExit puts those first). A file not exactly the
   // branch's is judged by the decision model when there is a key (kept.mjs); without one the commits are matched.
-  const keptCheck = rebaseOnto ? openKeptCheck({ inputs }) : null;
-  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress });
+  const keptCheck = rebaseOnto ? openKeptCheck({ inputs, stage: decisionStage }) : null;
+  const unresolved = await sendBackGuard({ outbox, onto: rebaseOnto, defaultBranch, judge: keptCheck?.judge ?? null, progress, limited: keptCheck?.limited ?? null });
   let pushed = await outbox.push();
   // The default branch changed a workflow file during the run and the new branch conflicts with Factory's merge of it
   // (outbox.mjs catchUp): GitHub would refuse the branch as it is, so the harness resolves the conflict once, as a
@@ -804,7 +820,7 @@ async function main() {
     const resume = session.canResume ? session.id : null;
     const live = liveActivity(progress, { harness: inputs.harness, model: inputs.model, tick: () => io.tick() });
     const pass = await runHarness({ onLine: live.onLine, onResume: live.onResume, harness: inputs.harness, model: inputs.model, effort: inputs.effort, prompt: resume ? catchPrompt.split("\n\n---\n\n").at(-1) : catchPrompt, freshPrompt: catchPrompt, maxUsd: budgetLeft(), resume, cwd: checkout, env: harnessEnv, timeoutMs: remainingMs(deadlineAt), eventsFile, label: "conflict" });
-    live.finish();
+    await live.finish();
     records.push(pass);
     if (pass.sessionId) session.id = pass.sessionId;
     // The pass answers for the branch like the work pass: a cap it reached Blocks with that cap, a death or a rebase or
@@ -877,9 +893,9 @@ async function main() {
       deadlineAt,
       eventsFile,
       io,
-      // Red-check triage (lib/triage.mjs): off without an AI Gateway key. Jobs are read and rerun with the job token on
+      // Red-check triage (lib/triage.mjs), asked through the stage's decider. Jobs are read and rerun with the job token on
       // Actions (actions: write), the repository token locally.
-      triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress }) : null,
+      triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }) : null,
       drift,
       // A work pass that ended well hands its pushed head to the review stage without waiting for the required checks:
       // the review waits for them beside its reviewer, and its answer pass fixes a red with the review's comments. A

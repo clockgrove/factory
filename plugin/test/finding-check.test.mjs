@@ -195,10 +195,12 @@ test("#368: without a decider key a reply answers its finding as before, said on
     assert.deepEqual(progress, ["finding check: off (no-key); a reply answers its finding"]);
     assert.deepEqual(await list(), []);
   });
-  const row = findingCheckRow({ inputs: {}, env: {}, home });
+  // #379: with no key the stage's own harness judges (decision_route auto); only with no decider is the check off.
+  assert.equal(findingCheckRow({ inputs: {}, env: {}, home }).status, "PASS");
+  const row = findingCheckRow({ inputs: { decisionRoute: "gateway" }, env: {}, home });
   assert.deepEqual([row.status, row.name], ["WARN", "finding check"]);
   assert.match(row.detail, /^off \(no-key\): reviewer findings are not judged; Factory's reply answers each one$/);
-  assert.match(findingCheckRow({ inputs: {}, env: { GITHUB_ACTIONS: "true" } }).fix, /ai_gateway_api_key/);
+  assert.match(findingCheckRow({ inputs: { decisionRoute: "gateway" }, env: { GITHUB_ACTIONS: "true" } }).fix, /ai_gateway_api_key/);
   assert.equal(findingCheckRow({ inputs: { aiGatewayApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } }).status, "PASS");
 });
 
@@ -306,13 +308,13 @@ test("#368: an answer the gateway gave no verdict on costs no answer round: the 
   const open = [{ id: 300, path: "src/merge.ts", line: 8 }];
   await withGitHub(gh, async () => {
     const d1 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "unavailable" }] }, { token: "t" });
-    assert.deepEqual(d1, { exit: "delivered", rerun: true, reason: `the decision model gave no verdict (unavailable) on the answers to 1 reviewer finding(s) (src/merge.ts:8); the review runs again to judge them, with no worker pass (1 of ${FINDING_CHECK_TRIES} stages without a verdict)` });
+    assert.deepEqual(d1, { exit: "delivered", rerun: true, reason: `the AI Gateway's decision model gave no verdict (unavailable) on the answers to 1 reviewer finding(s) (src/merge.ts:8); the review runs again to judge them, with no worker pass (1 of ${FINDING_CHECK_TRIES} stages without a verdict)` });
     const rec = await readAnswerRounds(REPO, ctx, { token: "t" });
     assert.equal(rec.rounds.length, 0, "no answer round taken");
     assert.deepEqual(checkState(rec), { unjudged: [300], failed: 1, error: "unavailable", judgeOnly: true }, "the next stage only judges: no worker pass for them");
     // The next stage judged it again and the gateway failed again: Blocked, its cause from the code.
     const d2 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "rate_limited" }] }, { token: "t" });
-    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then re-apply `factory:objective` to resume" });
+    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the AI Gateway's decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then re-apply `factory:objective` to resume" });
     assert.equal(gh.state.labels.length, 1);
   });
   // A stage that judged them, with others open, ends the run of failures and takes an answer round.
@@ -330,6 +332,30 @@ test("#368: an answer the gateway gave no verdict on costs no answer round: the 
     // The second stage in a row without a verdict; a refused key is the key's: a setup Block.
     const blocked = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "auth" }] }, { token: "t" });
     assert.deepEqual([blocked.exit, blocked.cause], ["blocked", "setup"]);
+  });
+});
+
+test("#379: the stage harness's usage limit in the finding check ends the stage as a pass meeting it does, counts as no try, and a Block names the harness asked", async () => {
+  const gh = github();
+  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
+  const open = [{ id: 300, path: "src/merge.ts", line: 8 }];
+  const limit = { harness: "claude", status: 429, type: "rate_limit_error", code: "usage_limit_reached", message: "limit", resetAt: Date.parse("2026-11-16T23:00:00Z") };
+  const decider = { name: "harness", model: "claude claude-fable-5-2" };
+  await withGitHub(gh, async () => {
+    const d1 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "rate_limited" }], decider, limit }, { token: "t" });
+    assert.equal(d1.usageLimit, limit, "the caller ends the stage on the refusal (usageLimitExit), not on this exit");
+    assert.equal(d1.rerun, undefined);
+    assert.equal(gh.state.labels.length, 0, "no review label: the pause or hold resumes it");
+    const rec = await readAnswerRounds(REPO, ctx, { token: "t" });
+    assert.deepEqual(checkState(rec), { unjudged: [300], failed: 0, error: "rate_limited", judgeOnly: true }, "judged again next stage, and no try counted");
+    // The next stage's check fails once more (no limit): one try, so it runs again rather than Block.
+    const d2 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "unavailable" }], decider }, { token: "t" });
+    assert.equal(d2.rerun, true);
+    assert.match(d2.reason, /^the stage's own harness \(claude claude-fable-5-2\) gave no verdict \(unavailable\)/);
+    const d3 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "vendor" }], decider }, { token: "t" });
+    assert.equal(d3.exit, "blocked");
+    assert.match(d3.reason, /^the stage's own harness \(claude claude-fable-5-2\) gave no verdict \(vendor\) .* in 2 review stages in a row: src\/merge\.ts:8\. Check the harness login this stage runs on and its usage, then re-apply/);
+    assert.doesNotMatch(d3.reason, /AI Gateway/);
   });
 });
 
@@ -404,5 +430,5 @@ test("#368: the review stage judges answers the last stage got no verdict on fir
   const judged = src.indexOf("if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);");
   assert.ok(judged > listed && judged < src.indexOf("await resolveFactoryThreads(repo, pr.number"), "judged before the threads are resolved");
   assert.match(src, /diffOf: \(from\) => answerDiff\(outbox\.git, \{ base: outbox\.base, from, head \}\), since: reviewedAt/);
-  assert.match(src, /if \(decision\.findingsOpen && [^\n]*decideExit\(\{ \.\.\.exitArgs, reviewUnaddressed: 0 \}\)\.exit === "delivered"\) await openFindingsExit\(decision, \{[^\n]*unjudged \}, token\);/);
+  assert.match(src, /if \(decision\.findingsOpen && [^\n]*decideExit\(\{ \.\.\.exitArgs, reviewUnaddressed: 0 \}\)\.exit === "delivered"\) await openFindingsExit\(decision, \{[^\n]*unjudged, decider: findingCheck\.asked\?\.\(\) \?\? null, limit: findingCheck\.limited\?\.\(\) \?\? null \}, token\);\n[^\n]*\n[^\n]*\n  if \(decision\.usageLimit\) throw new UsageLimitReached\(decision\.usageLimit/);
 });

@@ -1075,7 +1075,7 @@ test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page r
     assert.equal((await loop.resume(7)).exit, "blocked");
     assert.equal(tries(), 12);
     const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Factory's 12 h bound for GitHub failing/);
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Factory's 12 h bound for github\.test failing/);
     assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
     assert.ok(!loop.offline.has(7));
   } finally {

@@ -266,13 +266,17 @@ test("serve: a dispatch that releases a stop never drops a newer stop recorded w
 });
 
 /**
- * A GitHub for one Objective (#7) of a local loop's claim tests (#167): its comments (with GitHub's update time), labels
- * and PR. `fail(kind)` answers 502 to a read while it returns true: "comments", "issue" or "pulls".
+ * A GitHub for the Objectives of a local loop's claim tests (#167): #7 by default, and any other number with the same
+ * labels (`labelsOf(n)`); their comments (with GitHub's update time, and the issue each is on: #7 when none is named),
+ * labels and PR.
+ * `fail(kind)` answers 502 to a read while it returns true: "comments", "issue" or "pulls".
  */
 function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:running"], pr = null, fail = () => false } = {}) {
   const comments = [];
   const writes = [];
-  const state = { labels: new Set(labels) };
+  const sets = new Map();
+  const labelsOf = (n) => (sets.has(Number(n)) ? sets.get(Number(n)) : sets.set(Number(n), new Set(labels)).get(Number(n)));
+  const state = { labels: labelsOf(7) };
   let id = 100;
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
@@ -286,10 +290,11 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
     if (p === "/user") return json({ login: "maintainer", type: "User" });
     if (p === "/collaborators") return json([{ login: "maintainer" }]);
     if (/\/actions\/workflows\/[^/]+\/runs$/.test(p)) return json({ workflow_runs: [] });
-    if (method === "GET" && p === "/issues/7/timeline") return json([]);
-    if (method === "GET" && p === "/issues/7/comments") return fail("comments") ? json({ message: "Server Error" }, 502) : json(comments);
-    if (method === "POST" && p === "/issues/7/comments") {
-      const c = { id: (id += 1), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };
+    if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(p)) return json([]);
+    const on = /^\/issues\/(\d+)\/comments$/.exec(p);
+    if (on && method === "GET") return fail("comments") ? json({ message: "Server Error" }, 502) : json(comments.filter((c) => (c.issue ?? 7) === Number(on[1])));
+    if (on && method === "POST") {
+      const c = { id: (id += 1), issue: Number(on[1]), user: { login: "maintainer", type: "User" }, body: JSON.parse(init.body).body, updated_at: new Date().toISOString() };
       comments.push(c);
       return json(c, 201);
     }
@@ -306,12 +311,13 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
     }
     if (p === "/pulls" && method === "GET") return fail("pulls") ? json({ message: "Server Error" }, 502) : json(pr ? [pr] : []);
     if (p === "/issues" && method === "GET") return json(u.searchParams.get("labels") && state.labels.has(u.searchParams.get("labels")) ? [{ number: 7, state: "open", labels: [...state.labels].map((name) => ({ name })) }] : []);
-    if (p === "/issues/7" && method === "GET") return fail("issue") ? json({ message: "Server Error" }, 502) : json({ number: 7, state: "open", labels: [...state.labels].map((name) => ({ name })) });
-    const label = /^\/issues\/7\/labels\/(.+)$/.exec(p);
-    if ((label || p === "/issues/7/labels") && method !== "GET" && fail("labels")) return json({ message: "Server Error" }, 502);
-    if (label && method === "DELETE") return state.labels.delete(decodeURIComponent(label[1])) ? json([]) : json({ message: "Not Found" }, 404);
-    if (p === "/issues/7/labels" && method === "POST") {
-      for (const l of JSON.parse(init.body).labels) state.labels.add(l);
+    const issue = /^\/issues\/(\d+)$/.exec(p);
+    if (issue && method === "GET") return fail("issue") ? json({ message: "Server Error" }, 502) : json({ number: Number(issue[1]), state: "open", labels: [...labelsOf(issue[1])].map((name) => ({ name })) });
+    const label = /^\/issues\/(\d+)\/labels(?:\/(.+))?$/.exec(p);
+    if (label && method !== "GET" && fail("labels")) return json({ message: "Server Error" }, 502);
+    if (label?.[2] && method === "DELETE") return labelsOf(label[1]).delete(decodeURIComponent(label[2])) ? json([]) : json({ message: "Not Found" }, 404);
+    if (label && !label[2] && method === "POST") {
+      for (const l of JSON.parse(init.body).labels) labelsOf(label[1]).add(l);
       return json([]);
     }
     if (p === "/graphql") return json({ data: {} });
@@ -322,7 +328,7 @@ function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:
     if (saved === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = saved;
   };
-  return { comments, writes, labels: state.labels, restore };
+  return { comments, writes, labels: state.labels, labelsOf, restore };
 }
 
 /** A loop with this machine's holder id and no waits between claim reads. */
@@ -550,6 +556,155 @@ test("runObjective: a failed start goes back to Queued and is held for a doublin
   } finally {
     gh.restore();
   }
+});
+
+/** Every line this process logs while `fn` runs, as well as printed. */
+async function logged(fn) {
+  const lines = [];
+  const write = process.stdout.write;
+  process.stdout.write = (chunk, ...rest) => (lines.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  try {
+    await fn();
+  } finally {
+    process.stdout.write = write;
+  }
+  return lines;
+}
+
+test("runObjective: the same failed start on two Objectives is the machine's: none is charged or Blocked, every new start is held, said once, until the disk probe passes; a cause on one Objective alone is its own (#370)", async () => {
+  const { START_DISK_FLOOR } = await import("../scripts/local.mjs");
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    let now = Date.parse("2026-11-15T08:00:00Z");
+    loop.clock = () => now;
+    // The disk as statfs reads it: full until the test frees it.
+    let free = 1024 ** 2;
+    const read = [];
+    loop.machineProbes = { statfs: (dir) => (read.push(dir), { bavail: free, bsize: 1 }) };
+    let fail = { code: "ENOSPC", errno: -28 };
+    loop.stage = async (n) => {
+      if (fail) throw Object.assign(new Error(`${fail.code}: mkdir '/srv/box/.factory/${n}/usage-work'`), { ...fail, syscall: "mkdir", path: `/srv/box/.factory/${n}/usage-work` });
+      return { code: 0, exit: "blocked", usd: 0 };
+    };
+    const posted = () => gh.writes.filter((w) => /^POST \/issues\/\d+\/(comments|labels)/.test(w) && !w.includes(":local -->"));
+    // #7 alone: its own, as before: back to Queued, charged one failed start, held for its backoff; no machine hold.
+    await loop.runObjective(7);
+    assert.ok(!gh.labelsOf(7).has("factory:running"));
+    assert.equal(loop.startFailures.get(7).count, 1);
+    assert.match(loop.startHolds()[7], /1 in a row/);
+    assert.equal(await loop.machineWait(), null, "one Objective alone is no fault of the machine");
+    // #8 fails the same way (setup, ENOSPC) inside #7's backoff: the machine's. Neither is charged, both back to Queued.
+    const lines = await logged(async () => {
+      await loop.runObjective(8);
+      // Far past three failed starts each, an hour apart: never Blocked, never charged, said once.
+      for (let i = 0; i < 4; i += 1) {
+        now += 60 * 60_000;
+        for (const n of [7, 8]) {
+          gh.labelsOf(n).add("factory:running");
+          await loop.runObjective(n);
+        }
+      }
+    });
+    assert.ok(!gh.labelsOf(8).has("factory:running"), "back to Queued");
+    assert.deepEqual(posted(), [], "no Block, no label written");
+    assert.ok(![7, 8].some((n) => gh.labelsOf(n).has("factory:blocked")));
+    assert.equal(loop.startFailures.get(7).count, 0, "the earlier failed start is no longer charged either");
+    assert.equal(loop.startFailures.get(8).count, 0);
+    assert.deepEqual(loop.startHolds(), {}, "no Objective is held on its own count: the machine hold holds every start");
+    const said = lines.filter((l) => /holding every new start on this machine/.test(l));
+    assert.equal(said.length, 1, "said once");
+    assert.match(said[0], /#7, #8 failed to start the same way \(setup, ENOSPC\), which is this machine's fault, not theirs; no Objective is charged for it\. Fix: free disk space on this machine/);
+    assert.match(said[0], /New starts resume once the probe passes: 2 GB free on its disk\./);
+    // Each tick: still full, so serve's dispatch starts nothing, with the reason; the disk read is the one the error named.
+    assert.match(await loop.machineWait(), /^this machine's starts fail \(setup, ENOSPC\): 0\.0 GB free on its disk/);
+    assert.ok(read.at(-1).startsWith("/srv/box/.factory/"));
+    // Another cause on one Objective, during the hold: its own, charged as before.
+    fail = { code: "EACCES", errno: -13 };
+    gh.labelsOf(9).add("factory:running");
+    await loop.runObjective(9);
+    assert.equal(loop.startFailures.get(9).count, 1);
+    // The disk freed: the hold ends, said once, and starts go on; one that starts clears its record.
+    free = START_DISK_FLOOR;
+    const back = await logged(async () => assert.equal(await loop.machineWait(), null));
+    assert.ok(back.some((l) => /this machine's start fault \(setup, ENOSPC\) is gone \(2 GB free on its disk\): new starts resume/.test(l)));
+    assert.equal(await loop.machineWait(), null);
+    fail = null;
+    gh.labelsOf(7).add("factory:running");
+    await loop.runObjective(7);
+    assert.ok(!loop.startFailures.has(7));
+  } finally {
+    gh.restore();
+  }
+});
+
+test("startCause: a failed start's kind and code, on structure; a clone's machine hold waits for github.com and the disk, a claim's for GitHub's API, the clone's preparation for the sandbox (#370)", async () => {
+  const { startCause } = await import("../scripts/local.mjs");
+  const { prepareClone } = await import("../scripts/lib/local.mjs");
+  const { GitHubError } = await import("../scripts/lib/github.mjs");
+  assert.deepEqual(startCause(Object.assign(new Error("ENOSPC"), { code: "ENOSPC", syscall: "mkdir", startFailed: "work" })), { kind: "setup", code: "ENOSPC" });
+  assert.deepEqual(startCause(Object.assign(new Error("git clone failed (exit 128)"), { startStep: "clone", exitCode: 128, startFailed: "work" })), { kind: "clone", code: "exit 128" });
+  const prepared = await prepareClone("/nowhere", [], async () => ({ code: 1, stdout: "", stderr: "" })).catch((e) => e);
+  assert.deepEqual(startCause(Object.assign(prepared, { startStep: "prepare", startFailed: "work" })), { kind: "prepare", code: "exit 1" });
+  assert.deepEqual(startCause(Object.assign(new GitHubError("Server Error", 502, {}), { startFailed: "claim-read" })), { kind: "claim-read", code: "HTTP 502" });
+  assert.deepEqual(startCause(Object.assign(new Error("fetch failed", { cause: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) }), { startFailed: "claim-read" })), { kind: "claim-read", code: "ECONNREFUSED" });
+  assert.deepEqual(startCause(Object.assign(new Error("no settings"), { startFailed: "work" })), { kind: "setup", code: null }, "no code: never the machine's");
+
+  const gh = claimGitHub();
+  try {
+    const loop = await claimLoop();
+    let now = Date.parse("2026-11-15T08:00:00Z");
+    loop.clock = () => now;
+    const hosts = [];
+    let down = { "https://github.com": "ECONNREFUSED", "https://github.test": "ENOTFOUND" };
+    let sandbox = ["srt's sandbox does not start here (bwrap: setting up uid map: Permission denied)"];
+    loop.machineProbes = { statfs: () => ({ bavail: 1, bsize: 2 ** 40 }), net: async (o) => (hosts.push(o), down[o] ?? null), sandbox: () => sandbox };
+    for (const [fail, key, why] of [
+      [{ startStep: "clone", exitCode: 128 }, "clone exit 128", /^https:\/\/github\.com does not answer \(ECONNREFUSED\)$/],
+      [{ startFailed: "claim-read", status: 502 }, "claim-read HTTP 502", /^https:\/\/github\.test does not answer \(ENOTFOUND\)$/],
+      [{ startStep: "prepare", exitCode: 1 }, "prepare exit 1", /^srt's sandbox does not start here/],
+    ]) {
+      loop.stage = async () => {
+        throw Object.assign(new Error("failed"), fail);
+      };
+      loop.withClaim = fail.startFailed ? async () => Promise.reject(Object.assign(new Error("failed"), fail)) : Local.prototype.withClaim;
+      for (const n of [7, 8]) {
+        gh.labelsOf(n).add("factory:running");
+        await loop.runObjective(n);
+      }
+      assert.match(await loop.machineProbe(loop.machineHolds.get(key)), why);
+      now += 2 * 60 * 60_000;
+    }
+    assert.equal(loop.machineHolds.size, 3);
+    down = {};
+    sandbox = [];
+    assert.equal(await loop.machineWait(), null, "every probe passes: every hold ends");
+    assert.equal(loop.machineHolds.size, 0);
+    assert.ok(hosts.includes("https://github.com") && hosts.includes("https://github.test"));
+    assert.ok(!gh.writes.some((w) => /factory:blocked/.test(w)), "nothing Blocked");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("serve: a machine hold starts nothing new, with its reason on the tick line, and the tick after its probe passes picks again (#370)", async () => {
+  let free = 0;
+  const run = await serveAgainst({
+    view: (read, labels) => labels,
+    onList: (read) => {
+      if (read === 2) free = 2 ** 40;
+    },
+    firstStage: () => Promise.resolve({ exit: "delivered" }),
+    stopAfter: 4,
+    stubs: {
+      dev: mkdtempSync(join(tmpdir(), "dev-")),
+      machineProbes: { statfs: () => ({ bavail: free, bsize: 1 }) },
+      machineHolds: new Map([["setup ENOSPC", { kind: "setup", code: "ENOSPC", key: "setup ENOSPC", probes: ["disk"], path: "/srv/box/.factory/7", issues: new Set([7, 8]), since: Date.now(), retryAt: Date.now() }]]),
+    },
+  });
+  assert.deepEqual(run.claims, [3], "nothing started while the disk was full; picked on the tick after it was freed");
+  assert.ok(run.lines.some((l) => /tick: nothing ready \(this machine's starts fail \(setup, ENOSPC\): 0\.0 GB free on its disk/.test(l)), "the tick line names the hold");
+  assert.ok(run.lines.some((l) => /this machine's start fault \(setup, ENOSPC\) is gone/.test(l)));
 });
 
 test("runObjective: a start that fails on a claim it cannot read, or on another loop's it cannot replace, changes nothing; after the backoff the loop reads again, puts it back to Queued and starts it (#167)", async () => {

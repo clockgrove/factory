@@ -19,13 +19,13 @@
 // services: with FACTORY_LOCAL_DB=1 every validation command runs through plugin/bin/factory-db, which starts a fresh
 // Postgres inside the sandbox (init step: FACTORY_LOCAL_DB_INIT), and the task card tells the model to do the same.
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { constants as osConstants, homedir, hostname, platform, tmpdir, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
-import { OUTAGE, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
+import { OUTAGE, causeCode, githubOrigin, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
 
 /** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
 const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
@@ -140,6 +140,38 @@ export const START_BACKOFF_MS = 5 * 60_000;
 export const START_BACKOFF_MAX_MS = 60 * 60_000;
 /** The failed starts in a row of one Objective on one loop that Block it, with the error, rather than un-mark it again. */
 export const START_FAILURES_BLOCK = 3;
+/** The free disk space a machine hold on a full disk waits for before new starts resume (Local.machineProbe). */
+export const START_DISK_FLOOR = 2 * 1024 ** 3;
+/** The system codes of a full disk or a spent disk quota. */
+const DISK_CODES = new Set(["ENOSPC", "EDQUOT"]);
+
+/**
+ * A failed start's cause, on structure only. `kind`: the claim's read or write (`claim-read`, `claim`), else the step of
+ * the stage's set-up that failed (`clone`, `prepare`: the clone's preparation in its sandbox, `setup`: any other).
+ * `code`: a system or network code (ENOSPC, ECONNREFUSED), GitHub's HTTP status, a command's exit, or Factory's own
+ * code; null when the error carries none, and such a failure is never put down to the machine.
+ */
+export function startCause(e) {
+  const kind = e?.startFailed === "work" || !e?.startFailed ? e?.startStep ?? "setup" : e.startFailed;
+  const code = causeCode(e) || (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : "") || (e?.exitCode != null ? `exit ${e.exitCode}` : "") || (typeof e?.code === "string" && /^[a-z][a-z0-9-]*$/.test(e.code) ? e.code : "");
+  return { kind, code: code || null };
+}
+
+/**
+ * What tells that a machine's start fault is gone (Local.machineProbe), by its cause: free disk space for a full disk,
+ * GitHub answering for a clone or a claim, the sandbox starting for the clone's preparation; with no probe of its own
+ * (`retry`), one start is tried again once the backoff ends.
+ */
+const probesOf = ({ kind, code }) => (DISK_CODES.has(code) ? ["disk"] : kind === "clone" ? ["git-host", "disk"] : kind === "prepare" ? ["sandbox", "disk"] : kind === "claim-read" || kind === "claim" ? ["api"] : ["retry"]);
+const PROBE_FIX = {
+  disk: "free disk space on this machine (the error above names the path)",
+  "git-host": "check this machine's network to github.com",
+  api: "check this machine's network to GitHub's API, and GitHub's status",
+  sandbox: "make the sandbox start again (`factory doctor` names what fails)",
+  retry: "fix the error above",
+};
+const PROBE_WAIT = { disk: `${START_DISK_FLOOR / 1024 ** 3} GB free on its disk`, "git-host": "github.com answering", api: "GitHub's API answering", sandbox: "the sandbox starting", retry: "one start tried again after the backoff" };
+const gb = (n) => `${(n / 1024 ** 3).toFixed(1)} GB`;
 export const COPILOT_OUTER_OFF = "local mode runs Copilot only inside the outer sandbox, which does not start on this host";
 /** The Blocked reason when Copilot's outer sandbox stopped starting after serve began: fixed text, no probe output. */
 export const copilotOuterReason = "local mode: Copilot runs locally only inside the outer sandbox, which no longer starts on this machine (outer-sandbox); the local loop's log says why; run the Objective with FACTORY_HARNESS=claude or codex, or on the Action";
@@ -971,7 +1003,7 @@ export class Local {
       const child = spawn("git", ["-c", "credential.helper=", "-c", `credential.https://github.com.helper=${helper}`, "clone", "-q", "--reference-if-able", this.dev, "--dissociate", `https://github.com/${this.repoFull}.git`, dir], { env: { ...localBaseEnv(process.env), FACTORY_LOCAL_TOKEN: this.token, ...SKIP_SMUDGE_ENV }, stdio: ["ignore", "inherit", "inherit"] });
       child.on("close", done);
     });
-    if (code !== 0) throw new Error(`git clone of ${this.repoFull} failed (exit ${code})`);
+    if (code !== 0) throw Object.assign(new Error(`git clone of ${this.repoFull} failed (exit ${code})`), { startStep: "clone", exitCode: code });
     pinGitDir(dir, pin);
     // The Objective's first stage on this machine pays for this clone and a cold install: reported apart (worker.mjs).
     this.firstSetup.set(issue, Date.now() - started);
@@ -1325,7 +1357,10 @@ export class Local {
       for (const l of locks.live) log(`#${issue}: leaving git lock ${l}: a process on this machine has the clone open`);
       // That git runs on the model's clone: with no secret in its env (scrubbedEnv), as every other git there.
       const gitEnv = scrubbedEnv(env);
-      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, gitEnv), { env: gitEnv }), { fresh: script !== "worker.mjs", locks: locks.stale });
+      const prepared = await prepareClone(clone, [env.pnpm_config_store_dir, env.BUN_INSTALL_CACHE_DIR], (inner) => exec(...BACKENDS.local.sandbox.git(inner, gitEnv), { env: gitEnv }), { fresh: script !== "worker.mjs", locks: locks.stale }).catch((e) => {
+        // A failed start's step (unstart: startCause), which says what probe tells a machine's fault is gone.
+        throw Object.assign(e instanceof Error ? e : new Error(String(e)), { startStep: "prepare" });
+      });
       for (const l of prepared.locks) log(`#${issue}: removed stale git lock ${l} (no live process holds it)`);
     } catch (e) {
       dropStage();
@@ -2262,20 +2297,27 @@ export class Local {
   /**
    * The Objectives whose last start on this loop failed, still in their backoff: issue -> the reason serve's dispatch
    * holds it with (localHeld), so it is not picked, nor marked Running, before its backoff ends. This loop's memory only.
+   * One whose failed start was the machine's (count 0) is held only while its claim waits to be read again: the machine
+   * hold (machineWait) holds every new start meanwhile.
    */
   startHolds(now = (this.clock ?? Date.now)()) {
     const out = {};
-    for (const [n, f] of this.startFailures ?? []) if (now < f.retryAt) out[n] = `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+    for (const [n, f] of this.startFailures ?? []) {
+      if (now >= f.retryAt || (f.count === 0 && !f.recheck)) continue;
+      out[n] = f.count === 0 ? `its start here failed on a fault of this machine; its claim is read again after ${new Date(f.retryAt).toISOString()}` : `its last start here failed (${f.count} in a row); tried again after ${new Date(f.retryAt).toISOString()}`;
+    }
     return out;
   }
 
   /**
    * A start that failed before its work stage ran (the claim, the clone, prepareClone, a directory): the real error is
    * logged and the Objective goes back to Queued, its claim dropped, rather than sitting Running for the dispatcher to
-   * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS), so a
-   * machine-level fault (disk full, a broken sandbox) neither Blocks every queued Objective in turn nor relabels them
-   * every tick; the third failed start of the same Objective in a row Blocks it once, with the error as postedError has it
-   * (cause `setup`).
+   * Block with no cause. This loop then holds it for a backoff (START_BACKOFF_MS, doubling to START_BACKOFF_MAX_MS).
+   * The same cause (startCause: its kind and code) on two or more Objectives inside the backoff is the machine's (a full
+   * disk, a broken sandbox, GitHub out of reach): no Objective is charged for it, not this one nor the earlier ones,
+   * and this loop holds every new start until a probe of that cause passes (machineFault, machineWait). A cause seen on
+   * one Objective alone is its own: the third failed start of it in a row Blocks it once, with the error as postedError
+   * has it (cause `setup`).
    * When the claim could not be read, or was another loop's, who holds it is unknown: nothing changes now, and after the
    * backoff this loop reads the claim again (recheckStarts). Only an Objective still labelled Running is un-marked or
    * Blocked; otherwise, or on a failed read, the claim stays, goes stale and this loop resumes it (pausedHere).
@@ -2285,11 +2327,16 @@ export class Local {
     log(`#${issue}: could not start (${e.startFailed}): ${String(e?.message || e).slice(0, 300)}`);
     const error = postedError(e).slice(0, 300);
     const failures = (this.startFailures ??= new Map());
-    const count = (failures.get(issue)?.count ?? 0) + 1;
+    const cause = startCause(e);
+    const machine = this.machineFault(issue, cause, e);
+    // The machine's fault charges no Objective: an earlier failed start of the same cause goes uncharged too (none),
+    // and one of another cause keeps its count.
+    const prior = failures.get(issue);
+    const count = !machine ? (prior?.count ?? 0) + 1 : prior?.cause?.kind === cause.kind && prior?.cause?.code === cause.code ? 0 : prior?.count ?? 0;
     const unknown = e.startFailed === "claim-read" || !!e.othersClaim;
     const backoff = (recheck = unknown) => {
-      const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (count - 1), START_BACKOFF_MAX_MS);
-      failures.set(issue, { count, retryAt, recheck });
+      const retryAt = (this.clock ?? Date.now)() + Math.min(START_BACKOFF_MS * 2 ** (Math.max(count, 1) - 1), START_BACKOFF_MAX_MS);
+      failures.set(issue, { count, retryAt, recheck, cause });
       return new Date(retryAt).toISOString();
     };
     try {
@@ -2306,7 +2353,10 @@ export class Local {
       } else if (unknown) log(`#${issue}: who holds it is unknown here, so it stays as it is; this loop reads its claim again after ${backoff()}`);
       else {
         await this.requeue(issue);
-        log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
+        if (machine) {
+          backoff();
+          log(`#${issue}: back to Queued; it waits with every new start here for this machine's fault to clear`);
+        } else log(`#${issue}: back to Queued; this loop starts it again after ${backoff()}`);
       }
     } catch (x) {
       // GitHub failed here too (the issue read, the requeue or the Block): the Objective may still be Running, so this
@@ -2315,6 +2365,87 @@ export class Local {
     }
     this.lapsed?.delete(issue);
     return out;
+  }
+
+  /**
+   * Whether this failed start's cause is the machine's: a machine hold on that cause is on, or another Objective's start
+   * failed here with the same kind and code inside its backoff. Then the earlier ones are charged nothing either (their
+   * counts go to none), and the hold starts: said once in this log, with the cause, what to fix and what new starts
+   * wait for. A cause with no code is never the machine's.
+   */
+  machineFault(issue, cause, e) {
+    if (!cause.code) return false;
+    const key = `${cause.kind} ${cause.code}`;
+    const holds = (this.machineHolds ??= new Map());
+    const held = holds.get(key);
+    if (held) {
+      held.issues.add(issue);
+      return true;
+    }
+    const now = (this.clock ?? Date.now)();
+    const others = [...(this.startFailures ?? [])].filter(([n, f]) => n !== issue && f.cause && f.cause.kind === cause.kind && f.cause.code === cause.code && now < f.retryAt);
+    if (!others.length) return false;
+    for (const [, f] of others) f.count = 0;
+    const probes = probesOf(cause);
+    // The disk the start failed on: the path a system error names, else this repository's Objective directories.
+    const path = typeof e?.path === "string" && e.path.startsWith("/") ? e.path : join(this.dev, ".factory");
+    const issues = new Set([...others.map(([n]) => n), issue]);
+    holds.set(key, { ...cause, key, probes, path, issues, since: now, retryAt: now + START_BACKOFF_MS });
+    const list = [...issues].sort((a, b) => a - b).map((n) => `#${n}`).join(", ");
+    log(`holding every new start on this machine: ${list} failed to start the same way (${cause.kind}, ${cause.code}), which is this machine's fault, not theirs; no Objective is charged for it. Fix: ${probes.map((p) => PROBE_FIX[p]).join("; ")}. New starts resume once the probe passes: ${probes.map((p) => PROBE_WAIT[p]).join(" and ")}.`);
+    return true;
+  }
+
+  /**
+   * Each tick: the machine holds' probes (machineProbe). A hold whose probe passes ends, said once, and the Objectives
+   * it held are free to pick again. Returns the reason a hold still on gives serve's dispatch (no new start while it
+   * lasts), or null with none.
+   */
+  async machineWait() {
+    let why = null;
+    for (const [key, h] of [...(this.machineHolds ?? [])]) {
+      const problem = await this.machineProbe(h);
+      if (problem === null) {
+        // Their failed starts stay on record for the rest of their backoff: the same failure again is the machine's at once.
+        this.machineHolds.delete(key);
+        log(`this machine's start fault (${h.kind}, ${h.code}) is gone (${h.probes.map((p) => PROBE_WAIT[p]).join(" and ")}): new starts resume`);
+        continue;
+      }
+      why ??= `this machine's starts fail (${h.kind}, ${h.code}): ${problem}`;
+    }
+    return why;
+  }
+
+  /**
+   * Null when every probe of a machine hold's cause passes, else what still fails: the disk's free space against
+   * START_DISK_FLOOR (statfs on the failed path, or its nearest folder that exists), GitHub answering any HTTP at all
+   * (lib/network.mjs probe), srt's sandbox starting (lib/local.mjs sandboxStartProblems), or, with no probe of its own,
+   * the backoff since the hold began. `machineProbes`: a test's own statfs, net or sandbox.
+   */
+  async machineProbe(h) {
+    const p = { statfs: statfsSync, net: probeHost, sandbox: sandboxStartProblems, ...this.machineProbes };
+    for (const what of h.probes) {
+      if (what === "disk") {
+        let free = null;
+        for (let dir = h.path; free === null; dir = dirname(dir)) {
+          try {
+            const s = p.statfs(dir);
+            free = Number(s.bavail) * Number(s.bsize);
+          } catch {
+            if (dir === dirname(dir)) break;
+          }
+        }
+        if (free !== null && free < START_DISK_FLOOR) return `${gb(free)} free on its disk, under the ${PROBE_WAIT.disk} it waits for`;
+      } else if (what === "git-host" || what === "api") {
+        const origin = what === "api" ? githubOrigin() : "https://github.com";
+        const code = await p.net(origin);
+        if (code) return `${origin} does not answer (${code})`;
+      } else if (what === "sandbox") {
+        const problems = p.sandbox();
+        if (problems.length) return problems[0];
+      } else if ((this.clock ?? Date.now)() < h.retryAt) return `one start is tried again after ${new Date(h.retryAt).toISOString()}`;
+    }
+    return null;
   }
 
   /** Back to Queued: the Running label off, the card to Queued, this loop's claim dropped. */
@@ -3022,8 +3153,11 @@ export class Local {
       shownCap = capNow;
       const slots = this.takeSlots(box, running);
       // This machine's paused work resumes first, then reviews (they finish work in flight); new work gets the rest.
-      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : null;
-      const paused = switching ? [] : await this.pausedHere(running);
+      // A fault of this machine that failed the starts of two Objectives or more (machineFault): no new stage starts here
+      // until its probe passes, so none is charged for it.
+      const machineWhy = switching ? null : await this.machineWait().catch((e) => (log(`machine probe: ${String(e?.message || e).slice(0, 160)}`), null));
+      const waitLine = switching ? `no new stage until serve runs on clockgrove/factory@${this.repin?.ref}` : machineWhy;
+      const paused = waitLine ? [] : await this.pausedHere(running);
       const resumes = paused.slice(0, slots.take(paused.length));
       for (const n of resumes) {
         log(`#${n}: resuming (this machine held it when it went away)`);
@@ -3034,7 +3168,7 @@ export class Local {
       // it starts until its reset, said once; work on any other account goes on (limitHold names each Objective's).
       const free = pending.filter((r) => !this.limitHold(r.labels, r.issue, r.updatedAt ?? null));
       // Each review starts as soon as its slot is taken, as resumes do: never a slot held idle through the dispatch.
-      const reviews = switching ? [] : free.slice(0, slots.take(free.length));
+      const reviews = waitLine ? [] : free.slice(0, slots.take(free.length));
       for (const r of reviews) slots.start(r.issue, "review", () => track(r.issue, this.withClaim(r.issue, () => this.review(r.issue, r.pr))).catch((e) => log(`PR #${r.pr} review failed: ${e.message.slice(0, 200)}`)));
       // Held from this tick's dispatch: a failed start's backoff, a stage running here, and every review this loop owes
       // (starting now or waiting for a slot), so the dispatcher never Blocks one this live loop is about to run.
@@ -3051,7 +3185,7 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: switching ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3098,7 +3232,7 @@ export class Local {
       }
       const holding = (result.skipped || []).filter((s) => given.get(s.number)?.why === s.reason);
       const picks = (result.ready || []).filter((n) => !running.has(n) && !reviews.some((r) => r.issue === n));
-      if (free.length > reviews.length && !switching) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
+      if (free.length > reviews.length && !waitLine) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
       // What holds new starts on this machine, said once: here, unless the dispatcher's reason (localFull) says it already.
       const hold = box.why && result.reason !== box.why ? `; holding new starts: ${box.why}` : "";
       log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}${hold}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);

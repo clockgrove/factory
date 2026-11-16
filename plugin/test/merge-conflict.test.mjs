@@ -559,7 +559,7 @@ const RULESET = { type: "pull_request", ruleset_source_type: "Repository", rules
 const reply = (body, author = { __typename: "Bot", login: "factory-app" }, authorAssociation = "NONE") => ({ body, authorAssociation, author, pullRequestReview: { body: "", authorAssociation, author } });
 const personThread = { id: "PRRT_person", isResolved: false, path: "src/store.ts", line: null, originalLine: 41, comments: { nodes: [reply("Why a second store?", { __typename: "User", login: "dana" }, "MEMBER")] } };
 
-test("#331: code scanning's unanswered comment at the merge goes to the answer pass; answered, its thread is resolved and the PR merges", async () => {
+test("#331 #368: code scanning's open comment at the merge goes to the answer pass; Factory's answer alone leaves it open, and once the finding check resolved its thread the PR merges", async () => {
   await withGitHub(async (g, gh) => {
     const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
@@ -572,10 +572,13 @@ test("#331: code scanning's unanswered comment at the merge goes to the answer p
     assert.deepEqual(gh.attempts, [], "no merge GitHub would refuse");
     assert.deepEqual(gh.state.labelled, ["12:factory:review"], "the review runs again; its answer pass takes the comment");
     assert.equal(mergeBlockReason("code-scanning", report), null, "not a Block");
-    // The answer pass replied in its thread: resolved at the merge, which goes on.
+    // The answer pass replied in its thread, and the finding check did not read it as resolving the alert: still open.
     thread.comments.nodes.push(reply("<!-- factory:2:reply:4580153891 -->\nFixed in abc1234: the key is checked against __proto__."));
+    assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "code-scanning");
+    assert.deepEqual(gh.state.resolved, [], "Factory's own answer resolves nothing at the merge");
+    // The finding check's yes resolved the thread (finding-check.mjs): the merge goes on.
+    thread.isResolved = true;
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "queued");
-    assert.deepEqual(gh.state.resolved, [codeql.thread.id]);
     assert.deepEqual(gh.enqueued, [{ pr: 12, sha: two }]);
   });
 });
@@ -659,10 +662,10 @@ test("#331: code scanning's review rounds at the merge are bounded per re-entry,
     gh.state.threads = [alert("A3", 260), alert("A4", 12)];
     const report = {};
     assert.equal(await pass(report), "threads");
-    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 unanswered alert(s) on PR #12 after 2 review rounds answered its earlier ones: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `factory:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 open alert(s) on PR #12 after 2 answer rounds: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `factory:objective` to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     assert.equal(gh.state.labelled.length, 2, "two rounds, two review labels");
-    assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "code-scanning"))).length, 1, "one record on the issue");
+    assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "answer-rounds"))).length, 1, "one record on the issue");
     assert.deepEqual(gh.attempts, []);
     // A re-entry (the Objective label applied again) starts the count over.
     gh.state.timeline = [{ event: "labeled", label: { name: "factory:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
@@ -688,14 +691,16 @@ test("#331: threads resolved just now that GitHub's merge check does not count y
     const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
-    const thread = structuredClone(codeql.thread);
-    thread.comments.nodes.push(reply("<!-- factory:2:reply:4580153891 -->\nFixed in abc1234."));
+    // Factory's reviewer's finding a maintainer answered: a person's answer, resolved at the merge.
+    const factory = { __typename: "Bot", login: "factory-app" };
+    const root = { body: "acceptance 1: a second store", authorAssociation: "NONE", author: factory, pullRequestReview: { body: `${marker(2, "review")}\nFactory's review`, authorAssociation: "NONE", author: factory } };
+    const thread = { id: "PRRT_ours", isResolved: false, path: "src/store.ts", line: 41, originalLine: 41, comments: { nodes: [root, reply("Keep it: decided on the issue.", { __typename: "User", login: "dana" }, "MEMBER")] } };
     gh.state.threads = [thread];
     gh.state.rules = [RULESET];
     gh.state.refuseOnce = true;
     assert.equal(await merge(2, 12), "queued");
     assert.deepEqual(gh.attempts, [12, 12]);
-    assert.deepEqual(gh.state.resolved, [codeql.thread.id]);
+    assert.deepEqual(gh.state.resolved, ["PRRT_ours"]);
   });
 });
 

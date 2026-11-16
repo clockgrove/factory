@@ -7,7 +7,7 @@ description: "/factory:factory-run <issue> [--here]. Run one Clockgrove Factory 
 
 ## Local mode (the default)
 
-Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox (docs/LOCAL.md). It needs local mode set up (the token file, `srt`); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:factory-serve`, resumes it.
+Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox. It needs local mode set up (the token file, `srt`: the factory-setup skill); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:factory-serve`, resumes it.
 
 ## In this session (--here)
 
@@ -15,7 +15,7 @@ Work the Objective here, unsandboxed, when the user wants to watch or steer: the
 
 ### Preconditions
 
-- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token (docs/LOCAL.md) or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`, `FACTORY_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts.
+- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`, `FACTORY_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts.
 - The issue carries `factory:objective` and is open; else stop and say so.
 - Never on Factory's own repository (`clockgrove/factory`); stop and say so.
 

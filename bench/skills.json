@@ -14,19 +14,19 @@
       }
     },
     "factory-doctor": {
-      "sha256": "790700898b1764fafe7cc7a348a2cf37b5a9fb32944778240323907aa670bc76",
+      "sha256": "7f4f5de77cabeb6d7b6d54d565394594e15f891d9d52d0b934c27b9403443504",
       "lines": 43,
-      "words": 698
+      "words": 700
     },
     "factory-draft": {
-      "sha256": "a9af8316d55c803f4f04e875cd8033843e953d5aa4b5015f8256b52ec49c46a1",
+      "sha256": "85dc4ee375fe8b213e690768a2c4fc2f0526e53e3e7ab4369886df216c30ada9",
       "lines": 33,
-      "words": 446
+      "words": 445
     },
     "factory-file": {
-      "sha256": "f32d9612b063f8b140359efa897f7b2ecb1dc59b7c2768515df46c3d4a7dc135",
+      "sha256": "faac49c780cf1f1c6a77378e530684911526481928006b69c356e22ab74a49a5",
       "lines": 41,
-      "words": 693,
+      "words": 694,
       "files": {
         "reference.md": {
           "sha256": "f13ab17c5e45d4b2008a18becdd2fcfff71124e8fcdabdd3ac86329bcd1a34a5",
@@ -46,7 +46,7 @@
       "words": 700
     },
     "factory-objective-plan": {
-      "sha256": "749cfccb55f04d540d10a45bd31cb25ef14817e03631c45d3de1a0d3e0a2a782",
+      "sha256": "72fc80e887e2038c4e723864ab46ece53b0dcd744648604e23ad2ca6da959297",
       "lines": 42,
       "words": 700
     },
@@ -56,9 +56,9 @@
       "words": 697
     },
     "factory-queue": {
-      "sha256": "3dc163cc8c7db8f104dcf79e8aeed51f1fba878f80b61665a46421f07e76469e",
+      "sha256": "3f5e78db3c85a4173c1de2fb25444306d55e1063b31f7ecf0ed91bcb4548df9d",
       "lines": 48,
-      "words": 699
+      "words": 700
     },
     "factory-restart": {
       "sha256": "48b63572d5a72cddc4c63ad60f1c005ac8a336dd66a0f24678ef7176de7f0bad",
@@ -83,53 +83,58 @@
       }
     },
     "factory-run": {
-      "sha256": "d06df97c88ba31967fdf72d80faf2b063d5ec8e9e7ec2a11fe7ec709d996dc35",
+      "sha256": "111c0a1f032cbfbbc39ea943de933099a13e619930d9bb35d9509c7c52335b68",
       "lines": 49,
-      "words": 699
+      "words": 700
     },
     "factory-score": {
-      "sha256": "8d52bc0a75390a98b7459afbefa66c9803ef0f71e71d8ec3a4add095a9d9c319",
-      "lines": 28,
-      "words": 487
+      "sha256": "41feee99645f561db979bb5c96f2321f575868bba6c9187a231d16e673e0fe51",
+      "lines": 30,
+      "words": 519
     },
     "factory-scoring": {
-      "sha256": "7b738932eea81960fe2555a7c486cc4f88465611d23cc929aaa4719dc03b12e2",
-      "lines": 37,
-      "words": 696,
+      "sha256": "2c0b59b883e78f6e3aea91380dbdab76bb63208520c2a47b1e37bd0171f1e016",
+      "lines": 35,
+      "words": 700,
       "files": {
         "reference.md": {
-          "sha256": "8251a78cf9993c871e5bf99aee5a0a86d04c68aa19aae5ea25f551dd7a1022bb",
+          "sha256": "c59c50524de0ee201084420fd280aa39d434f0ce4c2b04803e78a08dc602969b",
           "lines": 52,
-          "words": 1258
+          "words": 1263
         }
       }
     },
     "factory-serve": {
-      "sha256": "74cc937471c415074d1f2c4889f32f2fb77f67eb20e11d2189668202e0dffbc8",
+      "sha256": "5f15a6c6360f2617b17962e9352c62cae112609ac9ad31d7f6da84fcf981f6ab",
       "lines": 34,
-      "words": 699
+      "words": 696
     },
     "factory-setup": {
-      "sha256": "06f8f9f9e02ac9d08a827d8fc1f0461b9a30c1b0fc569f09a06be333a4d805f4",
+      "sha256": "99be30753c1106d5229fde402cf5393f9c91a28fc3128d75bebd596d406510a8",
       "lines": 47,
-      "words": 700,
+      "words": 675,
       "files": {
-        "reference.md": {
-          "sha256": "196a7f9f0c1f3a4ecb18fc3fd29dc2a92e4a40c25300657625fb1bd28a52afc1",
+        "local.md": {
+          "sha256": "db4e54a7a99f8dcd2c4aa689d5b01c5480cb3b58c5b3e2855a6a52c2bac4dac6",
           "lines": 36,
-          "words": 680
+          "words": 653
+        },
+        "reference.md": {
+          "sha256": "3f7fa11fa4cc773fdf612feac725235cf6a82b2ca706fabf3856f1d50675cbed",
+          "lines": 36,
+          "words": 678
         }
       }
     },
     "factory-start": {
-      "sha256": "91479b9d95b56f3da708cbf2dc713154f88435c84732f242fa2a84b71f6f3aea",
+      "sha256": "a357f758d7c8c6dced0dfd075fbf1348815da190630e517a2adbc22df84a14b1",
       "lines": 36,
-      "words": 589
+      "words": 588
     },
     "factory-stop": {
-      "sha256": "a5fdb7d58f6cee8c04d11a47d6d8555e2a98438ca27af80acac7cae6e82bef28",
+      "sha256": "09ae4d5394df83874232a0d691824db48d9a160058dca5769f8bc9c7ecff4797",
       "lines": 30,
-      "words": 405
+      "words": 444
     }
   }
 }

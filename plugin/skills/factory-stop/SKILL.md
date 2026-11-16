@@ -26,4 +26,4 @@ Ask for a yes. Removing a label needs triage or write access to the repository; 
 
 On a yes, run `gh issue edit <issue> --repo OWNER/NAME --remove-label factory:objective`. Say it is stopped, and that `gh issue edit <issue> --repo OWNER/NAME --add-label factory:objective` starts it again.
 
-To stop every Objective at once instead, the README's "To stop everything" says how.
+To stop every Objective at once instead, the user disables the workflow (`gh workflow disable factory.yml`) and cancels its runs in the Actions tab; with the cloud sandbox, also the Objectives' sandboxes in the Vercel project, since a stage running there is no Actions run; in local mode, `factory serve` stops with Ctrl-C.

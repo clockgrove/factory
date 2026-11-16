@@ -82,8 +82,9 @@ import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
+import { redNames, redProgress } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail } from "./reds.mjs";
-import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, fixRunAllowed, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, QUEUE_STALL_MS, REVIEW_LABEL, STALL_CODE, freshPassDenied, ACTIONS_APP_ID, STEP_STALL_FLOOR_MS, jobPosition, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -796,9 +797,9 @@ export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
 
 /**
  * Factory's own validation: run the commands; on red, send the failure back to the
- * same harness (resume where the harness can) and run them once more. `maxPasses`
- * passes at most, plus one when the required checks are first red on the last of them and one for each catch-up merge
- * of Factory's own found red (logic.mjs fixRunAllowed). A fix pass that commits nothing on a red that is the work's
+ * same harness (resume where the harness can) and run them once more, for as long as each fix pass makes progress
+ * (fix-progress.mjs: the exact checks, then `progressCheck`'s decision call), within max_usd and the wall clock. A red
+ * on a catch-up merge of Factory's own is not the change's: it gets its fix pass unjudged. A fix pass that commits nothing on a red that is the work's
  * gets one fresh worker pass, a new session, before the stage Blocks (logic.mjs freshPassDenied): once per head, not
  * counted as a pass. `spentUsd` is what the job has spent before this loop; each fix run gets what is left of `maxUsd`,
  * and nothing is run once it is gone. Returns {green, passes, lastOutput, usage: [records], harness?:
@@ -1063,7 +1064,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
 
 /**
  * Factory's validation of the branch (the commands, or the required checks on the head it pushed), each red handed to a
- * fix pass until green or the passes run out; a green result's `given` is each red a fix pass was handed (its `tail`).
+ * fix pass until green or a fix pass makes no progress (fix-progress.mjs) or max_usd or the wall clock runs out; a green result's `given` is each red a fix pass was handed (its `tail`).
  * Three options let a stage take the checks' wait apart from the fix passes:
  * - `handOff`: with required checks, the first head whose local part is green (the commands first on the local route)
  *   is pushed and not waited for: the result is `{handedOff: sha}` (worker.mjs hands it to the review stage, which waits
@@ -1075,22 +1076,23 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", maxPasses = 2, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
   // The decision calls' spend during this loop (triage, the drift advisory: decisionSpend) is taken off what is left too.
   const decisionsAtStart = decisionSpend();
   const usage = [];
   let passes = 0;
   let last = null;
-  // Whether a fix run has had a red from the required checks (logic.mjs fixRunAllowed).
-  let checksFixed = false;
+  // The red the last fix pass was handed, as the progress check reads it (redShape), and why the loop stopped without
+  // progress. No progressCheck (no decider wired): only the exact checks decide, and what they cannot is no progress.
+  let handed = null;
+  let stalled = "";
+  const judgeProgress = progressCheck?.judge ?? (async ({ before, after }) => redProgress(before, after) ?? { progress: false, why: "the failing jobs changed without getting fewer, and no decision model can judge it" });
   // The last red's failing jobs' own failure lines (failureLead), for the Block's quoted output.
   let lastLead = "";
   // The head the last fix pass was asked to fix: the same head after it is no new observation (validate).
   let redHead = null;
   // Workflow files read at a head while classifying a wait (triage.mjs checkSources): once per stage.
   const workflowFiles = new Map();
-  // Factory's own catch-up merges (outbox.mjs caughtUp) validated red: each gets one fix pass that is not counted.
-  const caughtRed = new Set();
   // The red heads given a fresh worker pass after a fix pass changed nothing on them (freshPassDenied), each with that
   // first unchanged reading (`unchanged`, for the Block that names both attempts) and the worker's session before it
   // (`session`, the thread a fresh pass that commits nothing hands back): once per head in a stage.
@@ -1275,6 +1277,25 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // its tail (one 6000-character window shared by the failures; each full log is on disk), and the diff since the PR's
   // last green head.
   const failureText = (red) => redLines(red, { files: !!io });
+  /**
+   * A red as the progress check reads it (fix-progress.mjs): the head validated, its failing jobs (every failed required
+   * check run, each with its signature when reds.mjs read its log) or failing commands (each signed from its output),
+   * and the failure lines a decision call shows (`lead`, else each one's own line).
+   */
+  const redShape = (v, { detail, failures, lead }) => {
+    const sigs = new Map((detail?.jobs || []).map((j) => [j.id, j.sig]));
+    const jobs = v.fromChecks
+      ? (v.failedRuns?.length ? v.failedRuns : [{ name: `required checks ${checks.names.join(", ")}` }]).map((r) => ({ name: r.name, sig: sigs.get(r.id) ?? null }))
+      : failures.map((f) => ({ name: f.command, sig: failureSignature(f.command, f.full || f.output || "") }));
+    return { head: v.sha || v.head || "", jobs, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
+  };
+  // What the fix pass between two reds changed, as git's --stat (null when it cannot be read).
+  const diffStat = async (from, to) => {
+    if (!from || !to) return null;
+    const args = ["diff", "--stat", "--no-color", from, to];
+    const r = await (outbox?.agentGit ? outbox.agentGit(args) : git(checkout, args)).catch(() => null);
+    return r?.code === 0 ? String(r.stdout) : null;
+  };
   // The checkout's HEAD as the agent's git reads it (outbox.mjs agentGit), or with no outbox the checkout's own; null
   // when it cannot be read.
   const checkoutHead = async () => {
@@ -1367,6 +1388,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
             return { green: false, passes, lastOutput: String(v.rerunRed.failed.output || "").slice(-6000), command: v.command, usage, baseFailure: reason };
           }
           red = { ...lastFix, ...now, command: v.rerunRed.failed.command, rec: lastFix.rec };
+          // The fresh pass is judged against the red it is handed.
+          handed = redShape(v.rerunRed, now);
           lastLead = now.lead || lastLead;
           last = { ...last, failed: v.rerunRed.failed };
           block = unchangedBlock(v.unchanged, lastLead);
@@ -1439,17 +1462,26 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
     lastLead = lead;
     log(`${label} pass ${passes} red: ${failures.map((f) => `${f.command}${f.timedOut ? " (timed out)" : ""}`).join("; ")}`);
-    // The head validated (the checks' or the checkout's) is a merge Factory made and pushed itself: its red is not the
-    // change's last pass. Decided on the commit id the outbox recorded, once per merge.
+    // The head validated (the checks' or the checkout's), and whether it is a merge Factory made and pushed itself (the
+    // commit id the outbox recorded).
     const validated = v.sha || v.head || "";
-    if (validated && outbox?.caughtUp?.(validated)) caughtRed.add(validated);
-    const fixing = fixRunAllowed({ passes, maxPasses, fromChecks: !!v.fromChecks, checksFixed, catchUps: caughtRed.size });
+    const shape = redShape(v, { detail, failures, lead });
+    // A red after a fix pass goes on only when that pass made progress on the red it was handed (fix-progress.mjs); a
+    // red on a merge Factory made itself is not the change's, so it gets its fix pass unjudged.
+    const caught = !!validated && !!outbox?.caughtUp?.(validated);
+    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, diff: await diffStat(handed.head, shape.head) }) : null;
+    if (judged) log(`${label} pass ${passes}: the fix pass before it ${judged.progress ? "made progress" : "made no progress"}: ${judged.why}`);
+    if (judged && !judged.progress) {
+      const first = String(shape.lead).split("\n")[0].replace(/^--- /, "");
+      stalled = `the fix pass before it made no progress: ${judged.why}; failing: ${redNames(shape).join(", ")}${first ? ` (${first})` : ""}`;
+      if (onPhase) await onPhase(`${label} pass ${passes} red: ${stalled}`);
+      break;
+    }
     // The caller takes this red to its own pass (holdRed): no fix pass here.
-    const held = fixing ? holdRed?.() : null;
-    if (onPhase && fixing) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}`);
-    if (!fixing) break;
+    const held = holdRed?.();
+    if (onPhase) await onPhase(`${label} pass ${passes} red: ${failed.command}; ${held ? (typeof held === "string" ? held : "held for the stage's next pass") : "fix run"}${judged ? ` (progress: ${judged.why})` : ""}`);
     if (held) return { green: false, passes, lastOutput: tail, command: failed.command, usage, held: { passes, sha: v.sha ?? null, failures, detail, tail, lead, command: failed.command } };
-    if (v.fromChecks) checksFixed = true;
+    handed = shape;
     redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
@@ -1466,7 +1498,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const ended = await fixPass(lastFix);
     if (ended) return ended;
   }
-  return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
+  return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(stalled ? { stalled } : {}), ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
 }
 
 /**
@@ -2528,7 +2560,7 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
 
 /** The queue's removal code when the required checks failed on its merge_group commit (GitHub's FAILED_CHECKS). */
 export const QUEUE_RED_CODE = "failed_checks";
-/** The most queue fix passes (red queue runs in the PR's own change) per re-entry of the Objective, as maxPasses bounds a stage's. */
+/** The most queue fix passes (red queue runs in the PR's own change) per re-entry of the Objective. */
 export const QUEUE_FIX_PASSES = 2;
 /** How many review stages look for a red drop's merge-group run before it counts as unread (`none`). */
 export const QUEUE_RED_READS = 2;

@@ -42,6 +42,7 @@ import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/wo
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
+import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
@@ -867,7 +868,7 @@ async function main() {
   if (pr?.html_url) progress.link(`PR #${pr.number}`, pr.html_url);
 
 
-  // 7. Factory's own validation passes (validationLoop caps them), failures back to the harness.
+  // 7. Factory's own validation passes, failures back to the harness while its fix passes make progress (validationLoop).
   let validation = null;
   // Hard stops only; a harness that errored but left commits still gets Factory's validation pass.
   const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP) });
@@ -894,6 +895,8 @@ async function main() {
       // Actions (actions: write), the repository token locally.
       triage: pr ? openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }) : null,
       drift,
+      // Whether a fix pass moved the red closer to green, where the exact checks cannot tell (lib/fix-progress.mjs).
+      progressCheck: openProgressCheck({ inputs, stage: decisionStage }),
       // A work pass that ended well hands its pushed head to the review stage without waiting for the required checks:
       // the review waits for them beside its reviewer, and its answer pass fixes a red with the review's comments. A
       // send-back's rebase waits here as before (a reviewed head merges on it), as does a pass whose harness erred
@@ -935,7 +938,7 @@ async function main() {
     harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
-    validation: validation?.handedOff ? { passes: validation.passes, green: true } : validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass } : undefined,
+    validation: validation?.handedOff ? { passes: validation.passes, green: true } : validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass, stalled: validation.stalled } : undefined,
     protectedHits: protectedTouched(delta.files, protectedList),
     unresolved,
     record: asked.record,

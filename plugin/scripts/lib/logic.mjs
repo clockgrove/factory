@@ -80,15 +80,6 @@ export function protectedPaths(additions = []) {
 }
 
 /**
- * Whether a red validation pass gets a fix run: `maxPasses` passes at most, plus one when the red is the first the
- * required checks found. Locally the commands run before the checks, so a change they do not exercise (a browser test
- * only CI runs) is first red in the checks, possibly on the last pass; that red gets its fix run. Each later red stops
- * at `maxPasses`. `catchUps`: the catch-up merges of Factory's own (outbox.mjs catchUp) found red so far, each one
- * pass more: a pass on a merge Factory chose is not the change's, so it never takes the change's last pass.
- */
-export const fixRunAllowed = ({ passes, maxPasses, fromChecks, checksFixed, catchUps = 0 }) => passes < maxPasses + catchUps + (fromChecks && !checksFixed ? 1 : 0);
-
-/**
  * Why a red head a fix pass left unchanged gets no fresh worker pass before the stage Blocks (session.mjs
  * validationLoop), or "" when it gets one. Only a red that is the work's (unchangedBlock's cause `work`; an outage or a
  * setup gap is no code's to fix), once per head in a stage (`tried`: the heads already given one), and only when what is
@@ -804,7 +795,8 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              nothing failed: checksNotStarted's reason), triageRefused?: string (refusedRerunText), scope?: string (fixScopeReason),
  *              stuckCause?: string (the wait's cause, checksNotStarted), unchanged?: {reason, cause} (a fix pass that
  *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
- *              pass was given after a fix pass changed nothing on it, when the red after it is the last)}
+ *              pass was given after a fix pass changed nothing on it, when the red after it is the last), stalled?: string
+ *              (why the fix pass before the last red made no progress, naming that red: session.mjs validationLoop)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
  *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
@@ -884,7 +876,9 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: "work" };
     // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
     const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
-    const red = `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
+    const red = validation.stalled
+      ? `validation red on Factory's pass ${validation.passes}${validation.command ? ` (${validation.command})` : ""}: ${validation.stalled}${fresh}`
+      : `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause: "work" };
   }

@@ -566,6 +566,8 @@ test("triage: a flaky verdict whose rerun GitHub refuses comes back with the ver
 });
 
 test("the last red, triaged flaky with its rerun refused, Blocks naming the verdict, the refusal and the remedy, quoting the failing job's own line first", async () => {
+  // The fix pass commits (the head moves on, as Factory pushes it) and the same jobs fail; the roll-up's log has no
+  // failure line, so no signature: only a decider could judge it, and with none it is no progress.
   const { validationLoop, DETAIL_CHARS } = await import("../scripts/lib/session.mjs");
   const { decideExit } = await import("../scripts/lib/logic.mjs");
   const { refusedRerunText } = await import("../scripts/lib/triage.mjs");
@@ -576,28 +578,29 @@ test("the last red, triaged flaky with its rerun refused, Blocks naming the verd
     { id: 32, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-10T01:05:10Z", completed_at: "2026-11-10T01:05:20Z" },
   ];
   const refused = { status: 403, permission: true, where: "local", jobs: [{ name: "test", verdict: "flaky_or_infra", confidence: 0.99, line: supplyChain, lines: [supplyChain] }] };
+  const codex = idleCodex();
+  let pushes = 0;
   const result = await withRed({ runs, logs: { 31: failingLog, 32: aggregateLog } }, () =>
     validationLoop({
-      checkout: "/nonexistent",
+      checkout: codex.work,
       commands: [],
       harness: "codex",
       maxUsd: 0,
       session: {},
       taskCard: "",
-      env: process.env,
-      deadlineAt: Date.now() + 30_000,
-      // The red is on the last allowed pass: no fix pass follows it.
-      maxPasses: 0,
+      env: codex.env,
+      deadlineAt: Date.now() + 10 * 60_000,
       checks: { repo, issue: 4, prNumber: 5, names: ["quality"], token: "t" },
-      outbox: { push: async () => true, expected: () => sha },
+      outbox: { push: async () => ((pushes += 1), true), expected: () => (pushes > 1 ? "d".repeat(40) : sha) },
       triage: { red: async () => ({ rerun: false, refused }) },
     }),
-  );
+  ).finally(() => codex.putBack());
   assert.equal(result.green, false);
   assert.equal(result.harness, undefined);
+  assert.equal(result.usage.length, 1, "one fix pass");
   assert.equal(result.triageRefused, refusedRerunText(refused));
-  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, command: result.command, triageRefused: result.triageRefused } });
-  assert.equal(exit.reason, "validation red after Factory's first pass (required checks quality on ccccccc); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label");
+  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, command: result.command, triageRefused: result.triageRefused, stalled: result.stalled } });
+  assert.equal(exit.reason, `validation red on Factory's pass 2 (required checks quality on ddddddd): the fix pass before it made no progress: the failing jobs changed without getting fewer, and no decision model can judge it; failing: test, quality (quality (required check), from test: ${supplyChain}); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label`);
   // What the Blocked notice quotes (applyExit keeps the last DETAIL_CHARS): the failing job's own line leads it.
   const shown = result.lastOutput.slice(-2500);
   assert.equal(DETAIL_CHARS, 2500);
@@ -656,7 +659,7 @@ async function rollupRed(workflow, ciLog = aggregateLog) {
   const runs = [run(51, "test (windows-2025)", 0, 5), run(52, "test (macos-26)", 0, 6), run(53, "test (ubuntu-26.04)", 0, 7), run(54, "reuse", 0, 1), run(ci, "ci", 8, 9)];
   const logs = { 51: legLog(WINDOWS), 52: legLog(MAC), 53: legLog(LINUX), 54: legLog(REUSE), [ci]: ciLog };
   const result = await withRed({ runs, logs, workflow }, () =>
-    validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000, maxPasses: 0, checks: { repo: { owner: "acme", name: "app", full: "acme/app" }, issue: 4, prNumber: 5, names: ["ci"], token: "t" }, outbox: { push: async () => true, expected: () => "c".repeat(40) } }),
+    validationLoop({ checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000, checks: { repo: { owner: "acme", name: "app", full: "acme/app" }, issue: 4, prNumber: 5, names: ["ci"], token: "t" }, outbox: { push: async () => true, expected: () => "c".repeat(40) } }),
   );
   assert.equal(result.green, false);
   return result.lastOutput.split("\n\n")[0].split("\n").filter((l) => l.startsWith("--- "));
@@ -1202,15 +1205,57 @@ test("validation loop: the fresh worker pass is a new session, never a resume, h
   assert.ok(fixed.phases.includes("validation pass 2 (required checks)"), "the fresh pass's commit is the next pass");
 });
 
-test("validation loop: a fresh pass's commit red again is the last pass, and the Block names both attempts", async () => {
+test("validation loop: a fresh pass's commit red again the same way is no progress, and the Block names the red and both attempts", async () => {
   const { decideExit } = await import("../scripts/lib/logic.mjs");
   const red = await freshRun({ commits: true, nextRed: true });
   assert.equal(red.result.green, false);
   assert.equal(red.result.passes, 2);
   assert.equal(red.calls.length, 2, "no third harness run");
   assert.equal(red.result.freshPass, "9".repeat(40));
-  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: red.result.passes, green: false, command: red.result.command, unchanged: red.result.unchanged, freshPass: red.result.freshPass } });
-  assert.deepEqual(exit, { exit: "blocked", reason: `validation red after Factory's second pass (required checks quality on bbbbbbb); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
+  const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: red.result.passes, green: false, command: red.result.command, unchanged: red.result.unchanged, freshPass: red.result.freshPass, stalled: red.result.stalled } });
+  assert.deepEqual(exit, { exit: "blocked", reason: `validation red on Factory's pass 2 (required checks quality on bbbbbbb): the fix pass before it made no progress: the same jobs fail the same way; failing: quality (quality (required check): ${supplyChain}); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
+});
+
+test("validation loop: a red on Factory's own catch-up merge gets its fix pass unjudged; the red after that pass is judged (#399)", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const [first, merge, next] = ["9", "b", "e"].map((c) => c.repeat(40));
+  const run = (id) => [{ id, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-11T21:55:00Z", completed_at: "2026-11-11T21:57:00Z" }];
+  const go = async (caughtUp) => {
+    const id = (freshId += 10);
+    const codex = recordingCodex();
+    const phases = [];
+    try {
+      // Each red fails quality the same way; the head Factory pushes moves on after each fix pass (merge, then next).
+      const result = await withHead({ runs: run(id), heads: { [merge]: run(id + 1), [next]: run(id + 2) }, jobs: { [id]: { ...testFailed, id }, [id + 1]: { ...testFailed, id: id + 1 }, [id + 2]: { ...testFailed, id: id + 2 } }, logs: { [id]: failingLog, [id + 1]: failingLog, [id + 2]: failingLog } }, () =>
+        validationLoop({
+          checkout: codex.work,
+          commands: [],
+          harness: "codex",
+          maxUsd: 0,
+          session: {},
+          taskCard: "",
+          env: codex.env,
+          deadlineAt: Date.now() + 10 * 60_000,
+          checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
+          outbox: { push: async () => true, expected: () => [first, merge, next][Math.min(codex.calls().length, 2)], caughtUp: (sha) => caughtUp && sha === merge },
+          onPhase: async (l) => phases.push(l),
+        }),
+      );
+      return { result, phases, calls: codex.calls().length };
+    } finally {
+      codex.putBack();
+    }
+  };
+  const caught = await go(true);
+  assert.equal(caught.calls, 2, "the red on the merge got its fix pass");
+  assert.ok(caught.phases.includes("validation pass 2 red: required checks quality on bbbbbbb; fix run"), caught.phases.join("\n"));
+  assert.match(caught.result.stalled, /^the fix pass before it made no progress: the same jobs fail the same way; failing: quality /);
+  assert.equal(caught.result.passes, 3);
+  // Not Factory's merge: the same red after the first fix pass is no progress.
+  const own = await go(false);
+  assert.equal(own.calls, 1);
+  assert.equal(own.result.passes, 2);
+  assert.match(own.result.stalled, /^the fix pass before it made no progress: the same jobs fail the same way; failing: quality \(quality \(required check\): /);
 });
 
 test("validation loop: the session after a fresh pass is the fresh one when it committed, the worker's own thread when it committed nothing", async () => {

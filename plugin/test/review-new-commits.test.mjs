@@ -604,7 +604,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
     process.env.PATH = env.PATH;
     let r;
     try {
-      r = await validationLoop({ checkout: root, commands: ["test -f fixed || { echo 'not ok 1 - app.txt line 2 is missing its fix'; exit 1; }"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), maxPasses: 2 });
+      r = await validationLoop({ checkout: root, commands: ["test -f fixed || { echo 'not ok 1 - app.txt line 2 is missing its fix'; exit 1; }"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl") });
     } finally {
       process.env.PATH = path;
     }

@@ -152,6 +152,8 @@ export function foldPaths(line) {
 
 /** One failure line with run-to-run noise folded: paths (foldPaths), hashes, numbers (durations, counts, ports, line numbers). */
 const fold = (l) => foldPaths(l).replace(/\b[0-9a-f]{7,}\b/gi, "#").replace(/\d+(?:\.\d+)?/g, "0").replace(/\s+/g, " ").trim();
+/** The fold for the progress check's count of folded lines (fix-progress.mjs foldCounts), the one the signature uses. */
+export const foldLine = fold;
 
 // A dependency's or the runner's own directory: never the repository's file.
 const DEPENDENCY = /(?:^|\/)(?:node_modules|site-packages|dist-packages|hostedtoolcache|_actions|_tool|go\/pkg\/mod)\//;

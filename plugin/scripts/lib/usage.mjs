@@ -317,6 +317,31 @@ export function providerRefusal(harness, events, { rollout = null, since = null 
   return { ...r, ...(usageLimited(r) && reset !== null ? { resetAt: reset } : {}) };
 }
 
+/** Anthropic's API error types by HTTP status (its Errors reference), for an API error message that names no status. */
+const ANTHROPIC_ERROR_STATUS = new Map([["invalid_request_error", 400], ["authentication_error", 401], ["billing_error", 402], ["permission_error", 403], ["not_found_error", 404], ["request_too_large", 413], ["rate_limit_error", 429], ["api_error", 500], ["timeout_error", 504], ["overloaded_error", 529]]);
+
+/**
+ * A Claude Code sub-agent's model refused by the provider, from one of its API error messages (an assistant event with
+ * `is_api_error_message` and the `parent_tool_use_id` of the call that started it): {harness, status, type, code,
+ * message, subAgent, toolUseId}, else null. The main session goes on without the sub-agent's work, on its own model and
+ * with no error of its own (Claude Code 2.1.325), so the stage stops the run on it (harness.mjs runPass) and Blocks
+ * naming the sub-agent's model (logic.mjs refusalReason). Decided on the fields alone: its `api_error_status`, else the
+ * status of its `api_error_type` (a sub-agent's message carries the type only), a 4xx that refuses the model or the
+ * credential (not RETRYABLE_4XX, not a request's own REQUEST_4XX), or a REFUSED_KINDS type or code. A usage limit is
+ * not one: the main session draws on the same limit and meets it as its own refusal. `subAgent` is the agent's type.
+ */
+export function subAgentRefusal(events) {
+  for (const e of events) {
+    if (e?.type !== "assistant" || e.is_api_error_message !== true || !e.parent_tool_use_id) continue;
+    const text = (Array.isArray(e.message?.content) ? e.message.content : []).find((c) => c?.type === "text")?.text;
+    const r = { harness: "claude", status: num(e.api_error_status) ?? ANTHROPIC_ERROR_STATUS.get(e.api_error_type) ?? null, type: str(e.error), code: str(e.api_error), message: str(text) };
+    if (usageLimited(r)) continue;
+    const refused = refusedKind(r) || (r.status !== null && r.status >= 400 && r.status < 500 && !RETRYABLE_4XX.has(r.status) && !REQUEST_4XX.has(r.status));
+    if (refused) return { ...r, subAgent: str(e.subagent_type) ?? "", toolUseId: String(e.parent_tool_use_id) };
+  }
+  return null;
+}
+
 /**
  * The provider saying it is busy, from its error (providerError) on a failed run: {harness, status, type, code, message,
  * retryAt?}, else null. Busy is the status's own HTTP meaning: 408, 425 or 429 (BUSY_4XX), or any 5xx (529 included);
@@ -367,7 +392,8 @@ export function providerError(harness, events) {
   let retryAt = null;
   if (harness === "claude") {
     const res = [...events].reverse().find((e) => e?.type === "result");
-    const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true);
+    // The main session's own API error message: a sub-agent's (parent_tool_use_id) is subAgentRefusal's.
+    const api = [...events].reverse().find((e) => e?.type === "assistant" && e.is_api_error_message === true && !e.parent_tool_use_id);
     const status = num(res?.api_error_status) ?? num(api?.api_error_status);
     if (res?.is_error !== true || (!api && status === null)) return null;
     r = { status, type: str(api?.error), code: str(res.api_error) ?? str(api?.api_error), message: str(res.result) };
@@ -546,7 +572,7 @@ export function parseClaude(stdout, model) {
     first = claudeFirstRequest(lines);
   }
   rec.cache = { first };
-  const refusal = providerRefusal("claude", lines);
+  const refusal = providerRefusal("claude", lines) ?? subAgentRefusal(lines);
   if (refusal) rec.refusal = refusal;
   const busy = refusal ? null : providerBusy("claude", lines);
   if (busy) rec.busy = busy;
@@ -564,7 +590,8 @@ export function parseClaude(stdout, model) {
   rec.sessionId = result.session_id ?? init?.session_id ?? null;
   rec.turns = num(result.num_turns);
   rec.budgetExceeded = result.subtype === "error_max_budget_usd";
-  rec.ok = result.is_error !== true && (result.subtype === "success" || result.subtype === undefined);
+  // A sub-agent's model refused (subAgentRefusal): the run did not do what it was asked, whatever its result says.
+  rec.ok = result.is_error !== true && (result.subtype === "success" || result.subtype === undefined) && typeof refusal?.subAgent !== "string";
   if (!rec.ok) rec.error = result.subtype || (typeof result.result === "string" ? result.result.slice(0, 300) : "is_error");
 
   const byModel = claudeModels(result.modelUsage);

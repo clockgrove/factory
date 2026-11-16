@@ -579,10 +579,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   if (queue && ((squash[0] && squash[0] !== "PR_TITLE") || (squash[1] && !["PR_BODY", "BLANK"].includes(squash[1])))) out.push(FAIL("squash message", `squash commits default to ${squash.join(" and ")}`, "setup --apply protection sets them to the PR's title and body (Settings > General > Pull Requests > Allow squash merging: Default to pull request title and description)"));
   // Listing workflows needs `actions: read`: the job token's (workflow-template.yml), never the App's.
   const ci = await ciWorkflowTriggers(repo, { token: inputs.githubToken || token });
-  if (ci.error) out.push(WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions"));
-  else if (!ci.found) out.push(FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit"));
-  else if (!ci.mergeGroup) out.push((queue ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}`, `add "merge_group:" under on: in ${ci.path}`));
-  else out.push(PASS("ci workflow", `${ci.name} on pull_request and merge_group`));
+  out.push(ciWorkflowCheck(ci, { queue }));
   const runner = text !== null ? runnerMatchCheck(text, ci, { commands: [inputs.setup, ...inputs.validation], checks: [...checks, ...inputs.ciChecks] }) : null;
   if (runner) out.push(runner);
   // Sandbox mode resumes a stage on workflow_run, which filters by workflow name: a name no workflow has never fires.
@@ -730,12 +727,15 @@ export function unreadableRunners(labels) {
 
 /** A workflow's jobs: `check` (the job's name, else its id), `runner` (runnerLabel) and the text of its `run` steps. */
 export function workflowJobs(text) {
-  let doc;
   try {
-    doc = parseYaml(text);
+    return jobsOf(parseYaml(text));
   } catch {
     return [];
   }
+}
+
+/** workflowJobs of a parsed workflow. */
+function jobsOf(doc) {
   return Object.entries(doc?.jobs || {}).map(([id, job]) => ({
     check: typeof job?.name === "string" && !job.name.includes("${{") ? job.name : id,
     runner: runnerLabel(job?.["runs-on"]),
@@ -801,7 +801,8 @@ export function runnerMatchCheck(factoryText, ci, hints = {}) {
 
 /**
  * Find a workflow (other than factory.yml) with pull_request and merge_group triggers, or with `name`, the workflow of
- * that name. `jobs`: its jobs (workflowJobs).
+ * that name. Each workflow's `on:` is read from its parsed YAML (workflowEvents). `jobs`: its jobs (workflowJobs).
+ * `unread`: the workflows that could not be read or parsed here, whose triggers are unknown (each with its reason).
  */
 export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
   let list;
@@ -811,6 +812,7 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
     return { found: false, error: `${e.status || ""} ${e.message.slice(0, 120)}`.trim() };
   }
   let found = null;
+  const unread = [];
   // GitHub lists a workflow file it cannot parse under its path instead of its name, and runs nothing from it.
   const factory = list.find((w) => /(^|\/)factory\.ya?ml$/.test(w.path));
   const factoryParses = factory ? factory.name !== factory.path : null;
@@ -818,16 +820,36 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
     if (/factory\.ya?ml$/.test(w.path) || w.state !== "active") continue;
     const named = Boolean(name) && w.name === name;
     if (name && !named) continue;
-    const raw = await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }).catch(() => "");
-    const text = String(raw || "");
-    const pr = /^\s*pull_request\s*:/m.test(text) || /on:\s*\[[^\]]*pull_request/.test(text);
-    const mg = /^\s*merge_group\s*:/m.test(text) || /on:\s*\[[^\]]*merge_group/.test(text);
-    if (pr || named) {
-      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: workflowJobs(text), factoryParses };
-      if (mg || named) return found;
+    let doc = null;
+    try {
+      doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
+    } catch (e) {
+      // Listed but not on the default branch (it ran from a branch once): nothing runs from it on the default branch.
+      if (e.status === 404 && !named) continue;
+      unread.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
+    }
+    const events = workflowEvents(doc);
+    const mg = events.includes("merge_group");
+    if (events.includes("pull_request") || named) {
+      found = { found: true, name: w.name, path: w.path, mergeGroup: mg, jobs: doc ? jobsOf(doc) : [], factoryParses };
+      if (mg || named) return { ...found, unread };
     }
   }
-  return found || { found: false, factoryParses };
+  return found ? { ...found, unread } : { found: false, factoryParses, unread };
+}
+
+/**
+ * The ci workflow row, from ciWorkflowTriggers's result: a workflow on pull_request and merge_group, the second needed
+ * only with a merge queue (`queue`). A workflow doctor could not read or parse may be the one listening: its triggers
+ * are unknown, so no FAIL rests on it and the WARN names it.
+ */
+export function ciWorkflowCheck(ci, { queue = false } = {}) {
+  const unread = ci.unread?.length ? `; could not read the triggers of ${ci.unread.join(", ")}` : "";
+  const readFix = "make each workflow named readable to the token (contents: read) and valid YAML, then run doctor again";
+  if (ci.error) return WARN("ci workflow", `could not list workflows (${ci.error})`, "give the job token actions: read (permissions: in the workflow), or run doctor with a gh login that can read Actions");
+  if (!ci.found) return unread ? WARN("ci workflow", `no workflow doctor read listens on pull_request${unread}`, readFix) : FAIL("ci workflow", "no workflow listens on pull_request", "add a CI workflow on pull_request and merge_group; the queue needs checks on its commit");
+  if (!ci.mergeGroup) return (queue && !unread ? FAIL : WARN)("ci workflow", `${ci.name} listens on pull_request but not merge_group${queue ? "" : " (needed only with a merge queue)"}${unread}`, `add "merge_group:" under on: in ${ci.path}${unread ? `, or ${readFix}` : ""}`);
+  return PASS("ci workflow", `${ci.name} on pull_request and merge_group`);
 }
 
 /**
@@ -989,33 +1011,48 @@ export async function workflowText({ repo, branch, token, env = process.env, roo
 
 // ------------------------------------------------------------- repository
 
+/**
+ * Bash's own parse of `command` with the flags Factory runs it with (`bash -n`: read, never executed). Null when it
+ * parses; else {refused: true, message: bash's error} when bash refused it, or {refused: false, message} when bash
+ * could not parse it here (it did not start, or ran out of time).
+ */
+export async function shellSyntax(command, { cwd, env = process.env } = {}) {
+  let r;
+  try {
+    r = await exec("bash", ["-n", "-eo", "pipefail", "-c", command], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 });
+  } catch (e) {
+    return { refused: false, message: `bash could not start: ${e.code || e.message}` };
+  }
+  if (r.code === 0) return null;
+  if (r.code === null) return { refused: false, message: r.timedOut ? "bash -n timed out" : `bash -n ended on ${r.signal}` };
+  return { refused: true, message: r.stderr.trim().split("\n").join("; ").slice(0, 300) || `bash -n exited ${r.code}` };
+}
+
 export async function repositoryChecks({ inputs, checkout, env = process.env, runSetup = false, local = false, wf = readWorkflowEnv(checkout) }) {
   const out = [];
   if (!checkout || !existsSync(join(checkout, ".git"))) return [WARN("repository", "no checkout to inspect", "run from a clone or pass --checkout")];
   const install = installCommand(checkout, inputs.install);
   out.push(install ? PASS("lockfile", install.split("||")[0].trim()) : WARN("lockfile", "no lockfile recognised", "set install: <command> or install: none"));
-  const pkg = existsSync(join(checkout, "package.json")) ? JSON.parse(readFileSync(join(checkout, "package.json"), "utf8")) : null;
+  // Whether a validation command runs here is its exit code after setup, which Factory reads on every run: before
+  // that, bash's parse is all doctor can know, and it says so rather than guess from the command's words.
+  const parsed = [];
   for (const cmd of inputs.validation.map(commandText)) {
-    // `pnpm <script>` / `pnpm run <script>` must name a package.json script; `pnpm exec|dlx|x|-r|--filter …` and
-    // `env …` prefixes are not scripts and are only warned about when their binary is absent here.
-    const m = /^(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/.exec(cmd);
-    const notScript = m && /^(exec|dlx|x|test|install|i|ci|-.*)$/.test(m[1]) && !pkg?.scripts?.[m[1]];
-    if (m && pkg && !notScript) {
-      out.push(pkg.scripts?.[m[1]] ? PASS("validation", cmd) : FAIL("validation", `${cmd}: no script "${m[1]}" in package.json`, "fix the validation input or add the script"));
-    } else {
-      const bin = cmd.split(/\s+/)[0];
-      const local = existsSync(join(checkout, bin));
-      out.push(local || (await onPath(bin)) ? PASS("validation", cmd) : WARN("validation", `${cmd}: ${bin} not found here`, "it may exist on the runner after setup"));
-    }
+    const bad = await shellSyntax(cmd, { cwd: checkout, env });
+    if (bad) out.push(bad.refused ? FAIL("validation", `${cmd}: bash cannot parse it (${bad.message})`, "fix the validation command: Factory runs it with bash -eo pipefail -c") : WARN("validation", `${cmd}: not parsed here (${bad.message})`, "run doctor where bash runs"));
+    else parsed.push(cmd);
   }
+  if (parsed.length) out.push(WARN("validation", `${parsed.join("; ")}: ${parsed.length > 1 ? "each parses" : "parses"} as bash; doctor does not run validation, so whether ${parsed.length > 1 ? "each runs" : "it runs"} here is known only when Factory runs it after setup`, "nothing to fix before a run: a red validation command gets a fix pass; to see it now, run it after setup in a clone"));
   if (!inputs.validation.length) out.push(WARN("validation", "no validation commands", "set validation: so Factory has a feedback loop"));
   if (inputs.setup) {
     if (runSetup) {
       const r = await exec("bash", ["-eo", "pipefail", "-c", inputs.setup], { cwd: checkout, env, timeoutMs: 20 * 60_000 });
       out.push(r.code === 0 ? PASS("setup", inputs.setup) : FAIL("setup", `${inputs.setup} exited ${r.code}`, "fix the setup command"));
     } else {
-      const bin = inputs.setup.split(/\s+/)[0];
-      out.push(existsSync(join(checkout, bin)) || (await onPath(bin)) ? PASS("setup", `${inputs.setup} (present; run with --run-setup to execute)`) : FAIL("setup", `${bin} not found`, "fix the setup command"));
+      // Only parsed, never run: what it runs, and whether that exists here, is known when it runs.
+      const bad = await shellSyntax(inputs.setup, { cwd: checkout, env });
+      if (bad?.refused) out.push(FAIL("setup", `${inputs.setup}: bash cannot parse it (${bad.message})`, "fix the setup command: Factory runs it with bash -eo pipefail -c"));
+      else if (bad) out.push(WARN("setup", `${inputs.setup}: not parsed here (${bad.message})`, "run doctor where bash runs"));
+      else out.push(WARN("setup", `${inputs.setup}: parses as bash; doctor did not run it, so whether it runs here is known only when it runs`, "run doctor with --run-setup to run it here; on a run, a setup that exits non-zero Blocks"));
     }
   }
   // `local`: the developer's own checkout in local mode (doctor --local). A worker job's checkout in local mode is the

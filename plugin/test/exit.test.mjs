@@ -325,7 +325,7 @@ test("review: a missed pass reruns once on every harness; with no review from ei
   // The Blocked reason and the log name a crash as a crash, apart from a pass that ran and found nothing.
   assert.equal(noReviewReason([crash, { ...crash, signal: "SIGSEGV", exitCode: null }], reviewOf), "the reviewer produced no review (a crash (exit 101), then a crash (signal SIGSEGV)), so nothing was posted and the PR does not merge");
   assert.equal(noReviewReason([prose, { ok: false, timedOut: true }], reviewOf), "the reviewer produced no review (an answer with no findings JSON, then the time cap), so nothing was posted and the PR does not merge");
-  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "no output (killed as hung)", "a stop by Factory", "a review"]);
+  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no progress; killed)", "a stop by Factory", "a review"]);
 });
 
 test("review: a pass that failed, held no JSON or judged no entry is missed; one judgment is enough", () => {
@@ -542,12 +542,12 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   assert.equal(r.snapshot().usd, 0.5, "another session's total is its own");
 });
 
-test("exec: onLine sees each stdout line; a child silent for idleMs is killed and reported idle", async () => {
+test("exec: onLine sees each stdout line; a child that streams its answer and goes silent for idleMs is killed and reported idle", async () => {
   const { exec } = await import("../scripts/lib/proc.mjs");
   const seen = [];
   const r = await exec(process.execPath, ["-e", "process.stdout.write('a\\nb'); setTimeout(() => process.stdout.write('c\\n'), 50)"], { onLine: (l) => seen.push(l) });
   assert.deepEqual([r.code, r.idle, seen], [0, false, ["a", "bc"]]);
-  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 300 });
+  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 300, answerStreams: true });
   assert.equal(hung.idle, true);
   assert.ok(hung.signal, "killed by signal");
 });
@@ -595,7 +595,7 @@ test("exec: fileStdio hands the child regular files and still streams lines, std
   const seen = [];
   const r = await exec(process.execPath, ["-e", "const fs=require('fs');const t=(n)=>fs.fstatSync(n).isFile();process.stdout.write('a\\nb');process.stderr.write('e'+t(1)+t(2));setTimeout(()=>process.stdout.write('c\\n'),300)"], { onLine: (l) => seen.push(l), fileStdio: true });
   assert.deepEqual([r.code, r.stdout, r.stderr, seen], [0, "a\nbc\n", "etruetrue", ["a", "bc"]]);
-  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 400, fileStdio: true });
+  const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 400, answerStreams: true, fileStdio: true });
   assert.deepEqual([hung.idle, hung.stdout, !!hung.signal], [true, "x\n", true]);
   await assert.rejects(exec("factory-no-such-command", [], { fileStdio: true }), /ENOENT/);
 });

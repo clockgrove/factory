@@ -5,6 +5,8 @@ description: "/factory:factory-score [issue...]. Build or print the Clockgrove F
 
 # /factory:factory-score
 
+The scorecard script, `<factory clone>/bench/score.mjs`, is not part of the plugin: it runs from a clone of Factory's repository (`git clone https://github.com/clockgrove/factory`, Node 22 or newer). Without one, write the row by hand (Write the row).
+
 Load the `factory-scoring` skill first; it defines the four numbers, their units and their basis. This skill is the wiring.
 
 ## Inputs per Objective
@@ -14,11 +16,11 @@ Load the `factory-scoring` skill first; it defines the four numbers, their units
 - **Job log.** The runs that uploaded this issue's usage artifacts (`gh api repos/{owner}/{repo}/actions/artifacts?name=factory-usage-<issue>`, and `-review`; each carries its `workflow_run.id`), then `gh run view <id> --log` for runner minutes, validation reruns and the exit line. The worker job is named `work (<issue>)`; the review job is `review (factory/<issue>)`.
 - **Usage artifact.** `gh run download <id> -n factory-usage-<issue>` (and `-n factory-usage-<issue>-review` from the review run) into a scratch directory. Every harness uploads `result.json` (normalized) and `events.jsonl` (the raw stream); read `result.json`. Copilot's dollars are its AI credits at `copilot_credit_usd`; an artifact without credits is `unmetered`.
 
-For a run made with `/factory:factory-run <issue> --here` there is no job log or artifact: take the harness's usage from the session's own output if the user has it, else mark the dollars `unmetered` and the runner minutes `n/a`. A local-mode run (`factory run`, `factory serve`) uploads no artifact either; `bench/score.mjs` reads its dollars from the `<!-- factory:spend -->` lines in Factory's progress comments.
+For a run made with `/factory:factory-run <issue> --here` there is no job log or artifact: take the harness's usage from the session's own output if the user has it, else mark the dollars `unmetered` and the runner minutes `n/a`. A local-mode run (`factory run`, `factory serve`) uploads no artifact either; the scorecard script reads its dollars from the `<!-- factory:spend -->` lines in Factory's progress comments.
 
 ## Write the row
 
-When the bench is available (`bench/score.mjs` in a Factory checkout), run `node bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (the factory-scoring skill), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: the factory-scoring skill), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
+With a clone, run `node <factory clone>/bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (the factory-scoring skill), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: the factory-scoring skill), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
 
 With no issue given, score every issue that carries `factory:objective` and closed since the date the user names, plus the open ones that are Blocked, Question, In review or Running (`--since <date>`); the table is oldest first.
 

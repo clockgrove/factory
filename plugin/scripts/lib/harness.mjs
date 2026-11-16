@@ -25,6 +25,7 @@ import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, g
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
+import { harnessActivity } from "./logic.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
@@ -404,6 +405,8 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
  * the usage record plus {timedOut, exitCode, stdoutTail, finalText}. Never logs the
  * prompt or the env.
  */
+// The window a silent harness is checked over (proc.mjs exec `idleMs`): one that printed nothing across it is killed as
+// hung only when none of its processes used CPU across it, whatever command its stream shows open.
 export const HARNESS_IDLE_MS = 30 * 60_000;
 
 /**
@@ -1188,12 +1191,15 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const metered = meterPass(live, { session: resume || null, label, harness, model: model || null });
   if (eventsFile && !STAGE_SPEND.dir) Object.assign(STAGE_SPEND, { dir: dirname(eventsFile), harness });
   relay?.beginPass(maxUsd, live.usd);
+  // What the harness has in flight, from its own stream: the hung check names it.
+  const activity = harnessActivity();
   const lines = (l) => {
     live.line(l);
+    activity.feed(l);
     onLine?.(l);
   };
   // Local mode: the harness leads its own process group, named in the usage directory while it runs (proc.mjs exec `record`).
-  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
+  const r = await exec(execCmd, execArgs, { cwd, env: execEnv, input: stdin, timeoutMs, tee: eventsFile, echo: true, onLine: lines, idleMs, openItems: activity.open, signal, agentExtra, group: backend(env).name === "local", record: backend(env).name === "local" && eventsFile ? dirname(eventsFile) : null, fileStdio: true });
   await backend(env).sandbox.reap();
   const ended = new Date().toISOString();
   // A runner's Claude Code or Codex session, captured before anything else runs as the agent: the next start and the
@@ -1284,7 +1290,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     rec.error = rec.error || "wall clock reached";
   } else if (r.idle) {
     rec.ok = false;
-    rec.error = `no output from the harness for ${Math.round(idleMs / 60000)} min; killed`;
+    rec.error = `hung: no output and no CPU used by its processes for ${Math.round(idleMs / 60000)} min${r.idleOpen ? ` with ${r.idleOpen} command item${r.idleOpen === 1 ? "" : "s"} open` : ""}; killed`;
   } else if (r.code !== 0 && rec.ok) {
     rec.ok = false;
     rec.error = `${cmd} exited ${r.code ?? r.signal}`;

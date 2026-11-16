@@ -281,15 +281,19 @@ function fileStdio(limit) {
 }
 
 /**
- * Run a command. Resolves {code, signal, stdout, stderr, timedOut, idle, stopped, truncated, readError}; rejects only
- * when the process cannot start. `truncated`: stdout ran past `maxBytes` and only its first `maxBytes` are kept. `tee`
+ * Run a command. Resolves {code, signal, stdout, stderr, timedOut, idle, idleOpen, stopped, truncated, readError}; rejects
+ * only when the process cannot start. `truncated`: stdout ran past `maxBytes` and only its first `maxBytes` are kept. `tee`
  * streams stdout lines to a file as they arrive
  * (the harness event log), `echo` mirrors stderr to ours. `fileStdio`: the child writes its stdout and stderr to
  * regular files Factory reads every FILE_STDIO_POLL_MS (fileStdio above says why: the harness runs). There an output
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
+ * `idleMs`: the window a silent run is checked over, and `openItems` (a function) the count of commands its own stream
+ * shows started and not yet ended. Silence alone kills nothing: a run that printed nothing across a whole window is hung
+ * only when none of its processes (runCpu) used CPU across that window, whatever it had open. It is then killed and
+ * reported `idle`, with `idleOpen` the items open at the kill.
  */
-export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
+export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false, encoding = "utf8", maxBytes = 512 * 1024 * 1024, killPastMax = false, onLine = null, idleMs = 0, openItems = null, agentExtra = [], group = false, record = null, signal = null, fileStdio: toFiles = false } = {}) {
   // In the agent's home, as the agent (with its own env), whoever asked; the directory is entered as the agent.
   if (inAgentHome(cwd)) {
     if (!isSudo(cmd)) [cmd, args, env] = asAgent(cmd, args, env ?? process.env, agentExtra, cwd);
@@ -326,8 +330,9 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     let outBytes = 0;
     let timedOut = false;
     let idle = false;
+    let idleOpen = 0;
     let timer = null;
-    let idleTimer = null;
+    let check = null;
     const kill = () => {
       const sig = (s) => {
         try {
@@ -354,16 +359,32 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     };
     if (signal?.aborted) stop();
     else signal?.addEventListener("abort", stop, { once: true });
-    // A child that prints nothing for idleMs is hung, not thinking: it is killed and reported as idle.
-    const armIdle = () => {
-      if (!idleMs) return;
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        idle = true;
-        kill();
+    // Each idleMs window: a run that printed nothing across it and whose processes used no CPU across it is hung (an
+    // open command item with CPU is a long command, no item with CPU a long model answer); it is killed. CPU that cannot
+    // be read decides nothing: the wall clock (timeoutMs) still stops the run.
+    let heard = false;
+    if (idleMs > 0 && child.pid) {
+      // A run as the agent goes on in its own systemd unit (asAgent), outside the child's process tree: its cgroup counts,
+      // and a unit whose cgroup cannot be read (not started yet, or gone) makes the reading unknown.
+      const unit = agentUnit(args);
+      const reading = () => {
+        const cgroup = unit ? unitCgroup(unit) : null;
+        return unit && !cgroup ? null : runCpu(child.pid, { group, tag, cgroup });
+      };
+      let before = reading();
+      check = setInterval(() => {
+        const after = reading();
+        const used = cpuUsed(before, after);
+        if (!heard && used === 0) {
+          idle = true;
+          idleOpen = openItems?.() ?? 0;
+          clearInterval(check);
+          kill();
+        }
+        heard = false;
+        before = after;
       }, idleMs);
-    };
-    armIdle();
+    }
     let partial = "";
     const onOut = (chunk) => {
       outBytes += chunk.length;
@@ -371,7 +392,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       // `killPastMax`: a child that writes past `maxBytes` is stopped, not read on and dropped (a file that never ends).
       else if (killPastMax) kill();
       if (tee) appendOwn(tee, chunk);
-      armIdle();
+      heard = true;
       if (onLine) {
         partial += chunk.toString("utf8");
         const parts = partial.split("\n");
@@ -411,8 +432,13 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
       child.stdout.on("data", onOut);
       child.stderr.on("data", onErr);
     }
+    // A run whose own process has exited is not hung: what it left goes with it (`group`), or is no longer the run's.
+    child.on("exit", () => {
+      if (check) clearInterval(check);
+    });
     child.on("error", (e) => {
       if (timer) clearTimeout(timer);
+      if (check) clearInterval(check);
       if (poll) clearInterval(poll);
       files?.drop();
       signal?.removeEventListener("abort", stop);
@@ -435,7 +461,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     child.on("close", async (code, sig) => {
       closed = true;
       if (timer) clearTimeout(timer);
-      if (idleTimer) clearTimeout(idleTimer);
+      if (check) clearInterval(check);
       signal?.removeEventListener("abort", stop);
       if (files) {
         clearInterval(poll);
@@ -443,12 +469,11 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
         // files go.
         while (pullFiles()?.more) await new Promise((r) => setImmediate(r));
         files.drop();
-        if (idleTimer) clearTimeout(idleTimer);
       }
       if (readError) err.push(Buffer.from(`\n[factory] reading the run's output failed (${readError}); the run was stopped\n`));
       if (onLine && partial) onLine(partial);
       const decode = (chunks) => (encoding === "buffer" ? Buffer.concat(chunks) : Buffer.concat(chunks).toString("utf8"));
-      resolve({ code, signal: sig, stdout: decode(out), stderr: decode(err), timedOut, idle, stopped, truncated: outBytes > maxBytes || overflow, readError });
+      resolve({ code, signal: sig, stdout: decode(out), stderr: decode(err), timedOut, idle, idleOpen, stopped, truncated: outBytes > maxBytes || overflow, readError });
     });
     // A child that exits before draining a large prompt raises EPIPE on stdin; that is its exit code's story, not ours.
     child.stdin.on("error", () => {});
@@ -529,6 +554,120 @@ export function lstartSeconds(text) {
   const month = m ? ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(m[1]) : -1;
   if (month < 0) return null;
   return String(Date.UTC(Number(m[6]), month, Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])) / 1000);
+}
+
+/** `ps`'s cumulative CPU time ("[dd-][hh:]mm:ss[.cc]": procps prints 00:01:02, macOS 1:02.03) in ms; null if it is none. */
+export function cpuTimeMs(text) {
+  const m = /^(?:(\d+)-)?((?:\d+:){0,2}\d+)(?:\.(\d{1,3}))?$/.exec(String(text || "").trim());
+  if (!m) return null;
+  const seconds = m[2].split(":").reduce((s, p) => s * 60 + Number(p), 0) + Number(m[1] || 0) * 86_400;
+  return seconds * 1000 + Number((m[3] || "0").padEnd(3, "0"));
+}
+
+/** Every process as {ppid, pgid, cpu, start} by pid: Linux /proc, CPU in clock ticks; null when /proc cannot be read. */
+function procRows() {
+  let names;
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return null;
+  }
+  const rows = new Map();
+  for (const p of names) {
+    if (!/^\d+$/.test(p)) continue;
+    const f = procStat(p);
+    // utime + stime, and cutime + cstime: what its children used before it waited for them.
+    if (f) rows.set(Number(p), { ppid: Number(f[1]), pgid: Number(f[2]), cpu: Number(f[11]) + Number(f[12]) + Number(f[13]) + Number(f[14]), start: f[19] });
+  }
+  return rows;
+}
+
+/** Every process as procRows has it, from `ps` (macOS: `-S` adds what its exited children used), CPU in ms; null on failure. */
+function psRows() {
+  let text;
+  try {
+    text = ps(["-A", ...(process.platform === "darwin" ? ["-S"] : []), "-o", "pid=,ppid=,pgid=,time=,lstart="]);
+  } catch {
+    return null;
+  }
+  const rows = new Map();
+  for (const line of text.split("\n")) {
+    const [pid, ppid, pgid, time, ...start] = line.trim().split(/\s+/);
+    const cpu = cpuTimeMs(time);
+    if (/^\d+$/.test(pid || "") && cpu !== null) rows.set(Number(pid), { ppid: Number(ppid), pgid: Number(pgid), cpu, start: lstartSeconds(start.join(" ")) });
+  }
+  return rows;
+}
+
+/**
+ * The systemd unit an asAgent command runs in, from its own argv (`--unit=factory-agent-…`, `--user` for a user
+ * manager's), or null for any other command.
+ */
+export function agentUnit(args) {
+  const end = args.indexOf("--");
+  const own = end < 0 ? args : args.slice(0, end);
+  const name = own.find((a) => String(a).startsWith(`--unit=${UNIT_PREFIX}`))?.slice("--unit=".length);
+  return name ? { name, user: own.includes("--user") } : null;
+}
+
+/** A systemd unit's cgroup ("/system.slice/<unit>.service"), as its manager reports it; null while it has none. */
+export function unitCgroup({ name, user = false }) {
+  try {
+    return execFileSync("systemctl", [...(user ? ["--user"] : []), "show", "--property=ControlGroup", "--value", `${name}.service`], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, PATH: SAFE_PATH } }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The CPU time each process of a run has used so far: a Map of "<pid>:<start>" to its time, in the source's own unit
+ * (cpuUsed compares two of one source). The run's processes are `pid` and its descendants, with `group` every member
+ * of the process group `pid` leads, and with `tag` every process carrying FACTORY_RUN_TAG=`tag` (one that left the
+ * group, a setsid or double fork) and their descendants. Linux reads /proc; elsewhere, or with `procfs` false, `ps`.
+ * With `cgroup` (a cgroup v2 path, as unitCgroup gives it), the cgroup's whole CPU time joins as "cgroup:<path>" in µs,
+ * its exited processes' included. Null when any of these cannot be read.
+ */
+export function runCpu(pid, { group = false, tag = null, cgroup = null, procfs = process.platform === "linux" } = {}) {
+  const rows = procfs ? procRows() : psRows();
+  if (!rows) return null;
+  let cgroupUsec = null;
+  if (cgroup) {
+    try {
+      cgroupUsec = /^usage_usec (\d+)$/m.exec(readFileSync(`/sys/fs/cgroup${cgroup}/cpu.stat`, "utf8"))?.[1] ?? null;
+    } catch {
+      // unread
+    }
+  }
+  if (cgroup !== null && cgroupUsec === null) return null;
+  const children = new Map();
+  for (const [p, r] of rows) {
+    if (!children.has(r.ppid)) children.set(r.ppid, []);
+    children.get(r.ppid).push(p);
+  }
+  const walk = [pid];
+  if (group) for (const [p, r] of rows) if (r.pgid === pid) walk.push(p);
+  if (tag) walk.push(...taggedPids(tag, procfs));
+  const run = new Map();
+  while (walk.length) {
+    const p = walk.pop();
+    const r = rows.get(p);
+    if (!r || p === process.pid || run.has(`${p}:${r.start}`)) continue;
+    run.set(`${p}:${r.start}`, r.cpu);
+    walk.push(...(children.get(p) || []));
+  }
+  if (cgroupUsec !== null) run.set(`cgroup:${cgroup}`, Number(cgroupUsec));
+  return run;
+}
+
+/**
+ * The CPU a run's processes used between two runCpu readings: each process's gain, and all of one that started
+ * meanwhile. Null when either reading is.
+ */
+export function cpuUsed(before, after) {
+  if (!before || !after) return null;
+  let used = 0;
+  for (const [k, v] of after) used += Math.max(0, v - (before.get(k) ?? 0));
+  return used;
 }
 
 /** The pids in process group `pgid`, from `ps -A -o pid=,pgid=` output. */
@@ -755,9 +894,23 @@ export async function onPath(cmd) {
  */
 export function killTagged(tag) {
   if (!tag) return 0;
+  let killed = 0;
+  for (const pid of taggedPids(tag)) {
+    try {
+      process.kill(pid, "SIGKILL");
+      killed += 1;
+    } catch {
+      // gone
+    }
+  }
+  return killed;
+}
+
+/** The pids of this user's processes whose environment carries FACTORY_RUN_TAG=`tag`: /proc, or `ps eww` without it. */
+function taggedPids(tag, procfs = process.platform === "linux") {
   const mark = `FACTORY_RUN_TAG=${tag}`;
   const pids = [];
-  if (process.platform === "linux") {
+  if (procfs) {
     for (const p of readdirSync("/proc")) {
       if (!/^\d+$/.test(p) || Number(p) === process.pid) continue;
       try {
@@ -773,14 +926,5 @@ export function killTagged(tag) {
       // no ps
     }
   }
-  let killed = 0;
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGKILL");
-      killed += 1;
-    } catch {
-      // gone
-    }
-  }
-  return killed;
+  return pids;
 }

@@ -8,7 +8,7 @@ import { forEachChild, parse } from "../../vendor/unbash/dist/parser.js";
 // Builtins that run nothing and read no file: their words are data, so a variable among them resolves nothing.
 const DATA_BUILTINS = new Set(["echo", "printf", "export", "readonly", "declare", "typeset", "local", "set", "unset", "shift", "true", "false", ":", "test", "[", "exit", "return", "wait", "umask", "ulimit", "type", "hash", "read"]);
 // Shells: a `-c` option before the script operand makes the first operand shell code; options that take a value.
-const SHELLS = new Set(["bash", "sh", "dash", "zsh", "ksh"]);
+const SHELLS = new Set(["bash", "sh", "dash", "zsh", "ksh", "fish"]);
 const SHELL_CODE = /^-[A-Za-z]*c[A-Za-z]*$/;
 const SHELL_VALUED = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]);
 // Programs that run the word after `-c` as shell code wherever it stands (`su -c '…' user`), and sudo, whose `-s` or
@@ -57,6 +57,9 @@ const NODE_LOADS = new Set(["-r", "--require", "--import", "--loader", "--experi
 const NODE_EXTENSIONS = [".js", ".mjs", ".cjs", ".json", ".node"];
 // find's actions that run a program on what it finds.
 const FIND_RUNS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+// npm's subcommands that run a package script (its own command list: run and its aliases, the start/stop/restart/test
+// shorthands, an install's lifecycle, exec): any other (config, login, view, …) runs none.
+const NPM_RUNS = new Set(["run", "run-script", "rum", "urn", "start", "stop", "restart", "test", "t", "tst", "install", "i", "isntall", "add", "ci", "clean-install", "ic", "install-clean", "exec", "x"]);
 // pip's install sources: a directory is built through its build backend files.
 const BACKEND = ["pyproject.toml", "setup.py", "setup.cfg"];
 // A literal argument holding one of these may be shell code another program runs (`flock /l -c './x.sh'`): it is read
@@ -187,6 +190,15 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     let i = 0;
     let prefix = "";
     while (i < segs.length && "lit" in segs[i]) prefix += segs[(i += 1) - 1].lit;
+    // A glob or brace expansion after a fixed start: any file under the fixed directory it starts in.
+    if (["Glob", "ExtendedGlob", "BraceExpansion"].includes(segs[i].exp.type) && !tilde(w) && !URL_SCHEME.test(prefix)) {
+      const dir = prefix.includes("/") ? prefix.slice(0, prefix.lastIndexOf("/")) : "";
+      if (dir.startsWith("/")) {
+        const r = inRoot(posix.normalize(dir));
+        return r === null ? (mayLeadIn(`${dir}/`) ? { unknown: true } : { outside: true }) : { path: r || ".", rel: false, glob: true };
+      }
+      return { path: dir || ".", rel: true, glob: true };
+    }
     const rest = segs.slice(i + 1);
     const restLit = rest.every((s) => "lit" in s) ? rest.map((s) => s.lit).join("") : null;
     if (URL_SCHEME.test(prefix) || (tilde(w) && (prefix === "~" || prefix.startsWith("~/")))) return { outside: true };
@@ -259,11 +271,23 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     }
     for (const a of r.alts ?? [r]) add("paths", a.path, a.rel, cwds, spec, w.text);
   };
-  /** Any other argument: a path when it is one fixed path-looking string; a variable or a bare word there is data. */
+  /** Runs the substitutions in `w` again as feeding code: their commands' arguments are what that code is (`eval "$(cat env)"`). */
+  const feeding = (w, cwds, mode) => {
+    for (const x of segments(w)) if ("exp" in x && x.exp.script) run(x.exp.script, cwds ? new Set(cwds) : null, { ...mode, errexit: false, feeds: true });
+  };
+  /**
+   * Any other argument: a path when it is one, fixed (path-looking, or absolute into the checkout) or computed and
+   * resolved (`$PWD/scripts/x.ts`, `$D/setup.ts`, a glob's fixed directory); a bare word, or a computed word Factory
+   * cannot resolve, is data there.
+   */
   const argWord = (w, cwds, spec) => {
-    if (!literal(w) || (tilde(w) && !w.value.startsWith("~+"))) return;
+    if (literal(w) && tilde(w) && !w.value.startsWith("~+")) return;
     const r = resolve(w);
-    if (r.path !== undefined && (pathLooking(w.value) || !r.rel)) add("paths", r.path, r.rel, cwds, spec, w.text);
+    if (r.path === undefined) return;
+    for (const a of r.alts ?? [r]) {
+      if (a.path === ".") continue;
+      if (!literal(w) || pathLooking(w.value) || !a.rel || r.glob) add("paths", a.path, a.rel, cwds, spec, w.text);
+    }
   };
   /**
    * Whether a word is only the output of substitutions whose commands are fixed programs: code from one (`eval
@@ -374,6 +398,20 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       return;
     }
     if (FILE_VARS.has(name)) execWord(w, cwds, mode.spec);
+    // NODE_OPTIONS' --require/--import modules load into every node setup runs: each with node's candidates.
+    if (name === "NODE_OPTIONS") {
+      const text = segs.map((x) => ("lit" in x ? x.lit : " ")).join("");
+      const ws = text.split(/\s+/).filter(Boolean);
+      for (let k = 0; k < ws.length; k += 1) {
+        const m = /^(-r|--require|--import|--loader|--experimental-loader)(=(.*))?$/.exec(ws[k]);
+        if (!m) continue;
+        const mod = m[2] ? m[3] : ws[(k += 1)];
+        if (mod && /^\.{0,2}\//.test(mod)) {
+          add("paths", mod, true, cwds, mode.spec);
+          if (!/\.[A-Za-z0-9]+$/.test(mod)) for (const ext of NODE_EXTENSIONS) add("guarded", `${mod}${ext}`, true, cwds, mode.spec);
+        }
+      }
+    }
     for (const s of segs) if ("lit" in s) scan(s.lit, cwds);
   };
 
@@ -431,10 +469,12 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       const args = nv === "trap" ? words.slice(1, 2) : words.slice(1);
       if (args.every(literal)) code(args.map((w) => w.value).join(" "), cwds, mode);
       else if (!args.every((w) => literal(w) || externalOutput(w))) unknown(node.args.map((a) => a.text).join(" "), "shell code Factory cannot read", mode.spec);
+      for (const w of args) if (!literal(w)) feeding(w, cwds, mode);
       return same;
     }
     if (nv === "source" || nv === ".") {
       if (words[1]) execWord(words[1], cwds, mode.spec);
+      if (words[1] && !literal(words[1])) feeding(words[1], cwds, mode);
       for (const w of words.slice(2)) argWord(w, cwds, mode.spec);
       return same;
     }
@@ -485,6 +525,12 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
             if (SUDO_SHELL.test(lv(k))) shell = true;
             if (valued.has(lv(k))) k += 1;
           }
+          // `sudo FOO=1 sh s`: assignments after its options are the command's environment, not the command.
+          for (; at(k) && assignment(at(k)); k += 1) {
+            role.set(at(k), "skip");
+            const named = assignment(at(k));
+            assign(named.name, named.value, cwds, mode);
+          }
           if (shell && at(k)) {
             const rest = words.slice(k);
             for (const w of rest) role.set(w, "code");
@@ -496,7 +542,14 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           continue;
         }
         i += 1;
-        for (; lv(i) !== null && lv(i).startsWith("-") && lv(i) !== "-"; i += 1) if (valued.has(lv(i))) i += 1;
+        for (; lv(i) !== null && lv(i).startsWith("-") && lv(i) !== "-"; i += 1) {
+          // `xargs -a file`: the file's lines are the arguments it runs the command with.
+          if (b === "xargs" && (lv(i) === "-a" || lv(i) === "--arg-file") && at(i + 1)) {
+            role.set(at(i + 1), "named");
+            execWord(at(i + 1), cwds, mode.spec);
+          }
+          if (valued.has(lv(i))) i += 1;
+        }
         i += POSITIONAL[b] ?? 0;
         continue;
       }
@@ -536,10 +589,12 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         } else {
           role.set(operand, "code");
           if (!externalOutput(operand)) unknown(operand.text, "shell code Factory cannot read", mode.spec);
+          feeding(operand, cwds, mode);
         }
       } else if (operand) {
         role.set(operand, "named");
         execWord(operand, cwds, mode.spec, "a script Factory cannot name");
+        if (!literal(operand)) feeding(operand, cwds, mode);
       }
       // A shell with no script reads stdin: a here-document is its code; a pipe's is the left side's output, whose
       // repository files are named there (`cat scripts/x | bash`), and remote code is no repository file.
@@ -640,9 +695,24 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       }
     } else if (cb === "find" && words.some((w) => literal(w) && FIND_RUNS.has(w.value))) {
       // find … -exec: what it runs is each file under its start paths.
-      for (let k = cmdAt + 1; at(k) && !(literal(at(k)) && /^[-(!]/.test(at(k).value)); k += 1) {
+      let k = cmdAt + 1;
+      // find's own leading options (-H, -L, -P, -D debugopts, -Olevel) come before its start paths.
+      while (lv(k) !== null && /^-([HLP]|O\d*|D)$/.test(lv(k))) k += lv(k) === "-D" ? 2 : 1;
+      for (; at(k) && !(literal(at(k)) && /^[-(!]/.test(at(k).value)); k += 1) {
         role.set(at(k), "named");
         execWord(at(k), cwds, mode.spec);
+      }
+    } else if (cb === "make" || cb === "gmake") {
+      // make -f FILE: the makefile it runs.
+      for (let k = cmdAt + 1; at(k); k += 1) {
+        const v = lv(k);
+        if (v === "-f" || v === "--file" || v === "--makefile") {
+          if (at(k + 1)) {
+            role.set(at(k + 1), "named");
+            execWord(at(k + 1), cwds, mode.spec);
+          }
+          k += 1;
+        } else if (v !== null && /^(--file=|--makefile=)/.test(v)) add("paths", v.slice(v.indexOf("=") + 1), true, cwds, mode.spec);
       }
     } else if (cb === "run-parts") {
       let k = cmdAt + 1;
@@ -656,18 +726,72 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     // `mise exec -- pnpm run setup`): each run of runner words is followed, whatever wraps it.
     for (let k = cmdAt; k < words.length; k += 1) {
       const b = lv(k) === null ? null : base(lv(k));
-      if (b !== null && (PACKAGE_MANAGERS.has(b) || b === "corepack" || b === "turbo" || RUN_ALL.has(b))) packageManager(words, k, cwds, mode, role);
+      if (b !== null && role.get(at(k)) !== "global" && (PACKAGE_MANAGERS.has(b) || b === "corepack" || b === "turbo" || RUN_ALL.has(b))) packageManager(words, k, cwds, mode, role);
+    }
+    // A shell or an interpreter another program runs, in its command position (only options or NAME=values before
+    // it: `xvfb-run -a node x.js`, `cross-env CI=1 python3 tools/x.py`): its script operand is what setup runs.
+    for (let k = cmdAt + 1; k < words.length; k += 1) {
+      const v = lv(k);
+      if (v === null) break;
+      if (v === "--" || v.startsWith("-") || NAME_VALUE.test(v)) continue;
+      const b = base(v);
+      if (!(SHELLS.has(b) || interpreterOf(b)) || role.get(at(k)) === "skip") break;
+      let j = k + 1;
+      let inline = false;
+      for (; lv(j) !== null && /^[-+]./.test(lv(j)) && lv(j) !== "--"; j += 1) {
+        if ((SHELLS.has(b) && SHELL_CODE.test(lv(j))) || interpreterOf(b)?.code.test(lv(j)) || (interpreterOf(b)?.module && /^-[A-Za-z]*m/.test(lv(j)))) inline = true;
+        if (SHELL_VALUED.has(lv(j)) || interpreterOf(b)?.valued.has(lv(j))) j += 1;
+      }
+      if (lv(j) === "--") j += 1;
+      if (at(j) && !inline) {
+        role.set(at(j), "named");
+        execWord(at(j), cwds, mode.spec, "a script Factory cannot name");
+        if (b.startsWith("node") && literal(at(j)) && !/\.[A-Za-z0-9]+$/.test(lv(j))) for (const ext of NODE_EXTENSIONS) add("guarded", `${lv(j)}${ext}`, true, cwds, mode.spec);
+      } else if (at(j) && SHELLS.has(b) && literal(at(j))) {
+        role.set(at(j), "code");
+        code(lv(j), cwds, mode);
+      }
+      break;
+    }
+    // git's hooks directory: what git runs on its own (`git config core.hooksPath dir`, `git -c core.hooksPath=dir`).
+    if (cb === "git") {
+      for (let k = cmdAt + 1; at(k); k += 1) {
+        const v = lv(k);
+        if (v === null) continue;
+        const m = /^core\.hookspath(=(.*))?$/i.exec(v);
+        if (!m) continue;
+        const dir = m[1] ? null : at(k + 1);
+        if (m[1]) {
+          if (m[2]) add("paths", m[2], true, cwds, mode.spec);
+        } else if (dir) {
+          role.set(dir, "named");
+          execWord(dir, cwds, mode.spec);
+        }
+      }
     }
 
     // Every other argument: a path when it is a fixed path-looking string; data otherwise.
     for (let k = 1; k < words.length; k += 1) {
       const w = words[k];
       const r0 = role.get(w);
-      if (r0 === "code" || r0 === "skip" || r0 === "named") continue;
+      if (r0 === "code" || r0 === "skip" || r0 === "named" || r0 === "global") continue;
       if (!literal(w)) {
         const segs = segments(w);
-        // An option's or NAME='s computed value is data; its fixed text may still name a file.
-        for (const x of segs) if ("lit" in x && /[\/.]/.test(x.lit)) scan(x.lit, cwds);
+        const lead = "lit" in (segs[0] ?? {}) ? segs[0].lit : "";
+        if (lead.startsWith("-") || NAME_VALUE.test(lead)) {
+          // An option's or NAME='s computed value: a path when Factory resolves it, else data; its fixed text is scanned.
+          const at = lead.indexOf("=");
+          if (at >= 0) {
+            const value = { type: "Word", text: w.text.slice(w.text.indexOf("=") + 1), parts: [{ type: "Literal", value: lead.slice(at + 1) }, ...segs.slice(1).map((x) => ("lit" in x ? { type: "Literal", value: x.lit } : x.exp))].filter((x) => x.type !== "Literal" || x.value !== "") };
+            if (value.parts.length) argWord(value, cwds, mode.spec);
+          }
+          for (const x of segs) if ("lit" in x && /[\/.]/.test(x.lit)) scan(x.lit, cwds);
+          continue;
+        }
+        // Where its output feeds a shell, an argument is what that shell runs; elsewhere a computed word is a path
+        // when Factory resolves it, and data when it cannot.
+        if (mode.feeds) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
+        else argWord(w, cwds, mode.spec);
         continue;
       }
       const v = w.value;
@@ -681,7 +805,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         continue;
       }
       if (SPEC.test(v) && !v.includes("/")) continue;
-      argWord(w, cwds, mode.spec);
+      if (mode.feeds && !URL_SCHEME.test(v)) execWord(w, cwds, mode.spec);
+      else argWord(w, cwds, mode.spec);
       if (MAYBE_CODE.test(v)) code(v, cwds, { ...mode, spec: true });
     }
     // A here-document fed to anything else: its fixed text is read for paths.
@@ -726,7 +851,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (v === "-e" || v === "--editable") k += 1;
       if (!dir || !literal(dir)) continue;
       const d = dir.value.replace(/\[[^\]]*\]$/, "");
-      if (d !== "." && !d.startsWith("./") && !d.startsWith("../") && !d.includes("/")) continue;
+      // `-e`'s operand is a directory whatever it looks like; a bare positional is a package name.
+      if (dir === w && d !== "." && !d.startsWith("./") && !d.startsWith("../") && !d.includes("/")) continue;
       if (/\.(whl|zip|tar\.gz|tgz)$/.test(d)) continue;
       role.set(dir, "skip");
       for (const f of BACKEND) add("guarded", d === "." ? f : `${d}/${f}`, true, cwds, mode.spec);
@@ -750,6 +876,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     let first = true;
     let sub = null;
     let ignoreScripts = false;
+    let global = false;
     for (k += 1; k < words.length; k += 1) {
       const w = words[k];
       if (!literal(w)) {
@@ -758,6 +885,8 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         const prev = k > 0 && literal(words[k - 1]) ? words[k - 1].value : "";
         const lead = segments(w)[0]?.lit ?? "";
         const r = resolve(w);
+        // A workspace option Factory cannot read may pick any package.
+        if (PM_WORKSPACE.test(lead) || (PM_WORKSPACE.test(prev) && !prev.includes("="))) anyPackage = true;
         if (!lead.startsWith("-") && !(prev.startsWith("-") && !prev.includes("=")) && !r.spec && !r.outside) unknown(w.text, "a script Factory cannot name", mode.spec);
         continue;
       }
@@ -765,6 +894,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       role.set(w, "skip");
       if (v === "--") break;
       if (v === "--ignore-scripts") ignoreScripts = true;
+      if (v === "-g" || v === "--global" || v === "--location=global") global = true;
       if (v.startsWith("-")) {
         const opt = v.split("=")[0];
         if (PM_DIR.has(opt)) {
@@ -788,13 +918,53 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (!RUN_WORDS.has(v) || !first) names.push(v);
       first = false;
     }
+    // A global install, or an npm subcommand that runs no package script (config, login, view, …), fences nothing.
+    if (global) {
+      // Its package names are no runners either (`npm i -g pnpm`).
+      for (let j = at + 1; j < words.length; j += 1) role.set(words[j], "global");
+      return;
+    }
     const pkgs = anyPackage ? ["*"] : packages(dirs).map((d) => (d ? `${d}/package.json` : "package.json"));
-    for (const n of names) addScript(pkgs, n);
-    // An install runs the package's install lifecycle scripts (npm's documented list), unless scripts are off: by
-    // `--ignore-scripts`, or by `ignore-scripts=true` in the repository's .npmrc (setupGuard reads it). Bare `yarn` installs.
-    if (!ignoreScripts && (INSTALLS[pm]?.has(sub) || (pm === "yarn" && sub === null))) for (const n of LIFECYCLE) for (const pkg of pkgs) out.scripts.add(`${pkg}\0${n}\0lifecycle`);
+    // An install's own scripts are its lifecycle (below); its other words are package names, no scripts.
+    const install = INSTALLS[pm]?.has(sub) || (pm === "yarn" && sub === null);
+    if (!install && (pm !== "npm" || NPM_RUNS.has(sub))) for (const n of names) addScript(pkgs, n);
+    // An install runs the package's install lifecycle scripts (npm's documented list), and in a workspace each
+    // member's too (setupGuard reads whether there is one), unless scripts are off: by `--ignore-scripts`, or for npm
+    // and pnpm by `ignore-scripts=true` in the .npmrc they read (setupGuard). Bare `yarn` installs.
+    if (!ignoreScripts && install) for (const n of LIFECYCLE) for (const pkg of pkgs) out.scripts.add(`${pkg}\0${n}\0lifecycle:${pm}`);
     for (const d of packages(dirs)) for (const f of PM_FILES[pm] ?? []) out.guarded.add(d ? `${d}/${f}` : f);
     if (pm === "turbo") out.guarded.add("turbo.json");
+  };
+
+  /**
+   * Whether a pipeline element runs its input as code: a shell or an interpreter with no script operand (`| bash`,
+   * `| sudo -E bash -s`, `| python3 -`), or `xargs`, whatever wraps it (`sudo`, `env`, `timeout`).
+   */
+  const consumes = (node) => {
+    if (node.type !== "Command" || !node.name) return false;
+    const words = [node.name, ...node.args.filter((a) => a.type === "Word")];
+    const lv = (k) => (k < words.length && literal(words[k]) ? words[k].value : null);
+    let i = 0;
+    for (;;) {
+      const b = lv(i) === null ? null : base(lv(i));
+      if (b === "xargs") return true;
+      if (b === "env") {
+        for (i += 1; lv(i) !== null && (lv(i).startsWith("-") || NAME_VALUE.test(lv(i))); i += 1);
+        continue;
+      }
+      if (b !== null && Object.hasOwn(WRAPPERS, b)) {
+        for (i += 1; lv(i) !== null && (lv(i).startsWith("-") || NAME_VALUE.test(lv(i))); i += 1) if (WRAPPERS[b].has(lv(i))) i += 1;
+        i += POSITIONAL[b] ?? 0;
+        continue;
+      }
+      if (b === null || !(SHELLS.has(b) || interpreterOf(b))) return false;
+      for (i += 1; lv(i) !== null && /^[-+]./.test(lv(i)) && lv(i) !== "--"; i += 1) {
+        if (SHELL_CODE.test(lv(i)) && SHELLS.has(b)) return false;
+        if (SHELL_VALUED.has(lv(i))) i += 1;
+      }
+      if (lv(i) === "--") i += 1;
+      return i >= words.length || lv(i) === "-";
+    }
   };
 
   /** Whether `node` holds a `cd`, `pushd` or `popd` anywhere: one inside a loop or a function moves the commands around it. */
@@ -848,7 +1018,13 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           const r = run(node.commands[0], cwds, mode);
           return { ok: union(r.ok, r.ko), ko: union(r.ok, r.ko) };
         }
-        node.commands.forEach((c, k) => run(c, cwds ? new Set(cwds) : null, mode, k > 0));
+        // What feeds a shell, xargs or an interpreter reading its code (`cat setup | bash`) is that code: its arguments
+        // are what setup runs.
+        let fed = -1;
+        node.commands.forEach((c, k) => {
+          if (k > 0 && consumes(c)) fed = k;
+        });
+        node.commands.forEach((c, k) => run(c, cwds ? new Set(cwds) : null, k < fed ? { ...mode, feeds: true } : { ...mode, feeds: false }, k > 0));
         return { ok: cwds, ko: cwds };
       }
       case "Command":
@@ -920,6 +1096,6 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   }
   // Every path-looking word of the text, as Factory read a command before it parsed one: never fewer files than that.
   for (const p of wordScan(text)) add("paths", p, true, start, true);
-  const scripts = [...out.scripts].map((s) => s.split("\0")).map(([pkg, name, kind]) => (kind ? { pkg, name, lifecycle: true } : { pkg, name }));
+  const scripts = [...out.scripts].map((s) => s.split("\0")).map(([pkg, name, kind]) => (kind ? { pkg, name, lifecycle: kind.slice(10) } : { pkg, name }));
   return { paths: [...out.paths], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved] };
 }

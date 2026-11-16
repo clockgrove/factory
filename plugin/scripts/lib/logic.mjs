@@ -343,10 +343,36 @@ export async function setupGuard(setup, io) {
   const files = new Set([...refs.paths, ...refs.guarded]);
   const unresolved = [...refs.unresolved];
   const scripts = new Map();
-  // An install's lifecycle scripts run unless the repository's .npmrc turns scripts off.
-  const npmrc = await io.read(".npmrc");
-  const scriptsOff = typeof npmrc === "string" && /^\s*ignore-scripts\s*=\s*true\s*$/m.test(npmrc);
-  const queue = refs.scripts.filter((x) => !(x.lifecycle && scriptsOff));
+  // An install's lifecycle scripts run unless scripts are off: for npm and pnpm, by `ignore-scripts` in the .npmrc they
+  // read, the nearest one up from the install's directory that sets it (the root's last). Yarn Berry reads no .npmrc
+  // for it (its own `enableScripts` in .yarnrc.yml is not read here), so its install stays fenced.
+  const scriptsOff = async (x) => {
+    if (x.lifecycle !== "npm" && x.lifecycle !== "pnpm") return false;
+    const parts = x.pkg === "*" ? [] : dirOf(x.pkg).split("/").filter(Boolean);
+    for (let k = parts.length; k >= 0; k -= 1) {
+      const text = await io.read(`${parts.slice(0, k).map((d) => `${d}/`).join("")}.npmrc`);
+      const m = typeof text === "string" ? /^\s*ignore-scripts\s*=\s*(\S+)\s*$/m.exec(text) : null;
+      if (m) return m[1] === "true";
+    }
+    return false;
+  };
+  // In a workspace an install runs every member's lifecycle scripts too, a member the branch adds included.
+  const workspace = async (pkg) => {
+    if (pkg === "*") return false;
+    if (typeof (await io.read(`${dirOf(pkg)}pnpm-workspace.yaml`)) === "string") return true;
+    try {
+      const doc = JSON.parse((await io.read(pkg)) ?? "null");
+      return !!doc?.workspaces;
+    } catch {
+      return false;
+    }
+  };
+  const queue = [];
+  for (const x of refs.scripts) {
+    if (x.lifecycle && (await scriptsOff(x))) continue;
+    queue.push(x);
+    if (x.lifecycle && (await workspace(x.pkg))) queue.push({ pkg: "*", name: x.name });
+  }
   const seen = new Set();
   while (queue.length) {
     const { pkg, name } = queue.shift();
@@ -371,7 +397,7 @@ export async function setupGuard(setup, io) {
       const sub = commandRefs(value, { ...ctx, cwd: dirOf(p).replace(/\/$/, ""), errexit: false });
       for (const f of [...sub.paths, ...sub.guarded]) files.add(f);
       unresolved.push(...sub.unresolved.map((u) => `${p} scripts.${name}: ${u}`));
-      queue.push(...sub.scripts.filter((x) => !(x.lifecycle && scriptsOff)));
+      for (const x of sub.scripts) if (!(x.lifecycle && (await scriptsOff(x)))) queue.push(x);
     }
   }
   for (const f of [...files]) {

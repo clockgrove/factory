@@ -181,8 +181,7 @@ test("commandRefs: what names no repository file is no FAIL; a variable is unres
 
 test("commandRefs names what it cannot resolve", () => {
   assert.deepEqual(unresolved("bash $SCRIPT"), ["$SCRIPT"]);
-  assert.deepEqual(unresolved('for f in scripts/*.sh; do bash "$f"; done'), ['"$f"']);
-  assert.deepEqual(unresolved("./scripts/*.sh"), ["./scripts/*.sh"], "a glob is no fixed file");
+  assert.deepEqual(unresolved("*.sh"), ["*.sh"], "a glob in the root: the whole repository");
   assert.deepEqual(unresolved('cd "$DIR" && ./a.sh'), ['cd "$DIR"'], "a cd Factory cannot follow");
   assert.deepEqual(unresolved("for d in a b; do cd $d; done"), ["a loop that changes directory"]);
   assert.deepEqual(unresolved("bash <<EOF\n./$X.sh\nEOF"), ["./$X.sh"], "a here-document fed to a shell is read as code");
@@ -191,7 +190,7 @@ test("commandRefs names what it cannot resolve", () => {
 
 test("setup files: what the setup command may run that Factory cannot name FAILs doctor and is named", async () => {
   const dir = repo({ "scripts/setup.sh": "" });
-  for (const setup of ["bash $SETUP_SCRIPT", "for f in scripts/*.sh; do bash $f; done", 'cd "$UNSET_DIR" && ./scripts/setup.sh']) {
+  for (const setup of ["bash $SETUP_SCRIPT", "for f in *.sh; do bash $f; done", 'cd "$UNSET_DIR" && ./scripts/setup.sh']) {
     const [fail] = await setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/"] }, checkout: dir, env: {} });
     assert.equal(fail?.status, "FAIL", setup);
     assert.match(fail.detail, /which Factory cannot resolve to repository files/);
@@ -231,4 +230,65 @@ test("setupFilesNote: each entry bounded and in a code span, nothing that breaks
   assert.match(note, /`z{77}\.\.\.`/, "an entry is cut at 80 characters");
   assert.match(note, /don't change them or anything under them: `a\.sh`, .*\. Setup's package\.json scripts, don't change them: `package\.json scripts\.b`\./, "scripts are not paths");
   assert.equal(setupFilesNote({ files: [], scripts: [], unresolved: ["$X"] }), "Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");
+});
+
+test("commandRefs: a computed argument Factory resolves is a path wherever it stands; one it cannot is data outside a place setup runs it (N1)", () => {
+  const ctx = { env: { HOME: "/home/u", GITHUB_WORKSPACE: "/work/repo" }, roots: ["/work/repo"] };
+  for (const [c, file] of [
+    ["tsx $PWD/scripts/setup.ts", "scripts/setup.ts"],
+    ['deno run "$GITHUB_WORKSPACE/tools/x.ts"', "tools/x.ts"],
+    ["D=scripts; tsx $D/setup.ts", "scripts/setup.ts"],
+    ["xvfb-run -a $PWD/tools/run.sh", "tools/run.sh"],
+    ["S=$PWD/bin/s.sh; retry 3 $S", "bin/s.sh"],
+    ["tool --config=$PWD/conf/x.yml", "conf/x.yml"],
+  ]) assert.ok(paths(c, ctx).includes(file), `${c}: ${file}`);
+  assert.deepEqual(unresolved("tsx $UNKNOWN/x.ts", ctx), [], "unresolved outside a place setup runs it: data, as before");
+});
+
+test("commandRefs: a glob guards its fixed directory; what feeds a shell, xargs or eval is what setup runs (N2)", () => {
+  assert.deepEqual(paths("bash scripts/*.sh"), ["scripts"]);
+  assert.deepEqual(paths('for f in scripts/*.sh; do bash "$f"; done'), ["scripts"], "a loop over a glob");
+  assert.deepEqual(unresolved("bash *.sh"), ["*.sh"], "a glob in the root is the whole repository");
+  for (const [c, file] of [
+    ["cat setup | bash", "setup"],
+    ["ls scripts | xargs -n1 bash", "scripts"],
+    ["bash <(cat setup)", "setup"],
+    ['eval "$(cat env)"', "env"],
+    ["source <(cat env)", "env"],
+    ["xargs -a list bash", "list"],
+    ["cat setup | sudo -E bash -s", "setup"],
+  ]) assert.ok(paths(c).includes(file), `${c}: ${file}`);
+  assert.deepEqual(unresolved("cat $X | sh"), ["$X"], "a computed word feeding a shell");
+  assert.deepEqual(unresolved('echo "$X" | python3 tool.py'), [], "an interpreter with a script reads its input as data");
+});
+
+test("commandRefs: find's leading options, sudo's assignments, and the cheap cases (N4, N5, N6)", () => {
+  assert.deepEqual(paths("find -L scripts -exec chmod +x {} +"), ["scripts"], "find -L scripts: scripts is the start path");
+  assert.deepEqual(paths("sudo FOO=1 sh s"), ["s"], "an assignment after sudo's options is no command");
+  assert.ok(commandRefs("pip install -e pkg").guarded.includes("pkg/pyproject.toml"), "pip -e's bare directory");
+  assert.deepEqual(paths('fish -c "./f.sh"'), ["f.sh"], "fish is a shell");
+  assert.ok(all("xvfb-run -a node e2e/setup").includes("e2e/setup.mjs"), "an interpreter in a runner's command position");
+  assert.deepEqual(paths("make -f build/Setup.mk"), ["build/Setup.mk"]);
+  assert.ok(paths("git config core.hooksPath hooks").includes("hooks"), "git's hooks directory");
+  assert.ok(all('NODE_OPTIONS="--require ./hook" node a.js').includes("hook.mjs"), "NODE_OPTIONS modules with node's candidates");
+  assert.deepEqual(commandRefs("npm --workspace=$W run build").scripts[0], { pkg: "*", name: "build" }, "a workspace option Factory cannot read: any package");
+});
+
+test("commandRefs: a global install and an npm subcommand that runs no script fence nothing (N8)", () => {
+  assert.deepEqual(commandRefs("npm i -g pnpm").scripts, []);
+  assert.deepEqual(commandRefs("npm i -g pnpm").guarded, [], "its package names are no runners");
+  for (const c of ["npm config set x y", "npm login", "npm whoami", "npm view zod version"]) assert.deepEqual(commandRefs(c).scripts, [], c);
+  assert.ok(commandRefs("npm test").scripts.some((x) => x.name === "test"), "a script runner is still one");
+});
+
+test("setupGuard: an install in a workspace fences every member's lifecycle; ignore-scripts from the .npmrc npm reads (N3, N7)", async () => {
+  const ws = repo({ "package.json": JSON.stringify({ workspaces: ["packages/*"] }), "packages/a/package.json": "{}" });
+  const g = await setupGuard("npm ci", checkoutIo(ws));
+  assert.ok(g.scripts.some((x) => x.pkg === "*" && x.name === "postinstall"), "any package.json's postinstall, a new member's included");
+  assert.ok(!(await setupGuard("npm ci --ignore-scripts", checkoutIo(ws))).scripts.some((x) => x.name === "postinstall"), "an install with scripts off stays exempt");
+  const nearest = repo({ "web/package.json": "{}", "web/.npmrc": "ignore-scripts=true\n", ".npmrc": "ignore-scripts=false\n" });
+  assert.ok(!(await setupGuard("cd web && npm ci", checkoutIo(nearest))).scripts.some((x) => x.pkg === "web/package.json" && x.name === "postinstall"), "the nearest .npmrc up from the install decides");
+  const root = repo({ "package.json": "{}", ".npmrc": "ignore-scripts=true\n" });
+  assert.ok(!(await setupGuard("pnpm install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "pnpm reads it too");
+  assert.ok((await setupGuard("yarn install", checkoutIo(root))).scripts.some((x) => x.name === "postinstall"), "Yarn Berry reads no .npmrc for it: still fenced");
 });

@@ -5,6 +5,7 @@
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
@@ -1226,8 +1227,17 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
-export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+// The Public Suffix List, through the tldts library (vendored: plugin/vendor/tldts, pinned in tools/deps), its ICANN and
+// private sections both: `github.io` and `vercel.app` are suffixes anyone can register a site under, as `co.uk` is.
+const { getPublicSuffix } = createRequire(import.meta.url)("../../vendor/tldts/dist/index.cjs.min.js");
+/** Whether `name` is itself a public suffix (the Public Suffix List, both sections): anyone can have a site under it. */
+export const publicSuffix = (name) => getPublicSuffix(name, { allowPrivateDomains: true }) === name;
+/**
+ * Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry) that an
+ * Objective's label may open: a wildcard only over one organisation's name, never `*.` and a public suffix (publicSuffix),
+ * which would open every site registered under it.
+ */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host) && !(host.startsWith("*.") && publicSuffix(host.slice(2)));
 export function runnerDomains(value = "", hosts = []) {
   return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }

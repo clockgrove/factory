@@ -1186,6 +1186,28 @@ export async function branchState(repo, branch, opts) {
   return { head: target.oid, headAt: target.committedDate ?? null, queued: Number(d.repository.mergeQueue?.entries?.totalCount) || 0 };
 }
 
+/** The jobs of Actions run `runId`, their latest attempts, every page. Throws when they cannot be read. */
+export async function runJobs(repo, runId, opts) {
+  return (await rest(`repos/${repo.full}/actions/runs/${encodeURIComponent(runId)}/jobs?filter=latest&per_page=100`, { ...opts, paginate: true })) || [];
+}
+
+/**
+ * The PRs in `branch`'s merge queue now, in the queue's order: `[{pr, head}]`, `head` the commit the queue merges for
+ * it. Every page (100 a page); none with no queue. Throws when it cannot be read.
+ */
+export async function mergeQueueHeads(repo, branch, opts) {
+  const out = [];
+  let after = null;
+  for (;;) {
+    const d = await graphql(`query($owner: String!, $name: String!, $branch: String!, $after: String) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { entries(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { position pullRequest { number } headCommit { oid } } } } } }`, { owner: repo.owner, name: repo.name, branch, after }, opts);
+    const got = d?.repository?.mergeQueue?.entries;
+    for (const e of got?.nodes || []) if (e?.pullRequest?.number && e.headCommit?.oid) out.push({ pr: e.pullRequest.number, head: e.headCommit.oid, position: e.position ?? null });
+    if (!got?.pageInfo?.hasNextPage || !got.pageInfo.endCursor) break;
+    after = got.pageInfo.endCursor;
+  }
+  return out.sort((a, b) => (a.position ?? 0) - (b.position ?? 0)).map(({ pr, head }) => ({ pr, head }));
+}
+
 /** Take the PR out of the merge queue (Factory's App; the timeline names it as the actor). */
 export async function dequeuePr(repo, nodeId, opts) {
   await graphql(`mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }`, { id: nodeId }, opts);
@@ -1342,15 +1364,25 @@ const PROJECT_FIELDS = `
 /** The board's title: one per repository, since org projects share one namespace. */
 export const projectTitle = (repo) => `Factory: ${repo.name}`;
 
-/** The repository's Factory project (title "Factory: <repo>", "Factory", else a linked project with a Queued column), or null. */
+/**
+ * The repository's Factory project, or null: by identity, the board whose node id the `project` setting holds
+ * (`opts.project`, local mode's settings; else FACTORY_PROJECT, the workflow's env block on Actions), which setup records
+ * as it makes the board; with no id recorded, the board linked to the repository titled exactly "Factory: <repo>"
+ * (projectTitle, the title setup gives it). A recorded id that names no board is no board: nothing else stands in.
+ */
 export async function findProject(repo, opts) {
+  const id = String(opts?.project ?? process.env.FACTORY_PROJECT ?? "").trim();
+  if (id) {
+    const byId = await graphql(`query($id: ID!, $owner: String!, $name: String!) { node(id: $id) { ... on ProjectV2 { ${PROJECT_FIELDS} } } repository(owner: $owner, name: $name) { id } }`, { id, owner: repo.owner, name: repo.name }, opts);
+    return byId?.node?.id && byId.repository?.id ? { ...byId.node, repositoryId: byId.repository.id } : null;
+  }
   const data = await graphql(
     `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id projectsV2(first: 20) { nodes { ${PROJECT_FIELDS} } } } }`,
     { owner: repo.owner, name: repo.name },
     opts,
   );
   const nodes = data?.repository?.projectsV2?.nodes || [];
-  let project = nodes.find((p) => p.title === projectTitle(repo)) || nodes.find((p) => p.title === "Factory") || nodes.find((p) => p.field?.options?.some((o) => o.name === "Queued")) || null;
+  let project = nodes.find((p) => p.title === projectTitle(repo)) || null;
   // A repository's own list of linked projects can stay empty for a while after the link (seen on a new repository
   // for over an hour, while the project listed the repository): look the board up from its owner's side too.
   if (!project && data?.repository?.id) project = await ownerSideProject(repo, opts).catch(() => null);

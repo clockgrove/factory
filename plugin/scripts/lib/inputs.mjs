@@ -63,6 +63,7 @@ export const DEFAULTS = {
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
+  project: "", // the Factory board's node id, recorded by setup (github.mjs findProject); empty: the board titled exactly "Factory: <repo>"
   action: `clockgrove/factory@v${FACTORY_VERSION}`,
   objective_label: "factory:objective",
   mode: "",
@@ -173,7 +174,7 @@ export function workflowSettings(wf = {}) {
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
-    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
+    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
   ].map((n) => `FACTORY_${n}`),
 );
@@ -576,6 +577,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     sandboxIdleDays: num(get("sandbox_idle_days"), 7),
     sweepMaxDestroys: Math.max(0, Math.floor(num(get("sweep_max_destroys"), 5))),
     nodeVersion: get("node_version").trim(),
+    project: get("project").trim(),
   };
 }
 

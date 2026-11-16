@@ -664,7 +664,15 @@ export class Local {
     if (gateway) problems.push(gateway);
     if (problems.length) throw new Error(`local mode cannot start:\n- ${problems.join("\n- ")}`);
     this.notice = app ? noticeMinter({ appId: app.id, privateKey: app.key, owner: this.repo.owner, repo: this.repo.name }) : null;
-    this.opts = { token: this.token, notice: this.notice };
+    // `project`: the board's node id from the repository's settings (github.mjs findProject), read when a call is made.
+    const settings = () => this.wf || {};
+    this.opts = {
+      token: this.token,
+      notice: this.notice,
+      get project() {
+        return settings().FACTORY_PROJECT || "";
+      },
+    };
     // One holder id per loop: two loops (two boxes, or run beside serve) never share or clear each other's claim. A serve
     // that started again on its workflow's pinned release, in its own process, gets a new one: the claims of the loop it
     // was are a dead loop's (deadHereHolder), resumed at once as after any restart.

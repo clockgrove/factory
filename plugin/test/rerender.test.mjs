@@ -252,6 +252,53 @@ test("setup's protection step: no merge queue on a user's repository, and a rule
   }
 });
 
+test("the board's node id setup records is written as FACTORY_PROJECT and kept by a re-render; none is written before one is recorded", () => {
+  const first = render({ project: "PVT_board1" }, { notify: "kirk#318831919" });
+  assert.equal(first.after.env.FACTORY_PROJECT, "PVT_board1");
+  assert.equal((first.text.match(/FACTORY_PROJECT:/g) || []).length, 1);
+  const again = render({}, { text: first.text });
+  assert.equal(again.text, first.text, "kept, once");
+  assert.ok(!("FACTORY_PROJECT" in render({}, { notify: "kirk#318831919" }).after.env), "no empty line before a board is made");
+});
+
+test("findProject finds the board by the node id the settings record, never by a title or a column; without one, by its exact title only", async () => {
+  const { findProject } = await import("../scripts/lib/github.mjs");
+  const realFetch = globalThis.fetch;
+  const saved = { url: process.env.GITHUB_GRAPHQL_URL, project: process.env.FACTORY_PROJECT };
+  process.env.GITHUB_GRAPHQL_URL = "https://github.test/graphql";
+  delete process.env.FACTORY_PROJECT;
+  const board = (id, title, options = ["Queued", "Running", "In review", "Blocked", "Done"]) => ({ id, title, number: 1, field: { id: `F_${id}`, options: options.map((name) => ({ id: name, name })) } });
+  // The repository links three boards: another team's titled "Factory", one with a Queued column, and Factory's own,
+  // renamed by a person. GitHub answers a node by its id.
+  const linked = [board("PVT_other", "Factory"), board("PVT_kanban", "Team kanban"), board("PVT_ours", "Our pipeline")];
+  const queries = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const { query, variables } = JSON.parse(init.body);
+    queries.push(query.includes("node(id:") ? "node" : "linked");
+    const data = query.includes("node(id:") ? { node: linked.find((b) => b.id === variables.id) ?? null, repository: { id: "R_1" } } : { repository: { id: "R_1", projectsV2: { nodes: linked } } };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const repo = { owner: "o", name: "app", full: "o/app" };
+  try {
+    assert.equal((await findProject(repo, { token: "t", project: "PVT_ours" })).id, "PVT_ours", "by identity, whatever its title");
+    assert.deepEqual(queries, ["node"]);
+    process.env.FACTORY_PROJECT = "PVT_ours";
+    assert.equal((await findProject(repo, { token: "t" })).repositoryId, "R_1", "on Actions, from the workflow's env block");
+    assert.equal(await findProject(repo, { token: "t", project: "PVT_gone" }), null, "a recorded id that names no board is no board");
+    delete process.env.FACTORY_PROJECT;
+    // No id recorded: only the exact title setup gives a board; a board titled "Factory" or one with a Queued column is not it.
+    queries.length = 0;
+    const none = await findProject(repo, { token: "t" }).catch(() => null);
+    assert.equal(none?.id ?? null, null);
+    linked.push(board("PVT_titled", "Factory: app"));
+    assert.equal((await findProject(repo, { token: "t" })).id, "PVT_titled");
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const [k, v] of [["GITHUB_GRAPHQL_URL", saved.url], ["FACTORY_PROJECT", saved.project]]) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
+
 test("setup's project step skips the board on a repository a user owns: no GitHub App can move its cards (#199)", async () => {
   const { applyProjectStep } = await import("../scripts/setup.mjs");
   const realFetch = globalThis.fetch;
@@ -265,7 +312,8 @@ test("setup's project step skips the board on a repository a user owns: no GitHu
     return new Response(JSON.stringify({ message: "unexpected" }), { status: 500, headers: { "content-type": "application/json" } });
   };
   try {
-    const note = await applyProjectStep({ owner: "me", name: "app", full: "me/app" }, { token: "t" });
+    const { note, id } = await applyProjectStep({ owner: "me", name: "app", full: "me/app" }, { token: "t" });
+    assert.equal(id, null);
     assert.match(note, /^skipped: a repository a user owns gets no board/);
     assert.deepEqual(calls, ["GET /repos/me/app"], "no project query or mutation");
   } finally {

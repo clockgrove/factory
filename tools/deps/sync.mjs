@@ -18,6 +18,9 @@ export const VENDORED = {
   yaml: (p) => p === "LICENSE" || p === "package.json" || p.startsWith("browser/"),
   "smol-toml": (p) => p === "LICENSE" || p === "package.json" || /^dist\/[^/]+\.js$/.test(p),
   unbash: (p) => p === "LICENSE" || p === "package.json" || /^dist\/[^/]+\.js$/.test(p),
+  // Its one self-contained build, the Public Suffix List and tldts-core bundled in: the CommonJS one, which Node loads
+  // as its package.json says (no `type`), where the ES module build would be reparsed with a warning on every start.
+  tldts: (p) => p === "LICENSE" || p === "package.json" || p === "dist/index.cjs.min.js",
 };
 
 /** Every file under `dir`, relative; a link or anything but a directory or a regular file throws (a link would pass a byte check and break every installed copy). */

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { HOST_PREFIX, LABEL_MAX, choiceLabels, choiceOf, hostsOf, hostsProblem, ranWith } from "../scripts/lib/choice.mjs";
 import { CHOICE_FIX, EDITED_REASON, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { claudeRunner, codexRunner, copilotRunner, harnessCommand } from "../scripts/lib/harness.mjs";
-import { LOCAL_DOMAINS, gitPinFile, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
+import { LOCAL_DOMAINS, gitPinFile, isSandboxHost, openStageHosts, openedStageHosts, pinGitDir, runnerDomains } from "../scripts/lib/local.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { deniedHostsFix, harnessMarker, setSelf } from "../scripts/lib/logic.mjs";
 import { hostsLine, progressReporter, writeUsage } from "../scripts/lib/session.mjs";
@@ -42,6 +42,17 @@ test("host labels: each names one host a sandbox enforces as written, lower case
   // A host label is no harness or model choice: the harness label still reads, whatever host labels sit beside it.
   assert.deepEqual(choiceOf(["factory:harness:codex", HF, "factory:host:1.2.3.4"]).choice, { harness: "codex" });
   assert.deepEqual(choiceLabels(["factory:objective", HF, "factory:model:m"]), ["factory:host:huggingface.co", "factory:model:m"], "the set the plan's record and the trust check cover");
+});
+
+test("host labels: a wildcard over a public suffix (the Public Suffix List, private section included) is refused; one over an organisation's name opens", () => {
+  for (const suffix of ["co.uk", "github.io", "vercel.app", "s3.amazonaws.com", "pages.dev"]) {
+    const r = hostsOf([`${HOST_PREFIX}*.${suffix}`]);
+    assert.equal(r.ok, false, suffix);
+    assert.match(r.reason, new RegExp(`opens every site under \`${suffix.replace(/\./g, "\\.")}\`, a public suffix`), suffix);
+    assert.equal(isSandboxHost(`*.${suffix}`), false, "the runner's own filter drops it too");
+  }
+  // One organisation's name under such a suffix, or the suffix's own host, is a host like any other.
+  for (const ok of ["*.clockgrove.github.io", "*.example.co.uk", "*.hf.co", "github.io"]) assert.deepEqual(hostsOf([`${HOST_PREFIX}${ok}`]).hosts, [ok], ok);
 });
 
 test("a host label counts only when the person who last applied it can push or is a pinned maintainer; a bad name is refused before any read", async () => {

@@ -73,6 +73,9 @@ env:
   FACTORY_PROTECTED_PATHS: {{protected_paths}}
   FACTORY_CI_CHECKS: {{ci_checks}}
   FACTORY_NODE_VERSION: {{node_version}} # the Node.js your CI uses
+  # {{#project}}
+  FACTORY_PROJECT: {{project}} # the Factory board's node id (setup records it with the board)
+  # {{/project}}
   # {{#sandbox}}
   FACTORY_SANDBOX: {{sandbox}} # each stage runs in the Objective's cloud sandbox, started by a launch job; re-run setup to change
   FACTORY_SANDBOX_VCPUS: {{sandbox_vcpus}} # the sandbox's size (2 GB of memory per vCPU on Vercel); set it from your own capacity test

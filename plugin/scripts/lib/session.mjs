@@ -23,6 +23,7 @@ import {
   dequeuePr,
   inMergeQueue,
   mergeQueueEntry,
+  mergeQueueHeads,
   mergeGroupRuns,
   mergeQueueRemovals,
   mergeVerified,
@@ -65,12 +66,12 @@ import { RELAUNCH_MAX } from "./relaunch.mjs";
 import { DIFF_FILE, checkFile, isSplitPart, partsRecord, prFooter, putFiles, sanitize } from "./handoff.mjs";
 import { CODE_SCANNING, answeredReviewers, namedReviewer, thirdPartyComment, waitOf } from "./third-party-review.mjs";
 import { accountWaitOf } from "./account-wait.mjs";
-import { rebaseWaitOf, reviewWaitOf } from "./overlap.mjs";
+import { TrialCap, rebaseWaitOf, reviewWaitOf, siblingTrials } from "./overlap.mjs";
 import { EDITED_REASON, editedSincePlan } from "./objective-trust.mjs";
 import { TokenKeeper } from "./token-keeper.mjs";
 import { noticeFromParent } from "./app-token.mjs";
 import { agentPrereqs, prepareAgent, readTokenFiles } from "./agent.mjs";
-import { credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
+import { TrialUnread, credentialEnv as gitCredentialEnv, mergeTree, replay } from "./outbox.mjs";
 import { writeNew, writeOwn } from "./fsafe.mjs";
 import { lfsHook } from "./lfs.mjs";
 import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
@@ -338,6 +339,9 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   return savedRecord({ harness, sessionId, saved, checkout });
 }
 
+/** The usage artifacts a restore on Actions downloads at most, newest first: each is a download of up to two minutes. */
+export const ARTIFACT_LOOKS = 3;
+
 /**
  * The newest saved session of this harness for this Objective, put back where the harness looks for it, so the next
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
@@ -351,9 +355,10 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
   const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
   // A newer stage that ran no harness (a clean rebase, an already-reviewed PR) saved no session: look past it,
-  // newest first, to the most recent one that did.
+  // newest first, to the most recent one that did. Locally each is a file read: every stage directory is looked at. On
+  // Actions each is an artifact download: at most ARTIFACT_LOOKS of them.
   let last = "no earlier run saved a session";
-  for (const src of sources.slice(0, 3)) {
+  for (const src of fromStageDirs ? sources : sources.slice(0, ARTIFACT_LOOKS)) {
     const dir = await src.dir();
     if (!dir) {
       last = src.error || last;
@@ -3025,50 +3030,38 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
-/** How long a PR the merge queue took out for a conflict with a PR ahead of it waits for that queue to move. */
-export const QUEUE_CONFLICT_WAIT_MS = 2 * 3600_000;
-
-const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
-
-/** Factory's record of the merge queue's last conflict removal of the Objective's PR (queueConflictWait), or null. */
-export function queueConflictRecord(comments, issue) {
-  const mark = marker(issue, "queue-conflict");
-  const c = (comments || []).find((x) => isSelf(x) && (x.body || "").startsWith(mark));
-  try {
-    const v = JSON.parse(QUEUE_CONFLICT_LINE.exec(c?.body || "")?.[1] || "null");
-    return v && typeof v.removal === "string" && typeof v.main === "string" && typeof v.seen === "string" ? v : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * A PR the merge queue took out for a conflict (logic.mjs queueRetry `conflict`) and that does not conflict with the
- * default branch: the conflict was with a PR ahead of it. The first time the merge pass sees that removal, it records on
- * the issue the default branch's head then (a record Factory owns: a commit's date says nothing of when a queue merged
- * it). The PR goes back in once the head is another commit, the queue is empty, or QUEUE_CONFLICT_WAIT_MS has passed
- * since the record (read on the first tick after it: then the queue's next answer decides). Returns null to enqueue it
- * now, else "queue-wait", or "pending" when GitHub could not be read.
+ * default branch: the conflict was with a PR ahead of it. It goes back in when no PR in the queue now conflicts with it,
+ * by a trial merge of the two heads against the default branch (overlap.mjs siblingTrials, git merge-tree in a scratch
+ * mirror); a sibling's merge or drop ticks the dispatcher. Returns null to enqueue it now, "queue-wait" while one does,
+ * or "pending" when the queue could not be read. A trial merge that cannot be computed puts it back in: the queue
+ * itself then answers, and its removal for a conflict counts as no drop.
  */
-export async function queueConflictWait(repo, { issue, prNumber, base, removal }, opts, now = Date.now()) {
-  const branch = await branchState(repo, base, opts).catch((e) => (log(`#${issue}: ${base} could not be read (${errCode(e)}); next tick`), null));
-  if (!branch) return "pending";
-  // Unread comments say nothing of the record: no new one (its `seen` would restart the wait), the next tick reads again.
-  const comments = await listComments(repo, issue, opts).catch((e) => (log(`#${issue}: the queue-conflict record could not be read (${errCode(e)}); next tick`), null));
-  if (!comments) return "pending";
-  let rec = queueConflictRecord(comments, issue);
-  if (rec?.removal !== removal) {
-    rec = { removal, main: branch.head, seen: new Date(now).toISOString() };
-    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it. It goes back in once \`${base}\` moves past ${branch.head.slice(0, 7)}, the queue empties, or ${QUEUE_CONFLICT_WAIT_MS / 3600_000} h pass.`;
-    await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).catch((e) => log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); it is written again next tick`));
+export async function queueConflictWait(repo, { issue, prNumber, head, base, removal }, opts) {
+  const entries = await mergeQueueHeads(repo, base, opts).catch((e) => (log(`#${issue}: ${base}'s merge queue could not be read (${errCode(e)}); next tick`), null));
+  if (!entries) return "pending";
+  const ahead = entries.filter((e) => e.pr !== prNumber);
+  if (!ahead.length) {
+    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; the queue is empty now, so it goes back in`);
+    return null;
   }
-  const moved = branch.head !== rec.main;
-  const late = now - Date.parse(rec.seen) >= QUEUE_CONFLICT_WAIT_MS;
-  if (!moved && branch.queued > 0 && !late) {
-    log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict with a PR ahead of it; it waits for the queue to move (${branch.queued} waiting, ${base} still ${branch.head.slice(0, 7)})`);
-    return "queue-wait";
+  const trials = siblingTrials(repo, opts);
+  try {
+    for (const e of ahead) {
+      const { conflict, files } = await trials.conflicts(head, e.head);
+      if (!conflict) continue;
+      log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal}; it still conflicts with PR #${e.pr} in the queue (${files.slice(0, 5).join(", ") || "no file named"}), so it waits for that one to leave`);
+      return "queue-wait";
+    }
+  } catch (e) {
+    if (!(e instanceof TrialUnread || e instanceof TrialCap)) throw e;
+    log(`#${issue}: PR #${prNumber} could not be trial-merged with the queue's PRs (${String(e.message).slice(0, 160)}); it goes back in and the queue answers`);
+    return null;
+  } finally {
+    trials.close();
   }
-  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${moved ? `${base} has moved since` : branch.queued ? `${QUEUE_CONFLICT_WAIT_MS / 3600_000} h have passed` : "the queue is empty now"}, so it goes back in`);
+  log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; no PR in the queue now conflicts with it, so it goes back in`);
   return null;
 }
 
@@ -3485,10 +3478,10 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return "held";
     }
     // The queue took it out for a conflict with a PR ahead of it (the PR does not conflict with the default branch, or
-    // the send-back would have taken it): no drop. It waits for that queue to move (queueConflictWait) rather than
-    // bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
+    // the send-back would have taken it): no drop. It waits while a PR in the queue conflicts with it (queueConflictWait)
+    // rather than bouncing off the same entry; a sibling's merge or drop ticks the dispatcher.
     if (retry.conflict) {
-      const wait = await queueConflictWait(repo, { issue, prNumber, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
+      const wait = await queueConflictWait(repo, { issue, prNumber, head: pr.head.sha, base: pr.base?.ref || "main", removal: retry.conflict.at }, opts);
       if (wait) return wait;
     }
     // The newest drop is a red run on the queue's commit (QUEUE_RED_CODE): the review stage reads it first, once per drop

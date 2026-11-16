@@ -5,6 +5,7 @@
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
@@ -21,7 +22,10 @@ import { holdsDir } from "./holds.mjs";
 
 /** A claim whose heartbeat is older than this is stale: the box went away (asleep, off, or serve stopped). */
 export const CLAIM_FRESH_MS = 15 * 60_000;
-/** A stale claim pauses its Objective this long, for the same machine's serve to resume it; past it, Blocked. */
+/**
+ * A stale claim pauses its Objective this long, for the same machine's serve to resume it; past it, Blocked. The default
+ * of the repository's claim_pause_hours (inputs.mjs resolveInputs `claimPauseMs`).
+ */
 export const CLAIM_PAUSE_MS = 24 * 60 * 60_000;
 export const HEARTBEAT_MS = 2 * 60_000;
 /** A heartbeat this far ahead of now is a forgery or a broken clock, never fresh. */
@@ -109,6 +113,9 @@ export async function localClaim(repo, issue, opts, now = Date.now()) {
 }
 
 export const writeClaim = (repo, issue, holder, opts) => upsertComment(repo, issue, claimMarker(issue), claimBody(holder), opts);
+
+/** A heartbeat on the claim comment `commentId` this loop holds (localClaim read it): the same text writeClaim writes. */
+export const beatClaim = (repo, issue, commentId, holder, opts) => rest(`repos/${repo.full}/issues/comments/${commentId}`, { ...opts, method: "PATCH", body: { body: `${claimMarker(issue)}\n${claimBody(holder)}` } });
 
 /** Drop the claim only when this loop holds it: another loop's claim is not ours to clear. */
 export async function dropClaim(repo, issue, holder, opts) {
@@ -1226,8 +1233,94 @@ const domainEntries = (value) => String(value || "").split(/[\s,]+/).map((d) => 
  * the port and admits every port of the host; Copilot's sandbox drops its whole network policy for one).
  */
 const hostEntry = (d) => DOMAIN_ENTRY.test(d) && !/(^|\.)localhost$/.test(d);
-/** Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry). */
-export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host);
+// The Public Suffix List, through the tldts library (vendored: plugin/vendor/tldts, pinned in tools/deps), its ICANN and
+// private sections both: `github.io` and `vercel.app` are suffixes anyone can register a site under, as `co.uk` is.
+const requireVendor = createRequire(import.meta.url);
+const { getPublicSuffix } = requireVendor("../../vendor/tldts/dist/index.cjs.min.js");
+/** Whether `name` is itself a public suffix (the Public Suffix List, both sections): anyone can have a site under it. */
+export const publicSuffix = (name) => getPublicSuffix(name, { allowPrivateDomains: true }) === name;
+/**
+ * The list's rules as tldts publishes them (dist/cjs/src/data/trie.js: a trie of labels, right to left; a node's flags
+ * say a rule of either section ends there), read once; null when the file does not have that shape, so the check that
+ * reads it fails closed. tldts's API answers for one name only, never what lies below one.
+ */
+let pslTrie;
+const suffixTrie = () => {
+  if (pslTrie !== undefined) return pslTrie;
+  try {
+    const t = requireVendor("../../vendor/tldts/dist/cjs/src/data/trie.js");
+    const ok = t.nodeFlags instanceof Uint8Array && t.edgeStart?.length === t.nodeFlags.length + 1 && t.edgeLength?.length === t.edgeChild?.length && typeof t.labelText === "string" && Number.isInteger(t.rulesRoot);
+    const offset = ok ? new Uint32Array(t.edgeLength.length) : null;
+    for (let node = 0, at = 0; ok && node < t.nodeFlags.length; node += 1) {
+      for (let e = t.edgeStart[node]; e < t.edgeStart[node + 1]; e += 1) {
+        offset[e] = at;
+        at += t.edgeLength[e];
+      }
+    }
+    pslTrie = ok ? { ...t, label: (e) => t.labelText.slice(offset[e], offset[e] + t.edgeLength[e]) } : null;
+  } catch {
+    pslTrie = null;
+  }
+  return pslTrie;
+};
+/**
+ * A Public Suffix List rule (both sections) at `name` or below it: the first one found, as the list writes it (`*.` for
+ * a wildcard rule), or null with none. A `*.name` wildcard covers every site under `name`, so a rule anywhere below it
+ * (`s3.amazonaws.com` under `amazonaws.com`) is a public suffix it would open. Returns `name` itself when the list
+ * cannot be read: no wildcard passes unchecked.
+ */
+export function suffixRuleUnder(name) {
+  const t = suffixTrie();
+  if (!t) return name;
+  const edges = (node) => Array.from({ length: t.edgeStart[node + 1] - t.edgeStart[node] }, (_, i) => t.edgeStart[node] + i);
+  const child = (node, label) => {
+    const e = edges(node).find((x) => t.label(x) === label);
+    return e === undefined ? -1 : t.edgeChild[e];
+  };
+  const labels = name.split(".").reverse();
+  // An exception rule for `name` itself (`!city.kawasaki.jp`): the wildcard rule over it does not make it a suffix.
+  let ex = Number.isInteger(t.exceptionsRoot) ? t.exceptionsRoot : -1;
+  for (const label of labels) ex = ex < 0 ? -1 : child(ex, label);
+  const excepted = ex >= 0 && (t.nodeFlags[ex] & 3) !== 0;
+  // The nodes `name`'s labels reach, right to left, each label by its own edge or a wildcard rule's `*`.
+  let reached = [{ node: t.rulesRoot, path: [], star: false }];
+  for (const label of labels) {
+    reached = reached.flatMap(({ node, path }) => edges(node).filter((e) => t.label(e) === label || t.label(e) === "*").map((e) => ({ node: t.edgeChild[e], path: [t.label(e), ...path], star: t.label(e) === "*" })));
+    if (!reached.length) return null;
+  }
+  // Any rule that ends there or deeper (the trie shares its nodes: each is looked at once).
+  const seen = new Set();
+  const below = (node, path, self = true) => {
+    if (self && t.nodeFlags[node] & 3) return path.join(".");
+    if (seen.has(node)) return null;
+    seen.add(node);
+    for (const e of edges(node)) {
+      const hit = below(t.edgeChild[e], [t.label(e), ...path]);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  for (const { node, path, star } of reached) {
+    const hit = below(node, path, !(star && excepted));
+    if (hit) return hit;
+  }
+  return null;
+}
+/**
+ * Why a `*.name` wildcard may not be opened, or null when it may: a Public Suffix List rule at `name` or below it
+ * (suffixRuleUnder: `*.github.io`, `*.amazonaws.com`, where `s3.amazonaws.com` is a suffix anyone can have a bucket
+ * under), as `{rule}`. A wildcard over a top-level name alone (`*.com`, `*.internal`) is no host entry at all (hostEntry).
+ */
+export function wildcardRefusal(name) {
+  const rule = suffixRuleUnder(name);
+  return rule ? { rule } : null;
+}
+/**
+ * Whether `host` (lower case, trimmed) is an entry every harness's sandbox enforces as written (hostEntry) that an
+ * Objective's label may open: a wildcard only over a name with no public suffix at or below it (wildcardRefusal),
+ * never one that would open sites anyone can register.
+ */
+export const isSandboxHost = (host) => typeof host === "string" && hostEntry(host) && !(host.startsWith("*.") && wildcardRefusal(host.slice(2)));
 export function runnerDomains(value = "", hosts = []) {
   return [...new Set([...LOCAL_DOMAINS, ...domainEntries(value).filter(hostEntry), ...hosts.filter(isSandboxHost)])];
 }
@@ -1484,18 +1577,21 @@ export function writeBwrapTun(dir, bwrap = whichPath("bwrap", process.env), tun 
 /**
  * What Copilot's sandbox needs inside the outer one, checked as it would use it: the TUN device, its tools, and
  * slirp4netns wiring a fresh user and network namespace. Exit 0 and `ok` when all hold, else the first that does not.
+ * Each step waits on the answer itself, never a clock: the namespace's process says on a pipe that it is inside it, and
+ * slirp4netns writes its --ready-fd once the interface is configured (or exits, closing it, when it cannot). Each wait
+ * is bounded (OUTER_PROBE_WAIT_S, through `timeout`): one that hangs is a no then, well inside runOuterProbe's own limit,
+ * since the probe blocks the loop that runs it.
  */
+export const OUTER_PROBE_WAIT_S = 30;
 export const COPILOT_OUTER_PROBE = `test -c /dev/net/tun || { echo "no /dev/net/tun" >&2; exit 2; }
-for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
+for b in slirp4netns nsenter unshare ip iptables ip6tables iptables-restore ip6tables-restore mkfifo timeout; do command -v "$b" >/dev/null || { echo "$b is not on PATH" >&2; exit 3; }; done
 unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" true 2>/dev/null || { echo "unshare cannot make a user and network namespace mapping the user (util-linux 2.36 or later)" >&2; exit 5; }
-unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" --keep-caps sleep 10 & ns=$!
-sleep 0.5
-slirp4netns --configure --mtu=65520 "$ns" tap0 >/dev/null 2>"$TMPDIR/slirp.err" & sl=$!
+mkfifo "$TMPDIR/ns.ready" "$TMPDIR/slirp.ready" || { echo "mkfifo cannot make a pipe in $TMPDIR" >&2; exit 6; }
+unshare --user --net --map-user="$(id -u)" --map-group="$(id -g)" --keep-caps sh -c 'echo in >&3; exec 3>&-; exec sleep 120' 3>"$TMPDIR/ns.ready" & ns=$!
+[ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/ns.ready")" = in ] || { kill "$ns" 2>/dev/null; echo "unshare did not start its namespace's process" >&2; exit 5; }
+slirp4netns --configure --mtu=65520 --ready-fd=3 "$ns" tap0 3>"$TMPDIR/slirp.ready" >/dev/null 2>"$TMPDIR/slirp.err" & sl=$!
 ok=""
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  if nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; break; fi
-  sleep 0.3
-done
+if [ "$(timeout ${OUTER_PROBE_WAIT_S} cat "$TMPDIR/slirp.ready")" = 1 ] && nsenter --target "$ns" --user --net --preserve-credentials ip -4 -o address show dev tap0 2>/dev/null | grep -q 10.0.2.100; then ok=1; fi
 kill "$sl" "$ns" 2>/dev/null
 [ -n "$ok" ] || { echo "slirp4netns did not configure its interface: $(tail -1 "$TMPDIR/slirp.err" 2>/dev/null)" >&2; exit 4; }
 echo ok
@@ -1555,10 +1651,7 @@ export function outerProbe(harness, { domains = LOCAL_DOMAINS, env = process.env
     // none yet
   }
   if (cache[key]?.on === true) return { ...cache[key], cached: true, cacheFile };
-  let result = probe(harness, { domains, env, home });
-  // Copilot is refused without it (local.mjs preflight and stageEnv): a no is probed once more, so one slow probe (a
-  // busy box, slirp4netns late to configure) neither stops serve nor Blocks a stage.
-  if (!result.on && harness === "copilot") result = probe(harness, { domains, env, home });
+  const result = probe(harness, { domains, env, home });
   // A no from an older Factory is dropped with the rewrite.
   const kept = Object.fromEntries(Object.entries(cache).filter(([, v]) => v?.on === true));
   if (result.on || Object.keys(kept).length !== Object.keys(cache).length) {

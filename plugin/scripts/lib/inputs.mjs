@@ -30,6 +30,14 @@ export const MODEL_DEFAULTS = {
 /** This plugin's version (its manifest), the tag the Action default and setup's fallback pin name. */
 export const FACTORY_VERSION = JSON.parse(readFileSync(new URL("../../.claude-plugin/plugin.json", import.meta.url), "utf8")).version;
 
+/**
+ * image_max_age_days (lib/image.mjs imageDecision): its default, and its bounds. A person owns it: at least a day, and
+ * never more than IMAGE_MAX_AGE_MAX, so no image goes unrefreshed (its base image, the unpinned things setup fetches)
+ * without end. A value outside them is refused (VALUE_RULES) and reads as the default.
+ */
+export const IMAGE_MAX_AGE_DAYS = 7;
+export const IMAGE_MAX_AGE_MAX = 30;
+
 export const DEFAULTS = {
   harness: "claude",
   model: "", // empty: MODEL_DEFAULTS for the harness
@@ -64,6 +72,7 @@ export const DEFAULTS = {
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
+  project: "", // the Factory board's node id, recorded by setup (github.mjs findProject); empty: the board titled exactly "Factory: <repo>"
   action: `clockgrove/factory@v${FACTORY_VERSION}`,
   objective_label: "factory:objective",
   mode: "",
@@ -96,9 +105,22 @@ export const DEFAULTS = {
   vercel_project_id: "",
   image_refresh: "merge", // merge | nightly (lib/image.mjs imageDecision)
   image_daily_minutes: "5",
+  image_max_age_days: String(IMAGE_MAX_AGE_DAYS), // lib/image.mjs imageDecision: the current image stands for a head while younger
   image_owed: "", // image.mjs: `true` when the dispatcher's tick found a build owed (lib/image.mjs imageOwed)
   sandbox_idle_days: "7", // sweep.mjs: a stopped sandbox of an Objective neither Running nor In review, this long, goes
   sweep_max_destroys: "5",
+  // Limits a person owns (OWNER_LIMITS below has each one's rule and bound).
+  usage_limit_waits: "2", // waits in place for a usage limit's reset one pass gets (harness.mjs LIMIT.waits)
+  usage_limit_move_minutes: "60", // on Actions and the cloud sandbox, a longer wait moves to a free account (LIMIT.movePastMs)
+  claim_pause_hours: "24", // a quiet local claim pauses its Objective this long, then the dispatcher Blocks it (dispatch.mjs)
+  sibling_wait_hours: "6", // the longest a hand-off or a rebase waits for a sibling ahead (overlap.mjs)
+  max_parts: "6", // the most sequential PRs one Objective splits into (handoff.mjs nextPart)
+  step_stall_factor: "3", // a queue check's step is hung past this many times its normal duration (logic.mjs stepStallMs)
+  step_stall_floor_minutes: "15", // ... and never before its normal duration plus this
+  queue_stall_minutes: "10", // a merge queue commit with no CI begun this long is stalled (logic.mjs queueStall)
+  relay_unknown_shut: "6", // failed relayed calls of unknown cost that shut the gateway relay for a stage (gateway-relay.mjs)
+  relay_unknown_floor_usd: "0.25", // the least such a call is booked at
+  relay_slow_floor_usd: "1", // the least one that ran past 30 s upstream is booked at
 };
 
 export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
@@ -106,7 +128,27 @@ export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "c
  * Local mode's own settings a repository's workflow env block may set (docs/LOCAL.md, Configuration); the developer's
  * shell wins over each.
  */
-export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB"];
+export const LOCAL_WORKFLOW_SETTINGS = ["FACTORY_LOCAL_DOMAINS", "FACTORY_LOCAL_ENV", "FACTORY_LOCAL_SETUP", "FACTORY_LOCAL_VALIDATION", "FACTORY_LOCAL_DB", "FACTORY_LOCAL_DB_INIT", "FACTORY_PG_BIN", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_LOCAL_MEDIA_MAX_MB", "FACTORY_LOCAL_WAIT_MINUTES", "FACTORY_LOCAL_OUTAGE_HOURS", "FACTORY_LOCAL_LAPSE_MAX", "FACTORY_LOCAL_TOKEN_PROBE_MAX"];
+/**
+ * Local mode's bounded whole-number settings (docs/LOCAL.md, Configuration), each its default, least and most:
+ * `FACTORY_LOCAL_LAPSE_MAX`, the lapse in a row that Blocks a stage the lapse check judges transient (local.mjs lapse);
+ * `FACTORY_LOCAL_TOKEN_PROBE_MAX`, the most repositories the local token's check probes (local.mjs checkToken).
+ */
+export const LOCAL_BOUNDS = Object.freeze({
+  FACTORY_LOCAL_LAPSE_MAX: Object.freeze({ fallback: 3, min: 2, max: 10 }),
+  FACTORY_LOCAL_TOKEN_PROBE_MAX: Object.freeze({ fallback: 100, min: 1, max: 1000 }),
+});
+/**
+ * A LOCAL_BOUNDS setting's value (`name`, as set: unset or empty is the default): `{value, problem}`, where a value that is
+ * no whole number within the bounds is the default and `problem` names it for the log.
+ */
+export function localBound(name, value) {
+  const b = LOCAL_BOUNDS[name];
+  const v = String(value ?? "").trim();
+  if (v === "") return { value: b.fallback, problem: null };
+  if (/^\d+$/.test(v) && Number(v) >= b.min && Number(v) <= b.max) return { value: Number(v), problem: null };
+  return { value: b.fallback, problem: `${name} ${JSON.stringify(v)} is not a whole number from ${b.min} to ${b.max}; using ${b.fallback}` };
+}
 /** DEFAULTS keys that are no input of the Action (action.yml): Factory's own, or a run's argument. */
 const NOT_INPUTS = ["action", "objective_label", "repo"];
 /**
@@ -168,15 +210,17 @@ export function workflowSettings(wf = {}) {
 /**
  * Settings that steer trust or money's route, whom Factory answers and what gates a merge, what a stage may reach or
  * receive, or how it is set up and installed (the binaries it runs and the Node.js it runs on included), and the ids of the App, the sandbox vendor
- * and the federation endpoint the credentials go with, and the dispatcher's own per-run `image_owed`: only the reviewed
+ * and the federation endpoint the credentials go with, the gateway relay's spend cap on calls it cannot price, and the
+ * dispatcher's own per-run `image_owed`: only the reviewed
  * workflow file sets them, never a repository variable (#284), since anyone with write access can set one. One set as a
  * variable is named and ignored.
  */
 export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
-    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION"],
+    ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
+    ...["RELAY_UNKNOWN_SHUT", "RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD"],
   ].map((n) => `FACTORY_${n}`),
 );
 /** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, the harness, models, effort, validation, sweep, scheduling. */
@@ -222,6 +266,61 @@ export const GUESS_MAX_HOURS = HOLD_MAX_MS / 3600_000;
 export const guessHoursValid = (hours) => Array.isArray(hours) && hours.length > 0 && hours.every((h) => typeof h === "number" && Number.isFinite(h) && h > 0 && h <= GUESS_MAX_HOURS);
 
 const number = (v) => v.trim() !== "" && Number.isFinite(Number(v));
+
+/**
+ * Limits a person owns (#423), each a setting whose default is DEFAULTS's (or LOCAL_LIMIT_DEFAULTS's) and whose value
+ * must lie in its range: `whole` a whole number, `from` the least it may be (`above` true: it must be above it), `max`
+ * the most, so no value can push a time past what a Date holds. A value out of its rule reads as the default, and a
+ * repository variable that sets one is named as invalid (VALUE_RULES).
+ */
+export const OWNER_LIMITS = {
+  FACTORY_USAGE_LIMIT_WAITS: { whole: true, from: 0, max: 10 },
+  FACTORY_USAGE_LIMIT_MOVE_MINUTES: { from: 0, above: true, max: 24 * 60 },
+  // At least two of the hourly beats a loop writes on a paused Objective's claim (local.mjs PAUSED_BEAT_MS), and twice
+  // the most a local stage waits in place writing none (FACTORY_LOCAL_WAIT_MINUTES).
+  FACTORY_CLAIM_PAUSE_HOURS: { from: 2, max: 30 * 24 },
+  FACTORY_SIBLING_WAIT_HOURS: { from: 0, above: true, max: 7 * 24 },
+  FACTORY_MAX_PARTS: { whole: true, from: 1, max: 50 },
+  FACTORY_STEP_STALL_FACTOR: { from: 1, max: 100 },
+  // At least a minute each: near 0, every queue commit is stalled the moment it is made (dequeued, requeued, Blocked, so
+  // nothing merges), and every running check's job is read again on each poll, on the shared API quota.
+  FACTORY_STEP_STALL_FLOOR_MINUTES: { from: 1, max: 24 * 60 },
+  FACTORY_QUEUE_STALL_MINUTES: { from: 1, max: 24 * 60 },
+  FACTORY_RELAY_UNKNOWN_SHUT: { whole: true, from: 1, max: 1000 },
+  FACTORY_RELAY_UNKNOWN_FLOOR_USD: { from: 0, above: true, max: 100 },
+  FACTORY_RELAY_SLOW_FLOOR_USD: { from: 0, above: true, max: 100 },
+  // At most half the claim pause's least (two hours): a stage waiting in place writes no heartbeat while this machine's
+  // network is down, so its wait ends well before the dispatcher could take its quiet claim for a loop gone away.
+  FACTORY_LOCAL_WAIT_MINUTES: { from: 0, above: true, max: 60 },
+  FACTORY_LOCAL_OUTAGE_HOURS: { from: 0, above: true, max: 30 * 24 },
+};
+/** Local mode's own limits (LOCAL_WORKFLOW_SETTINGS, no Action input): their defaults. */
+export const LOCAL_LIMIT_DEFAULTS = { FACTORY_LOCAL_WAIT_MINUTES: "15", FACTORY_LOCAL_OUTAGE_HOURS: "12" };
+
+/** Whether `v` (text) meets owner limit `rule`. */
+const limitOk = (rule, v) => {
+  const s = String(v ?? "").trim();
+  if (rule.whole ? !/^\d+$/.test(s) : !number(s)) return false;
+  const n = Number(s);
+  return (rule.above ? n > rule.from : n >= rule.from) && n <= rule.max;
+};
+/** What owner limit `rule` asks for, as a variable's refusal names it. */
+const limitText = (rule) => `${rule.whole ? "a whole number" : "a number"} ${rule.above ? `above ${rule.from}` : rule.from === 0 ? "0 or more" : `at least ${rule.from}`}, at most ${rule.max}`;
+
+/** Owner limit `name`'s value in force from `value` (a setting's text): the value when it meets its rule, else the default. */
+export function ownerLimit(name, value) {
+  const rule = OWNER_LIMITS[name];
+  if (limitOk(rule, value)) return Number(String(value).trim());
+  return Number(LOCAL_LIMIT_DEFAULTS[name] ?? DEFAULTS[name.replace(/^FACTORY_/, "").toLowerCase()]);
+}
+
+/**
+ * Local mode's own limits from a local stage's or serve's env (local.mjs baseEnv: the developer's own over the
+ * repository's): `waitMs`, how long a local stage waits in place for the network or a usage limit's reset before it
+ * ends paused for serve to resume (FACTORY_LOCAL_WAIT_MINUTES, network.mjs OUTAGE.stageWaitMs); `outageMs`, how long
+ * serve keeps an Objective paused on one outage before it Blocks it (FACTORY_LOCAL_OUTAGE_HOURS, OUTAGE.blockMs).
+ */
+export const localLimits = (env = process.env) => ({ waitMs: ownerLimit("FACTORY_LOCAL_WAIT_MINUTES", env.FACTORY_LOCAL_WAIT_MINUTES) * 60_000, outageMs: ownerLimit("FACTORY_LOCAL_OUTAGE_HOURS", env.FACTORY_LOCAL_OUTAGE_HOURS) * 3600_000 });
 /**
  * What a variable's value must be for Factory to take it as given (#284), where the env block's parsing would fall back
  * to a default or refuse it (resolveInputs, promptCacheSetting, harness.mjs copilotCreditUsd, machine.mjs loopCap): each
@@ -241,6 +340,7 @@ const VALUE_RULES = (() => {
     FACTORY_DAILY_USD: atLeast0,
     FACTORY_MAX_USD: atLeast0,
     FACTORY_IMAGE_DAILY_MINUTES: atLeast0,
+    FACTORY_IMAGE_MAX_AGE_DAYS: [(v) => /^\s*\d+\s*$/.test(v) && Number(v) >= 1 && Number(v) <= IMAGE_MAX_AGE_MAX, `a whole number of days, 1 to ${IMAGE_MAX_AGE_MAX}`],
     FACTORY_SANDBOX_IDLE_DAYS: atLeast0,
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
@@ -249,11 +349,13 @@ const VALUE_RULES = (() => {
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_TRIAGE_MIN_CONFIDENCE: [(v) => confidenceValue(v) !== null, "a number from 0 to 1"],
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
+    ...Object.fromEntries(Object.entries(LOCAL_BOUNDS).map(([k, b]) => [k, [(v) => localBound(k, v).problem === null, `a whole number from ${b.min} to ${b.max}`]])),
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
     FACTORY_SIBLING_HOLD: oneOf("on", "off"),
     FACTORY_DECISION_ROUTE: oneOf("auto", "gateway", "off"),
     FACTORY_PROMPT_CACHE_TTL: oneOf("off", "auto", "1h", "5m"),
     FACTORY_IMAGE_REFRESH: oneOf("merge", "nightly"),
+    ...Object.fromEntries(Object.entries(OWNER_LIMITS).map(([k, rule]) => [k, [(v) => limitOk(rule, v), limitText(rule)]])),
   };
 })();
 /**
@@ -519,6 +621,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
       .split(/\r?\n|,/)
       .map((s) => s.trim())
       .filter(Boolean);
+  const limit = (n) => ownerLimit(`FACTORY_${upper(n)}`, get(n));
   const repoFull = get("repo") || env.GITHUB_REPOSITORY || "";
   const harness = get("harness").toLowerCase();
   const md = MODEL_DEFAULTS[harness] || {};
@@ -594,9 +697,19 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     imageRefresh: get("image_refresh").trim().toLowerCase() === "nightly" ? "nightly" : "merge",
     imageDailyMinutes: num(get("image_daily_minutes"), 5),
     imageOwed: get("image_owed").trim() === "true",
+    imageMaxAgeDays: ((d) => (Number.isInteger(d) && d >= 1 && d <= IMAGE_MAX_AGE_MAX ? d : IMAGE_MAX_AGE_DAYS))(num(get("image_max_age_days").trim() || "x", IMAGE_MAX_AGE_DAYS)),
     sandboxIdleDays: num(get("sandbox_idle_days"), 7),
     sweepMaxDestroys: Math.max(0, Math.floor(num(get("sweep_max_destroys"), 5))),
     nodeVersion: get("node_version").trim(),
+    // Limits a person owns (OWNER_LIMITS): a value out of its rule reads as the default.
+    usageLimitWaits: limit("usage_limit_waits"),
+    usageLimitMoveMs: limit("usage_limit_move_minutes") * 60_000,
+    claimPauseMs: limit("claim_pause_hours") * 3600_000,
+    siblingWaitMs: limit("sibling_wait_hours") * 3600_000,
+    maxParts: limit("max_parts"),
+    stall: { factor: limit("step_stall_factor"), floorMs: limit("step_stall_floor_minutes") * 60_000, queueMs: limit("queue_stall_minutes") * 60_000 },
+    relay: { unknownShut: limit("relay_unknown_shut"), unknownFloorUsd: limit("relay_unknown_floor_usd"), slowFloorUsd: limit("relay_slow_floor_usd") },
+    project: get("project").trim(),
   };
 }
 

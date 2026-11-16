@@ -138,7 +138,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
  */
 function serveOn(h, clock) {
   const dev = join(h, "work", `repo-${Math.random().toString(36).slice(2, 8)}`);
-  const loop = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repo: REPO, repoFull: REPO.full, wf: {}, opts: { token: "t" }, stopping: false, firstSetup: new Map(), children: new Set(), clock, holder: holderId(machineIdentity(), process.pid), claimRetryMs: 0, claimSettleMs: 0 });
+  const loop = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repo: REPO, repoFull: REPO.full, wf: {}, opts: { token: "t" }, stopping: false, firstSetup: new Map(), children: new Set(), clock, holder: holderId(machineIdentity(), process.pid), claimRetryMs: 0 });
   loop.holds = accountHolds({ dir: holdsDir(h) });
   loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1" });
   loop.harnessReady = () => [];

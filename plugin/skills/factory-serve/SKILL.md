@@ -30,4 +30,4 @@ Each stage runs on one account of its harness for its whole run (docs/LOCAL.md, 
 
 ## Stop
 
-Stop it with Ctrl-C, or by ending that process. Stopping pauses its Objectives: they stay Running with their claims, and the next `factory serve` on this machine resumes them first. The dispatcher Blocks one only after a day away.
+Stop it with Ctrl-C, or by ending that process. Stopping pauses its Objectives: they stay Running with their claims, and the next `factory serve` on this machine resumes them first. The dispatcher Blocks one after `claim_pause_hours` away (a day by default).

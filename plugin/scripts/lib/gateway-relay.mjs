@@ -25,11 +25,11 @@
 //   for one, PRE_MODEL_ERRORS; a 5xx saying no generation ran, UNAVAILABLE_ERRORS); a redirect, which is never followed.
 // - A failed call whose cost is unknown (an error status, a broken answer, a timeout, a stream that carried an error and
 //   no finish) is never $0 (#142): it is booked at an upper bound, the dearest call priced so far or $0.25 ($1.00 on an
-//   image route until a call there is priced), and relaying goes on. One that names its generation is booked so at once,
+//   image route until a call there is priced; the repository's relay_unknown_floor_usd), and relaying goes on. One that names its generation is booked so at once,
 //   and its record's cost replaces the estimate when it comes; with a cap, one such estimate at a time (HOLD_MAX_MS). A
-//   failure that ran past SLOW_FAILURE_MS upstream is booked at least $1.00. The gateway shuts for the stage (the pass
+//   failure that ran past SLOW_FAILURE_MS upstream is booked at least $1.00 (relay_slow_floor_usd). The gateway shuts for the stage (the pass
 //   ends over budget, so the stage Blocks, and every later call is refused) once a run of such calls with no priced call
-//   between them is UNKNOWN_STREAK_SHUT long and has lasted UNKNOWN_WINDOW_MS; at the UNKNOWN_STAGE_SHUT-th in the stage
+//   between them is UNKNOWN_STREAK_SHUT long and has lasted UNKNOWN_WINDOW_MS; at the UNKNOWN_STAGE_SHUT-th (relay_unknown_shut) in the stage
 //   that may have been billed (a fast error status, FAST_ERROR_MS, is not one, so blips never end a stage by their
 //   count); and at once for a complete answer that cannot be priced. The call that shuts it is booked too.
 // - The call log: one line per call in the stage's usage directory (CALL_LOG), no body and no key.
@@ -166,7 +166,10 @@ export const PRE_MODEL_ERRORS = new Set(["authentication_error", "invalid_reques
  * in the body or header, the call costs $0 and is no unknown cost; with an id it is booked at the estimate and looked up.
  */
 export const UNAVAILABLE_ERRORS = new Set(["service_unavailable_error", "overloaded_error", "rate_limit_exceeded", "rate_limit_error"]);
-/** The least a call whose cost stays unknown is booked at (#142): it, or the dearest call priced so far, the larger. */
+/**
+ * The least a call whose cost stays unknown is booked at (#142): it, or the dearest call priced so far, the larger. The
+ * default of the repository's relay_unknown_floor_usd (openRelay `unknownFloorUsd`).
+ */
 export const UNKNOWN_COST_FLOOR_USD = 0.25;
 /**
  * The least an image call of unknown cost is booked at until a call on its route is priced: an image costs more than
@@ -191,7 +194,8 @@ export const UNKNOWN_WINDOW_MS = 60_000;
  * estimates that stand for such failures in a stage, and so what they can understate. It never resets, so a fast error
  * status (FAST_ERROR_MS) is not one of them: the edge's 5xx in a blip comes back within seconds and runs no model, and
  * counting blips over a stage of hours would end it. Those count only toward the run (UNKNOWN_STREAK_SHUT), which a
- * gateway that stays down still reaches within about a minute.
+ * gateway that stays down still reaches within about a minute. The default of the repository's relay_unknown_shut (openRelay
+ * `unknownStageShut`): a repository that makes many calls per stage needs a larger count than one that makes ten.
  */
 export const UNKNOWN_STAGE_SHUT = 6;
 /**
@@ -206,7 +210,7 @@ export const FAST_ERROR_MS = 3_000;
 export const FAST_ERROR_STATUS = (status) => status === 408 || status === 409 || (status >= 500 && status < 600);
 /**
  * A failed call that ran this long upstream before it ended ran a model: its estimate is at least SLOW_UNKNOWN_FLOOR_USD
- * on any route, as an image call's is.
+ * on any route, as an image call's is (the default of the repository's relay_slow_floor_usd, openRelay `slowFloorUsd`).
  */
 export const SLOW_FAILURE_MS = 30_000;
 export const SLOW_UNKNOWN_FLOOR_USD = 1;
@@ -527,10 +531,12 @@ function eventReader() {
  * directory the caller made, mode 700); its path must fit UNIX_SOCKET_PATH_MAX. `editsMaxBytes`: an image edit's body
  * cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other limits and delays). `upstreamClock`: what a call's
  * time upstream is read on, against fastErrorMs and slowFailureMs (Date.now; a test sets its own, so a loaded machine's
- * pause never turns a fast answer slow). Returns the relay: {url, port,
+ * pause never turns a fast answer slow). `unknownStageShut`, `unknownFloorUsd`, `slowFloorUsd`: the repository's
+ * relay_unknown_shut, relay_unknown_floor_usd and relay_slow_floor_usd (UNKNOWN_STAGE_SHUT, UNKNOWN_COST_FLOOR_USD and
+ * SLOW_UNKNOWN_FLOOR_USD by default). Returns the relay: {url, port,
  * tcpPort, socketPath, dir, socketDir, token, probeId, beginPass(budget), endPass(), totals(), close()}.
  */
-export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
+export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, unknownStageShut = UNKNOWN_STAGE_SHUT, unknownFloorUsd = UNKNOWN_COST_FLOOR_USD, slowFloorUsd = SLOW_UNKNOWN_FLOOR_USD, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `factory-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -593,12 +599,12 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     s.dearest = Math.max(s.dearest, total);
   };
   // The upper bound a call of unknown cost is booked at (#142): the dearest call priced so far in the stage, at least
-  // UNKNOWN_COST_FLOOR_USD; on an image route at least IMAGE_UNKNOWN_FLOOR_USD until a call on that route is priced; and
-  // for a call that ran past slowFailureMs upstream, at least SLOW_UNKNOWN_FLOOR_USD. `ctx`: the call's path and `slow`.
+  // unknownFloorUsd; on an image route at least IMAGE_UNKNOWN_FLOOR_USD until a call on that route is priced; and
+  // for a call that ran past slowFailureMs upstream, at least slowFloorUsd. `ctx`: the call's path and `slow`.
   // It counts against max_usd like any spend. Returns what dropEstimate takes back.
   const bookEstimate = ({ path, slow = false }) => {
     const image = IMAGE_ROUTE.test(path) && !s.pricedPaths.has(path) ? IMAGE_UNKNOWN_FLOOR_USD : 0;
-    const usd = round6(Math.max(s.dearest, UNKNOWN_COST_FLOOR_USD, image, slow ? SLOW_UNKNOWN_FLOOR_USD : 0));
+    const usd = round6(Math.max(s.dearest, unknownFloorUsd, image, slow ? slowFloorUsd : 0));
     const pass = s.pass;
     book(usd);
     s.estimated += 1;
@@ -627,7 +633,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
   };
   // One more call of unknown cost, its estimate already booked (`ctx`: its seq; `at`, when its answer ended; `fast`, a
   // fast error status). The gateway shuts for the stage once a run of them with no priced call between them is
-  // UNKNOWN_STREAK_SHUT long and has gone on for unknownWindowMs, or at the UNKNOWN_STAGE_SHUT-th in the stage that may
+  // UNKNOWN_STREAK_SHUT long and has gone on for unknownWindowMs, or at the unknownStageShut-th in the stage that may
   // have been billed (not a fast error status). Returns the call log's basis for it.
   const strike = (why, usd, { seq, at, fast = false }) => {
     if (!fast) s.unknownTotal += 1;
@@ -637,7 +643,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     run.last = run.count ? Math.max(run.last, at) : at;
     run.count += 1;
     if (s.failClosed) return "estimate";
-    if (!fast && s.unknownTotal >= UNKNOWN_STAGE_SHUT) {
+    if (!fast && s.unknownTotal >= unknownStageShut) {
       shutDown(why, { calls: s.unknownTotal, stage: true });
       return "shut";
     }
@@ -645,7 +651,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       shutDown(why, { calls: run.count });
       return "shut";
     }
-    log(`gateway relay: a call's cost could not be determined (${why}); booked $${usd.toFixed(4)} against max_usd, an upper bound, and relaying goes on (${run.count} in a row over ${Math.round((run.last - run.first) / 1000)} s; ${s.unknownTotal} in the stage that may have been billed; the gateway shuts for the stage at ${UNKNOWN_STREAK_SHUT} in a row over ${Math.round(unknownWindowMs / 1000)} s, or at ${UNKNOWN_STAGE_SHUT} that may have been billed)`);
+    log(`gateway relay: a call's cost could not be determined (${why}); booked $${usd.toFixed(4)} against max_usd, an upper bound, and relaying goes on (${run.count} in a row over ${Math.round((run.last - run.first) / 1000)} s; ${s.unknownTotal} in the stage that may have been billed; the gateway shuts for the stage at ${UNKNOWN_STREAK_SHUT} in a row over ${Math.round(unknownWindowMs / 1000)} s, or at ${unknownStageShut} that may have been billed)`);
     return "estimate";
   };
   // A call that failed (a network error after it was sent, a broken or truncated answer, a timeout, an error status, a

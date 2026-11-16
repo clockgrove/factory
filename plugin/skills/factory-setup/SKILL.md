@@ -31,11 +31,11 @@ Then the user's model credential (`gh secret set`): `ANTHROPIC_API_KEY` (`CLAUDE
 
 ## 4. Skills in the repository
 
-Committed copies of the skills and agents, for vendors' cloud sessions only: offer them per [reference.md](reference.md).
+Committed skills and agents, for vendors' cloud sessions only: offer them per [reference.md](reference.md).
 
 ## Local mode, instead of or beside the Action
 
-On the user's machine, walk `docs/LOCAL.md` instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates a fine-grained token for this one repository (Contents, Issues and Pull requests read and write; Actions and Variables read), and for Copilot a Copilot Requests token. They save them with that page's command; never ask for or read them. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label are the local loop's, not the Action's.
+On the user's machine, walk `docs/LOCAL.md` instead of steps 1 to 3: no App or model secret; WSL2 only on Windows. The user creates a fine-grained token for this repository (Contents, Issues and Pull requests read and write; Actions and Variables read), and for Copilot a Copilot Requests token. They save them with that page's command; never ask for or read them. Then offer `node "${CLAUDE_PLUGIN_ROOT}/scripts/local.mjs" serve --once` from the clone: it lists anything missing and creates the `factory:local` label. Objectives with that label, and every one where no Action is active, are the local loop's.
 
 ## Several accounts
 

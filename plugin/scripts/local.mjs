@@ -7,8 +7,8 @@
 //   node scripts/local.mjs handover <issue> [--push] [--app ID]   (a person applies Factory's workflow hand-over: read it, then --push)
 //   node scripts/local.mjs wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval S] [--timeout S]   (an orchestrator waits on the queue)
 // Routing: an Objective labelled factory:local is the local loop's and the Actions path leaves it alone;
-// serve takes only those unless --all (FACTORY_LOCAL_ALL=1), or the default branch has no Factory workflow, so no Action
-// takes any: then it takes every Objective. A claim comment with a heartbeat marks one in flight.
+// serve takes only those unless --all (FACTORY_LOCAL_ALL=1). Where no Action runs (GitHub lists no active factory.yml
+// workflow), serve labels each Objective it picks factory:local first. A claim comment with a heartbeat marks one in flight.
 // Needs git, gh, the harness CLI (claude or codex logged in; copilot with a Copilot Requests token in
 // COPILOT_GITHUB_TOKEN or ~/.config/factory/copilot-token, plus slirp4netns and iptables on Linux), srt
 // (npm i -g @anthropic-ai/sandbox-runtime), ripgrep and, on Linux and WSL2, bubblewrap and socat; and a
@@ -40,7 +40,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, hasLocalLabel, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -635,13 +635,27 @@ async function retried(what, fn, { tries = 3, waitMs = 2_000 } = {}) {
 }
 
 /**
- * serve's line for the Queued Objectives it leaves to the Action because they lack factory:local (dispatch's
- * `unrouted`): how many, which, and how to take them here.
+ * serve's line for the Queued Objectives it does not take because they lack factory:local (dispatch's `unrouted`): how
+ * many, which, and what to do. `action`: actionState's answer, "live" (the Action takes them) or null (unread).
  */
-export function unroutedLine(numbers, branch = null) {
+export function unroutedLine(numbers, action) {
   const n = numbers.length;
   const shown = numbers.slice(0, 10).map((x) => `#${x}`).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
-  return `${n} queued Objective${n === 1 ? "" : "s"} without ${LOCAL_LABEL} (${shown}) ${n === 1 ? "is" : "are"} left to the Action${branch ? ` (the workflow on origin/${branch})` : ""}: this loop takes only Objectives labelled ${LOCAL_LABEL}. To run one here, add ${LOCAL_LABEL} to it; to take every Objective, start serve with --all`;
+  const head = `${n} queued Objective${n === 1 ? "" : "s"} without ${LOCAL_LABEL} (${shown})`;
+  if (action !== "live") return `${head}: this loop takes only Objectives labelled ${LOCAL_LABEL}, and whether an Action runs them could not be read; add ${LOCAL_LABEL} to one to run it on this machine`;
+  return `${head} ${n === 1 ? "is" : "are"} the Action's: its factory.yml workflow is active. To run one on this machine instead, add ${LOCAL_LABEL} to it. (serve --all is for a repository whose Action should not run Objectives: with the Action active, both would race for every Objective without ${LOCAL_LABEL})`;
+}
+
+/**
+ * Whether GitHub's Action runs Objectives in `repo` (#455), from its factory.yml workflow as GitHub lists it: "live" when
+ * it is active, "none" when there is no such workflow (404) or it is disabled or deleted, null for anything else (a
+ * failed read, an answer with no known state): unknown, which changes nothing.
+ */
+export async function readActionState(repo, opts) {
+  return rest(`repos/${repo.full}/actions/workflows/factory.yml`, { ...opts, noRateWait: true }).then(
+    (w) => (w?.state === "active" ? "live" : /^(disabled_\w+|deleted)$/.test(w?.state ?? "") ? "none" : null),
+    (e) => (e?.status === 404 ? "none" : null),
+  );
 }
 
 /** The start's line when this plugin, which runs every stage here, is older than the release the committed workflow pins; else null. */
@@ -654,8 +668,7 @@ export class Local {
   constructor(flags) {
     // This process is the local backend: the dispatcher it runs in-process routes factory:local Objectives here.
     process.env.FACTORY_LOCAL = "1";
-    // --all, or FACTORY_LOCAL_ALL=1 in this shell: every Objective, whatever the default branch holds (route()).
-    this.allFlag = !!flags.all || process.env.FACTORY_LOCAL_ALL === "1";
+    if (flags.all) process.env.FACTORY_LOCAL_ALL = "1";
     // Canonical, so every sandbox path derived from it is real (lib/local.mjs refuses one that resolves elsewhere).
     this.dev = realpathSync(sh("git", ["-C", resolve(flags.checkout || process.cwd()), "rev-parse", "--show-toplevel"]));
     this.repoFull = flags.repo || repoFromRemote(sh("git", ["-C", this.dev, "remote", "get-url", "origin"]));
@@ -670,7 +683,6 @@ export class Local {
     // A workflow that does not parse holds settings no one can read (protected paths, maintainers, caps): nothing starts.
     if (committed.parseError) throw new Error(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}; fix the file on ${committed.branch} and start again`);
     if (committed.error) log(`local mode reads its settings from the default branch's .github/workflows/factory.yml: ${committed.error}, so it uses none`);
-    this.route(committed);
     for (const line of workflowDriftLines(readWorkflowEnv(this.dev), committed)) log(line);
     const plugin = pluginLine(committed);
     if (plugin) log(plugin);
@@ -684,24 +696,35 @@ export class Local {
   }
 
   /**
-   * Which Objectives this loop takes (#455), from the default branch's workflow read (committedWorkflowEnv, and each
-   * refreshSettings read): with no .github/workflows/factory.yml there (`absent`), no Action takes any Objective, so this
-   * loop takes every one, labelled factory:local or not; with the file there, only those labelled factory:local, and the
-   * Action the rest, unless --all. Set in FACTORY_LOCAL_ALL, which the dispatcher's routing reads (backend.mjs), and said
-   * at the start and when it changes. A read with no default branch, or one that could not fetch it, changes nothing.
+   * Whether the Action runs Objectives here (readActionState, for this loop's repository, --repo's when given), read at
+   * most once per settings interval (SETTINGS_EVERY_MS) and kept across an unknown read. Said when it is first known and
+   * when it changes: with none, the Objectives this loop picks without factory:local get the label (dispatch `adopt`).
    */
-  route(read) {
-    if (!read?.branch || read.unfetched) return;
-    const absent = !!read.absent;
-    if (absent === this.noWorkflow) return;
-    const first = this.noWorkflow === undefined;
-    this.noWorkflow = absent;
-    this.allFlag ??= process.env.FACTORY_LOCAL_ALL === "1";
-    if (this.allFlag || absent) process.env.FACTORY_LOCAL_ALL = "1";
-    else delete process.env.FACTORY_LOCAL_ALL;
-    if (this.allFlag) return;
-    if (absent) log(`origin/${read.branch} has no .github/workflows/factory.yml, so no Action takes Objectives in this repository: local mode takes every Objective here, labelled ${LOCAL_LABEL} or not`);
-    else if (!first) log(`origin/${read.branch} has .github/workflows/factory.yml now: the Action takes the Objectives without ${LOCAL_LABEL}, and this loop from now on only those labelled ${LOCAL_LABEL} (start serve with --all to take every one)`);
+  async actionState() {
+    const every = this.settingsEveryMs ?? SETTINGS_EVERY_MS;
+    if (this.actionReadAt !== undefined && Date.now() - this.actionReadAt < every) return this.action ?? null;
+    this.actionReadAt = Date.now();
+    const now = await readActionState(this.repo, this.opts ?? { token: this.token });
+    if (now === null) {
+      if (this.action === undefined && !this.actionUnreadSaid) log(`whether GitHub's Action runs Objectives in ${this.repoFull} could not be read (its factory.yml workflow): this loop takes only those labelled ${LOCAL_LABEL} until it can`);
+      this.actionUnreadSaid = true;
+      return this.action ?? null;
+    }
+    if (now !== this.action) {
+      if (now === "none") log(`no Action runs Objectives in ${this.repoFull} (no active factory.yml workflow): this loop takes the Objectives without ${LOCAL_LABEL} too, and labels each ${LOCAL_LABEL} as it picks it`);
+      else if (this.action === "none") log(`GitHub's Action runs Objectives in ${this.repoFull} now (its factory.yml workflow is active): it takes the Objectives without ${LOCAL_LABEL}; those labelled ${LOCAL_LABEL} stay this machine's`);
+    }
+    this.action = now;
+    return now;
+  }
+
+  /** Labels `issue` factory:local, said once, when no Action runs here: `factory run` on it, as serve's pick does (#455). */
+  async adoptForRun(issue, data) {
+    if (hasLocalLabel(data) || (await this.actionState()) !== "none") return;
+    await addLabels(this.repo, issue, [LOCAL_LABEL], this.opts ?? { token: this.token }).then(
+      () => log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it`),
+      (e) => log(`#${issue}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); add it, or no loop tends this Objective's merge while none runs here`),
+    );
   }
 
   /**
@@ -2853,6 +2876,7 @@ export class Local {
     if (data?.state === "closed") throw new Error(`#${issue} is closed; nothing to run`);
     // Before any claim: a draft is never run (lib/stop.mjs).
     if (isDraft(data)) throw draftRefusal(issue, "nothing to run");
+    await this.adoptForRun(issue, data);
     const pr = await retried(`reading the open PR of factory/${issue}`, () => gh.findPr(this.repo, `factory/${issue}`, this.opts), { waitMs });
     const next = stageFor({ pr, issue: data }) ?? "work";
     if (next === "review") log(`#${issue}: PR #${pr.number} waits for its review; starting there`);
@@ -3238,7 +3262,6 @@ export class Local {
     }
     const now = this.settingsRead;
     if (!now) return;
-    this.route(now);
     if (now.error) {
       if (now.error !== this.settingsError) log(`${now.error}: serve keeps the settings it has`);
       this.settingsError = now.error;
@@ -3633,7 +3656,9 @@ export class Local {
       // localMarked: each pick the dispatch marks Running, named before its write, so a stop puts back even those of a
       // dispatch that threw midway.
       const marked = [];
-      this.dispatching = dispatch(inputs, { token: this.token, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      // No Action runs here (actionState): this loop picks the Objectives without factory:local too, labelling each first.
+      const adopt = (await this.actionState().catch(() => null)) === "none";
+      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at FACTORY_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3665,10 +3690,10 @@ export class Local {
         slots.spare();
         break;
       }
-      // Queued Objectives this loop leaves to the Action only for want of factory:local: said once per start (#455).
+      // Queued Objectives this loop does not take only for want of factory:local: said once per start (#455).
       if (result.unrouted?.length && !this.unroutedSaid) {
         this.unroutedSaid = true;
-        log(unroutedLine(result.unrouted, this.settingsBranch));
+        log(unroutedLine(result.unrouted, this.action ?? null));
       }
       if (result.refused) {
         slots.spare();

@@ -2224,12 +2224,11 @@ export function committedWorkflowEnv(dir, { git = (args) => spawnSync("git", ["-
 }
 
 /**
- * committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file, `absent`, so no
- * Action runs there; one that does not parse is the `error`, with `parseError`, and no settings: `serve`, `run` and
- * `review` do not start on it).
+ * committedWorkflowEnv's answer for the workflow file's text on origin/<branch> (null: no such file; one that does not
+ * parse is the `error`, with `parseError`, and no settings: `serve`, `run` and `review` do not start on it).
  */
 function committedWorkflow(text, branch) {
-  if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml`, absent: true };
+  if (text === null) return { wf: {}, pins: [], branch, error: `origin/${branch} has no .github/workflows/factory.yml` };
   try {
     return { wf: workflowEnv(text), pins: workflowPins(text), branch, error: null, text };
   } catch (e) {

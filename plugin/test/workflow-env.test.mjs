@@ -125,7 +125,7 @@ test("local mode reads the workflow's settings from the default branch's commit,
   git(dev, "add", "README");
   git(dev, "commit", "-q", "-m", "first");
   git(dev, "push", "-q", "origin", "trunk");
-  assert.deepEqual(committedWorkflowEnv(dev), { wf: {}, pins: [], branch: "trunk", error: "origin/trunk has no .github/workflows/factory.yml", absent: true }, "none on the default branch: none used, and no Action runs there");
+  assert.deepEqual(committedWorkflowEnv(dev), { wf: {}, pins: [], branch: "trunk", error: "origin/trunk has no .github/workflows/factory.yml" }, "none on the default branch: none used");
   flow({ FACTORY_MODEL: "m1", FACTORY_LOCAL_DOMAINS: "pypi.org" });
   git(dev, "add", ".github");
   git(dev, "commit", "-q", "-m", "workflow");

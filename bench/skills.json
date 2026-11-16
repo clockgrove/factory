@@ -105,12 +105,12 @@
       }
     },
     "factory-serve": {
-      "sha256": "74cc937471c415074d1f2c4889f32f2fb77f67eb20e11d2189668202e0dffbc8",
+      "sha256": "1b4ffcecf7b356a9795f6fb1f646749b9435304dc5fd58805dccfdbad56516c7",
       "lines": 34,
-      "words": 699
+      "words": 700
     },
     "factory-setup": {
-      "sha256": "e5257596abe1e82f6d086398f5b9e721a2837f4270697f0cf7d3a3406d06ce7b",
+      "sha256": "86c8896c876c59b9d02264afe3b01f448ed948c1eff3198e9b8c4b980c7102be",
       "lines": 47,
       "words": 700,
       "files": {

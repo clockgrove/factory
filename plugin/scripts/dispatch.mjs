@@ -20,7 +20,7 @@ import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
-import { CLAIM_PAUSE_MS, hasLocalLabel } from "./lib/local.mjs";
+import { CLAIM_PAUSE_MS, LOCAL_LABEL, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
@@ -106,7 +106,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.FACTORY_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
+export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (FACTORY_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -273,8 +273,11 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("issues");
 
   // One explicit issue (workflow_dispatch) still obeys the state and blocking rules, not the caps.
-  // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs).
-  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i));
+  // Routing first: factory:local Objectives are a local loop's, the rest the Action's (lib/local.mjs). `adopt`: a local
+  // loop where no Action runs (local.mjs actionState) also takes the Queued ones without factory:local, each labelled
+  // factory:local just before it is marked Running, so every later pass routes it by its label (#455).
+  const adoptable = (i) => adopt && !inputs.issue && !hasLocalLabel(i) && stateOf(i, null) === "Queued";
+  const wanted = (inputs.issue ? issues.filter((i) => i.number === inputs.issue) : issues).filter((i) => backend().trigger.routes(i) || adoptable(i));
   if (inputs.issue && drafts.includes(inputs.issue)) {
     log(`issue #${inputs.issue} is a draft (${DRAFT_LABEL}); nothing to dispatch`);
     return { ...nothingDispatched(), skipped: draftSkips, reason: "a draft" };
@@ -1579,16 +1582,28 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // the ones it marked. It is told each one before its write (localMarked), so a dispatch that throws midway still
   // leaves it the list to put back to Queued (local.mjs serve).
   if (!dryRun) {
+    const unlabelled = new Set();
     for (const [i, n] of picked.ready.entries()) {
       if (localStopping?.()) {
         picked.ready = picked.ready.slice(0, i);
         break;
+      }
+      // A pick without factory:local where no Action runs gets the label first: one that cannot be labelled is not started.
+      const issue = issues.find((x) => x.number === n);
+      if (issue && adoptable(issue)) {
+        const labelled = await addLabels(repo, n, [LOCAL_LABEL], opts).then(() => true, (e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
+        if (!labelled) {
+          unlabelled.add(n);
+          continue;
+        }
+        log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}`);
       }
       // Named before the write: a write whose answer is lost may still have landed.
       localMarked?.(n);
       await setStateLabel(repo, n, "running", opts);
       await moveCard(project, repo, n, "Running", opts).catch((e) => log(`card #${n}: ${e.message.slice(0, 120)}`));
     }
+    if (unlabelled.size) picked.ready = picked.ready.filter((n) => !unlabelled.has(n));
   }
   // A starting marker for each stage this run names on the sandbox route, written under the record lock: a launch that
   // never runs its course (its job never starts, fails before it writes, or is cut off) leaves it with no outcome, and
@@ -1608,8 +1623,8 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     }
   }
   watch.mark("mark");
-  // The Queued Objectives this route leaves to the other one (its trigger's routes): a local loop says how many once (#455).
-  const unrouted = inputs.issue ? [] : issues.filter((i) => !backend().trigger.routes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
+  // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
+  const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
   return { ...picked, unrouted, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 

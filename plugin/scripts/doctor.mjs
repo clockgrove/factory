@@ -8,7 +8,7 @@ import { homedir, platform } from "node:os";
 import { pathToFileURL } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { appPermissionsText, mintInstallationToken, noticeAppExtra } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { CLI, GATEWAY_CODEX_URL, MODEL_SECRET_KEYS, claudeLocalCheck, codexGatewayOf, codexRunner, copilotRunner, copilotSandboxCheck, credentialEnv, harnessCommand, hasApiCredential, scrubbedEnv } from "./lib/harness.mjs";
@@ -841,6 +841,9 @@ export async function ciWorkflowTriggers(repo, opts, { name = "" } = {}) {
       if (e.status === 404 && !named) continue;
       unread.push(`${w.path} (${e.status ? `HTTP ${e.status}` : String(e.message).slice(0, 80)})`);
     }
+    // GitHub lists a workflow it cannot parse by its path, as it also names one with no `name:`: a file that sets a
+    // name and is listed by its path is one GitHub runs nothing from.
+    if (doc && w.name === w.path && typeof doc.name === "string" && doc.name !== w.path && !named) continue;
     const events = workflowEvents(doc);
     const mg = events.includes("merge_group");
     if (events.includes("pull_request") || named) {
@@ -1025,14 +1028,38 @@ export async function workflowText({ repo, branch, token, env = process.env, roo
 // ------------------------------------------------------------- repository
 
 /**
- * Bash's own parse of `command` with the flags Factory runs it with (`bash -n`: read, never executed). Null when it
- * parses; else {refused: true, message: bash's error} when bash refused it, or {refused: false, message} when bash
- * could not parse it here (it did not start, or ran out of time).
+ * The bash doctor starts: the first `bash` among the absolute PATH entries outside the checkout (the system's newest,
+ * such as Homebrew's on macOS, whose /bin/bash is 3.2), else SAFE_PATH's. Never a relative entry (`.`, an empty one,
+ * `node_modules/.bin`) or one in the checkout, where the repository's own file named `bash` would run. Null when there
+ * is none. With the agent set up on Actions, SAFE_PATH's alone.
  */
-export async function shellSyntax(command, { cwd, env = process.env } = {}) {
+export function systemBash(env = process.env, checkout = null) {
+  const real = (d) => {
+    try {
+      return realpathSync(d);
+    } catch {
+      return resolve(d);
+    }
+  };
+  const root = checkout ? real(checkout) : null;
+  const inside = (d) => root !== null && (real(d) === root || real(d).startsWith(`${root}${sep}`));
+  // On Actions with the agent set up, only the system directories, as proc.mjs runnerCommand pins every bare command.
+  const dirs = agentUser() ? [] : String(env.PATH || "").split(delimiter).filter((d) => isAbsolute(d) && !inside(d));
+  return whichSync("bash", { PATH: [...dirs, SAFE_PATH].join(delimiter) });
+}
+
+/**
+ * Bash's own parse of `command` with the flags Factory runs it with (`bash -n`: read, never executed), from `/`, with
+ * extglob on (a command may turn it on before the line that uses it, which a parse never runs). Null when it parses;
+ * else {refused: true, message: bash's error} when bash refused it, or {refused: false, message} when bash could not
+ * parse it here (none found, it did not start, or it ran out of time).
+ */
+export async function shellSyntax(command, { env = process.env, checkout = null } = {}) {
+  const bash = systemBash(env, checkout);
+  if (!bash) return { refused: false, message: "no bash found" };
   let r;
   try {
-    r = await exec("bash", ["-n", "-eo", "pipefail", "-c", command], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 });
+    r = await exec(bash, ["-n", "-O", "extglob", "-eo", "pipefail", "-c", command], { cwd: "/", env: { PATH: SAFE_PATH }, timeoutMs: 30_000 });
   } catch (e) {
     return { refused: false, message: `bash could not start: ${e.code || e.message}` };
   }
@@ -1046,8 +1073,8 @@ const fixedWord = (w) => !w?.parts || w.parts.every((p) => p.type === "Literal" 
 
 /**
  * The first simple command `command` runs at its own level, read from its bash syntax tree (unbash): {first: that
- * Command node (null when it has none), functions: the functions defined before it}, or {error} when unbash reports
- * one. A function's body runs only when called, so it is no first command.
+ * Command node (null when it has none), functions: the functions defined before it, failing: failingFirst}, or {error}
+ * when unbash reports one. A function's body runs only when called, so it is no first command.
  */
 export function firstCommand(command) {
   const tree = parseShell(command);
@@ -1061,7 +1088,52 @@ export function firstCommand(command) {
     forEachChild(n, visit);
   };
   visit(tree);
-  return { first, functions };
+  return { first, functions, failing: failingFirst(tree) };
+}
+
+/**
+ * The simple command `bash -eo pipefail` runs first whose failure ends the shell, or null: the lead of the first
+ * statement (past function definitions and bare assignments), through a subshell or brace group, never one in a `&&`
+ * or `||` list, behind `!`, sent to the background or in a condition, whose failure the shell goes on past.
+ */
+export function failingFirst(tree) {
+  const lead = (n) => {
+    switch (n?.type) {
+      case "Script":
+      case "CompoundList": {
+        const s = n.commands.find((c) => c.command?.type !== "Function" && !(c.command?.type === "Command" && !c.command.name));
+        return s ? lead(s) : null;
+      }
+      case "Statement":
+        return n.background ? null : lead(n.command);
+      case "AndOr":
+        return n.commands.length === 1 ? lead(n.commands[0]) : null;
+      case "Pipeline":
+        return n.prefixes.some((p) => p.type === "Negation") ? null : lead(n.commands[0]);
+      case "Subshell":
+      case "BraceGroup":
+        return lead(n.body);
+      case "Redirected":
+        return lead(n.command);
+      case "Command":
+        return n.name ? n : null;
+      default:
+        return null;
+    }
+  };
+  return lead(tree);
+}
+
+/** Whether the repository's .npmrc sets `if-present` to anything but false (npm and pnpm then skip a missing script). */
+function ifPresent(checkout) {
+  const file = join(checkout, ".npmrc");
+  if (!existsSync(file)) return false;
+  return readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .some((line) => {
+      const at = line.indexOf("=");
+      return at > 0 && line.slice(0, at).trim() === "if-present" && line.slice(at + 1).trim() !== "false";
+    });
 }
 
 /**
@@ -1080,6 +1152,9 @@ export function missingScript(cmd, checkout) {
     if ((end < 0 ? after : after.slice(0, end)).some((w) => !fixedWord(w) || w.value.startsWith("-"))) return null;
   }
   const script = words[1].value;
+  // What runs without a script: npm's own `run env`, `start` as `node server.js`, pnpm's `/regex/` for every script it
+  // matches, and the repository's .npmrc if-present.
+  if ((pm === "npm" && script === "env") || (script === "start" && existsSync(join(checkout, "server.js"))) || (pm === "pnpm" && script.length > 1 && script.startsWith("/") && script.endsWith("/")) || ifPresent(checkout)) return null;
   const file = join(checkout, "package.json");
   if (!existsSync(file)) return `${pm} run ${script} needs a package.json, and the checkout has none`;
   let pkg;
@@ -1094,7 +1169,10 @@ export function missingScript(cmd, checkout) {
 
 /** What bash takes `name` for in `cwd` (`type -t`: file, builtin, function…), or "" when it finds nothing. */
 async function commandType(name, { cwd, env }) {
-  const r = await exec("bash", ["-c", 'type -t -- "$1"', "_", name], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 }).catch(() => null);
+  const bash = systemBash(env, cwd);
+  if (!bash) return "";
+  // `type` reads PATH and the files there and runs none of them; the PATH is the command's own, as it runs in `cwd`.
+  const r = await exec(bash, ["-c", 'type -t -- "$1"', "_", name], { cwd, env: { PATH: env.PATH || SAFE_PATH }, timeoutMs: 30_000 }).catch(() => null);
   return r?.code === 0 ? r.stdout.trim() : "";
 }
 
@@ -1105,7 +1183,7 @@ async function commandType(name, { cwd, env }) {
  * is no fixed word, or that unbash cannot read, cannot be looked up: a WARN saying so.
  */
 export async function commandCheck(row, command, { checkout, env = process.env, missing, pass = "" }) {
-  const syntax = await shellSyntax(command, { cwd: checkout, env });
+  const syntax = await shellSyntax(command, { env, checkout });
   if (syntax?.refused) return FAIL(row, `${command}: bash cannot parse it (${syntax.message})`, `fix the ${row} command: Factory runs it with bash -eo pipefail -c`);
   if (syntax) return WARN(row, `${command}: not parsed here (${syntax.message})`, "run doctor where bash runs");
   const read = firstCommand(command);
@@ -1113,7 +1191,8 @@ export async function commandCheck(row, command, { checkout, env = process.env, 
   if (!read.first) return PASS(row, `${command}${pass}`);
   const name = read.first.name;
   if (!fixedWord(name)) return WARN(row, `${command}: its first command, ${name.text}, is not a fixed word, so doctor cannot look it up`, `nothing to fix if it runs; a fixed command name lets doctor check it`);
-  const why = missingScript(read.first, checkout);
+  // A missing script fails the command only where its failure ends the shell (`npm run lint || true` goes on).
+  const why = read.failing === read.first ? missingScript(read.first, checkout) : null;
   if (why) return FAIL(row, `${command}: ${why}`, `fix the ${row} command or add the script`);
   const type = read.functions.has(name.value) ? "function" : await commandType(name.value, { cwd: checkout, env });
   if (!type) return WARN(row, `${command}: ${name.value} is not found here; ${missing}`, `install ${name.value}, or fix the ${row} command`);

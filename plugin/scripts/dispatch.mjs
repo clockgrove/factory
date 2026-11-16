@@ -328,9 +328,9 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // waits for the PR's ready mark (review.mjs readyMark): a comment there starts no work beside that mark's review.
   // Only a Question's issue is read here, with conditional reads (`readCache`; GitHub counts no 304).
   // Whether the answer gives a decision is the answer check's (lib/answer-check.mjs): with an AI Gateway key it is
-  // judged here, and a confident no decision keeps the Question open with one notice per comment. This process has no
-  // stage harness: the work stage the answer resumes judges it again at its start, on its own decider. A comment judged
-  // before is not judged again, and never resumes the Question.
+  // judged here: a confident no decision keeps the Question open with one notice, and a decision is recorded for the
+  // work stage. This process has no stage harness: without a key the work stage the answer resumes judges it first
+  // thing, on its own decider. No version of a comment is judged twice; one judged no decision never resumes it.
   const answered = [];
   let answerCheck = null;
   for (const issue of wanted) {
@@ -370,7 +370,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       continue;
     }
     answerCheck ??= openAnswerCheck({ inputs });
-    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, opts, dryRun });
+    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.FACTORY_LOCAL_APP_ID || null, opts, dryRun });
     if (!screen.requeue) {
       // Said when it is judged; a comment judged at an earlier tick keeps it open quietly.
       if (!screen.judged) log(`  #${issue.number}: the Question stays open: ${screen.why}`);

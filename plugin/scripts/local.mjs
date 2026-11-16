@@ -1075,7 +1075,9 @@ export class Local {
     const env = { ...localBaseEnv(process.env, list(process.env.FACTORY_LOCAL_ENV || this.wf.FACTORY_LOCAL_ENV), { workerSecrets: wf.FACTORY_WORKER_SECRETS || "" }), ...wf };
     // The developer's own FACTORY_LOCAL_* settings win over the workflow's.
     for (const [k, v] of Object.entries(process.env)) if (k.startsWith("FACTORY_LOCAL_") && !HOST_ONLY.includes(k)) env[k] = v;
-    return { ...env, FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
+    // The Factory App's id alone (never its key), so a stage knows the notices its App posted (answer-check.mjs factoryNotice).
+    const appId = String(process.env.FACTORY_LOCAL_APP_ID || "").trim();
+    return { ...env, ...(/^\d+$/.test(appId) ? { FACTORY_NOTICE_APP_ID: appId } : {}), FACTORY_HARNESS: this.harness, FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL || "" };
   }
 
   /**

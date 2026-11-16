@@ -332,12 +332,12 @@ test("local mode: a harness this machine cannot run Blocks before the stage's sa
   const path = process.env.PATH;
   process.env.PATH = dev;
   try {
-    assert.deepEqual(harnessProblems("codex", ""), ["codex is not on PATH"]);
+    assert.deepEqual(harnessProblems("codex", ""), ["codex is not on PATH; install Codex (npm i -g @openai/codex) and log in (codex login)"]);
     assert.ok(harnessProblems("copilot", "").some((p) => /no Copilot token/.test(p)));
     assert.deepEqual(harnessProblems("gemini", ""), ["unknown harness gemini"]);
     const loop = Object.assign(Object.create(Local.prototype), { dev, harness: "claude" });
     assert.deepEqual(loop.harnessReady("claude"), [], "the loop's own harness passed at its start");
-    assert.deepEqual(loop.harnessReady("codex"), ["codex is not on PATH"]);
+    assert.deepEqual(loop.harnessReady("codex"), ["codex is not on PATH; install Codex (npm i -g @openai/codex) and log in (codex login)"]);
   } finally {
     process.env.PATH = path;
   }

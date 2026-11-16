@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Factory setup: apply the GitHub fixes doctor names, on consent.
-//   node scripts/setup.mjs --repo OWNER/NAME --yes [--apply labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
+//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/factory.yml]
 //                          [--action clockgrove/factory@vX.Y.Z]   (default: the latest Factory release)   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 //                          [--sandbox vercel [--ci-workflow NAME]]   stages run in a cloud sandbox, started by launch jobs (docs/ADAPTERS.md)
@@ -8,6 +8,7 @@
 //                                                                    of the CI workflow's (NAME, else the one on pull_request) job that runs
 //                                                                    setup or validation, else a required check's, else ubuntu-latest.
 //                                                                    Doctor's runner check compares against the one on pull_request.
+// Without --repo, the repository is the origin remote of the clone (--checkout, else here), as `factory serve` finds it.
 // Without --yes it prints what each step would do and exits. It never creates a
 // GitHub App: it verifies the one whose app_id and app_private_key it is given
 // (or FACTORY_APP_TOKEN) and tells the adopter the App's permissions.
@@ -27,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
+import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
 import { DEFAULTS, FACTORY_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
@@ -640,8 +642,8 @@ async function main() {
   }
   const args = { ...keptArgs(before, explicit, template), ...explicit };
   const inputs = resolveInputs({ args });
-  if (!inputs.repo) throw new Error("--repo OWNER/NAME is required");
-  const repo = repoOf(inputs.repo);
+  // No --repo (nor GITHUB_REPOSITORY): the clone's origin, as `factory serve` finds it.
+  const repo = repoOf(inputs.repo || cloneRepo(checkout));
   const yes = args.yes === "true";
   // Labels, the board and the ruleset are created with the App when its credentials are given, else with the
   // user's own gh login (a developer running /factory setup); the App is verified, never created.

@@ -2158,6 +2158,78 @@ export function localToken(repoFull, env = process.env) {
   const f = tokenFile(repoFull);
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
+/**
+ * Saves local mode's token for a repository where localToken reads it (tokenFile): a new file, owner-only (0600), put in
+ * place by rename, so a link or a file of other mode there is replaced whole and no reader sees half a token; the folders
+ * it creates are owner-only too. Returns the file's path. Refuses a repository that is not OWNER/NAME, an empty token,
+ * or one with whitespace inside.
+ */
+export function saveLocalToken(repoFull, token, home = homedir()) {
+  // A repository's two names as GitHub allows them, so the file lands under tokens/ and nowhere else.
+  const parts = String(repoFull).split("/");
+  if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) throw new Error(`--repo must be OWNER/NAME, not ${JSON.stringify(repoFull)}; nothing saved`);
+  const t = String(token ?? "").trim();
+  if (!t) throw new Error("no token given; nothing saved");
+  if (/\s/.test(t)) throw new Error("the token has whitespace inside it; paste the one token GitHub showed. Nothing saved");
+  const file = tokenFile(repoFull, home);
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const temp = join(dirname(file), `.${basename(file)}.${process.pid}.tmp`);
+  rmSync(temp, { force: true });
+  try {
+    writeFileSync(temp, t, { mode: 0o600, flag: "wx" });
+    chmodSync(temp, 0o600);
+    renameSync(temp, file);
+  } catch (e) {
+    rmSync(temp, { force: true });
+    throw e;
+  }
+  return file;
+}
+/** The line that says local mode has no token for a repository, and the fix. */
+export const noTokenLine = (repoFull) => `no token for ${repoFull}: create a fine-grained token for this one repository (${LOCAL_TOKEN_PERMISSIONS}) and save it with \`factory token set\` in the clone (it asks for the token and writes ${tokenFile(repoFull)}), or export FACTORY_LOCAL_TOKEN`;
+
+const gitTry = (args) => spawnSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+/** Throws the plain line for git missing from PATH (spawn's ENOENT) or a git that did not start; else returns its result. */
+const gitRan = (r) => {
+  if (r.error?.code === "ENOENT") throw new Error("git is not on PATH; install git (https://git-scm.com/downloads) and start again");
+  if (r.error) throw new Error(`git did not run (${r.error.code || r.error.message}); check the git on PATH`);
+  return r;
+};
+
+/** OWNER/NAME from a GitHub remote's URL (https, ssh or scp form), else null. */
+export function repoFromRemote(url) {
+  const m = /github\.com[:/]([^/]+)\/([^/]+?)(\.git)?\/?$/.exec(url || "");
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * The top directory of the clone `dir` is in, its real path. A missing git, or a directory in no clone, throws one plain
+ * line naming the fix, never git's own failure.
+ */
+export function cloneTop(dir) {
+  const r = gitRan(gitTry(["-C", dir, "rev-parse", "--show-toplevel"]));
+  if (r.status !== 0) {
+    const said = String(r.stderr || "").trim().split("\n")[0];
+    throw new Error(`${dir} is not in a git clone${said ? ` (git: ${said})` : ""}; run factory in a clone of the repository, or pass --checkout CLONE`);
+  }
+  return realpathSync(r.stdout.trim());
+}
+
+/**
+ * The repository a command acts on: `repo` (--repo OWNER/NAME) when given, else the one the clone at `dir` has as its
+ * origin remote, as `serve` finds it. A clone with no remote named origin, or an origin that is no GitHub repository,
+ * throws one plain line naming the fix.
+ */
+export function cloneRepo(dir, repo = null) {
+  if (repo) return repo;
+  const top = cloneTop(dir);
+  const remotes = gitRan(gitTry(["-C", top, "remote"]));
+  if (remotes.status !== 0 || !remotes.stdout.split("\n").includes("origin")) throw new Error(`the clone at ${top} has no remote named origin; add the GitHub repository as origin (git remote add origin https://github.com/OWNER/NAME.git), or pass --repo OWNER/NAME`);
+  const url = gitRan(gitTry(["-C", top, "remote", "get-url", "origin"]));
+  const full = url.status === 0 ? repoFromRemote(url.stdout.trim()) : null;
+  if (!full) throw new Error(`the origin remote of the clone at ${top} is no github.com repository; pass --repo OWNER/NAME`);
+  return full;
+}
 /** The permissions local mode's token needs, as the set-up and every message that asks for them name them. */
 export const LOCAL_TOKEN_PERMISSIONS = "Contents, Issues and Pull requests read and write; Actions and Variables read";
 /**

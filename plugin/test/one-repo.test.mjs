@@ -147,6 +147,35 @@ test("plan-time Question: the mid-run stop never stops a rerun for a repository 
   assert.deepEqual([...answeredRepos(asked, [d("Do without it", "2026-11-09T09:00:00Z")], { named: false })], [], "a reply before the ask is no answer");
 });
 
+test("#421: plan-time Question: the plan-answer check judges whether the comments since the ask answer the need, naming the repository or not", async () => {
+  const { judgedAnswers, openPlanAnswerCheck, PLAN_ANSWER_QUESTION } = await import("../scripts/lib/plan-answer.mjs");
+  const asked = { "acme/shared-lib": "2026-11-09T10:00:00Z", "acme/infra": "2026-11-09T10:00:00Z" };
+  const d = (body, at) => ({ author: "owner", at, seen: at, body, key: `comment:${at}` });
+  const reply = [d("Old note about acme/infra", "2026-11-09T09:00:00Z"), d("No, copy the helper into this repo instead.", "2026-11-09T10:05:00Z")];
+  const seen = [];
+  const check = (answer) => openPlanAnswerCheck({ decider: { decide: async (input, question) => (seen.push({ input, question }), answer(input)) } });
+  // The owner's direction names neither repository: the check reads it as an answer for shared-lib, not for infra.
+  const answered = await judgedAnswers(asked, reply, { source, check: check((input) => ({ verdict: input.includes("The other repository: acme/shared-lib") ? "answered" : "open", confidence: 0.9 })) });
+  assert.deepEqual([...answered], ["acme/shared-lib"]);
+  assert.equal(seen[0].question, PLAN_ANSWER_QUESTION);
+  assert.match(seen[0].input, /needs a change in acme\/shared-lib, and Factory works in one repository per Objective/, "Factory's own question line");
+  assert.match(seen[0].input, /No, copy the helper into this repo instead\./);
+  assert.ok(!seen[0].input.includes("Old note"), "only comments since the ask");
+  assert.equal(ask("Needs-Repository: acme/shared-lib", { answered }), "", "not asked again");
+  // A confident `open` keeps a comment that names the repository from answering it.
+  const naming = [d("I'll think about acme/shared-lib.", "2026-11-09T10:05:00Z")];
+  assert.deepEqual([...(await judgedAnswers(asked, naming, { source, check: check(() => ({ verdict: "open", confidence: 0.9 })) }))], []);
+  // No verdict (a lower confidence, an error, no decider): the exact rule, a comment naming the repository.
+  for (const c of [check(() => ({ verdict: "answered", confidence: 0.5 })), check(() => ({ verdict: null, confidence: null, error: "unavailable" })), openPlanAnswerCheck({ inputs: { decisionRoute: "off" } }), null]) {
+    assert.deepEqual([...(await judgedAnswers(asked, naming, { source, check: c }))], ["acme/shared-lib"]);
+    assert.deepEqual([...(await judgedAnswers(asked, reply, { source, check: c }))], []);
+  }
+  // Nothing since the ask: nothing asked of the decider.
+  seen.length = 0;
+  assert.deepEqual([...(await judgedAnswers(asked, [d("acme/infra", "2026-11-09T09:00:00Z")], { source, check: check(() => ({ verdict: "answered", confidence: 0.9 })) }))], []);
+  assert.equal(seen.length, 0);
+});
+
 test("plan-time Question: the ask is recorded in Factory's own progress comment, and only its own record counts", () => {
   const at = "2026-11-09T10:00:00Z";
   const own = (body, login = BOT) => ({ user: { login }, body });

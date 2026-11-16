@@ -599,7 +599,15 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
       { mode: 0o755 },
     );
     const env = { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CODEX_HOME: join(root, "codex") };
-    const r = await validationLoop({ checkout: root, commands: ["test -f fixed || { echo 'not ok 1 - app.txt line 2 is missing its fix'; exit 1; }"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), maxPasses: 2 });
+    // runPass looks the CLI up on this process's PATH.
+    const path = process.env.PATH;
+    process.env.PATH = env.PATH;
+    let r;
+    try {
+      r = await validationLoop({ checkout: root, commands: ["test -f fixed || { echo 'not ok 1 - app.txt line 2 is missing its fix'; exit 1; }"], harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), maxPasses: 2 });
+    } finally {
+      process.env.PATH = path;
+    }
     assert.deepEqual([r.green, r.passes, r.lastOutput], [true, 2, ""]);
     assert.equal(r.given.length, 1);
     assert.match(r.given[0], /not ok 1 - app\.txt line 2 is missing its fix/);

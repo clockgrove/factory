@@ -198,7 +198,7 @@ export function foundationCall({ harness, model, effort, label, timeoutMs, promp
 
 /**
  * The foundation pass (foundationPrompt): one reviewer call, rerun once like the first pass when it misses (no answer,
- * or no JSON: handoff.mjs reviewMissed, with no entries to judge; on the fallback reviewer where the harness has one),
+ * or no JSON: handoff.mjs reviewMissed with `judges` false, as it judges no entry; on the fallback reviewer where the harness has one),
  * never after a provider's refusal. Each call starts only with budget and time left: `over()` true (max_usd spent) ends
  * it with `stop: "cap"`, `timeout()` null (reviewCallTimeout) with `stop: "time"` before the first call (before the
  * rerun, `missed`: the first call's end is the reason). `run` makes one call ({model, effort,
@@ -216,7 +216,7 @@ export async function foundationReview({ run, model, effort, fallback = null, ov
     const rec = await run({ ...call, timeoutMs });
     recs.push(rec);
     const review = parseReview(rec.finalText || "");
-    if (!reviewMissed({ ok: rec.ok, review })) return { review, recs, stop: null };
+    if (!reviewMissed({ ok: rec.ok, review, judges: false })) return { review, recs, stop: null };
     if (rec.refusal) break;
   }
   return { review: null, recs, stop: "missed" };

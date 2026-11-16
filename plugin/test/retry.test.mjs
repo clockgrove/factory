@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { Local, REFUSED_PROBE } from "../scripts/local.mjs";
 import { RETRY, graphql, rest } from "../scripts/lib/github.mjs";
+import { setSelf } from "../scripts/lib/logic.mjs";
 import { gitTransport, openOutbox } from "../scripts/lib/outbox.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
 
@@ -284,6 +285,45 @@ test("#353: a comment GitHub answers 500 is looked for before it is sent again: 
       assert.deepEqual(seen, ["POST /repos/o/r/issues/1/comments", "GET /repos/o/r/issues/1/comments", "POST /repos/o/r/issues/2/comments", "GET /repos/o/r/issues/2/comments", "POST /repos/o/r/issues/2/comments"]);
     },
   );
+});
+
+test("#353 review: a comment's check finds a notice the App posted (its marker, not Factory's login), whatever its line ends; a bare body by someone else is no find; 502 waits for GitHub first; reads keep the deadline", async () => {
+  const comments = { 1: [], 2: [], 3: [] };
+  let id = 200;
+  const notice = "<!-- factory:1:blocked:x -->\nBlocked: the review label   \nRe-apply it.";
+  const gets = [];
+  setSelf("kirk");
+  try {
+    await withFetch(
+      (req, n) => {
+        const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
+        if (req.method === "GET") return gets.push(issue), json(comments[issue]);
+        // #1: the notice App's comment landed, stored with CRLF line ends and its trailing blanks gone, before a 502.
+        if (issue === 1 && n === 1) return comments[1].push({ id: (id += 1), body: req.body.body.replace(/[ \t]+$/gm, "").replace(/\n/g, "\r\n"), user: { login: "factory-notices[bot]" } }), json({ message: "Bad Gateway" }, 502);
+        // #2: someone else wrote the same words (no marker) just before; Factory's 500 made nothing.
+        if (issue === 2 && n === 1) return comments[2].push({ id: (id += 1), body: "ok", user: { login: "someone" } }), json({ message: "Server Error" }, 500);
+        // #3: answered 502 every time; the check's read keeps the call's deadline.
+        if (issue === 3) return json({ message: "Bad Gateway" }, 502);
+        comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "kirk" } });
+        return json(comments[issue].at(-1), 201);
+      },
+      async ({ seen, waits, now }) => {
+        assert.equal((await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: notice } })).user.login, "factory-notices[bot]");
+        assert.equal(comments[1].length, 1, "the notice is not posted twice");
+        assert.deepEqual(waits, [RETRY.gatewayMs], "a gateway's 502: the check waits for GitHub to finish first");
+        assert.equal((await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "ok" } })).user.login, "kirk");
+        assert.equal(comments[2].length, 2, "someone else's words are not Factory's comment: posted once");
+        waits.length = 0;
+        const deadlineAt = now() + RETRY.gatewayMs + 1000;
+        await assert.rejects(rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "late" }, deadlineAt }), (e) => e.status === 502);
+        assert.deepEqual(waits, [RETRY.gatewayMs], "no wait past the deadline");
+        assert.equal(seen.filter((x) => x === "POST /repos/o/r/issues/3/comments").length, 2);
+        assert.deepEqual(gets, [1, 2, 3]);
+      },
+    );
+  } finally {
+    setSelf(null);
+  }
 });
 
 // ------------------------------------------------------------------ git

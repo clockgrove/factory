@@ -26,6 +26,9 @@ import { pathToFileURL } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { dispatch } from "./dispatch.mjs";
 import { OUTAGE, lostText, minutesText, probe as probeHost, serverDown, waitOutages } from "./lib/network.mjs";
+
+/** The wait before serve resumes an Objective after its `pauses`th pause on GitHub's 5xx: 1, 2, 4… minutes, up to OUTAGE.serverResumeMaxMs. */
+const serverWait = (pauses) => Math.min(OUTAGE.serverResumeMaxMs, OUTAGE.serverResumeMs * 2 ** Math.max(0, pauses - 1));
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, findProject, getIssue, getPr, getPrSettled, listComments, listIssuesByLabel, markReady, objectiveLabeledAt, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { holdSecrets, input, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
@@ -1662,8 +1665,12 @@ export class Local {
    * comes within OUTAGE.stageWaitMs of this loop resuming the Objective from an earlier one is the same outage (a network
    * that comes and goes): its `since` stays the earlier one, so OUTAGE.blockMs counts from when the Objective first lost
    * the network. A pause on GitHub's spent rate limit after an earlier one, with no other end between, is the same however
-   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. No lapse is counted; the
-   * claim stays. The memory is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
+   * long the run between them lasted, so repeated quota pauses stay within OUTAGE.blockMs too. A pause on GitHub answering
+   * 5xx past the client's retries (network.mjs serverDown) is counted in `server` ({since, pauses, at}) across every
+   * pause of the Objective however far apart, until a stage ends any other way (withClaim): a probe of the host answers
+   * while one endpoint fails, so pausedHere resumes it after a doubling wait instead (serverWait), and resume Blocks it
+   * past OUTAGE.serverResumes resumes or OUTAGE.blockMs from the first. No lapse is counted; the claim stays. The memory
+   * is this loop's: another serve on the machine resumes the Objective with the bound counted afresh.
    */
   outagePaused(issue, result) {
     if (result?.usageLimit) return this.limitPaused(issue, result);
@@ -1676,9 +1683,16 @@ export class Local {
     const quotaAgain = Number.isFinite(reset) && Number.isFinite(earlier?.reset) && !earlier?.harness;
     const same = earlier && (quotaAgain || (Number.isFinite(earlier.resumedAt) && own - earlier.resumedAt < OUTAGE.stageWaitMs));
     const since = same ? Math.min(own, earlier.since) : own;
-    (this.offline ??= new Map()).set(issue, { since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(Number.isFinite(reset) ? { reset } : {}) });
+    const now = (this.clock ?? Date.now)();
+    const before = earlier?.harness ? null : (earlier?.server ?? null);
+    const server = serverDown(o.code) ? { since: Math.min(own, before?.since ?? own), pauses: (before?.pauses ?? 0) + 1, at: now } : before;
+    (this.offline ??= new Map()).set(issue, { since: serverDown(o.code) ? server.since : since, stage: result?.stage || "work", origin: o.origin ?? null, host: o.host || "the network", code: o.code || "no answer", ...(o.endpoint ? { endpoint: o.endpoint } : {}), ...(Number.isFinite(reset) ? { reset } : {}), ...(server ? { server } : {}) });
     this.lapsed?.delete(issue);
-    const what = Number.isFinite(reset) ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset` : `${lostText(o.host || "the network", o.code || "no answer")} since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
+    const what = Number.isFinite(reset)
+      ? `GitHub's ${o.quota || "core"} API rate limit on ${o.host || "GitHub"} is spent until ${o.reset}; the claim stays and this loop resumes it after the reset`
+      : serverDown(o.code)
+        ? `${lostText(o.host || "GitHub", o.code, o.endpoint)} since ${new Date(server.since).toISOString()}; the claim stays and this loop resumes it in ${minutesText(serverWait(server.pauses))} (pause ${server.pauses}; Blocked after ${OUTAGE.serverResumes} resumes)`
+        : `${lostText(o.host || "the network", o.code || "no answer")} since ${new Date(since).toISOString()}; the claim stays and this loop resumes it once that host answers`;
     log(`#${issue}: the ${result?.stage || "work"} stage paused: ${what}`);
   }
 
@@ -2064,10 +2078,13 @@ export class Local {
           continue;
         }
         await this.twoCleared(issue.number);
-        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
+        // Paused on GitHub's 5xx: resumed after its doubling wait (serverWait), not on a probe, which answers while one
+        // endpoint fails; taken up at once past OUTAGE.serverResumes resumes, so resume Blocks it.
+        const server = serverDown(off.code) && off.server ? off.server.pauses > OUTAGE.serverResumes || now - off.since >= OUTAGE.blockMs || now >= off.server.at + serverWait(off.server.pauses) : null;
+        const due = off.pinWait || (Number.isFinite(off.reset) ? now >= off.reset || (!!off.harness && !!off.hold && (await this.movesEarly(issue.number, off, names, issue.updated_at ?? null))) : server !== null ? server : !off.origin || now - off.since >= OUTAGE.blockMs || (await probeHost(off.origin)) === null);
         if (due) out.push(issue.number);
-        // Waiting on a usage limit's reset or on its account labels: its claim kept alive while this loop is.
-        else if (off.harness) await this.beatPaused(issue.number, c);
+        // Waiting on a usage limit's reset, on its account labels or on GitHub's 5xx: its claim kept alive while this loop is.
+        else if (off.harness || server !== null) await this.beatPaused(issue.number, c);
         continue;
       }
       if (c.holder === this.holder ? !!this.lapsed?.has(issue.number) || !c.fresh : !c.fresh || deadHereHolder(c.holder, { own: this.holder })) out.push(issue.number);
@@ -2112,15 +2129,19 @@ export class Local {
   /**
    * Pick a paused Objective up where it stands: its open PR's review, else its work from the clone and saved sessions.
    * One paused on this machine's network for OUTAGE.blockMs or more is Blocked instead, with the External cause
-   * `outage`, naming the host and since when.
+   * `outage`, naming the host and since when; so is one paused on GitHub's 5xx past OUTAGE.serverResumes resumes, naming
+   * the request and the status.
    */
   async resume(issue) {
     const off = this.offline?.get(issue);
     const now = (this.clock ?? Date.now)();
-    if (off && !off.harness && !off.pinWait && now - off.since >= OUTAGE.blockMs) {
+    const serverOver = !!off && serverDown(off.code) && !!off.server && off.server.pauses > OUTAGE.serverResumes;
+    if (off && !off.harness && !off.pinWait && (serverOver || now - off.since >= OUTAGE.blockMs)) {
       // GitHub answers here; the host the stage could not reach may still not (a provider), and the notice says which.
-      const back = !off.origin || (await probeHost(off.origin)) === null;
-      const reason = `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? `${serverDown(off.code) ? off.host : "The network"} is back: re-apply the label to run it again.` : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
+      const back = serverDown(off.code) || !off.origin || (await probeHost(off.origin)) === null;
+      const reason = serverDown(off.code)
+        ? `${lostText(off.host, off.code, off.endpoint)} from ${new Date(off.since).toISOString()}, through ${off.server?.pauses ?? 1} pauses over ${minutesText(now - off.since)}, past Factory's bound of ${OUTAGE.serverResumes} resumes or ${minutesText(OUTAGE.blockMs)} for GitHub failing. Re-apply the label to run it again once GitHub answers that request.`
+        : `${lostText(off.host, off.code)} from ${new Date(off.since).toISOString()} for ${minutesText(now - off.since)}, past Factory's ${minutesText(OUTAGE.blockMs)} bound for an outage. ${back ? `${serverDown(off.code) ? off.host : "The network"} is back: re-apply the label to run it again.` : `${off.host} is still unreachable from this machine: re-apply the label once it answers.`}`;
       log(`#${issue}: ${reason}`);
       try {
         await this.block(issue, off.stage || "work", reason, { cause: "outage" });

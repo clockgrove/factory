@@ -76,8 +76,11 @@ export const unreachable = (e) => !!e && (e.offline === true || UNREACHABLE.has(
 /** Whether an outage's code is GitHub answering 5xx past the client's retries ("HTTP 500"), not a lost network. */
 export const serverDown = (code) => /^HTTP 5\d\d$/.test(String(code));
 
-/** How an outage of `host` with `code` reads in a reason: GitHub's 5xx, or this machine not reaching the host. */
-export const lostText = (host, code) => (serverDown(code) ? `${host} answered ${code} to every try` : `this machine could not reach ${host} (${code})`);
+/**
+ * How an outage of `host` with `code` reads in a reason: GitHub's 5xx (on `endpoint`, the request that met it, when
+ * known), or this machine not reaching the host.
+ */
+export const lostText = (host, code, endpoint = null) => (serverDown(code) ? `${host} answered ${code} to every try${endpoint ? ` of ${endpoint}` : ""}` : `this machine could not reach ${host} (${code})`);
 
 /**
  * The bounds. `stageWaitMs`: how long a local stage waits in place for the network before it ends `paused` for its serve
@@ -96,7 +99,10 @@ export const lostText = (host, code) => (serverDown(code) ? `${host} answered ${
  * still refused after its stated reset waits `probeMs` (doubling) instead. `exitWaitMs`: how long past its deadline a
  * stage off the local route that ended on a rate limit may wait for the reset to write its Block (the job keeps fifteen
  * minutes after its deadline, session.mjs deadline, which also pay for the steps before Factory runs and the upload
- * after). `now`, `sleep` and `random` are replaced in tests.
+ * after). `serverResumeMs`, `serverResumeMaxMs`, `serverResumes`: serve resumes an Objective paused on GitHub answering
+ * 5xx past the client's retries (serverDown) after 1, 2, 4… minutes, doubling up to half an hour, since a probe of the
+ * host answers while one endpoint fails; six such resumes in a row (an hour in all) and it Blocks (local.mjs). `now`,
+ * `sleep` and `random` are replaced in tests.
  */
 export const OUTAGE = {
   stageWaitMs: 15 * 60_000,
@@ -109,6 +115,9 @@ export const OUTAGE = {
   flapMs: 60_000,
   quotaJitterMs: 10_000,
   exitWaitMs: 12 * 60_000,
+  serverResumeMs: 60_000,
+  serverResumeMaxMs: 30 * 60_000,
+  serverResumes: 6,
   now: () => Date.now(),
   random: Math.random,
   sleep: (ms, signal) =>
@@ -464,9 +473,9 @@ export function outageOf(e, now = OUTAGE.now()) {
   // An error that names no outage (a bare connect failure): the one this process last gave up on, if any.
   const known = e?.origin && Number.isFinite(e?.since) ? e : (e?.origin && GIVEN_UP.get(e.origin)) || [...GIVEN_UP.values()].at(-1) || e;
   const origin = known?.origin ?? null;
-  return { origin, host: origin ? hostOf(origin) : "the network", code: known?.code || causeCode(e) || "no answer", since: Number.isFinite(known?.since) ? known.since : now, ...(Number.isFinite(known?.resetAt) ? { resetAt: known.resetAt, quota: quotaName(known.key) } : {}) };
+  return { origin, host: origin ? hostOf(origin) : "the network", code: known?.code || causeCode(e) || "no answer", since: Number.isFinite(known?.since) ? known.since : now, ...(typeof known?.endpoint === "string" ? { endpoint: known.endpoint } : {}), ...(Number.isFinite(known?.resetAt) ? { resetAt: known.resetAt, quota: quotaName(known.key) } : {}) };
 }
 
 /** A paused or Blocked stage's reason for an outage (outageOf's fields, `since` and `resetAt` in ms). */
-export const outageReason = ({ host, code, since, resetAt, quota = "core" }, now = OUTAGE.now()) =>
-  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${lostText(host, code)} from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;
+export const outageReason = ({ host, code, since, resetAt, quota = "core", endpoint = null }, now = OUTAGE.now()) =>
+  Number.isFinite(resetAt) ? `GitHub's ${quota} API rate limit on ${host} is spent until ${iso(resetAt)} (met at ${iso(since)})` : `${lostText(host, code, endpoint)} from ${iso(since)}, ${minutesText(Math.max(0, now - since))} so far`;

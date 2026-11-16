@@ -1872,7 +1872,7 @@ export const RELAUNCH_NOTE = `Factory relaunches a stage lost to its network, at
  * The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` and `quota`
  * for a rate limit).
  */
-const outageRecord = (lost) => ({ host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}), ...(Number.isFinite(lost.resetAt) ? { reset: new Date(lost.resetAt).toISOString(), quota: lost.quota } : {}) });
+const outageRecord = (lost) => ({ host: lost.host, code: lost.code, since: new Date(lost.since).toISOString(), ...(lost.origin ? { origin: lost.origin } : {}), ...(lost.endpoint ? { endpoint: lost.endpoint } : {}), ...(Number.isFinite(lost.resetAt) ? { reset: new Date(lost.resetAt).toISOString(), quota: lost.quota } : {}) });
 
 /**
  * Off the local route, a stage that ended on GitHub's spent rate limit: its Block is a GitHub write too, so it waits for the

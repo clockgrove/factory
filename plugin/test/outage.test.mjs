@@ -651,13 +651,13 @@ test("#353: a label write GitHub answers 500 on every try ends the stage on GitH
       assert.equal(decision.exit, "blocked");
       const end = thrown(() => sessionLib.outageFirst(decision));
       assert.ok(end && unreachable(end), String(end));
-      assert.deepEqual({ status: end.status, origin: end.origin, code: end.code, since: end.since }, { status: 500, origin: "https://api.github.test", code: "HTTP 500", since: first });
+      assert.deepEqual({ status: end.status, origin: end.origin, code: end.code, since: end.since, endpoint: end.endpoint }, { status: 500, origin: "https://api.github.test", code: "HTTP 500", since: first, endpoint: "POST repos/o/r/issues/70/labels" });
       const ends = [];
       const blocks = [];
       await outageExit(end, { local: true, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
       assert.equal(ends[0][0], "paused");
-      assert.match(ends[0][1], /^api\.github\.test answered HTTP 500 to every try from 2026-11-14T08:47:00\.000Z/);
-      assert.deepEqual(ends[0][2], { host: "api.github.test", code: "HTTP 500", since: new Date(first).toISOString(), origin: "https://api.github.test" });
+      assert.match(ends[0][1], /^api\.github\.test answered HTTP 500 to every try of POST repos\/o\/r\/issues\/70\/labels from 2026-11-14T08:47:00\.000Z/);
+      assert.deepEqual(ends[0][2], { host: "api.github.test", code: "HTTP 500", since: new Date(first).toISOString(), origin: "https://api.github.test", endpoint: "POST repos/o/r/issues/70/labels" });
       assert.deepEqual(blocks, [], "nothing written to GitHub");
       await outageExit(end, { local: false, records: [], finish: async (...a) => ends.push(a), block: async (...a) => blocks.push(a) });
       assert.equal(ends[1][0], "blocked");

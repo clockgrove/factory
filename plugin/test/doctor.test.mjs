@@ -317,13 +317,15 @@ test("doctor and serve warn when the installed plugin is older than the release 
   assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(null) })), null, "no workflow on the default branch: nothing to compare");
 });
 
-test("mintInstallationToken reads a personal account from the installation and stops requiring projects there; an organization's still needs it (#199)", () => {
+test("mintInstallationToken reads a personal account from the installation and stops requiring projects there; an organization's still needs it (#199); doctor's row names projects only where it is needed (#360)", () => {
   const lib = join(import.meta.dirname, "..", "scripts", "lib", "app-token.mjs");
+  const doctor = join(import.meta.dirname, "..", "scripts", "doctor.mjs");
   const script = `
     import { generateKeyPairSync } from "node:crypto";
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs1", format: "pem" });
     const perms = { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read" };
+    const { appPermissionChecks } = await import(${JSON.stringify(pathToFileURL(doctor).href)});
     const out = {};
     for (const type of ["User", "Organization"]) {
       globalThis.fetch = async (url) => {
@@ -337,11 +339,18 @@ test("mintInstallationToken reads a personal account from the installation and s
       const { mintInstallationToken } = await import(${JSON.stringify(pathToFileURL(lib).href)} + "?" + type);
       const r = await mintInstallationToken({ appId: "1", privateKey: pem, owner: "o", repo: "r" });
       out[type] = { userAccount: r.userAccount, missing: r.missing };
+      if (type === "User") out.row = appPermissionChecks(r);
+      else out.orgFix = appPermissionChecks(r)[0].fix;
     }
     process.stdout.write(JSON.stringify(out));`;
   const got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, GITHUB_API_URL: "https://github.test" }, encoding: "utf8" }));
   assert.deepEqual(got.User, { userAccount: true, missing: [] });
   assert.deepEqual(got.Organization, { userAccount: false, missing: ["projects:write"] });
+  // The App on a personal account holds no projects: the PASS row must not claim it, and says it is not needed there.
+  assert.deepEqual(got.row.map((c) => c.status), ["PASS"]);
+  assert.doesNotMatch(got.row[0].detail, /projects: write|projects, /);
+  assert.match(got.row[0].detail, /projects: not needed on a personal account \(labels carry the state\)/);
+  assert.match(got.orgFix, /issues, projects: write/, "an organization's App is still told it needs projects write");
 });
 
 test("secrets on a repository a user owns: GitHub's 422 for organization secrets means none, so a missing secret still FAILs and present ones PASS", async () => {

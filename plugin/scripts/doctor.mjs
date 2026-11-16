@@ -1789,14 +1789,17 @@ export function machineChecks({ env = process.env, local, home = homedir(), proc
   const limits = machineLimits({ home });
   const sat = saturation(pressure, limits.pressure);
   const problems = limits.problems.filter((p) => p !== budget.problem);
-  const set = [limits.from.pressure, limits.from.guess].includes("setting") ? `, from ${limits.file}` : `: Factory's defaults; set them in ${limits.file}`;
+  // The guess: machine.json's, else the repository's guess_hours (`env`: this shell's over the workflow's and variables').
+  const repoGuess = env.FACTORY_GUESS_HOURS || env.FACTORY_INPUT_GUESS_HOURS;
+  const inForce = { ...limits, guessMs: limits.from.guess === "setting" ? limits.guessMs : resolveInputs({ env }).guessMs };
+  const set = `the pressure limits from ${limits.from.pressure === "setting" ? limits.file : `Factory's defaults (set them in ${limits.file})`}, the guess from ${limits.from.guess === "setting" ? limits.file : repoGuess ? "the repository's FACTORY_GUESS_HOURS" : "Factory's default"}`;
   const what = (h) => h.pid === undefined ? `a holder whose record cannot be read yet (${h.file})` : `pid ${h.pid} ${h.repo || "(no repository)"} ${h.issue ? `#${h.issue}` : h.pr ? `PR #${h.pr}` : "(starting)"}${h.stage ? ` ${h.stage}` : ""}`;
   const from = budget.from === "setting" ? budget.file : `from its ${budget.cpus} CPU threads and ${Math.round(budget.memBytes / 2 ** 30)} GB: a quarter of the threads, at most one per 8 GB; set it in ${budget.file}`;
   const cap = loopCap(env.FACTORY_LOCAL_MAX_CONCURRENT, budget.stages);
   return [
     ...(cap > budget.stages ? [WARN("FACTORY_LOCAL_MAX_CONCURRENT", `${cap} is above this machine's stage budget of ${budget.stages}, which every Factory loop here shares, so a loop runs at most ${budget.stages}`, `to run more stages on this machine, raise the budget: write {"stages": ${cap}} to ${budget.file}; else lower FACTORY_LOCAL_MAX_CONCURRENT to ${budget.stages} or less`)] : []),
     budget.problem ? WARN("machine budget", `${budget.problem}, so local mode uses ${budget.stages} stage(s), from this machine's size`, `write {"stages": N} to ${budget.file}, N a positive whole number`) : PASS("machine budget", `${budget.stages} stage(s) at once on this machine, shared by every Factory loop here (${from})`),
-    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Factory's defaults stand for those; in force: ${limitsLine(limits)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0`) : PASS("machine limits", `${limitsLine(limits)}${set}`),
+    problems.length ? WARN("machine limits", `${problems.join("; ")}, so Factory's defaults stand for those; in force: ${limitsLine(inForce)}`, `correct ${limits.file}: "pressure" takes cpu_psi, load, memory_psi and available_gb, and "guess_hours" a list of hours, each a number above 0`) : PASS("machine limits", `${limitsLine(inForce)}; ${set}`),
     PASS("machine slots", `${holders.length} of ${budget.stages} held${holders.length ? `: ${holders.map(what).join("; ")}` : ""}`),
     sat ? WARN("machine load", `${pressureLine(pressure)}: saturated (${sat.why}), so the loops here hold new starts; a loop that holds no stage still starts one`, "wait for the load to fall, or end work outside Factory on this machine") : PASS("machine load", `${pressureLine(pressure)}: loops here start stages as the budget allows`),
   ];

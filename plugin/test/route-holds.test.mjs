@@ -355,6 +355,27 @@ test("with every other account held, a usage limit Blocks provider-quota naming 
   assert.equal(routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude-9", env, opts: {} }), null);
 });
 
+test("#402: on Actions and in the cloud sandbox the no-reset guess follows the repository's guess_hours, by how many in a row; one that is no list of hours is the default", async () => {
+  setSelf(BOT);
+  const guessFor = async (hours, times) => {
+    const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1", ...(hours === null ? {} : { FACTORY_GUESS_HOURS: hours }) };
+    const ends = [];
+    await withGitHub({}, async () => {
+      for (let i = 0; i < times; i += 1) {
+        const t = Date.now();
+        const limits = routeLimits({ repo: REPO, issue: 8, stage: "work", harness: "claude", account: "claude", env, opts: { token: "t" }, now: () => t });
+        await limits.spent({ harness: "claude" });
+        ends.push((await readHolds(REPO, { token: "t" }, { now: t })).store.avoidUntil("claude", t) - t);
+      }
+    });
+    return ends.map((ms) => Math.round(ms / (H / 60)) / 60);
+  };
+  assert.deepEqual(await guessFor("2, 5", 3), [2, 5, 5]);
+  assert.deepEqual(await guessFor(null, 2), [1, 4], "Factory's default");
+  assert.deepEqual(await guessFor("soon", 1), [1], "not a list of hours: the default");
+  setSelf(null);
+});
+
 test("a usage limit with no reset reported still Blocks, and its account is a guess the next account step passes over (#268)", async () => {
   setSelf(BOT);
   const env = { FACTORY_ACCOUNTS: THREE, FACTORY_AUTO_ACCOUNT: "1" };

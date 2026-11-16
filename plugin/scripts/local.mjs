@@ -314,11 +314,12 @@ export function deadHereHolder(holder, { id = machineIdentity(), self = process.
 /**
  * The repository's settings (the default branch's workflow and the repository's variables) a running serve takes at its
  * next tick (refreshSettings): how many run, on which models and effort (held with the harness when it changes), what
- * validation runs, how a session resumes and its cache, and whether hand-offs wait for siblings. One this shell sets (inputs.mjs machineSettings) keeps the
- * shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
+ * validation runs, how a session resumes and its cache, whether hand-offs wait for siblings, how many rebases a PR
+ * gets and how long a usage limit with no reset passes its account over. One this shell sets (inputs.mjs
+ * machineSettings) keeps the shell's value whatever the repository says. What a stage may reach or receive, spend, protect or be set up with, and
  * the harness, are taken only when serve starts.
  */
-export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD"];
+export const HOT_SETTINGS = ["FACTORY_MAX_CONCURRENT", "FACTORY_LOCAL_MAX_CONCURRENT", "FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_EFFORT", "FACTORY_REVIEWER_EFFORT", "FACTORY_VALIDATION", "FACTORY_LOCAL_VALIDATION", "FACTORY_RESUME_POLICY", "FACTORY_PROMPT_CACHE_TTL", "FACTORY_SIBLING_HOLD", "FACTORY_REBASE_LIMIT", "FACTORY_GUESS_HOURS"];
 
 /**
  * What changed between two sets of the repository's settings (settingLayers's values), one `NAME: old → new` each, in
@@ -3048,9 +3049,13 @@ export class Local {
     return false;
   }
 
-  /** How long a usage limit with no reset passes its account over, by how many in a row: machine.json's guess_hours. */
+  /**
+   * How long a usage limit with no reset passes its account over, by how many in a row: machine.json's guess_hours, this
+   * machine's own, else the repository's (the guess_hours setting).
+   */
   guessSteps() {
-    return machineLimits({ home: this.machinePlaces().home }).guessMs;
+    const machine = machineLimits({ home: this.machinePlaces().home });
+    return machine.from.guess === "setting" ? machine.guessMs : resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }).guessMs;
   }
 
   /** Where this loop reads the machine's budget, slots and load: the user's home and /proc, or a test's own. */

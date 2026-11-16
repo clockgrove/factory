@@ -440,10 +440,14 @@ test("#402: a loop holds new starts by the machine's own pressure limits, and do
   const by = (rows) => Object.fromEntries(rows.map((r) => [r.name, r]));
   const rows = by(machineChecks({ env: {}, local: true, home: relaxed, proc: busy }));
   assert.equal(rows["machine limits"].status, "PASS");
-  assert.equal(rows["machine limits"].detail, `saturated at CPU pressure 30% over a minute (without PSI, a load of 0.9 per CPU thread), memory pressure 10%, or under 8.0 GB memory available; a usage limit with no reset passes its account over for 2 h, 8 h by how many in a row, from ${join(relaxed, ".cache", "factory", "machine.json")}`);
+  assert.equal(rows["machine limits"].detail, `saturated at CPU pressure 30% over a minute (without PSI, a load of 0.9 per CPU thread), memory pressure 10%, or under 8.0 GB memory available; a usage limit with no reset passes its account over for 2 h, 8 h by how many in a row; the pressure limits from ${join(relaxed, ".cache", "factory", "machine.json")}, the guess from ${join(relaxed, ".cache", "factory", "machine.json")}`);
   assert.equal(rows["machine load"].status, "PASS", "doctor judges the load by the same limits");
   const dfltRows = by(machineChecks({ env: {}, local: true, home: dflt, proc: busy }));
-  assert.match(dfltRows["machine limits"].detail, /^saturated at CPU pressure 15% over a minute .*under 4\.0 GB memory available; .* for 1 h, 4 h, 24 h by how many in a row: Factory's defaults; set them in /);
+  assert.match(dfltRows["machine limits"].detail, /^saturated at CPU pressure 15% over a minute .*under 4\.0 GB memory available; .* for 1 h, 4 h, 24 h by how many in a row; the pressure limits from Factory's defaults \(set them in .*\), the guess from Factory's default$/);
+  // Without machine.json's guess_hours, the repository's setting is the one in force.
+  const repoRows = by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: dflt, proc: busy }));
+  assert.match(repoRows["machine limits"].detail, /for 3 h, 9 h by how many in a row; .* the guess from the repository's FACTORY_GUESS_HOURS$/);
+  assert.match(by(machineChecks({ env: { FACTORY_GUESS_HOURS: "3, 9" }, local: true, home: relaxed, proc: busy }))["machine limits"].detail, /for 2 h, 8 h by how many in a row/, "machine.json's wins on this machine");
   assert.equal(dfltRows["machine load"].status, "WARN");
   const wrong = home();
   mkdirSync(join(wrong, ".cache", "factory"), { recursive: true });

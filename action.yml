@@ -62,6 +62,9 @@ inputs:
   max_concurrent:
     description: How many worker jobs may run at once; the dispatcher starts up to this minus the ones running.
     required: false
+  guess_hours:
+    description: How many hours automatic account choice passes over an account whose usage limit or quota reported no reset, by how many in a row (the last for every one after); `1, 4, 24` when empty. A list of hours, comma or space separated, each a number above 0. In local mode, machine.json's `guess_hours` wins on that machine.
+    required: false
   rebase_limit:
     description: How many times in 24 hours a PR goes back to its worker to rebase after other PRs merged (each a worker run) before its Objective Blocks; 5 when empty. A whole number above 0. Scheduling only.
     required: false
@@ -396,6 +399,7 @@ runs:
         FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
         FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
         FACTORY_INPUT_REBASE_LIMIT: ${{ inputs.rebase_limit }}
+        FACTORY_INPUT_GUESS_HOURS: ${{ inputs.guess_hours }}
         FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
         FACTORY_INPUT_MAX_USD: ${{ inputs.max_usd }}
         FACTORY_INPUT_COPILOT_CREDIT_USD: ${{ inputs.copilot_credit_usd }}

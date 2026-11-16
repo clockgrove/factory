@@ -1072,9 +1072,11 @@ test("#402: a usage limit with no reset passes its account over for machine.json
   try {
     await withHome(h, async () => {
       const loop = autoServe(h, () => now);
+      // The repository's guess_hours too: machine.json's wins on this machine.
+      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
       loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
-      assert.equal(loop.holds.avoidUntil("alpha", now), now + 120 * MIN, "two hours, not the default's one");
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 120 * MIN, "two hours, not the default's one nor the repository's three");
       // A second in a row, from a stage that ended paused on it: the setting's second step.
       now += 121 * MIN;
       await loop.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, pinned: true, usageLimit: { harness: "claude", reset: null, since: new Date(now).toISOString(), noReset: true } });
@@ -1082,6 +1084,20 @@ test("#402: a usage limit with no reset passes its account over for machine.json
     });
   } finally {
     gh.restore();
+  }
+  // Without guess_hours in machine.json, the repository's setting is the one in force.
+  const plain = fakeHome();
+  const gh2 = fakeGitHub();
+  try {
+    await withHome(plain, async () => {
+      const loop = autoServe(plain, () => now);
+      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
+      loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
+      assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
+      assert.equal(loop.holds.avoidUntil("alpha", now), now + 180 * MIN);
+    });
+  } finally {
+    gh2.restore();
   }
 });
 

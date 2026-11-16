@@ -43,6 +43,7 @@ export const DEFAULTS = {
   max_concurrent: "3",
   sibling_hold: "on", // on | off: a hand-off to review waits for a sibling on the same files (lib/overlap.mjs)
   rebase_limit: "5", // send-backs for a rebase one Objective gets in 24 h before it Blocks (logic.mjs staleDecision)
+  guess_hours: "1, 4, 24", // how long automatic account choice passes over an account whose usage limit reported no reset, by how many in a row (holds.mjs spent)
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
@@ -233,6 +234,7 @@ const VALUE_RULES = (() => {
     FACTORY_SWEEP_MAX_DESTROYS: atLeast0,
     FACTORY_TIMEOUT_MINUTES: above0,
     FACTORY_THIRD_PARTY_WAIT_MINUTES: above0,
+    FACTORY_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, "a list of hours, each a number above 0"],
     FACTORY_COPILOT_CREDIT_USD: above0,
     FACTORY_LOCAL_MEDIA_MAX_MB: above0,
     FACTORY_RESUME_POLICY: oneOf("fresh", "fix-passes"),
@@ -241,6 +243,16 @@ const VALUE_RULES = (() => {
     FACTORY_IMAGE_REFRESH: oneOf("merge", "nightly"),
   };
 })();
+/**
+ * A `guess_hours` value as milliseconds: a list of hours, comma or space separated, each a number above 0 (the same
+ * rule as machine.json's `guess_hours`, machine.mjs machineLimits); null when it is not one.
+ */
+export function guessHoursMs(value) {
+  const parts = String(value ?? "").split(/[\s,]+/).filter(Boolean);
+  const hours = parts.map(Number);
+  return hours.length && hours.every((h) => Number.isFinite(h) && h > 0) ? hours.map((h) => h * 3600_000) : null;
+}
+
 /** Why a variable's value for setting `name` is not taken (VALUE_RULES), or null. */
 export const valueProblem = (name, value) => (VALUE_RULES[name] && !VALUE_RULES[name][0](value) ? `not ${VALUE_RULES[name][1]}` : null);
 
@@ -501,6 +513,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     maxConcurrent: num(get("max_concurrent"), 3),
     siblingHold: (get("sibling_hold") || "on").trim().toLowerCase() !== "off",
     rebaseLimit: Math.floor(above0(get("rebase_limit"), 5)) || 5,
+    guessMs: guessHoursMs(get("guess_hours")) ?? guessHoursMs(DEFAULTS.guess_hours),
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
     timeoutMinutes: num(get("timeout_minutes"), 240),

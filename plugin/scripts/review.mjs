@@ -42,6 +42,7 @@ import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
 import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
+import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
 import { checkAnswers, openFindingCheck } from "./lib/finding-check.mjs";
 import {
@@ -356,11 +357,11 @@ export function workerRun(inputs) {
  * but of code scanning's alert only its file, and never a protected or toolchain one: an alert there is fixed by no
  * answer pass, and the scope's refusal Blocks it.
  */
-export function answerScope(comments, protectedList) {
+export function answerScope(comments, protectedList, toolchainPaths = []) {
   return comments.flatMap((c) => {
     if (c.from !== CODE_SCANNING) return [`${c.path || ""}\n${c.body || ""}`];
     const path = String(c.path || "");
-    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path) ? [path] : [];
+    return path && !protectedTouched([path], protectedList).length && !toolchainFile(path, toolchainPaths) ? [path] : [];
   });
 }
 
@@ -1022,7 +1023,7 @@ async function main() {
   // starts at GitHub's head now. No GitHub token reaches a child: on Actions the agent reads with its own read-only
   // token; locally nothing.
   const childBase = scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent, ...branchIdentity(branch) });
-  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
+  const outbox = await openOutbox({ branch, defaultBranch, checkout, remote: `https://github.com/${repo.full}.git`, token: keeper.getter, agentEnv: childBase, local: backend().name === "local", protectedList, toolchain: setupPaths(inputs, { env: process.env, roots: [checkout] }), toolchainPaths: inputs.toolchainPaths, setup: inputs.setup, setupContext: { env: process.env, roots: [checkout] }, deadlineAt, base: tmp.factory });
   // Before each push, the issue once more: a stopped or restarted Objective pushes nothing (stop.mjs confirmRunning).
   outbox.beforePush = () => beforeExit?.();
   const identity = await gitIdentity(app, keeper.getter);
@@ -1129,6 +1130,8 @@ async function main() {
   const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: harnessEnv, record: (r) => records.push(r) };
   // The drift advisory (lib/drift.mjs) on the answer and fix passes: advice only.
   const drift = openDrift({ inputs, progress, stage: decisionStage });
+  // The fence check (lib/fence-check.mjs): an answer or fix pass's toolchain change outside its scope goes only on its yes.
+  outbox.fenceCheck = openFenceCheck({ inputs, stage: decisionStage });
   // The answer gate's decision model (answerDecider): triage's model, through the stage's decider; with none, every
   // answer that committed gets a review pass.
   const answerAsk = answerDecider({ inputs, stage: decisionStage });
@@ -1647,7 +1650,7 @@ async function main() {
     };
     // The answer pass is a fix pass (outbox.mjs fence): the plan, the issue, the decisions and the comments it answers name its scope.
     const scope = io.scope();
-    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])] }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+    await outbox.fence({ plan: scope.plan, texts: [...scope.texts, ...answerScope(toAnswer, protectedList, inputs.toolchainPaths), ...(heldRed ? heldRed.failures.map((f) => f.output || "") : [])], lead: heldRed?.lead || "", comments: toAnswer.map((c) => ({ path: c.path || "", line: c.line ?? c.original_line ?? null, body: c.body || "" })) }).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     // The checkout's HEAD before the pass: a queue fix counts once the pass itself committed and that went up
     // (recordQueueFix), never for a merge commit Factory makes at the push.
     const checkoutHead = async () => {
@@ -1783,6 +1786,7 @@ async function main() {
     sessionCap: sessionCapNote(process.env.FACTORY_STAGE_SESSION_CAP),
     // Every push went through the outbox, which refuses plain blobs LFS should hold and media over the cap.
     pushRejected: outbox.failed ? outbox.error : "",
+    pushCause: outbox.failed ? outbox.errorCause : null,
     lfsRefused: outbox.lfsRefused,
     lfsQuota: outbox.errorKind === "lfs-quota",
     handoverRefused: handover.refused(),

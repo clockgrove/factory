@@ -756,23 +756,37 @@ export function shellSecretsNote(names = []) {
  * it get one turn to put them back (resumed where the harness can); what is still outside then is refused: the outbox
  * pushes none of it and the stage Blocks with the reason. A turn that put them back and asks a Question in its exit
  * record (the fix needs that change) stops the stage there, so no further fix pass makes the change again and the
- * Question reaches the exit. Returns {usage, refused?: reason, question?: true, harness?: record} (harness when that
+ * Question reaches the exit. The fence check (fence-check.mjs, through the outbox) has already let go each file it
+ * judged part of the fix; a refusal that stands only because it gave no answer carries `cause` (`factory`, `outage`),
+ * and the stage harness's usage limit that stopped its questions ends the stage on it (UsageLimitReached), with nothing
+ * of the pass pushed. Returns {usage, refused?: reason, cause?, question?: true, harness?: record} (harness when that
  * turn hit a cap or died; question with refused naming the files the fix needs).
  */
 export async function holdScope({ outbox, session, harness, model, effort = null, taskCard, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0, label, progress = null, io = null }) {
   const usage = [];
-  const read = async () => (outbox?.fenced?.() ? outbox.outside().catch((e) => e) : []);
-  let out = await read();
+  const read = async () => {
+    const out = outbox?.fenced?.() ? await outbox.outside().catch((e) => e) : [];
+    const verdict = outbox?.fenceVerdict?.() ?? null;
+    if (verdict?.limited) {
+      const why = `the fence check met ${verdict.limited.harness}'s usage limit; nothing of the fix pass was pushed, and it is checked again after the reset`;
+      outbox.block(why);
+      log(why);
+      throw new UsageLimitReached(verdict.limited, { since: Date.now(), label: "fence check" });
+    }
+    return { out, verdict };
+  };
+  const { out, verdict } = await read();
   if (out instanceof Error) return { usage, refused: `the fix pass's changes could not be read: ${out.message.slice(0, 160)}` };
   if (!out.length) return { usage };
-  const first = out;
+  const first = { out, verdict };
   log(`${label}: outside the fix pass's scope: ${out.slice(0, 10).join(", ")}`);
   const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd) : 0;
   if (remainingMs(deadlineAt) > 120_000 && !(maxUsd > 0 && left <= 0)) {
     if (progress) await progress(`${label}: ${out.length} toolchain file(s) outside the plan and the red; one turn to put them back`);
     const since = outbox.fenceStart();
+    const judged = verdict?.judged ?? [];
     const ask = [
-      `Factory will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.`,
+      `Factory will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.${judged.length ? ` Factory's fence check: ${judged.join("; ")}.` : ""}`,
       `Put each of those files back as it was at ${since} (\`git checkout ${since} -- <file>\`, or \`git rm\` a file that commit lacks) and commit; keep the rest of the fix. If the fix cannot work without that change, put the files back anyway, say so in \`$FACTORY_OUT/pr.md\`, and your exit record asks that Question, naming each file and why. Change nothing else.`,
     ].join("\n\n");
     const resume = session?.canResume ? session.id : null;
@@ -785,22 +799,33 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     if (rec.sessionId && session) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true;
     if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
-    return { usage, ...scopeTurnResult({ first, out: await read(), rec, exitBefore, exitNow: io?.files?.()?.["exit.json"] }) };
+    const after = await read();
+    return { usage, ...scopeTurnResult({ first: first.out, out: after.out, verdict: after.verdict, rec, exitBefore, exitNow: io?.files?.()?.["exit.json"] }) };
   }
-  return { usage, refused: fixScopeReason(out) };
+  return { usage, ...scopeRefusal(out, verdict) };
+}
+
+/**
+ * The refusal of the files still `out` of a fix pass's scope, with what the fence check said of them (`verdict`,
+ * outbox.mjs box.fenceVerdict): {refused, cause?}, `cause` its Block's when one of them stands only because the check
+ * gave no answer.
+ */
+export function scopeRefusal(out, verdict = null) {
+  const cause = verdict?.cause && (verdict.undecided ?? []).some((p) => out.includes(p)) ? verdict.cause : null;
+  return { refused: fixScopeReason(out, [], verdict?.judged ?? []), ...(cause ? { cause } : {}) };
 }
 
 /**
  * What holdScope's corrective turn leaves (pure): `first` the files outside before it, `out` after it (or the Error
- * reading them), `rec` its run, `exitBefore`/`exitNow` the exit record's text before and after it. Still outside:
- * refused. A cap or a crash: that record. All put back with a Question this turn wrote (not one left from before it):
- * refused naming the files the fix needs, with question, so the caller stops the stage and the Question reaches the
- * exit. All put back and no Question: nothing.
+ * reading them) with the fence check's `verdict` on them, `rec` its run, `exitBefore`/`exitNow` the exit record's text
+ * before and after it. Still outside: refused (scopeRefusal). A cap or a crash: that record. All put back with a
+ * Question this turn wrote (not one left from before it): refused naming the files the fix needs, with question, so the
+ * caller stops the stage and the Question reaches the exit. All put back and no Question: nothing.
  */
-export function scopeTurnResult({ first, out, rec, exitBefore, exitNow }) {
+export function scopeTurnResult({ first, out, verdict = null, rec, exitBefore, exitNow }) {
   if (out instanceof Error) return { refused: `the fix pass's changes could not be read: ${out.message.slice(0, 160)}` };
-  if (rec.timedOut || rec.budgetExceeded || rec.refusal || crashed(rec)) return { harness: crashed(rec) ? { ...rec, died: 1 } : rec, ...(out.length ? { refused: fixScopeReason(out) } : {}) };
-  if (out.length) return { refused: fixScopeReason(out) };
+  if (rec.timedOut || rec.budgetExceeded || rec.refusal || crashed(rec)) return { harness: crashed(rec) ? { ...rec, died: 1 } : rec, ...(out.length ? scopeRefusal(out, verdict) : {}) };
+  if (out.length) return scopeRefusal(out, verdict);
   const asks = typeof exitNow === "string" && exitNow !== exitBefore && parseExitRecord(exitNow)?.exit === "question";
   return asks ? { refused: fixScopeReason(first), question: true } : {};
 }
@@ -1436,11 +1461,11 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
     const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage) + (decisionSpend() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
     usage.push(...held.usage);
-    if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused } : {}) });
+    if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}) } : {}) });
     if (held.refused) {
       if (onPhase) await onPhase(`${label} pass ${red.passes}: ${held.question ? `put back and asked a Question: ${held.refused}` : held.refused}`);
       // A Question: the stage stops here and its exit record decides (the caller passes no validation for it).
-      return end({ scope: held.refused, ...(held.question ? { question: true } : {}) });
+      return end({ scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}), ...(held.question ? { question: true } : {}) });
     }
     return null;
   };
@@ -1495,7 +1520,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         if (!denied) {
           freshHeads.set(head, { unchanged: v.unchanged, session: session.id });
           // The scope fence names what this red names, as a fix pass's does.
-          if (red !== lastFix && outbox?.fence) await outbox.fence({ plan: "", texts: red.failures.map((f) => f.output || "") }).catch((e) => log(`fresh-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
+          if (red !== lastFix && outbox?.fence) await outbox.fence({ plan: "", texts: red.failures.map((f) => f.output || ""), lead: lastLead }).catch((e) => log(`fresh-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
           const before = await checkoutHead();
           const ended = await fixPass(red, { fresh: true });
           if (ended?.capped) {
@@ -1588,7 +1613,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // The fix pass's scope (outbox.mjs fence): the plan and what the branch changed so far, and what this red names.
     // A red names a file by its failure window (or the command's output), not the whole job log, which prints every setup step.
     const scope = io?.scope?.() ?? { plan: "", texts: [] };
-    const fenced = { plan: scope.plan, texts: [...scope.texts, ...failures.map((f) => f.output || "")] };
+    // The failing checks' lead lines go to the fence check's question too (fence-check.mjs); a command's red with no job
+    // lines, its output's end.
+    const fenced = { plan: scope.plan, texts: [...scope.texts, ...failures.map((f) => f.output || "")], lead: lead || failures.map((f) => `--- ${f.command}\n${String(f.output || "").slice(-2000)}`).join("\n") };
     if (outbox?.fence) await outbox.fence(fenced).catch((e) => log(`fix-pass scope not set: ${String(e?.message || e).slice(0, 160)}`));
     lastFix = { passes, sha: v.sha, failures, detail, tail, command: failed.command, checksMs: v.waitedMs ?? 0, rec: null };
     given.push(tail);

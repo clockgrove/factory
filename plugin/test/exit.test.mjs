@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { appJwt, normalizePem } from "../scripts/lib/app-token.mjs";
 import { input, parseArgs, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, clip, commandPaths, decideExit, deniedHostsFix, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
+import { EXIT_PROMPT, QUESTION_TESTS, REASON_MAX, acceptanceEntries, capReached, checkConfigFile, clip, commandPaths, decideExit, deniedHostsFix, fenceDecidable, isHostName, diffLines, entryKey, fixScopeReason, fixScopeRefused, isPlaceholder, marker, membershipOnly, mergeChecked, namesPath, parseExitRecord, parseFindings, parseReview, protectedPaths, questionCheckPrompt, questionFounded, setupPaths, snapComments, standingQuestions, pushRefusal, toolchainFile, workflowScopeReason, workflowScopeRefused, workspaceDeclarations } from "../scripts/lib/logic.mjs";
 import { noReviewReason, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewProduced, reviewRetry, splitPartOf } from "../scripts/lib/handoff.mjs";
 import { exitRecord } from "../scripts/lib/session.mjs";
 import { renderWorkflow } from "../scripts/setup.mjs";
@@ -1083,16 +1083,18 @@ test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is
 });
 
 test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the red are refused; everything else passes", () => {
-  for (const p of ["package-lock.json", "web/pnpm-lock.yaml", ".nvmrc", "rust-toolchain.toml", "scripts/install-toolchain.sh", ".gitlab-ci.yml", ".circleci/config.yml", "Dockerfile", "docker/api.Dockerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".husky/pre-commit", "toolchain/fetch.sh", "tools/toolchains/zig.sh", "src/toolchain/x.ts"]) assert.equal(toolchainFile(p), true, p);
+  for (const p of ["package-lock.json", "web/pnpm-lock.yaml", ".nvmrc", "rust-toolchain.toml", ".gitlab-ci.yml", ".circleci/config.yml", "Dockerfile", "docker/api.Dockerfile", ".devcontainer/devcontainer.json", "gradle/wrapper/gradle-wrapper.properties", ".husky/pre-commit"]) assert.equal(toolchainFile(p), true, p);
   for (const p of ["src/app.ts", "package.json", "README.md", "docs/toolchain.md", "Dockerfiles/readme.md", "scripts/setup.sh", "src/mytoolchainutil/x.ts"]) assert.equal(toolchainFile(p), false, p);
-  // The incident shape: a fix for an unrelated red edits the toolchain download step and the pins.
+  // The incident shape: a fix for an unrelated red edits the toolchain download step and the pins. The download step is
+  // toolchain by the repository's `toolchain_paths` setting, not by its name.
+  const paths = ["scripts/fetch-toolchain.sh"];
   const changed = ["src/parse.ts", "scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"];
   const plan = "1. Parser fix: owns `src/parse.ts`, `test/parse.test.ts` (acceptance 1).";
   const red = "FAIL test/parse.test.ts\n  expected 3, received 2\n    at src/parse.ts:41:7";
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts"], texts: [plan, red] }), ["scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts"], texts: [plan, red], paths }), ["scripts/fetch-toolchain.sh", ".nvmrc", "package-lock.json"]);
   // In scope: changed before the fix passes; named by the plan, the issue or the red (path or file name); a lockfile beside its own manifest in scope.
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts", ".nvmrc"], texts: [plan, red] }), ["scripts/fetch-toolchain.sh", "package-lock.json"]);
-  assert.deepEqual(fixScopeRefused(changed, { prior: ["package.json"], texts: ["npm ci: `package-lock.json` is not in sync with package.json", "bump `scripts/fetch-toolchain.sh` to zig 0.14"] }), [".nvmrc"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["src/parse.ts", ".nvmrc"], texts: [plan, red], paths }), ["scripts/fetch-toolchain.sh", "package-lock.json"]);
+  assert.deepEqual(fixScopeRefused(changed, { prior: ["package.json"], texts: ["npm ci: `package-lock.json` is not in sync with package.json", "bump `scripts/fetch-toolchain.sh` to zig 0.14"], paths }), [".nvmrc"]);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { prior: ["web/package.json"] }), []);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { prior: ["api/package.json"] }), ["web/package-lock.json"]);
   assert.deepEqual(fixScopeRefused(["web/package-lock.json"], { texts: ["Item 2 adds zod to web/package.json"] }), []);
@@ -1137,10 +1139,47 @@ test("fix-pass scope: toolchain, lockfile and CI files outside the plan and the 
   assert.deepEqual(fixScopeRefused(["src/parse.ts", "scripts/setup.sh", "scripts/other.sh"], { prior: ["src/parse.ts"], texts: [plan, red], extra }), ["scripts/setup.sh"]);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { texts: ["setup fails: scripts/setup.sh line 3"], extra }), []);
   assert.deepEqual(fixScopeRefused(["scripts/setup.sh"], { prior: ["scripts/setup.sh"], extra }), []);
-  assert.deepEqual(fixScopeRefused(["toolchain/fetch.sh"], { texts: [plan, red] }), ["toolchain/fetch.sh"]);
+  assert.deepEqual(fixScopeRefused(["toolchain/fetch.sh"], { texts: [plan, red], paths: ["toolchain/"] }), ["toolchain/fetch.sh"]);
   const reason = fixScopeReason(["a/.nvmrc", "b", "c", "d", "e", "f", "g"]);
   assert.match(reason, /^a fix pass changed a\/\.nvmrc, b, c, d, e and 2 more \(toolchain, lockfile or CI configuration\)/);
   assert.deepEqual(decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, validation: { passes: 1, green: false, scope: reason } }), { exit: "blocked", reason, cause: "work" });
+});
+
+test("#414: toolchain by exact lists and the toolchain_paths setting, never by a name guess; the fence check is asked only about what it may let go", () => {
+  // No name guess: a `*toolchain*` file or a `toolchain(s)/` directory is toolchain only on the setting.
+  for (const p of ["scripts/install-toolchain.sh", "toolchain/fetch.sh", "tools/toolchains/zig.sh", "src/toolchain/x.ts"]) {
+    assert.equal(toolchainFile(p), false, `${p}: no guess`);
+    assert.deepEqual(fixScopeRefused([p], {}), [], `${p}: a fix pass may change it`);
+  }
+  const paths = ["toolchain/", "zig.sh", "/scripts/install-toolchain.sh"];
+  for (const p of ["toolchain/fetch.sh", "tools/toolchains/zig.sh", "scripts/install-toolchain.sh"]) assert.equal(toolchainFile(p, paths), true, `${p}: on the setting`);
+  assert.equal(toolchainFile("src/toolchain/x.ts", paths), false, "a directory matches from the root, as protected_paths do");
+  assert.equal(toolchainFile("a/scripts/install-toolchain.sh", paths), false, "a leading / matches at the root only");
+  assert.deepEqual(resolveInputs({ env: {} }).toolchainPaths, [], "empty by default: the exact lists only");
+  assert.deepEqual(resolveInputs({ env: { FACTORY_TOOLCHAIN_PATHS: "toolchain/, scripts/zig.sh" } }).toolchainPaths, ["toolchain/", "scripts/zig.sh"]);
+  // What the fence check may let go: a toolchain file by the lists or the setting; never the checks' own configuration,
+  // a protected path, what setup or install names or runs, a script entry, or anything while a command cannot be named.
+  for (const p of ["package-lock.json", "web/yarn.lock", ".nvmrc", ".npmrc", "pnpm-workspace.yaml", "Dockerfile", ".devcontainer/devcontainer.json"]) assert.equal(fenceDecidable(p), true, p);
+  assert.equal(fenceDecidable("toolchain/fetch.sh", { paths }), true, "on the setting");
+  for (const p of [".github/workflows/ci.yml", ".gitlab-ci.yml", ".circleci/config.yml", "ci/.buildkite/pipeline.yml", ".husky/pre-commit", ".pre-commit-config.yaml", "lefthook.yml", "Jenkinsfile"]) {
+    assert.equal(checkConfigFile(p), true, p);
+    assert.equal(toolchainFile(p), true, `${p} is fenced`);
+    assert.equal(fenceDecidable(p), false, `${p}: the checks' own configuration, never judged`);
+  }
+  assert.equal(fenceDecidable("src/app.ts"), false, "not toolchain: nothing to judge");
+  assert.equal(fenceDecidable(".nvmrc", { protectedList: protectedPaths(["/.nvmrc"]) }), false, "a protected path");
+  assert.equal(fenceDecidable("tools/.npmrc", { extra: ["tools/.npmrc"] }), false, "what setup or install names");
+  assert.equal(fenceDecidable("tools/.npmrc", { guarded: ["tools"] }), false, "what the setup guard covers, under a guarded directory");
+  assert.equal(fenceDecidable("package-lock.json", { unknown: ["$SCRIPT"] }), false, "a command that may run a file Factory cannot name");
+  assert.equal(fenceDecidable("package.json scripts.build"), false, "a script setup or install runs");
+  // The Block names what the fence check said; its cause is the work's unless it gave no answer.
+  const reason = fixScopeReason(["package-lock.json"], [], ["package-lock.json: judged to weaken or sidestep the check at 0.91"]);
+  assert.match(reason, /\(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: package-lock\.json: judged to weaken/);
+  const exit = (more) => decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, ...more });
+  assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "outage" } }).cause, "outage");
+  assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "nonsense" } }).cause, "work");
+  assert.equal(exit({ pushRejected: reason, pushCause: "factory" }).cause, "factory");
+  assert.equal(exit({ pushRejected: reason }).cause, "work");
 });
 
 test("fix-pass scope: a workspace member's manifest brings its workspace's root lockfile, as the declaration lists members", () => {

@@ -2,7 +2,8 @@ import "./temp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Local } from "../scripts/local.mjs";
@@ -10,7 +11,7 @@ import { stopHold } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { OUTAGE } from "../scripts/lib/network.mjs";
 import { fakeProc } from "./fixtures/machine.mjs";
-import { accountHolds } from "../scripts/lib/holds.mjs";
+import { accountHolds, holdsDir } from "../scripts/lib/holds.mjs";
 
 // The API client retries a failed read (lib/github.mjs RETRY): no real waits here. A fake that must fail a whole read
 // fails every one of its tries.
@@ -1094,6 +1095,36 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
     // A weekly limit's reset is past the outage bound: still resumed after it, not Blocked as an outage.
     t = since + OUTAGE.blockMs + 60_000;
     loop.offline.get(7).reset = t;
+    assert.deepEqual(await loop.pausedHere(new Map()), [7]);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("#376: an Objective paused on a usage limit with a far reset resumes at the next tick once its account is no longer held: released with factory hold release, or its files removed by hand; another account's release moves nothing", async () => {
+  const gh = claimGitHub();
+  try {
+    const home = mkdtempSync(join(tmpdir(), "hold-"));
+    const dir = holdsDir(home);
+    const loop = await claimLoop();
+    loop.holds = accountHolds({ dir });
+    const hold = (...args) => spawnSync(process.execPath, [join(import.meta.dirname, "..", "scripts", "local.mjs"), "hold", ...args], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+    const since = Date.now() - 60_000;
+    const reset = since + 30 * 60 * 60_000;
+    const limit = { exit: "paused", stage: "work", code: 0, usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(since).toISOString() } };
+    assert.equal((await loop.withClaim(7, async () => limit)).exit, "paused");
+    assert.equal(loop.offline.get(7).reset, reset, "the pause keeps the provider's reset, thirty hours out");
+    loop.holds.limit({ harness: "claude", account: "other", reset, now: Date.now() });
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "held: it waits");
+    assert.equal(hold("release", "other").status, 0);
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "another account's release moves nothing");
+    const r = hold("release", "claude");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(await loop.pausedHere(new Map()), [7], "released: resumed at the next tick, long before the reset");
+    // Paused again on a new limit (after the release, so it holds), then the folder cleared by hand: resumed too.
+    await loop.limitPaused(7, { ...limit, usageLimit: { ...limit.usageLimit, since: new Date().toISOString() } });
+    assert.deepEqual(await loop.pausedHere(new Map()), [], "a limit after the release holds again");
+    for (const f of readdirSync(dir)) rmSync(join(dir, f));
     assert.deepEqual(await loop.pausedHere(new Map()), [7]);
   } finally {
     gh.restore();

@@ -22,7 +22,8 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
-import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
+import { DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
+import { appIdSetLine, readAppIdVariable } from "./app-id.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, codexRow, longShare, sumLong } from "./usage.mjs";
@@ -348,13 +349,15 @@ export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAutho
 /**
  * Read what a report needs from GitHub and the user's disk, within `maxCalls` GitHub API calls. `scope`: {since, until
  * (ISO or null), issues (numbers), label, parent}. `appId`: Pendulum's App id (pendulumOwn), else the repository variable
- * PENDULUM_APP_ID (one call), else `envAppId`; `self`: the logins `--self` names; `by`: the `--by` values (summaryFor:
+ * PENDULUM_APP_ID (one call; on a 403, one more with `fallback()`'s token, the gh login's), else `localCopy`'s id
+ * (app-id.mjs readLocalAppId), else `envAppId`; `source.appFrom` names the one taken, or why none was (`unset`,
+ * `forbidden`); `self`: the logins `--self` names; `by`: the `--by` values (summaryFor:
  * a merged Objective read from its finish card's summary has no usage artifact read); `stages`: read every Objective's
  * stages, none from its summary (`--rates`). `download(repo, artifact, token)` reads
  * an artifact's result.json (github.mjs downloadArtifactResult). A BudgetStop ends the reads early, with what was read
  * kept and `source.stopped` set.
  */
-export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CALLS, appId = null, envAppId = null, self = [], by = [], stages = false, download = downloadArtifactResult, checkout = null, cacheDir = reportCacheDir(repo.full), log = () => {} } = {}) {
+export async function readReport(repo, scope, { token, fallback = null, maxCalls = DEFAULT_MAX_CALLS, appId = null, localCopy = null, envAppId = null, self = [], by = [], stages = false, download = downloadArtifactResult, checkout = null, cacheDir = reportCacheDir(repo.full), log = () => {} } = {}) {
   const opts = { token };
   const budget = new Budget(maxCalls, log);
   const source = { stopped: null, comments: 0, pullsRead: false, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), localRecords: 0, selfKnown: false, login: null, appFrom: appId !== null ? "flag" : null };
@@ -401,16 +404,15 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     source.selfKnown = !!selfLogin();
     source.login = selfLogin();
     if (app === null) {
-      budget.take("app id");
-      try {
-        const v = await rest(`${base}/actions/variables/${APP_ID_VARIABLE}`, opts);
-        if (/^\d+$/.test(String(v?.value ?? "").trim())) {
-          app = Number(String(v.value).trim());
-          source.appFrom = "variable";
-        }
-      } catch (e) {
-        if (e?.status !== 404 && e?.status !== 403) throw e;
-      }
+      // The variable, read again with the gh login's token when this one gets a 403 (app-id.mjs readAppIdVariable); then
+      // the local copy, then local mode's notice App. With none, appFrom says why: `unset` or `forbidden`.
+      const v = await readAppIdVariable(repo, { token, fallback, take: () => budget.take("app id"), plan: () => budget.plan(1, "the App id variable again, with the gh login's token (the token got HTTP 403)") });
+      app = v.id;
+      source.appFrom = v.from;
+      if (app === null && localCopy?.id) {
+        app = localCopy.id;
+        source.appFrom = "local-copy";
+      } else if (app === null && localCopy?.problem) log(`pendulum report: the local copy of the App id is not taken: ${localCopy.problem}`);
       if (app === null && envAppId !== null) {
         app = envAppId;
         source.appFrom = "env";
@@ -1243,7 +1245,10 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   };
   if (source.stopped) out.push({ code: "stopped", count: 1, issues: [], text: `the reads stopped at --max-calls ${calls.max} before ${source.stopped}: what is shown is partial` });
   if (!source.selfKnown) out.push({ code: "self-unknown", count: 1, issues: [], text: "the login the token belongs to could not be read, so only Pendulum's App (--app) counts as Pendulum's own" });
-  if (trust.vouched && read.appId === null) out.push({ code: "app-not-given", count: trust.vouched, issues: [], text: "comments by another login that can push or through a GitHub App are not attributed to Pendulum: no App id was given (--app) or found (the repository variable PENDULUM_APP_ID)" });
+  // No App id, whether or not a comment through an App was read (#564): unreadable (403) apart from not set (404).
+  const unattributed = `so comments through a GitHub App or by another login that can push are not attributed to Pendulum (the count: those read, ${trust.vouched})`;
+  if (read.appId === null && source.appFrom === "forbidden") out.push({ code: "app-unreadable", count: trust.vouched, issues: [], text: `the repository variable PENDULUM_APP_ID could not be read (HTTP 403: the token may not read the repository's variables, and no gh login could either) and no App id was given (--app), ${unattributed}; give the token Variables: read, log in with gh, or pass --app ID` });
+  if (read.appId === null && source.appFrom === "unset") out.push({ code: "app-not-given", count: trust.vouched, issues: [], text: `the repository variable PENDULUM_APP_ID is not set and no App id was given (--app), ${unattributed}; set it once: ${appIdSetLine(read.repo?.full ?? "OWNER/NAME")}` });
   add("unattributed", missing.unattributed, UNKNOWN_WHY.unattributed);
   add("no-record", missing.noRecord, UNKNOWN_WHY["no-record"]);
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
@@ -1269,8 +1274,9 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
     maxCalls: calls.max,
     calls: { planned: calls.planned, plannedAtLeast: !!calls.open, made: calls.made, byKind: { ...calls.byKind } },
     // Whose markers were taken as Pendulum's: the token's own login, the logins --self named (each only on a comment by
-    // someone who can push) and the App, with where its id came from (`flag`, `variable`, `env`).
-    trusted: { logins: [...new Set([source.login, ...(read.self ?? [])].filter(Boolean))], app: read.appId ?? null, appFrom: read.appId === null || read.appId === undefined ? null : source.appFrom ?? null },
+    // someone who can push) and the App, with where its id came from (`flag`, `variable`, `variable-gh`, `local-copy`,
+    // `env`) or why there is none (`unset`, `forbidden`; null when the call budget stopped before the read).
+    trusted: { logins: [...new Set([source.login, ...(read.self ?? [])].filter(Boolean))], app: read.appId ?? null, appFrom: source.appFrom ?? null },
     read: { comments: source.comments, pendulumComments: trust.own, unattributedComments: trust.vouched, ignoredComments: trust.ignored, issues: read.issues?.size ?? 0, pulls: read.pulls?.length ?? 0, artifacts: { ...source.artifacts }, localRecords: source.localRecords, summaries },
     missing: out,
   };

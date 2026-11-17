@@ -58,6 +58,7 @@ import { scrubbedEnv } from "./lib/harness.mjs";
 import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
+import { appIdSetLine, ghLoginToken, learnAppId, readLocalAppId } from "./lib/app-id.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
@@ -899,11 +900,15 @@ export class Local {
     }
   }
 
-  /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
+  /**
+   * The settings (takeSettings, after the repository's variables), the token check, `serve`'s App id copy (keepAppId)
+   * and the routing label.
+   */
   async init({ serve = false } = {}) {
     await this.startVariables({ serve });
     this.takeSettings();
     await checkToken(this.repoFull, this.token, { max: this.bounded("PENDULUM_LOCAL_TOKEN_PROBE_MAX") });
+    if (serve) await this.keepAppId();
     if (this.notice) {
       const minted = await this.notice().catch((e) => {
         throw new Error(`local mode cannot start: the Pendulum App (PENDULUM_LOCAL_APP_ID ${process.env.PENDULUM_LOCAL_APP_ID}) gave no token for ${this.repoFull}: ${e.message.slice(0, 200)}; check the id, the key, and that the App is installed on this repository`);
@@ -3329,6 +3334,28 @@ export class Local {
   }
 
   /**
+   * serve's start (#564): Pendulum's App id from the repository variable as the start's list read it, or, when the list
+   * was refused and no local copy is there yet, read alone with the gh login's token; saved as its local copy for
+   * `pendulum report` (lib/app-id.mjs learnAppId). A variable that is not set is said with the line that sets it.
+   * Nothing here stops serve.
+   */
+  async keepAppId({ fallback = ghLoginToken } = {}) {
+    if (!this.repo || (!this.variables && !this.variablesRefused)) return null;
+    const listed = this.variablesRefused ? { refused: this.variablesRefused } : { vars: this.variables };
+    try {
+      const r = await learnAppId(this.repo, { listed, fallback, retry: false });
+      if (r.saved) log(`saved Pendulum's App id ${r.id} (the repository variable ${r.from === "variable-gh" ? "as the gh login reads it" : "PENDULUM_APP_ID"}) for \`pendulum report\` to ${r.file}`);
+      if (r.problem) log(`the local copy of Pendulum's App id for \`pendulum report\`: ${r.problem}`);
+      if (r.from === "unset") log(`the repository variable PENDULUM_APP_ID is not set, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's${r.copy ? ` (it takes the local copy, ${r.copy}, meanwhile)` : ""}; set it once: ${appIdSetLine(this.repoFull)}`);
+      if (r.from === "forbidden") log("the repository variable PENDULUM_APP_ID could not be read (the local token may not read variables, and no gh login could either), so no local copy of Pendulum's App id was saved for `pendulum report`; log in with gh, or give the token Variables: read");
+      return r;
+    } catch (e) {
+      log(`Pendulum's App id was not read (${String(e?.message || e).slice(0, 160)}); \`pendulum report\` reads it itself`);
+      return null;
+    }
+  }
+
+  /**
    * The repository's settings as they are now, read at each serve tick (#276, #284): the default branch's workflow and
    * the repository's variables over it (readVariables). Only HOT_SETTINGS (caps, models and effort, validation, resume
    * policy, cache TTL) apply while serve runs: from that tick, to this loop's limit, the dispatcher's caps and every stage
@@ -4368,9 +4395,15 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
     if (!flags.repo) throw e;
   }
   const repoFull = cloneRepo(checkout ?? here, flags.repo);
-  // Pendulum's App: --app, else the repository variable PENDULUM_APP_ID (readReport), else local mode's notice App.
+  // Pendulum's App: --app, else the repository variable PENDULUM_APP_ID (readReport; on a 403, read again with the gh
+  // login's token), else its local copy beside the local token (lib/app-id.mjs), else local mode's notice App.
   const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
-  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], stages: !!flags.rates, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
+  const main = token ?? sessionToken(repoFull);
+  const fallback = () => {
+    const gh = ghLoginToken();
+    return gh && gh !== main ? gh : null;
+  };
+  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: main, fallback, localCopy: flags.app ? null : readLocalAppId(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], stages: !!flags.rates, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
   const report = buildReport(read, { by: flags.by ? [flags.by] : [], rates: flags.rates ? reportModels(flags.rates) : null, now: new Date(now).toISOString() });
   out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
   if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);

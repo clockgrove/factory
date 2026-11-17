@@ -31,7 +31,7 @@ import { BILLING, BILLING_WORDS, UNKNOWN_WHY, bareModel, codexRow, longShare, su
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
 import { spread } from "./spread.mjs";
-import { COST_KINDS, addCost, addTokens, isAnswer, isFix, stagePassFigures, zeroCost, zeroTokens } from "./pass-figures.mjs";
+import { COST_KINDS, addCost, addTokens, isAnswer, isFix, ledgerPass, stagePassFigures, zeroCost, zeroTokens } from "./pass-figures.mjs";
 
 export { COST_KINDS, passLabel } from "./pass-figures.mjs";
 
@@ -793,6 +793,126 @@ export function outcomeOf(issue, pulls, { pullsRead = true } = {}) {
 /** The newest PR on Objective `n`'s branch from this repository itself (not a fork's), or undefined. */
 const newestPull = (n, pulls) => (pulls || []).filter((p) => p?.head?.ref === `pendulum/${n}` && p.head?.repo?.id === p.base?.repo?.id).sort((a, b) => ms(b.created_at) - ms(a.created_at))[0];
 
+/**
+ * `breakdowns.model`'s rows (#568): one per model, in the order of its first part, each with its stage count, cost and
+ * tokens, and `basis`, the same split by how they were booked (modelParts): `pass` (by the model each pass ran on) and
+ * `stage` (whole, under the stage's model), each `{stages, cost, tokens}`, null where none was booked so.
+ */
+function modelBreakdown() {
+  const rows = new Map();
+  const fold = (into, x) => {
+    into.stages += x.stages;
+    addCost(into.cost, x.cost);
+    addTokens(into.tokens, x.tokens);
+  };
+  return {
+    add(parts) {
+      for (const x of parts) {
+        const k = x.key ?? null;
+        const r = rows.get(k) ?? { key: k, stages: 0, cost: zeroCost(), tokens: zeroTokens(), basis: { pass: null, stage: null } };
+        fold(r, x);
+        fold((r.basis[x.basis] ??= { stages: 0, cost: zeroCost(), tokens: zeroTokens() }), x);
+        rows.set(k, r);
+      }
+    },
+    rows: () => [...rows.values()],
+  };
+}
+
+const TOKEN_KINDS = ["input", "output", "cached", "written"];
+/** A count summed over the values that are counts; null when none is. */
+const countSum = (...xs) => (xs.some((x) => num(x) !== null) ? xs.reduce((t, x) => t + (num(x) ?? 0), 0) : null);
+
+/**
+ * What is left of a stage's `cost` and `tokens` once `parts` are taken out of them, or null when the parts do not fit
+ * inside them (a kind's dollars, the runs of unknown cost, or a token count over the stage's, or a count the stage does
+ * not report). A difference within the records' rounding (each dollar figure is to a millionth: half a millionth for
+ * each of `n` figures and the stage's own) is none.
+ */
+function remainderOf(cost, tokens, parts, n) {
+  const tol = 5e-7 * (n + 1) + 1e-9;
+  const spare = zeroCost();
+  for (const k of COST_KINDS) {
+    const r = round6(cost.usd[k] - parts.reduce((t, x) => t + x.cost.usd[k], 0));
+    if (r < -tol) return null;
+    spare.usd[k] = Math.abs(r) <= tol ? 0 : r;
+  }
+  spare.unknownRuns = cost.unknownRuns - parts.reduce((t, x) => t + x.cost.unknownRuns, 0);
+  if (spare.unknownRuns < 0) return null;
+  spare.unknownWhy = spare.unknownRuns ? [...cost.unknownWhy] : [];
+  const left = zeroTokens();
+  for (const k of TOKEN_KINDS) {
+    const taken = countSum(...parts.map((x) => x.tokens?.[k]));
+    const own = num(tokens?.[k]);
+    if (taken === null) left[k] = own;
+    else if (own === null || own < taken) return null;
+    else left[k] = own - taken;
+  }
+  return { cost: spare, tokens: left };
+}
+
+/**
+ * A Claude stage's dollars and tokens by model from Claude Code's own per-model usage (its usage record's `models`, from
+ * `modelUsage`, sub-agents included), each model's part `{key, cost, tokens}`; null unless it accounts for exactly the
+ * passes of its `entries` (ledger entries read by ledgerPass): every model named, every pass's dollars reported and all of
+ * one billing kind, and the models' dollars summing to the passes' to the records' rounding.
+ */
+function claudeModelParts(usage, entries, prices) {
+  const models = usage?.models && typeof usage.models === "object" && !Array.isArray(usage.models) ? Object.entries(usage.models) : [];
+  if (!models.length || entries.some(([, p]) => !p.priced || p.cost.unknownRuns)) return null;
+  const kinds = new Set(entries.flatMap(([, p]) => COST_KINDS.filter((k) => p.cost.usd[k] > 0)));
+  if (kinds.size > 1 || kinds.has("sandbox")) return null;
+  const kind = [...kinds][0] ?? null;
+  const parts = [];
+  for (const [name, u] of models) {
+    const key = modelName(name, prices);
+    const usd = num(u?.usd);
+    if (!key || usd === null || usd < 0 || (usd > 0 && !kind)) return null;
+    const cost = zeroCost();
+    if (kind) cost.usd[kind] = round6(usd);
+    parts.push({ key, cost, tokens: { input: countSum(u.input, u.cached, u.written), output: num(u.output), cached: num(u.cached), written: num(u.written) } });
+  }
+  const passes = entries.reduce((t, [, p]) => t + COST_KINDS.reduce((s, k) => s + p.cost.usd[k], 0), 0);
+  const named = parts.reduce((t, x) => t + COST_KINDS.reduce((s, k) => s + x.cost.usd[k], 0), 0);
+  return Math.abs(passes - named) <= 5e-7 * (entries.length + models.length) + 1e-9 ? parts : null;
+}
+
+/**
+ * How one stage goes into `breakdowns.model` (#568): its dollars, runs of unknown cost and tokens by the model each pass
+ * ran on, wherever its per-pass `ledger` names it; in a Claude stage whose usage record (`usage`) holds Claude Code's
+ * per-model usage, by that usage, so its sub-agents' models get their own parts (claudeModelParts). What no pass names (a
+ * pass whose model the ledger does not name, the sandbox vendor's cost, dollars outside every pass) stays under the
+ * stage's `model`, as does the whole stage with no ledger, or one whose passes do not fit inside its figures
+ * (remainderOf). `ledger` is the one both the stage path and the finish card path have at hand: its ledger line, else
+ * local mode's own record of it in this clone; `stages` 1 for a stage, 0 for a record that is none, counted under its own
+ * model. Parts `{key, basis, stages, cost, tokens}`, `basis` `pass` or `stage`; their sums are the stage's.
+ */
+export function modelParts({ model, cost, tokens, stages, ledger = null, usage = null, harness = null, prices }) {
+  const whole = [{ key: model, basis: "stage", stages, cost, tokens }];
+  const entries = (Array.isArray(ledger) ? ledger : []).map((e) => [e, ledgerPass(e)]).filter(([, p]) => p);
+  if (!entries.length) return whole;
+  let parts = harness === "claude" ? claudeModelParts(usage, entries, prices) : null;
+  if (!parts) {
+    const by = new Map();
+    for (const [e, p] of entries) {
+      const key = modelName(e.model, prices);
+      if (!key) continue;
+      const x = by.get(key) ?? { key, cost: zeroCost(), tokens: zeroTokens() };
+      addCost(x.cost, p.cost);
+      addTokens(x.tokens, p.tokens);
+      by.set(key, x);
+    }
+    parts = [...by.values()];
+  }
+  if (!parts.length) return whole;
+  const spare = remainderOf(cost, tokens, parts, entries.length + parts.length);
+  if (!spare) return whole;
+  const own = parts.find((x) => x.key === model) ?? { key: model, cost: zeroCost(), tokens: zeroTokens() };
+  const out = [own, ...parts.filter((x) => x !== own)].map((x) => ({ key: x.key, basis: "pass", stages: x === own ? stages : 0, cost: x.cost, tokens: x.tokens }));
+  const leftover = COST_KINDS.some((k) => spare.cost.usd[k]) || spare.cost.unknownRuns || TOKEN_KINDS.some((k) => spare.tokens[k]);
+  return leftover ? [...out, { key: model, basis: "stage", stages: 0, ...spare }] : out;
+}
+
 /** A breakdown's rows: one per key, in the order of their first stage, each with its stage count, cost and tokens. */
 function breakdown() {
   const rows = new Map();
@@ -824,7 +944,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   // The stages among them (a decision record, or a vendor comment with no stage of its own, is none).
   let unknownStages = 0;
   const mixes = mixBook(prices);
-  const views = { stage: breakdown(), pass: breakdown(), model: breakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
+  const views = { stage: breakdown(), pass: breakdown(), model: modelBreakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
   const passMinutes = new Map();
   const cacheByKind = new Map();
   const objectives = [];
@@ -985,6 +1105,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       // the order the stage path counts them (Pendulum's stages, then its sandbox stages with no progress comment, then
       // those it cannot attribute and their vendor comments), before the decision calls outside a stage (cost.parts).
       summariesUsed += 1;
+      // Each of its stages' ledger lines, by run key: the card's per-stage passes carry no model.
+      const lineLedgers = new Map(sorted(ownAll.filter((c) => progress.test(c.body || "") && spendParts(c.body))).reverse().map((c) => [runOf(c.body), ledgerOfComment(c.body)?.ledger]).filter(([k, l]) => k && Array.isArray(l)));
       const count = (kind, c, s, stage) => {
         const tokens = s.tokens ?? zeroTokens();
         const model = modelName(s.model, prices);
@@ -994,7 +1116,11 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
         addTokens(totalTokens, tokens);
         views.stage.add(kind, c, tokens, stage ? 1 : 0);
         views.harness.add(s.harness ?? null, c, tokens, stage ? 1 : 0);
-        views.model.add(model, c, tokens, stage ? 1 : 0);
+        // By the model each pass ran on (modelParts), from the same ledger the stage path takes it from: the stage's
+        // ledger line beside its spend line, else local mode's own record of it in this clone.
+        const local = stage && !s.unattributed && s.key ? localRecs.get(s.key) ?? null : null;
+        const split = stage && !s.unattributed && s.key ? lineLedgers.get(s.key) ?? (Array.isArray(local?.ledger) ? local.ledger : null) : null;
+        views.model.add(modelParts({ model, cost: c, tokens, stages: stage ? 1 : 0, ledger: split, usage: local, harness: s.harness ?? null, prices }));
         views.version.add(s.version ?? null, c, tokens, stage ? 1 : 0);
         if (stage) {
           stagesSeen += 1;
@@ -1063,7 +1189,10 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       const count = rec.notStage ? 0 : 1;
       views.stage.add(stageKind, c, tokens, count);
       views.harness.add(harness, c, tokens, count);
-      views.model.add(model, c, tokens, count);
+      // Its dollars by the model each pass ran on (modelParts), from the ledger the finish card path has at hand as well:
+      // its ledger line, else local mode's own record of it in this clone; with that record's per-model usage for Claude.
+      const split = rec.source === "decisions" || rec.unattributed || rec.notStage || rec.unmatched === true ? null : onComment?.ledger ?? (Array.isArray(localRec?.ledger) ? localRec.ledger : null);
+      views.model.add(modelParts({ model, cost: c, tokens, stages: count, ledger: split, usage: localRec, harness, prices }));
       // The stage's per-pass ledger, as its finish card takes it (finish-card.mjs objectiveStages), so the card path and
       // the stage path give the same figures whatever else of the Objective is read: its progress comment's ledger line
       // (times to the second), else its usage record's or local mode's own record of it (to the millisecond). A record
@@ -1071,7 +1200,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       const unmatched = rec.unmatched === true;
       const ledger = unmatched ? null : ([onComment, rec, recordOf, localRec].map((x) => x?.ledger).find(Array.isArray) ?? null);
       // The token mix `--rates` weighs (mixBook): a stage's whole tokens from its record when one is at hand (with its
-      // long-context share and its sub-agent threads), else as the model breakdown counts them; split by its ledger's
+      // long-context share and its sub-agent threads), else the stage's tokens as the totals count them; split by its ledger's
       // passes when they ran on more than one model. The Objective's worker and sub-agent models from its harness line's
       // or record's `ran`.
       if (rates && rec.source !== "decisions" && !rec.notStage && !rec.unattributed) {
@@ -1417,8 +1546,8 @@ const TOKEN_KEYS = ["input", "cached", "written", "output"];
 const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
 
 /**
- * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the model breakdown counts
- * them, but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
+ * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the totals count them,
+ * but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
  * stage's, as the cost join prices them (usage.mjs priceStage); its decision records' tokens are in no model's. A stage
  * whose ledger's harness passes (its decision records left out) name more than one model (a review stage's review pass on
  * the reviewer's model, its answer and fix passes on the worker's), or one that is not the stage's (an alias or a dated
@@ -1619,7 +1748,8 @@ export function renderReport(r) {
   };
   view("stage", r.breakdowns.stage, "Stage");
   view("pass", r.breakdowns.pass, "Pass", "Passes");
-  view("model", r.breakdowns.model, "Model");
+  // One line per model and basis (modelParts): by pass, by stage.
+  if (r.breakdowns.model.length) out.push("", "## By model", "", "Each pass's dollars are under the model it ran on, where its stage's per-pass ledger names it (by pass); the rest of a stage's are under the stage's model (by stage). A stage counts once, under its own model.", "", table(["Model", "Basis", "Stages", ...COST_HEAD], r.breakdowns.model.flatMap((x) => ["pass", "stage"].filter((b) => x.basis[b]).map((b) => [x.key ?? "not recorded", b, x.basis[b].stages, ...costCells(x.basis[b].cost)]))));
   view("harness", r.breakdowns.harness, "Harness");
   view("Pendulum version", r.breakdowns.version, "Version");
   if (r.breakdowns.account) view("account", r.breakdowns.account, "Account");

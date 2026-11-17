@@ -44,16 +44,16 @@ if (mode === "claude-resumed") {
 `, { mode: 0o755 });
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const mode = process.env.FAKE_MODE;
-${line({ type: "thread.started", thread_id: "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" })}
+console.log(JSON.stringify({ type: "thread.started", thread_id: process.env.FAKE_THREAD || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" }));
 if (mode === "codex-killed") setTimeout(() => {}, 60000);
-if (mode === "codex-turn") ${line({ type: "turn.completed", usage: { input_tokens: 200000, cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } })}
+if (mode === "codex-turn") console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.FAKE_INPUT || 200000), cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } }));
 `, { mode: 0o755 });
   return bin;
 }
 
 const BIN = fakeBin();
-const pass = (harness, model, mode, { resume = null, timeoutMs = 60_000, version = "", usd = "", session = "" } = {}) =>
-  runHarness({ harness, model, prompt: "p", maxUsd: 25, resume, cwd: BIN, env: { HOME: process.env.HOME, PATH: `${BIN}:${process.env.PATH}`, CODEX_HOME: join(BIN, "codex-home"), FAKE_MODE: mode, FAKE_VERSION: version, FAKE_USD: String(usd), FAKE_SESSION: session }, timeoutMs, label: "work-1" });
+const pass = (harness, model, mode, { resume = null, timeoutMs = 60_000, version = "", usd = "", session = "", input = "", thread = "" } = {}) =>
+  runHarness({ harness, model, prompt: "p", maxUsd: 25, resume, cwd: BIN, env: { HOME: process.env.HOME, PATH: `${BIN}:${process.env.PATH}`, CODEX_HOME: join(BIN, "codex-home"), FAKE_MODE: mode, FAKE_VERSION: version, FAKE_USD: String(usd), FAKE_SESSION: session, FAKE_INPUT: String(input), FAKE_THREAD: thread }, timeoutMs, label: "work-1" });
 
 /** A fake GitHub that lists `comments` as the repository's comments updated today, and no usage artifact. */
 async function fakeGitHub(comments) {
@@ -342,6 +342,14 @@ test("#506 review F1: a resumed total below the one counted is unknown, and the 
   assert.deepEqual([old.usd, old.usdUnknownWhy], [null, ["resumed-total"]]);
   const next = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-old", version: "2.1.325", usd: 3.5, session: "s-old" });
   assert.ok(Math.abs(next.usd - 0.5) < 1e-9, `$0.50 against the $3 still counted, never $2.00 against the old version's $1.50: ${next.usd}`);
+  // Codex: its running total is its tokens. Counted before: 500,000 input; the thread then reports 200,000 (unknown, the
+  // new base), then 300,000: that pass's share is 100,000, never 0 against the old 500,000.
+  const thread = "02b2d7cb-27c3-7b24-b3eb-58c062c5f835";
+  seedSessionTotal(thread, { usd: null, tokens: { input: 500_000, output: 5000, cached: 100_000, written: 0 } });
+  const low = await pass("codex", "gpt-6.1-sol", "codex-turn", { resume: thread, input: 200_000, thread });
+  assert.deepEqual([low.usd, low.usdUnknownWhy], [null, ["resumed-total"]]);
+  const after = await pass("codex", "gpt-6.1-sol", "codex-turn", { resume: thread, input: 300_000, thread });
+  assert.deepEqual([after.tokens.input, after.tokens.output, after.usdUnknownWhy ?? []], [100_000, 0, []], "the share from the 200,000 base");
 });
 
 test("#506 review: every result.json Pendulum writes for a stage whose own process wrote none names the stage's progress comment and account, and says it stands in", async () => {

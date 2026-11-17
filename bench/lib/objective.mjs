@@ -770,7 +770,8 @@ export function accountUse(usage) {
  *   that account's comments.
  * A stand-in (`standIn`: Pendulum's record for a stage whose own process wrote none) gives way to the comments it stands
  * for, the first taking its sandbox cost when it has none; when another record stands for them all, its sandbox cost goes
- * to that record (when it has none) and it is dropped. A record that names no comment counts beside the comments, but a
+ * to that record (when it has none) and it is dropped. A record that is no stand-in takes the sandbox cost of a comment
+ * it stands for when it has none of its own. A record that names no comment counts beside the comments, but a
  * figure is never counted twice: a record with no `progressRun` field beside an unnamed comment of its stage with
  * dollars may be that stage, so its dollars are unknown there (UNKNOWN_WHY `unmatched`).
  */
@@ -790,7 +791,13 @@ export const withLines = (records = [], lines = []) => {
   // Who counts each comment: a record that is no stand-in first, then the stand-ins in turn.
   const owner = new Map();
   const out = all.filter((r) => !r.standIn).map((r) => ({ ...r }));
-  out.forEach((r) => lines.filter(covers(r)).forEach((l) => owner.set(l, owner.get(l) ?? r)));
+  for (const r of out) {
+    for (const l of lines.filter(covers(r))) {
+      owner.set(l, owner.get(l) ?? r);
+      // The stage's sandbox cost, booked on its comment (its vendor comment): the record takes it when it has none.
+      if (l.vendor && !r.vendor) r.vendor = l.vendor;
+    }
+  }
   for (const r of all.filter((x) => x.standIn)) {
     const mine = lines.filter(covers(r));
     const free = mine.filter((l) => !owner.has(l));
@@ -809,7 +816,7 @@ export const withLines = (records = [], lines = []) => {
   // A record that cannot say which comment is its own, beside an unnamed comment of its stage with dollars: unknown there.
   const unsure = (r) => !Object.hasOwn(r, "progressRun") && !lines.some(covers(r)) && rest.some((l) => stageOf(l) === stageOf(r) && typeof l.usd === "number" && l.usd > 0);
   const known = (r) => r.runs !== 0 && ((typeof r.usd === "number" && r.usd > 0) || (r.harness === "codex" && (r.tokens?.input ?? null) !== null));
-  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])] } : r));
+  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdByBilling: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])] } : r));
   return [...counted, ...rest];
 };
 

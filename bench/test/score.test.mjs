@@ -1402,3 +1402,12 @@ test("#506 review N3: the row's accounts come from the records and the comments 
   n3.issueComments[n3.issueComments.length - 1].body = account(n3.issueComments.at(-1).body);
   assert.deepEqual(score(n3).accounts, ["alpha"]);
 });
+
+test("#506 re-check: a record that is no stand-in takes the sandbox cost of the comment it stands for when it has none", () => {
+  // Probe: the stage's own result.json ($4, no vendor) and its comment, whose vendor comment booked the sandbox's $0.60.
+  const c = mixedRoute(97, { workKey: "5552-abcdef012345", work: { usd: 4 }, review: false, artifact: { progressRun: "5552-abcdef012345", usd: 4 } });
+  const app = c.issueComments[0].user;
+  c.issueComments.push({ user: app, created_at: "2031-03-02T02:00:00Z", body: "<!-- pendulum:97:vendor:work:5552-abcdef012345 -->\nSandbox cost.\n<!-- pendulum:spend {\"usd\":0.6,\"vendorUsd\":0.6} -->" });
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.deepEqual([row.cost.usd, row.cost.vendorUsd, row.cost.totalUsd, row.cost.usdUnknown], [4, 0.6, 4.6, undefined]);
+});

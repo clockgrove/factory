@@ -4,8 +4,8 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { setSelf } from "../scripts/lib/logic.mjs";
-import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
+import { setSelf, setWriters } from "../scripts/lib/logic.mjs";
+import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, pendulumLogins, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -82,6 +82,52 @@ test("finish card: markers count only from Pendulum's own login", () => {
   assert.equal(d.planned, false);
 });
 
+test("finish card: Pendulum's logins are the App's and a local loop's; an Objective that moved from the Action to a local loop counts every stage; none found is unknown, never $0", () => {
+  setWriters("clockgrove/pendulum-scratch", ["dev", "kirkmarple-clockgrove"]);
+  // The Action built it (the App's comments, its pendulum:running); a person moved it to their local loop, whose login
+  // applied pendulum:running and ran the review (its spend line in its progress comment).
+  const moved = [
+    ...real.timeline,
+    { id: 501, event: "labeled", label: { name: "pendulum:local" }, actor: { login: "kirkmarple-clockgrove", type: "User" }, created_at: "2026-11-17T02:26:00Z" },
+    { id: 502, event: "labeled", label: { name: "pendulum:running" }, actor: { login: "dev", type: "User" }, created_at: "2026-11-17T02:26:10Z" },
+  ];
+  const comments = withSpend({ review: { usd: 0.163442 } }).map((c) => (c.body.startsWith("<!-- pendulum:3:progress:review:") ? { ...c, user: { login: "dev", type: "User" } } : c));
+  for (const self of [SELF, "dev"]) {
+    setSelf(self);
+    try {
+      const owners = pendulumLogins(3, moved, comments);
+      assert.deepEqual([...owners].sort(), ["clockgrove-pendulum[bot]", "dev"], `as ${self}`);
+      const d = finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: moved, comments, pulls: pulls(), checks: real.checks, records: real.records, mine: (x) => owners.has(String(x?.user?.login).toLowerCase()) });
+      assert.deepEqual(d.stages.map((s) => [s.kind, s.usd]), [["build", 0.35637], ["review", 0.163442]], `every stage, posting as ${self}`);
+      assert.match(renderFinishCard(d), /Merged in 3 min 54 s for \$0\.52\./);
+    } finally {
+      setSelf(null);
+    }
+  }
+  // A person's pendulum:running with no pendulum:local on is no loop's: their login stays untrusted.
+  setSelf("dev");
+  try {
+    const manual = [...real.timeline, { event: "labeled", label: { name: "pendulum:running" }, actor: { login: "kirkmarple-clockgrove", type: "User" }, created_at: "2026-11-17T02:26:10Z" }];
+    assert.deepEqual([...pendulumLogins(3, manual, [])].sort(), ["clockgrove-pendulum[bot]", "dev"]);
+    // The local-route mark: its writer made the pendulum:local label it names.
+    const adopted = [...real.timeline, { id: 777, event: "labeled", label: { name: "pendulum:local" }, actor: { login: "kirkmarple-clockgrove", type: "User" }, created_at: "2026-11-17T02:23:50Z" }];
+    const mark = { id: 1, user: { login: "kirkmarple-clockgrove", type: "User" }, body: "<!-- pendulum:3:local-route:777 -->\nmarked" };
+    assert.ok(pendulumLogins(3, adopted, [mark]).has("kirkmarple-clockgrove"));
+    assert.ok(!pendulumLogins(3, adopted, [{ ...mark, user: { login: "someone", type: "User" } }]).has("someone"), "a mark by another login proves nothing");
+  } finally {
+    setSelf(null);
+  }
+  // Stages written by a login the card cannot trust (or none at all): no stage, and the cost is unknown, never $0.00.
+  const none = withSelf(() => finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: real.records, mine: (x) => x?.user?.login === "someone-else" }));
+  assert.deepEqual(none.stages, []);
+  const md = renderFinishCard(none);
+  assert.match(md, /<h3 align="center">Merged in 3 min 54 s; its cost is unknown\.<\/h3>/);
+  assert.doesNotMatch(md, /\$0\.00/);
+  assert.match(md, /\| Pendulum's stages, no record found \| — \| unknown \|/);
+  assert.match(md, /Pendulum found no record of this run's stages, so its cost shows as unknown, not as a number\./);
+  setWriters("clockgrove/pendulum-scratch", []);
+});
+
 test("finish card: a run with unreported spend shows it as unknown, never as a number, and draws no cost chart", () => {
   // The work stage was killed before its harness reported (a run of unknown cost, $0 known); the review reported $0.10.
   const comments = withSpend({ work: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, review: { usd: 0.1 } });
@@ -140,11 +186,13 @@ test("finish card: what the dollars are comes from #508's usdByBilling, on recor
   assert.match(unrecorded, /for \$0\.52 \(billing not recorded\)\.<\/h3>/);
   assert.ok(unrecorded.includes('<img alt="cost: $0.52"'));
   assert.ok(unrecorded.includes("| Stage | Time | Cost (billing not recorded) |"));
-  assert.match(unrecorded, /Pendulum did not record how they were billed\./);
+  assert.match(unrecorded, /Pendulum did not record how these dollars were billed\./, "no recorded kind: not 'some'");
+  assert.doesNotMatch(unrecorded, /For some of these dollars/);
   assert.doesNotMatch(unrecorded, /API-equivalent/);
   const half = renderFinishCard(withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { subscription: 0.35637 } }, { ...real.records[1], usdByBilling: { unknown: 0.163442 } }] })));
   assert.match(half, /for \$0\.52 \(part API-equivalent, part billing not recorded\)\.<\/h3>/);
   assert.match(half, /\| Review · Fable 5\.2 \| 35 s \| \$0\.16 \(billing not recorded\) \|/);
+  assert.match(half, /For some of these dollars Pendulum did not record how they were billed\./, "beside a recorded kind: 'some'");
 });
 
 test("finish card: a sandbox stage's vendor comment counts whenever it was written; one with no progress comment is a stage of its own, its unknowns kept (B2, S8)", () => {
@@ -180,6 +228,9 @@ test("finish card: a stage is named only by what its records say (S5)", () => {
   assert.deepEqual(d.stages.map((s) => s.kind), ["build", "work", "rebase", "review"], "a later work stage is work, not a fix");
   assert.match(renderFinishCard(d), /section Work\n {4}10s :active/);
 
+  // A sandbox work stage that wrote only its vendor comment, before the build's progress comment: it is the build.
+  const early = comment(912, "2026-11-17T02:24:00Z", `<!-- pendulum:3:vendor:work:zz -->\nx\n${spendLine({ usd: 0.2, modelUsd: 0.1, vendorUsd: 0.1 })}`);
+  assert.deepEqual(withSelf(() => data({ comments: [...real.comments, early] })).stages.map((s) => s.kind), ["build", "work", "review"], "named in time order across both kinds");
   // A split Objective: the first work stage after part 1 merged is part 2's.
   const part1 = { ...real.pr, number: 2, merged_at: "2026-11-17T02:25:58Z", created_at: "2026-11-17T02:25:00Z", html_url: "https://github.com/clockgrove/pendulum-scratch/pull/2" };
   const split = withSelf(() => data({ comments: [...real.comments, again], pulls: [{ pr: part1, timeline: [], reviews: [], reviewComments: [] }, ...pulls()] }));
@@ -388,7 +439,7 @@ test("finish card: a passing failure waits for a later tick, by the tick's own c
   assert.deepEqual((await tickOver(refused)).finished, [3]);
 });
 
-test("finish card: only the route that runs the Objective posts it, and under a person's login the PR body is left alone (S1, B3)", async () => {
+test("finish card: one route posts it, the local loop for pendulum:local Objectives and the Action for the rest, and under a person's login the PR body is left alone (S1, S-A, B3)", async () => {
   // A local loop without --all: #3 has no pendulum:local, so it is the Action's; the loop tidies nothing of it.
   const notOurs = fakeRepo();
   assert.deepEqual((await tickOver(notOurs, { env: { PENDULUM_LOCAL: "1" } })).finished, []);
@@ -404,4 +455,11 @@ test("finish card: only the route that runs the Objective posts it, and under a 
   assert.deepEqual((await tickOver(loop, { env: { PENDULUM_LOCAL: "1" } })).finished, [3]);
   assert.ok(loop.writes.some((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}`)));
   assert.ok(!loop.writes.some((w) => w.startsWith("PATCH /pulls/4")), "no edit of the PR body under a person's login");
+  // A loop with --all beside a running Action: it tidies the Action's Objective but posts no card for it; the Action does.
+  const all = fakeRepo();
+  const allTick = await tickOver(all, { env: { PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" } });
+  assert.deepEqual(allTick.finished, []);
+  assert.ok(allTick.done.includes(3), "tidied all the same");
+  assert.ok(!all.writes.some((w) => w.includes(finishMarker(3))));
+  assert.deepEqual((await tickOver(fakeRepo())).finished, [3], "the Action posts it");
 });

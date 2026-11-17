@@ -1520,13 +1520,14 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
     const cards = project && recent.length ? await projectStatuses(project, repo, recent.map((c) => c.number), opts) : {};
     for (const { number, labels } of doneTidies(recent, { cards, project: !!project, tends: (i) => backend().trigger.tends(i) })) {
       // The finish card (finish-card.mjs): once per Objective that merged, at its first tidy, before its state label goes,
-      // by the route that ran it (a local loop with --all tidies others' Objectives but posts no card for them). One that
+      // by one route only: a local loop for a `pendulum:local` Objective, the Action for any other, so a loop with --all
+      // beside a running Action never posts a second card (it tidies the Action's Objectives but posts for none). One that
       // met a passing failure (GitHub's 5xx, its rate limit, the network) leaves the label for a later tick (the cron's or
       // the loop's; no wake of its own), up to FINISH_RETRY_MS after the close; after that, or on any other failure, the
       // tidy goes on without it. Under a person's login (a local loop) the PR body keeps no finish block: the card on the
       // issue is the record.
       const closed = recent.find((i) => i.number === number);
-      if (labels.length && closed && backend().trigger.routes(closed)) {
+      if (labels.length && closed && hasLocalLabel(closed) === (backend().name === "local")) {
         const usageToken = inputs.githubToken || token;
         const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, log, records: (n) => objectiveRecords(repo, n, { token: usageToken, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
         if (card === "posted") {

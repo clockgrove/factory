@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { INTERNAL_SKILLS, PLUGIN_ROOT_SENTENCE, skillRules, skillsDigest, unshippedRefs } from "../skills.mjs";
+import { INTERNAL_SKILLS, PLUGIN_ROOT_SENTENCE, USER_SKILLS, skillRules, skillSet, skillsDigest, unshippedRefs } from "../skills.mjs";
 
 const SCRIPT = join(import.meta.dirname, "..", "skills.mjs");
 const skills = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
@@ -211,6 +211,51 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
   const r = skills(["--plugin", join(dir, "plugin"), "--out", join(dir, "skills.json")]);
   assert.equal(r.status, 5, "the CI gate fails on them");
   assert.match(r.stderr, /user-slash: a user skill's description starts with what it does/);
+});
+
+// A newcomer meets one skill per verb: the twelve user skills are pinned, the stage skills stay hidden, and a skill added,
+// removed or renamed changes the pin in the same PR.
+test("the plugin holds exactly the pinned skills: the twelve user skills and the internal ones", () => {
+  assert.deepEqual(skillSet(join(CHECKOUT, "plugin")), []);
+  assert.deepEqual(USER_SKILLS, [
+    "pendulum-file",
+    "pendulum-status",
+    "pendulum-stop",
+    "pendulum-restart",
+    "pendulum-run",
+    "pendulum-serve",
+    "pendulum-review-here",
+    "pendulum-kick",
+    "pendulum-handover",
+    "pendulum-score",
+    "pendulum-doctor",
+    "pendulum-setup",
+  ]);
+  assert.deepEqual(INTERNAL_SKILLS.filter((s) => USER_SKILLS.includes(s)), [], "no skill is both");
+  assert.equal(skills(["--check"]).status, 0, "the CI gate passes on the checkout's plugin");
+});
+
+test("skillSet: a pinned skill missing, a skill pinned as neither and a user skill's description without when to use it or what it is not for are refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-bench-set-"));
+  const skill = (name, description) => {
+    mkdirSync(join(dir, "plugin", "skills", name), { recursive: true });
+    writeFileSync(join(dir, "plugin", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: "${description}"\n---\nBody.\n`);
+  };
+  const pins = { user: ["one", "two", "three"], internal: ["stage"] };
+  skill("one", "Does one thing. Use when asked for it. Not for the other thing (two).");
+  skill("stage", "Internal: a stage.");
+  const set = () => skillSet(join(dir, "plugin"), pins).map((r) => `${r.skill}: ${r.why}`);
+  assert.deepEqual(set(), ["three: a pinned skill the plugin does not have", "two: a pinned skill the plugin does not have"]);
+  skill("two", "Does two things. Use when asked for them.");
+  skill("three", "Does three things. Not for one thing (one).");
+  skill("four", "Does four things. Use when asked. Not for one thing (one).");
+  assert.deepEqual(set(), [
+    "four: a skill pinned as neither a user skill (USER_SKILLS) nor an internal one (INTERNAL_SKILLS)",
+    "three: a user skill's description says what it does, when to use it (`Use when`) and what it is not for (`Not for`)",
+    "two: a user skill's description says what it does, when to use it (`Use when`) and what it is not for (`Not for`)",
+  ]);
+  // The CLI holds only this checkout's plugin to the pin: a tree made for a test passes the gate with skills of its own.
+  assert.equal(skills(["--plugin", join(dir, "plugin"), "--out", join(dir, "skills.json")]).status, 0);
 });
 
 // Codex loads a skill whose implicit invocation is off only when the prompt names it as `$name`; Claude Code and Copilot

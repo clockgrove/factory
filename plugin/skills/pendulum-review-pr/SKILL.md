@@ -1,6 +1,6 @@
 ---
 name: pendulum-review-pr
-description: "Internal: the Clockgrove Pendulum reviewer's instructions, loaded only by Pendulum's reviewer job, its reviewer agents and the pendulum-review skill. One pass of line-tied review comments on a Clockgrove Pendulum PR, each naming the acceptance entry or repository rule it concerns, with behaviour-changing assumptions flagged; no verdict, no approval, no request for changes, no refusal."
+description: "Internal: the Clockgrove Pendulum reviewer's instructions, loaded only by Pendulum's reviewer job, its reviewer agents and the pendulum-review-here skill. One pass of line-tied review comments on a Clockgrove Pendulum PR, each naming the acceptance entry or repository rule it concerns, with behaviour-changing assumptions flagged; no verdict, no approval, no request for changes, no refusal."
 user-invocable: false
 ---
 

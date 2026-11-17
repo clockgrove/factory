@@ -1,9 +1,9 @@
 ---
-name: pendulum-review
+name: pendulum-review-here
 description: "Review one Clockgrove Pendulum PR of the current repository by number: in this session with the reviewer's skill, posting one comment-only pass of line-tied findings as the user only once they have read it and said yes; or, on their yes, with local mode's sandboxed review stage (`pendulum review <pr> --wait`). Use when the user asks to review a Clockgrove Pendulum PR. Not for answering a review's comments, which the worker does (pendulum-run)."
 ---
 
-# /pendulum:pendulum-review <pr>
+# /pendulum:pendulum-review-here <pr>
 
 One reviewer pass on a Pendulum PR, as the Action's review job makes it. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 

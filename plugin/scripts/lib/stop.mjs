@@ -69,7 +69,7 @@ export function goTrust(events, n, trusted) {
 export const goNoted = (events, n, at) => (events || []).some((e) => e?.event === "commented" && isSelf({ user: e.user ?? e.actor }) && (e.body || "").startsWith(refusedMarker(n, at)));
 
 /** The states a person's go (the Objective label re-applied) puts back to Queued: their labels, by the issue's timeline. */
-const REQUEUED_FROM = ["pendulum:blocked", "pendulum:question", "pendulum:in-review"];
+export const REQUEUED_FROM = ["pendulum:blocked", "pendulum:question", "pendulum:in-review"];
 
 /**
  * Whether a person re-applied the Objective `label` (or started it from a draft: its DRAFT_LABEL taken off) after its last

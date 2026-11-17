@@ -1,6 +1,6 @@
 ---
 name: pendulum-serve
-description: "Start Clockgrove Pendulum's local loop for the current repository on this machine (`pendulum serve`) on the user's yes: it takes the Objectives labelled pendulum:local (every one where no Action is active), works, reviews and merges them in sandboxes on this machine's harness login, and resumes its own paused work first; also supervises the queue with `pendulum wait`. Use when the user asks to run Clockgrove Pendulum locally, serve, or work the queue on their machine. Not for one Objective by number (pendulum-run) or the Action's scheduler (pendulum-queue)."
+description: "Start Clockgrove Pendulum's local loop for the current repository on this machine (`pendulum serve`) on the user's yes: it takes the Objectives labelled pendulum:local (every one where no Action is active), works, reviews and merges them in sandboxes on this machine's harness login, and resumes its own paused work first; also supervises the queue with `pendulum wait`. Use when the user asks to run Clockgrove Pendulum locally, serve, or work the queue on their machine. Not for one Objective by number (pendulum-run) or kicking the Action's dispatcher (pendulum-kick)."
 ---
 
 # /pendulum:pendulum-serve

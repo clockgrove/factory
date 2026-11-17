@@ -1,6 +1,6 @@
 ---
 name: pendulum-run
-description: "Run one Clockgrove Pendulum Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`pendulum run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Pendulum to push only on a second yes. Use when the user asks to run, work or build one Clockgrove Pendulum Objective on their machine. Not for working the whole queue (pendulum-serve) or starting the Action's scheduler (pendulum-queue)."
+description: "Run one Clockgrove Pendulum Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`pendulum run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Pendulum to push only on a second yes. Use when the user asks to run, work or build one Clockgrove Pendulum Objective on their machine. Not for working the whole queue (pendulum-serve) or kicking the Action's dispatcher (pendulum-kick)."
 ---
 
 # /pendulum:pendulum-run <issue> [--here]
@@ -43,7 +43,7 @@ The rendered task card is your instructions, `$PENDULUM_IN/issue.md` verbatim th
 
 Show the user the branch's commits (`git log --oneline origin/<default branch>..HEAD`), the PR title (the first line of `$PENDULUM_OUT/pr.md`) and the exit record, and say what `pendulum deliver <issue>` does: it runs the trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `pendulum/<issue>`, posts the plan, the PR, the replies and the note as the user, and applies the exit record: a delivered PR is marked ready and labelled `pendulum:review`, which, when `.github/workflows/pendulum.yml` exists, fires the Action's review job (with `auto_merge` on, the Action merges it once green). Ask for a yes.
 
-On a yes, run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review skill and a human merge.
+On a yes, run `pendulum deliver <issue>` from the clone. Without the workflow, say that the PR waits for the pendulum-review-here skill and a human merge.
 
 ### After
 

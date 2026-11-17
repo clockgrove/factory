@@ -1,11 +1,11 @@
 ---
-name: pendulum-queue
-description: "Start the unattended Clockgrove Pendulum scheduler for the current repository on the user's yes: preview what the Action's dispatcher would start and its spend caps, then dispatch the workflow when .github/workflows/pendulum.yml exists; otherwise explain the harness-cloud path for this harness. Also names the three off-machine routes and how an Objective moves between local mode and the Action. Use when the user asks to queue, start, kick or run the Clockgrove Pendulum queue unattended, or what running off this machine takes. Not for working Objectives on this machine (pendulum-serve, pendulum-run)."
+name: pendulum-kick
+description: "Kick the Clockgrove Pendulum Action's dispatcher now, on the user's yes: preview what it would start and its spend caps, then dispatch .github/workflows/pendulum.yml for the whole queue or one Objective, rather than wait for its next event or ten-minute tick; without the workflow, explain the harness-cloud path for this harness. Also names the three off-machine routes and how an Objective moves between local mode and the Action. Use when the user asks to kick or run the Clockgrove Pendulum dispatcher or the Action's queue now, or what running off this machine takes. Not for working Objectives on this machine (pendulum-serve, pendulum-run) or seeing what the queue is doing (pendulum-status)."
 ---
 
-# /pendulum:pendulum-queue
+# /pendulum:pendulum-kick [issue]
 
-Start unattended work: this starts the scheduler, never an Objective in this session. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
+Kick the dispatcher: the Action's job that starts ready Objectives, which otherwise runs on events and a ten-minute schedule. It never works an Objective in this session. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
 ## When the workflow exists
 

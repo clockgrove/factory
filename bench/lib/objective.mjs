@@ -28,6 +28,7 @@ import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf, decisionSpendEntries, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
+import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
 export const ROW_VERSION = 1;
 const BRANCH = (issue) => `pendulum/${issue}`;
@@ -79,28 +80,11 @@ function commitActor(commit) {
 }
 
 /**
- * The first `labeled pendulum:objective` event (the clock), or null; a draft's start
- * for a draft (below). With `clockAfter`, the first such event at or after that date:
- * an issue that an earlier Pendulum already ran under the same label starts its 0.6
- * clock there.
+ * The clock: the first `labeled pendulum:objective` event, or null; a draft's start for a draft. With `clockAfter`, the
+ * first such event at or after that date: an issue that an earlier Pendulum already ran under the same label starts its
+ * clock there. The finish card starts its clock the same way, so the rule lives with it (plugin finish-card.mjs).
  */
-export function labelTime(issue, timeline, label = OBJECTIVE_LABEL, clockAfter = null) {
-  const floor = clockAfter ? ms(clockAfter) : Number.NEGATIVE_INFINITY;
-  // The clock is the Objective's first label at or after the floor, or the first time Pendulum
-  // picked it up (its Running label) if that came first: an issue labelled before the floor and
-  // re-labelled later as a recovery must not have its recovery mistaken for its start.
-  const events = (timeline || [])
-    .filter((e) => e.event === "labeled" && (e.label?.name === label || e.label?.name === RUNNING_LABEL) && ms(e.created_at) >= floor)
-    .sort((a, b) => ms(a.created_at) - ms(b.created_at));
-  const first = events[0]?.created_at ?? null;
-  // A draft (pendulum:draft) is not started until it may run: its clock is the last of its Objective label's
-  // applications and its draft label's removals before Pendulum first picked it up, so neither its time as a draft nor
-  // the start itself (one label off, the other on, in either order) counts against the run.
-  if (!first || !(timeline || []).some((e) => e.event === "labeled" && e.label?.name === DRAFT_LABEL)) return first;
-  const running = events.find((e) => e.label?.name === RUNNING_LABEL)?.created_at ?? null;
-  const starts = (timeline || []).filter((e) => ((e.event === "labeled" && e.label?.name === label) || (e.event === "unlabeled" && e.label?.name === DRAFT_LABEL)) && ms(e.created_at) >= ms(first) && (!running || ms(e.created_at) <= ms(running)));
-  return starts.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1) ?? first;
-}
+export { labelTime };
 
 /**
  * Minutes of the wall clock spent waiting rather than working: from the clock to Pendulum's first
@@ -1021,7 +1005,10 @@ export function scoreObjective(collected, opts = {}) {
   const parked = issue.state === "open" && !missing.includes("label event") && Array.isArray(issue.labels) && !issue.labels.some((l) => (typeof l === "string" ? l : l?.name) === label);
 
   const pendulumLocal = localPendulumActions(collected);
-  const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !pendulumLocal(e.at, e.by, "body edit")) ?? null;
+  // Every body edit after the clock by a person, oldest first: never Pendulum's own login (its App's finish block on the
+  // merged PR's body, plugin finish-card.mjs), nor, in local mode, what localPendulumActions says is Pendulum's.
+  const self = pendulumLogin(collected.issueTimeline, app);
+  const bodyEdit = [...(collected.bodyEdits || [])].sort((a, b) => ms(a.at) - ms(b.at)).find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !(self && e.by?.login === self) && !pendulumLocal(e.at, e.by, "body edit")) ?? null;
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   actions.push(...unattributedAnswers(collected, since, actions, merged?.merged_at ?? null, { bots }));

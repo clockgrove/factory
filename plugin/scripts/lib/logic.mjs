@@ -759,8 +759,10 @@ export function parseBlockedBy(body) {
 
 /** The statuses that keep an issue out of the ready list, as the card shows them or the label says. */
 export const NOT_READY_STATUSES = new Set(["Running", "Blocked", "Question", "In review", "Done"]);
+/** The label Pendulum puts on an Objective it is working. */
+export const RUNNING_LABEL = "pendulum:running";
 export const STATE_LABELS = {
-  "pendulum:running": "Running",
+  [RUNNING_LABEL]: "Running",
   "pendulum:blocked": "Blocked",
   "pendulum:question": "Question",
   "pendulum:in-review": "In review",

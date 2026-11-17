@@ -640,3 +640,28 @@ test("#465: an Objective from before the rename (its events and markers under th
   const all = Object.values(s.harnesses).flatMap((h) => h.sequence);
   assert.deepEqual(all.map((e) => [e.issue, e.ok]), [[47, true]]);
 });
+
+test("body edits: every edit of the issue and PR bodies is read; Pendulum's finish block on the merged PR neither hides a person's earlier edit nor counts as one", async () => {
+  const { collectObjective } = await import("../lib/collect.mjs");
+  const api = async (path) => {
+    if (/issues\/5$/.test(path)) return { number: 5, labels: [{ name: "pendulum:objective" }], user: { login: "owner" } };
+    if (/pulls\?head=.*state=closed/.test(path)) return [{ number: 9, merged_at: "2031-03-02T03:30:00Z" }];
+    if (/pulls\/9$/.test(path)) return { number: 9, merged_at: "2031-03-02T03:30:00Z" };
+    return [];
+  };
+  const edits = (nodes) => ({ userContentEdits: { nodes } });
+  const graphql = async (q) => ({ repository: q.includes("pullRequest(") ? { pullRequest: edits([{ editedAt: "2031-03-02T03:31:00Z", editor: { login: "acme-pendulum", __typename: "Bot" } }, { editedAt: "2031-03-02T02:30:00Z", editor: { login: "owner", __typename: "User" } }]) } : { issue: edits([]) } });
+  const read = await collectObjective(api, REPO, 5, { graphql, jobs: false });
+  assert.deepEqual(read.bodyEdits.map((e) => [e.where, e.by.login]), [["PR #9", "acme-pendulum"], ["PR #9", "owner"]], "the App's later edit does not hide the person's");
+
+  const APP = { login: "acme-pendulum[bot]", type: "Bot" };
+  const finish = { at: "2031-03-02T03:31:00Z", where: "PR #100", by: APP };
+  const clean = cleanMerge(61);
+  clean.bodyEdits = [finish];
+  assert.equal(score(clean).walkAway.value, true, "Pendulum's own finish block is no human action");
+  const person = cleanMerge(62);
+  person.bodyEdits = [finish, { at: "2031-03-02T02:30:00Z", where: "PR #100", by: { login: "owner", type: "User" } }];
+  const r = score(person);
+  assert.equal(r.walkAway.value, false);
+  assert.match(r.walkAway.reason, /first human action: body edit on PR #100 by owner/);
+});

@@ -15,7 +15,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activePendulumJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activePendulumJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -23,6 +23,7 @@ import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_J
 import { addBilling } from "./lib/usage.mjs";
 import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
+import { FINISH_RETRY_MS, objectiveRecords, postFinishCard } from "./lib/finish-card.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -111,7 +112,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], finished: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, decisionRole = "dispatcher", notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
@@ -1512,11 +1513,34 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   // state label and its card moves to Done. No job runs on merge, so the cron does it. A local loop does it only for
   // the Objectives it routes, and records its removals as Pendulum's first (#2668).
   const done = [];
+  // The merged Objectives whose finish card this tick posted.
+  const finished = [];
   if (!dryRun) {
     const recent = await recentlyClosedByLabel(repo, inputs.objectiveLabel, 48, opts).catch(() => []);
     // Every closed one's card in one read, not one read each.
     const cards = project && recent.length ? await projectStatuses(project, repo, recent.map((c) => c.number), opts) : {};
     for (const { number, labels } of doneTidies(recent, { cards, project: !!project, tends: (i) => backend().trigger.tends(i) })) {
+      // The finish card (finish-card.mjs): once per Objective that merged, at its first tidy, before its state label goes,
+      // by one route only: a local loop for a `pendulum:local` Objective, the Action for any other, so a loop with --all
+      // beside a running Action never posts a second card (it tidies the Action's Objectives but posts for none). One that
+      // met a passing failure (GitHub's 5xx, its rate limit, the network) leaves the label for a later tick (the cron's or
+      // the loop's; no wake of its own), up to FINISH_RETRY_MS after the close; after that, or on any other failure, the
+      // tidy goes on without it. Under a person's login (a local loop) the PR body keeps no finish block: the card on the
+      // issue is the record.
+      const closed = recent.find((i) => i.number === number);
+      if (labels.length && closed && hasLocalLabel(closed) === (backend().name === "local")) {
+        const usageToken = inputs.githubToken || token;
+        const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n) => objectiveRecords(repo, n, { token: usageToken, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
+        if (card === "posted") {
+          finished.push(number);
+          log(`  #${number}: merged; its finish card is posted`);
+        } else if (card === "no self") log(`  #${number}: Pendulum's own login is unknown, so its records cannot be trusted; no finish card`);
+        else if (card instanceof Error) {
+          const again = transientError(card) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS;
+          log(`  #${number}: finish card: ${String(card.message).slice(0, 120)}; ${again ? "its state label waits for a later tick" : "the tidy goes on without it"}`);
+          if (again) continue;
+        }
+      }
       // Under a person's login, the removal is recorded as Pendulum's before it is made, or waits for the next tick.
       if (labels.length && backend().trigger.asPerson) {
         const recorded = await upsertComment(repo, number, marker(number, "done"), doneRecord(labels), opts).then(
@@ -1649,7 +1673,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   watch.mark("mark");
   // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
   const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
-  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? null : spentToday, unknownToday: usageError ? 0 : unknownToday, billingToday: usageError ? {} : billingToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? null : spentToday, unknownToday: usageError ? 0 : unknownToday, billingToday: usageError ? {} : billingToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, finished, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**

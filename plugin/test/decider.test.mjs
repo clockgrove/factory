@@ -513,8 +513,8 @@ test("#379: the answer gate and the finding check ask the stage's harness withou
   assert.equal(check.off, null);
   const [r] = await check.judge([{ id: 1, path: "a.js", line: 3, body: "null check missing", reply: "Fixed.", diff: "+if (x == null) return;" }], { repo: "o/r", prNumber: 2 });
   assert.deepEqual(r, { id: 1, verdict: "fixed", confidence: 0.9, error: null });
-  assert.ok(calls()[0].prompt.includes('"enum":["fixed","rebutted","unresolved"]'));
-  assert.equal(FINDING_QUESTION.choices.length, 3);
+  assert.ok(calls()[0].prompt.includes('"enum":["fixed","rebutted","decided","unresolved"]'));
+  assert.equal(FINDING_QUESTION.choices.length, 4);
   assert.equal(kept.length, 1);
 });
 

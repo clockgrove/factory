@@ -1616,6 +1616,8 @@ async function main() {
   // comments too.
   // The finding check (#368): what it judges each answer by, and its answers the gateway gave no verdict on (`unjudged`,
   // over this stage). The repository's rules: AGENTS.md at the head, the protected paths and the validation commands.
+  // The decisions: the maintainers' this stage read (objectiveDecisions, authors with write access), which can settle a
+  // finding (#474).
   const findingCheck = openFindingCheck({ inputs, stage: decisionStage });
   const unjudged = [];
   const findingRules = async (head) => {
@@ -1624,7 +1626,7 @@ async function main() {
   };
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
-    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [] }));
+    const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [] }));
     unjudged.push(...r.unjudged);
   };
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway

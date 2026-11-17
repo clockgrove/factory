@@ -93,14 +93,14 @@ const harnessOf = (stage) => {
 
 /**
  * The stage's one record of its gateway decision calls, as the stage's usage keeps it, as a harness decision call's is
- * (harness.mjs keepDecision): labelled `decision`, `decider` "ai-gateway", no tokens (the gateway's model is no
+ * (harness.mjs keepDecision): labelled `decision`, `decider` "ai-gateway", billed `api` (to the gateway key), no tokens (the gateway's model is no
  * harness's), `calls` the tries that reached the gateway, `usd` the known dollars and `usdUnknown` the calls of unknown
  * cost (usage.mjs UNKNOWN_WHY `decision`). Its counts live beside it (GATEWAY_COUNTS), so nothing but usage fields is on
  * it.
  */
 const GATEWAY_COUNTS = new WeakMap();
 const gatewayRecord = (model) => {
-  const rec = { harness: null, decider: "ai-gateway", model: model ?? null, label: "decision", usd: null, tokens: { input: null, output: null, cached: null, written: null }, turns: null, basis: "the AI Gateway's cost of each decision call (the cost its answer reports, else its generation's total_cost)", started: new Date().toISOString(), ended: null, ok: true, decision: true, calls: 0 };
+  const rec = { harness: null, decider: "ai-gateway", billing: "api", model: model ?? null, label: "decision", usd: null, tokens: { input: null, output: null, cached: null, written: null }, turns: null, basis: "the AI Gateway's cost of each decision call (the cost its answer reports, else its generation's total_cost)", started: new Date().toISOString(), ended: null, ok: true, decision: true, calls: 0 };
   GATEWAY_COUNTS.set(rec, { known: null, unknown: 0, settling: 0 });
   return rec;
 };
@@ -182,7 +182,8 @@ async function gatewayCall(vendor, input, question, opts, stage, reserve = false
         c.unknown += unknown;
         if (usd !== null) c.known = Math.round(((c.known ?? 0) + usd) * 1e6) / 1e6;
         refresh(rec);
-        metered.end({ usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}) });
+        // Billed to the gateway key: `api` (usage.mjs BILLING), whatever the stage's own credential is.
+        metered.end({ usd, billing: "api", ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}) });
       };
       const entry = { book, done: null };
       entry.done = Promise.resolve(spend.settled).then(book, () => book(null));

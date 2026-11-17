@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, UNKNOWN_WHY, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, runningTokens, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
+import { BILLING, COPILOT_CREDIT_USD, UNKNOWN_WHY, addBilling, codexPlanLimits, passBilling, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, runningTokens, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -112,8 +112,8 @@ export function scrubbedEnv(base = process.env, extra = {}) {
 }
 
 /**
- * The credential each harness child gets, and nothing else. Returns {env, basis}
- * or throws when the configured credential is absent.
+ * The credential each harness child gets, and nothing else. Returns {env, basis, billing} (`billing`: what the run's
+ * dollars are, usage.mjs BILLING) or throws when the configured credential is absent.
  *   claude  api : ANTHROPIC_API_KEY, or a federated short-lived token (see federate())
  *           plan: CLAUDE_CODE_OAUTH_TOKEN (a developer's own repository only)
  *   codex   api : PENDULUM_CODEX_GATEWAY_KEY (the codex_gateway_key input) when set: Codex through the Vercel AI
@@ -135,7 +135,70 @@ export function hasApiCredential({ harness, inputs, env = process.env }) {
   return false;
 }
 
-export async function credentialEnv({ harness, credential, inputs: asked, env: given = process.env, session = null }) {
+/** A variable set to something other than empty, "0" or "false" (Claude Code's own reading of its switches). */
+const switchOn = (v) => typeof v === "string" && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+/** The Claude Code provider switches billed per use on a cloud account; another `CLAUDE_CODE_USE_*` is of unknown billing. */
+const CLAUDE_CLOUD_SWITCHES = new Set(["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]);
+
+/**
+ * What a Codex credential value's dollars are (usage.mjs BILLING): an API key is `api`; a ChatGPT login is decided by its
+ * auth mode (an `auth.json`'s `auth_mode`): `chatgpt` or `chatgptAuthTokens` is `subscription`; `apikey`,
+ * `personalAccessToken` or a `bedrock` mode is `api`; a ChatGPT access token alone (a JWT) is `subscription`; any other
+ * mode, or none, is `unknown`.
+ */
+export function codexKeyBilling(value) {
+  if (!value) return "unknown";
+  if (!chatgptLogin(value)) return "api";
+  const v = String(value).trim();
+  if (!v.startsWith("{")) return "subscription";
+  let mode = null;
+  try {
+    mode = JSON.parse(v)?.auth_mode;
+  } catch {
+    mode = null;
+  }
+  const m = typeof mode === "string" ? mode.toLowerCase() : "";
+  if (m === "chatgpt" || m === "chatgptauthtokens") return "subscription";
+  if (m === "apikey" || m === "personalaccesstoken" || m.startsWith("bedrock")) return "api";
+  return "unknown";
+}
+
+/**
+ * What a harness child's dollars are (usage.mjs BILLING), from the environment it gets (`env`: the scrubbed parent's
+ * plus its credential, credentialEnv), on a positive signal only:
+ * - Copilot: `credits`.
+ * - Claude: a `CLAUDE_CODE_USE_*` switch on is `api` for Bedrock or Vertex, else `unknown`; an `ANTHROPIC_AUTH_TOKEN`
+ *   (a bearer token to a gateway or proxy) or an `ANTHROPIC_API_KEY` is `api`; an `ANTHROPIC_BASE_URL` other than
+ *   Anthropic's with neither is `unknown`; a `CLAUDE_CODE_OAUTH_TOKEN` is `subscription`; nothing of these (the CLI's own
+ *   stored login) is `unknown`, and each pass decides by what Claude Code reports (passBilling).
+ * - Codex: the AI Gateway key is `api`; `CODEX_API_KEY` or `OPENAI_API_KEY` by codexKeyBilling; none (the CLI's own
+ *   stored login) is `unknown`, each pass deciding by its rollout (passBilling).
+ */
+export function childBilling(harness, env = {}) {
+  if (harness === "copilot") return "credits";
+  if (harness === "claude") {
+    const on = Object.keys(env).filter((k) => k.startsWith("CLAUDE_CODE_USE_") && switchOn(env[k]));
+    if (on.length) return on.every((k) => CLAUDE_CLOUD_SWITCHES.has(k)) ? "api" : "unknown";
+    if (env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) return "api";
+    const base = String(env.ANTHROPIC_BASE_URL ?? "").trim().replace(/\/+$/, "");
+    if (base && base !== "https://api.anthropic.com") return "unknown";
+    return env.CLAUDE_CODE_OAUTH_TOKEN ? "subscription" : "unknown";
+  }
+  if (harness === "codex") {
+    if (env[CODEX_GATEWAY_ENV]) return "api";
+    const key = env.CODEX_API_KEY || env.OPENAI_API_KEY;
+    return key ? codexKeyBilling(key) : "unknown";
+  }
+  return "unknown";
+}
+
+/** credentialEnv with `billing`: what the child's dollars are, from the environment it gets (childBilling). */
+export async function credentialEnv(args) {
+  const c = await credentialOf(args);
+  return { ...c, billing: childBilling(args.harness, { ...scrubbedEnv(args.env ?? process.env), ...c.env }) };
+}
+
+async function credentialOf({ harness, credential, inputs: asked, env: given = process.env, session = null }) {
   const out = {};
   // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs).
   const inputs = routeInputs(asked, given);
@@ -495,7 +558,15 @@ const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 // cost (`unknown`, usage.mjs UNKNOWN_WHY), and the passes still running (`open`), each with the session it resumed. What
 // the progress comment's spend line carries until the stage records its final figure. `dir` and `harness`: the stage's
 // usage directory and harness, from its first pass.
-const STAGE_SPEND = { done: 0, unknown: 0, open: new Map(), dir: null, harness: null, decisions: 0, capped: false, reserve: 0, reserved: 0 };
+const STAGE_SPEND = { done: 0, unknown: 0, open: new Map(), dir: null, harness: null, decisions: 0, billing: null, doneBy: {}, capped: false, reserve: 0, reserved: 0 };
+
+/**
+ * The stage credential's billing (usage.mjs BILLING, credentialEnv's), set by the stage once it reads its credential:
+ * each pass's record is stamped with its own (usage.mjs passBilling) as it ends, and its dollars are booked by it.
+ */
+export function setStageBilling(kind) {
+  STAGE_SPEND.billing = BILLING.includes(kind) ? kind : null;
+}
 
 /**
  * The file in a stage's usage directory that holds each session's running total as the stage's progress comment last
@@ -523,7 +594,9 @@ export async function stageSpendSoFar() {
 export function stageSpendNow() {
   // Each session's last reported total, as `usd` counted it: a running pass's share is not in either until it ends.
   const totals = Object.fromEntries(SESSION_TOTALS);
-  const usd = STAGE_SPEND.done + (Number(activeRelay()?.totals().usd) || 0);
+  // The relayed worker key's spend so far (gateway-relay.mjs): billed API spend, whatever the harness's credential.
+  const keyUsd = Math.max(0, Number(activeRelay()?.totals().usd) || 0);
+  const usd = STAGE_SPEND.done + keyUsd;
   const unknown = STAGE_SPEND.unknown + STAGE_SPEND.open.size;
   const { dir, harness } = STAGE_SPEND;
   const commit = () => {
@@ -534,7 +607,9 @@ export function stageSpendNow() {
       log(`session totals not written: ${String(e?.message || e).slice(0, 120)}`);
     }
   };
-  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, unknown, commit };
+  // The known dollars by billing: each ended pass's at its own (meterPass), the relayed key's as `api`.
+  const byBilling = addBilling(STAGE_SPEND.doneBy, keyUsd > 0 ? { api: keyUsd } : {});
+  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, keyUsd: Math.round(keyUsd * 1e6) / 1e6, byBilling, unknown, commit };
 }
 /**
  * The drift reserve (#479): what of a stage's `max_usd` the drift advisory, which only advises, may spend, carved out
@@ -583,11 +658,14 @@ export function meterPass({ session = null, label = "run", harness = null, model
   return {
     end: (rec) => {
       if (!STAGE_SPEND.open.delete(token)) return;
+      // Stamped with its billing once the stage has read its credential (setStageBilling); a record with none names none.
+      if (rec && STAGE_SPEND.billing) rec.billing = passBilling(STAGE_SPEND.billing, rec);
       if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) {
         STAGE_SPEND.done += Math.max(0, rec.usd);
         if (decision) STAGE_SPEND.decisions += Math.max(0, rec.usd);
         if (decision && reserve) STAGE_SPEND.reserved += Math.max(0, rec.usd);
       }
+      if (rec?.billing) STAGE_SPEND.doneBy = addBilling(STAGE_SPEND.doneBy, { [rec.billing]: typeof rec.usd === "number" && Number.isFinite(rec.usd) ? Math.max(0, rec.usd) : 0 });
       booked = unknownRuns(rec);
       STAGE_SPEND.unknown += booked;
     },
@@ -1217,6 +1295,9 @@ async function outageCut(rec, { harness, env }) {
   return passCutOff(rec.providerOutage ?? null, providerOrigin(harness, env), { startedMs: started, endedMs: ended });
 }
 
+/** What says what a record's dollars are (usage.mjs passBilling), carried to a record made from it: its billing, key source and plan limits. */
+const billingSigns = (rec) => ({ ...(rec.billing ? { billing: rec.billing } : {}), ...(typeof rec.apiKeySource === "string" ? { apiKeySource: rec.apiKeySource } : {}), ...(rec.planLimits === true ? { planLimits: true } : {}), ...(rec.overage === true ? { overage: true } : {}) });
+
 /**
  * The record of a pass that ran again after the network cut it off (`lost`, its earlier runs), with `limit` after it
  * waited out its usage limit, with `busy` after its provider was busy, or with `jobs` after its session ended while its
@@ -1239,6 +1320,7 @@ export function joinLost(lost, rec, { limit = false, busy = false, jobs = false 
     ...(typeof m.aiu === "number" ? { aiu: m.aiu } : {}),
     usdUnknown: m.usdUnknown,
     usdUnknownWhy: m.usdUnknownWhy,
+    ...billingSigns(m),
     ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
     // Every run's relayed calls of unknown cost, as its dollars are: the stage's count (session.mjs writeUsage) never misses one.
     ...(all.some((r) => Number(r.workerKeyUnknown) > 0) ? { workerKeyUnknown: all.reduce((s, r) => s + Math.max(0, Number(r.workerKeyUnknown) || 0), 0) } : {}),
@@ -1464,6 +1546,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const counted = withSubAgents(prior ? sinceSession(reported, prior, { at: ended }) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null, { at: ended });
   const rec = counted.rec;
   for (const [id, total] of Object.entries(counted.totals)) SESSION_TOTALS.set(id, total);
+  // A ChatGPT plan's rate limits in the run's rollout: the positive sign of a subscription (usage.mjs passBilling).
+  if (harness === "codex" && codexPlanLimits(rollout, started)) rec.planLimits = true;
   // Threads this run may have spawned that were not read (a rollout absent, too large or unreadable, the read limit),
   // or sub-agent work in the stream with no thread read at all: their spend is unknown (UNKNOWN_WHY), and the log says why. A
   // thread already counted whose rollout is gone (a runner restores only the lineage's own) is no miss, nor is the
@@ -1846,12 +1930,14 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   let rollout = null;
   if (harness === "codex" && !agent) {
     const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
-    // Read before the files go: a failed call's usage limit, and every call's request sizes (usage.mjs rolloutLong).
+    // Read once, before the files go: a failed call's usage limit, every call's request sizes (usage.mjs rolloutLong) and
+    // a ChatGPT plan's rate limits (codexPlanLimits), which say how the call is billed.
     if (thread) rollout = await codexPassRollout(thread, null, launch.env, { label });
     // Only this call's own thread: an id that is no plain thread id names no file (as codexPassRollout reads it).
     if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
   }
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout: r.code !== 0 ? rollout : null, requests: rollout, since: started });
+  if (harness === "codex" && codexPlanLimits(rollout, started)) rec.planLimits = true;
   metered.end(rec);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
@@ -1875,7 +1961,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
  * with the stage's passes (keepDecisionPass) so a stopped stage counts it (stop.mjs stoppedRecords).
  */
 export function keepDecision(rec) {
-  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...unknownOf([rec]), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
+  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...unknownOf([rec]), ...billingSigns(rec), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
 }
 
 /** One more call (`one`, keepDecision's) folded into the stage's decision record `kept`, in place: spend, tokens, credits, turns, end. */

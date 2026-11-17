@@ -60,7 +60,7 @@ import {
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -703,8 +703,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
  * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
- * answered when a person answered it (a reply by someone who can push but Pendulum's own answer on the reviewer's
- * comment, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
+ * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
+ * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
  * answer (logic.mjs pendulumReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
  * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Pendulum's own reviews on the PR) decides which roots are the reviewer's by structure, which
@@ -725,7 +725,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
   // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
-  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? trustedAuthor(c) && !pendulumReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? personAnswer(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
   const answer = new Map(replies.filter(pendulumReply).map((c) => [c.in_reply_to_id, c.body]));
   const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.

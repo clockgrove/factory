@@ -2451,13 +2451,22 @@ const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
  */
 export const pendulumReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
 
+// Any of Pendulum's marked comments: a marker of an Objective's at the start.
+const MARKED_AT_START = /^<!-- pendulum:\d+:/;
+/**
+ * Whether `reply` is a person's answer in a review thread: by someone who can push (trustedAuthor), and not one of
+ * Pendulum's marked comments (its answer, or the evidence the finding check posts before it resolves a thread,
+ * finding-check.mjs), which never answers a finding. A thread a person reopens after Pendulum resolved it is open again.
+ */
+export const personAnswer = (reply) => trustedAuthor(reply) && !MARKED_AT_START.test(String(reply?.body ?? ""));
+
 /**
  * Whether a person's `reply` answers the line comment that a named reviewer or code scanning (`rootLogin`) opened, the
  * same on every side (the answer pass's list, the threads Pendulum resolves, the merge pass): a reply by someone who can
  * push (trustedAuthor) that is not Pendulum's own answer (pendulumReply). Never on code scanning's comment: a person's
  * "looking into it" leaves a security finding to the answer pass, and never lets Pendulum resolve it.
  */
-export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !pendulumReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
+export const answersComment = (rootLogin, reply) => personAnswer(reply) && loginKey(rootLogin) !== CODE_SCANNING;
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Pendulum marker

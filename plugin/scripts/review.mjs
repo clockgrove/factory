@@ -628,7 +628,7 @@ export function coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewe
 }
 
 /** The worker's prompt for the one pass that answers the review. */
-export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red }) {
+export function answerPrompt({ taskCard, prNumber, comments, decisions = [], afterPush = false, red = null, question = !red, namedTests = false }) {
   // A finding answered before and still open (the finding check read that answer as not resolving it) carries `earlier`.
   const list = comments.map((c) => `- ${c.path || "(review body)"}${Number.isInteger(c.line) ? `:${c.line}` : ""} (comment id ${JSON.stringify(c.id)}${c.from ? `, from third-party reviewer ${c.from}` : ""}): ${c.from ? JSON.stringify(String(c.body ?? "")) : c.body}${c.earlier ? `\n  Still open: Pendulum's check read your earlier answer as not resolving it: ${JSON.stringify(String(c.earlier))}` : ""}`).join("\n");
   const from = [...new Set(comments.map((c) => c.from).filter(Boolean))];
@@ -644,7 +644,7 @@ export function answerPrompt({ taskCard, prNumber, comments, decisions = [], aft
     ? `${red.queue ? `The merge queue's run of the required checks on its integrated commit ${String(red.sha || "").slice(0, 7)} (this PR on top of the default branch and the PRs queued ahead of it) failed in this PR's own change, and Pendulum took the PR out of the queue.` : `Pendulum's validation found the required checks red on the head the reviewer read (${String(red.sha || "").slice(0, 7)}).`} Fix that cause in the code too (never weaken, skip or delete a test unless the issue asks) and update the Validation section of \`$PENDULUM_OUT/pr.md\`; the failures are below, each whole output in \`$PENDULUM_IN/checks/\`. A failing policy check is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy.`
     : "";
   const ask = comments.length
-    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code and, when a test shows it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum posts them and runs each named test on the head before it spends another round on the finding.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
+    ? `The reviewer has posted its one pass on PR #${prNumber} (the comments are below and in \`$PENDULUM_IN/review-comments.json\`). Load the $pendulum-deliver-pr skill's "Reviewer comments" section and handle each comment once: make the change and reply with the commit, or reply with a rebuttal naming the acceptance entry or repository rule. Write the replies to \`$PENDULUM_OUT/replies.json\` as [{"id": <comment id>, "body": "..."}], adding "fixed": true to a reply whose fix is in the code${namedTests ? ` and, when a test fails without the fix and passes with it, "test": {"command": "<one validation command, exactly as the task card lists it>", "args": ["<what makes it run only that test>"]}; Pendulum runs that test without the fix and with it before it spends another round on the finding` : ""}; Pendulum posts them.${untrusted}${recorded ? " Apply the maintainers' decisions below as well." : ""}${red ? ` ${redAsk}` : ""}`
     : afterPush
       ? `A maintainer commented on PR #${prNumber} after the last pass read the decisions (new or edited comments). Apply the decisions below to the branch: they are the specification where they differ from the code or your assumptions. If a decision asks for nothing to change, change nothing for it.${red ? ` ${redAsk}` : ""}`
       : question
@@ -1640,8 +1640,8 @@ async function main() {
     const agents = head ? await outbox.git(["show", `${head}:AGENTS.md`], { maxBytes: 64 * 1024 }).catch(() => null) : null;
     return [agents?.code === 0 ? `AGENTS.md:\n${agents.stdout}` : "", `Protected paths (no pass may change them): ${protectedList.join(", ")}`, inputs.validation.length ? `Validation commands: ${inputs.validation.join("; ")}` : ""].filter(Boolean).join("\n\n");
   };
-  // A reply that says fixed and names a test has it run on the head by the validation command it names, through the
-  // stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
+  // A reply that says fixed and names a test has it run without the fix and with it by the validation command it names,
+  // through the stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
     const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, timeoutMs: () => remainingMs(deadlineAt) });
@@ -1712,9 +1712,9 @@ async function main() {
         onResume: answerLive.onResume,
         ...workerRun(inputs),
         resume,
-        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
+        prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0, namedTests: inputs.validation.length > 0 }),
         // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
-        ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
+        ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0, namedTests: inputs.validation.length > 0 }) } : {}),
         maxUsd: Math.max(0, passCap() - sumSpend(records).usd),
         cwd: checkout,
         env: passEnv,
@@ -1821,9 +1821,9 @@ async function main() {
   await postNote(repo, issue, io.files()["note.md"], token).catch((e) => log(`note: ${e.message.slice(0, 120)}`));
 
   // The finding check (#368): each finding the answer pass replied to is checked before another answer round is spent
-  // on it: the test a "fixed" reply names, run on the head (#516), else the decision model's verdict on the reply and
-  // what the PR changed since the finding was raised; only a passing test or a yes at the floor resolves its thread, with
-  // the evidence posted there (finding-check.mjs). Not after a refused push.
+  // on it: the test a "fixed" reply names, failing without the fix and passing with it (#516), else the decision model's
+  // verdict on the reply and what the PR changed since the finding was raised; only that test or a yes at the floor
+  // resolves its thread, with the evidence posted there (finding-check.mjs). Not after a refused push.
   if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);
   // Threads a person answered (and no-finding ones) are resolved so a ruleset that requires thread resolution
   // can merge; they stay visible on the PR. Not after a refused push: the answers never reached the branch.

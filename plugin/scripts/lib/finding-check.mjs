@@ -1,13 +1,13 @@
 // The finding check (#368): after a review stage's answer pass, each finding Pendulum answered (its own reviewer's, a named
 // reviewer's, code scanning's) is checked before any answer round is spent on it. An answer that says fixed and names a
-// test has that test run on the head by the repository's validation command (#516): the exact check. Any other answer is
-// judged by the decision model: does it resolve the finding, fixed in the code, rebutted with an acceptance entry or
-// repository rule that holds, or settled by a maintainer's recorded decision (#474)? Only a passing test or a yes at the
-// confidence floor resolves the finding's thread, with that evidence posted in it, which is what marks it answered
-// (session.mjs unaddressedReviewComments, github.mjs reviewThreads); a failed test, a no or a test that cannot be run
-// leaves it open for the next answer round within the bound, named with what was found, and no verdict (the gateway
-// failed) for a check again in the next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is
-// never judged here.
+// test has that test run by the repository's validation command without the fix and with it (#516): failing without and
+// passing with is the exact check. Any other answer, and one whose test is no evidence, is judged by the decision model:
+// does it resolve the finding, fixed in the code, rebutted with an acceptance entry or repository rule that holds, or
+// settled by a maintainer's recorded decision (#474)? Only that test or a yes at the confidence floor resolves the
+// finding's thread, with that evidence posted in it, which is what marks it answered (session.mjs
+// unaddressedReviewComments, github.mjs reviewThreads); a test failing on the head or a no leaves it open for the next
+// answer round within the bound, named with what was found, and no verdict (the gateway failed) for a check again in the
+// next stage, with no worker pass (session.mjs openFindingsExit). A person's answer is never judged here.
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with red-check triage's
 // key and model setting (triage.mjs). This runs in Pendulum's own process, never in a harness. Only the typed choice
 // reaches code; the finding, the reply, the diff, the rules and the decisions are data between random-tag markers,
@@ -19,8 +19,12 @@ import { openDecider } from "./decider.mjs";
 import { postReply, rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { CODE_SCANNING, acceptanceEntries, commandText, isBodyFindingId, marker } from "./logic.mjs";
+import { CODE_SCANNING, acceptanceEntries, commandText, dependencyFile, isBodyFindingId, marker } from "./logic.mjs";
 import { runValidation } from "./checkout.mjs";
+import { backend } from "./backend.mjs";
+import { scrubbedEnv } from "./harness.mjs";
+import { exec } from "./proc.mjs";
+import { simpleCommand } from "./shell.mjs";
 import { shellQuote } from "./handover.mjs";
 import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
@@ -219,27 +223,89 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
 /** A commit as a note names it. */
 const short = (sha) => String(sha || "").slice(0, 7);
 
+/** The time a named test's run leaves the stage for its exit, and the least a run is worth starting with. */
+export const TEST_RESERVE_MS = 3 * 60_000;
+export const TEST_MIN_MS = 60_000;
+
+
 /**
- * The runner of the test a reply names (#516) for checkAnswers: the test a reply that says `fixed` names (handoff.mjs
- * namedTest) runs on the PR's head (`head`) by the repository's own validation command, through the stage's validation
- * path (checkout.mjs runValidation: the stage's sandbox, its env, and `timeoutMs()`, the stage's time left). Its `command`
- * must be one of the validation commands (`commands`, as the task card lists them, the `parallel:` mark off) exactly; its
- * `args` follow it each shell-quoted, so they reach that command as data, never as shell. A test named twice runs once.
- * Returns `{ok, head, run, code, timedOut}` (`run`, the command line as it ran), or `{unchecked: why}`: no such validation
- * command, no head, a checkout on another commit, or a run that could not start.
+ * The runner of the test a reply names (#516) for checkAnswers. The exact check is that the test fails without the fix
+ * and passes with it: `runTest(test, {before})` runs the reply's test (handoff.mjs namedTest) by the repository's own
+ * validation command, through the stage's validation path (checkout.mjs runValidation: the stage's sandbox and env), in
+ * the checkout itself, first on the PR's head (`head`), then on the tree of `before` (the commit the finding was raised
+ * on) with the head's copy of each argument that names a path there put back; then the checkout goes back to the head
+ * (`git reset --hard`), and HEAD and a clean tracked tree are checked. Its git runs in the agent's sandbox too.
+ * - `command` must be one of the validation commands (`commands`, the `parallel:` mark off) exactly, and one simple
+ *   command (shell.mjs simpleCommand); `args`, each shell-quoted, follow it, and at least one is no option (a test, not
+ *   a flag).
+ * - Each run gets the stage's time left (`timeoutMs()`) less `reserveMs`, and none starts with under `minMs` of it.
+ * Returns `{fixed: true, head, before, run}` (fails without the fix, passes with it), `{failed: true, head, run, code}`
+ * (fails on the head), `{passes: true, before, run}` (passes without the fix too: no evidence), or `{unchecked: why}`
+ * (the reply then goes to the decision model, checkAnswers):
+ * not a validation command, no test argument, a dependency manifest or lockfile changed since `before` (dependencyFile),
+ * a checkout not at the head or not clean, a run that timed out or changed tracked files, a `before` the checkout lacks,
+ * too little time. Once the checkout cannot be put back on the head, no further test runs.
  */
-export function namedTestRunner({ checkout, commands = [], env = process.env, head = null, timeoutMs = () => 10 * 60_000 }) {
+export function namedTestRunner({ checkout, commands = [], env = process.env, head = null, timeoutMs = () => 10 * 60_000, reserveMs = TEST_RESERVE_MS, minMs = TEST_MIN_MS }) {
   const known = new Set(commands.map((c) => commandText(c).trim()).filter(Boolean));
-  const runs = new Map();
-  return async (test) => {
+  const gitEnv = { ...scrubbedEnv(env), GIT_NO_REPLACE_OBJECTS: "1", GIT_TERMINAL_PROMPT: "0" };
+  const git = (args) => exec(...backend(gitEnv).sandbox.git(["git", "-C", checkout, ...args], gitEnv), { env: gitEnv }).catch((e) => ({ code: null, stdout: "", stderr: String(e?.message || e) }));
+  let broken = null;
+  // The checkout as the stage left it: HEAD at the head, and no tracked file changed.
+  const atHead = async () => {
+    const h = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+    if (h.code !== 0 || h.stdout.trim() !== head) return `the checkout is on ${short(h.stdout.trim()) || "no commit"}, not the PR's head ${short(head)}`;
+    const s = await git(["status", "--porcelain", "--untracked-files=no"]);
+    return s.code !== 0 ? "the checkout's status could not be read" : s.stdout.trim() ? "the checkout has changed tracked files" : null;
+  };
+  const back = async () => {
+    const r = await git(["reset", "-q", "--hard", head]);
+    const left = r.code === 0 ? await atHead() : "git reset failed";
+    if (left) {
+      broken = `the checkout could not be put back on the PR's head (${left})`;
+      log(`finding check: ${broken}; no further named test runs in this stage`);
+    }
+    return left;
+  };
+  const run = async (line) => {
+    const cap = timeoutMs() - reserveMs;
+    if (cap < minMs) return { unchecked: "too little of the stage's time is left to run it" };
+    const r = await runValidation(checkout, [line], { timeoutMs: cap, env }).catch((e) => ({ error: String(e?.message || e).slice(0, 160) }));
+    if (r.error) return { unchecked: `\`${line}\` could not start (${r.error})` };
+    if (r.failed?.timedOut) return { unchecked: `\`${line}\` timed out` };
+    return { green: !!r.green, code: r.failed?.code ?? 0 };
+  };
+  return async (test, { before = null } = {}) => {
+    if (broken) return { unchecked: broken };
     if (!known.has(test.command)) return { unchecked: `it names \`${test.command}\`, which is not one of the repository's validation commands` };
+    if (!simpleCommand(test.command)) return { unchecked: `\`${test.command}\` is not one simple command, so a test's arguments would not be its own` };
+    if (!test.args.some((a) => !a.startsWith("-"))) return { unchecked: "it names no test, only options" };
     if (!head) return { unchecked: "the PR's head could not be read" };
-    const run = [test.command, ...test.args.map(shellQuote)].join(" ");
-    if (!runs.has(run)) runs.set(run, runValidation(checkout, [run], { timeoutMs: Math.max(1000, timeoutMs()), env }).catch((e) => ({ error: String(e?.message || e).slice(0, 160) })));
-    const r = await runs.get(run);
-    if (r.error) return { unchecked: `\`${run}\` could not start (${r.error})` };
-    if (r.head !== head) return { unchecked: `the checkout is on ${short(r.head) || "no commit"}, not the PR's head ${short(head)}` };
-    return { ok: !!r.green, head, run, code: r.failed?.code ?? 0, timedOut: !!r.failed?.timedOut };
+    if (!before) return { unchecked: "the commit the finding was raised on is not known" };
+    const line = [test.command, ...test.args.map(shellQuote)].join(" ");
+    const wrong = await atHead();
+    if (wrong) return { unchecked: wrong };
+    // With the fix: the head as the stage pushed it.
+    const after = await run(line);
+    if (!after.unchecked && !(await atHead())) {
+      if (!after.green) return { failed: true, head, run: line, code: after.code };
+    } else {
+      const left = await back();
+      return { unchecked: after.unchecked || left || "the test changed tracked files" };
+    }
+    // Without the fix: the tree of `before`, but the test's own files as the head has them.
+    const changed = await git(["diff", "--name-only", "-z", before, head, "--"]);
+    if (changed.code !== 0) return { unchecked: `the commit the finding was raised on, ${short(before)}, is not in the checkout` };
+    const deps = changed.stdout.split("\0").filter((p) => p && dependencyFile(p));
+    if (deps.length) return { unchecked: `a dependency manifest or lockfile changed since ${short(before)} (${deps.slice(0, 3).join(", ")}), so the code without the fix cannot run as it was` };
+    const paths = [];
+    for (const a of new Set(test.args.map((x) => x.replace(/^\.\//, "")))) if (a && !a.startsWith("-") && (await git(["cat-file", "-e", `${head}:${a}`])).code === 0) paths.push(a);
+    const restored = await git(["restore", `--source=${before}`, "--staged", "--worktree", "--", "."]);
+    const kept = restored.code === 0 && paths.length ? await git(["restore", `--source=${head}`, "--staged", "--worktree", "--", ...paths]) : restored;
+    const without = kept.code === 0 ? await run(line) : { unchecked: `the tree of ${short(before)} could not be set out in the checkout` };
+    const left = await back();
+    if (without.unchecked || left) return { unchecked: without.unchecked || left };
+    return without.green ? { passes: true, before, run: line } : { fixed: true, head, before, run: line };
   };
 }
 
@@ -249,10 +315,11 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
 /**
  * Judge each finding of `findings` that has an answer (`repliesText`: the answer pass's replies.json, as postReplies read
  * it; or, for a check again, Pendulum's earlier answers) and resolve those it finds fixed or settled.
- * - A reply that says `fixed` and names a test (handoff.mjs parseReplies: `fixed`, `test`) has that test run on the head
- *   (`runTest`, namedTestRunner): the exact check, and the only one for it. A pass resolves the finding; a failure leaves
- *   it open (`test-failed`); a test that cannot be run there (no `runTest`, or namedTestRunner's `unchecked`) leaves it
- *   open (`not-checkable`), never resolved.
+ * - A reply that says `fixed` and names a test (handoff.mjs parseReplies: `fixed`, `test`) has that test run without the
+ *   fix and with it (`runTest`, namedTestRunner, from `raisedOn`, else `since`): the exact check. Failing without the fix
+ *   and passing with it resolves the finding; failing on the head leaves it open (`test-failed`) with no decision call.
+ *   A test that passes without the fix too, or cannot be checked (no `runTest`, or namedTestRunner's `unchecked`), is no
+ *   evidence: the reply goes to the decision model as below, and the Block's note says so too (`not-checkable`).
  * - Every other reply goes to the decision model (`check`, openFindingCheck): a verdict that `resolves` at the check's
  *   floor resolves the finding; any other verdict leaves it open (`not-fixed`); no verdict leaves it to be judged again
  *   (`unjudged`). A `decided` verdict never resolves code scanning's finding, nor any finding when a decision newer than
@@ -279,22 +346,26 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     log(line);
     if (progress) await progress(line);
   };
-  // The exact check: the test the reply names, on the head. No decision call is made for these.
+  // The exact check: the test the reply names fails without the fix and passes with it (namedTestRunner). One that fails
+  // on the head leaves the finding open; one that passes without the fix too, or cannot be checked, is no evidence, so
+  // the decision model judges that reply as any other, its note kept for the Block (`pre`).
   const tested = answered.filter((f) => replies.get(String(f.id)).test);
+  const pre = new Map();
   for (const f of tested) {
     const test = replies.get(String(f.id)).test;
-    const r = runTest ? await Promise.resolve(runTest(test)).catch((e) => ({ unchecked: `the test could not be run (${String(e?.message || e).slice(0, 120)})` })) : { unchecked: "no test can be run where this check runs" };
-    if (r.unchecked) found.push({ id: f.id, kind: FOUND.notCheckable, note: `not checkable: ${r.unchecked}` });
-    else if (r.ok) yes.set(String(f.id), `the test this answer names passed on ${short(r.head)}: \`${r.run}\`, by the repository's validation command \`${test.command}\`. The finding is resolved.`);
-    else found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` ${r.timedOut ? "timed out" : `exited ${r.code}`} on ${short(r.head)}` });
-    log(`finding check: ${findingPlace(f)} (comment ${f.id}): ${yes.has(String(f.id)) ? `the named test passed: ${r.run}` : found.at(-1).note}`);
+    const r = runTest ? await Promise.resolve(runTest(test, { before: f.raisedOn || since })).catch((e) => ({ unchecked: `the test could not be run (${String(e?.message || e).slice(0, 120)})` })) : { unchecked: "no test can be run where this check runs" };
+    const id = String(f.id);
+    if (r.fixed) yes.set(id, `the test this answer names fails without the fix and passes with it: \`${r.run}\`, by the repository's validation command \`${test.command}\`, failed on the tree of ${short(r.before)} (where the finding was raised, the test's own files as the head has them) and passed on ${short(r.head)}. The finding is resolved.`);
+    else if (r.failed) found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` exited ${r.code} on ${short(r.head)}` });
+    else pre.set(id, r.passes ? `not evidence: \`${r.run}\` passes without the fix too, on the tree of ${short(r.before)}` : `not checkable: ${r.unchecked}`);
+    log(`finding check: ${findingPlace(f)} (comment ${f.id}): ${r.fixed ? `the named test fails without the fix and passes with it: ${r.run}` : r.failed ? found.at(-1).note : `${pre.get(id)}; the decision model judges the reply`}`);
   }
   if (tested.length) {
-    const left = found.filter((x) => tested.some((f) => String(f.id) === String(x.id)));
+    const failed = found.filter((x) => x.kind === FOUND.testFailed);
     const at = (x) => findingPlace(tested.find((f) => String(f.id) === String(x.id)));
-    await say(`finding check: ${tested.length - left.length} of ${tested.length} named test(s) passed on the head${left.length ? `; still open: ${left.slice(0, 5).map((x) => `${at(x)} (${x.kind === FOUND.testFailed ? "test failed" : "not checkable"})`).join(", ")}${left.length > 5 ? ` and ${left.length - 5} more` : ""}` : ""}`);
+    await say(`finding check: ${tested.length - failed.length - pre.size} of ${tested.length} named test(s) fail without the fix and pass with it${failed.length ? `; failed on the head: ${failed.slice(0, 5).map(at).join(", ")}${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}` : ""}${pre.size ? `; no evidence from ${pre.size}, judged by the decision model` : ""}`);
   }
-  const judged = answered.filter((f) => !replies.get(String(f.id)).test);
+  const judged = answered.filter((f) => !replies.get(String(f.id)).test || pre.has(String(f.id)));
   if (judged.length && !check?.judge) {
     await say(`finding check: off (${check?.off || "no-key"}); a reply answers its finding`);
     for (const f of judged) yes.set(String(f.id), null);
@@ -321,9 +392,11 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
       if (resolves(v, floor.min) && !alertDecided && !unsure) yes.set(String(it.id), `the finding check (${who}) judged this answer ${v.verdict}, at confidence ${v.confidence.toFixed(2)} (${floor.text}). The finding is resolved.`);
       else if (!v?.verdict) {
         unjudged.push({ id: it.id, error: v?.error || "no_answer" });
+        if (pre.has(String(it.id))) found.push({ id: it.id, kind: FOUND.notCheckable, note: pre.get(String(it.id)) });
         left.push(it);
       } else {
-        found.push({ id: it.id, kind: FOUND.notFixed, note: `judged not ${it.fixed ? "fixed" : "resolved"}: ${said} (${who})` });
+        const note = `judged not ${it.fixed ? "fixed" : "resolved"}: ${said} (${who})`;
+        found.push({ id: it.id, kind: FOUND.notFixed, note: pre.has(String(it.id)) ? `${pre.get(String(it.id))}; ${note}` : note });
         left.push(it);
       }
     }

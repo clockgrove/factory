@@ -1,6 +1,7 @@
 ---
 name: factory-review-pr
-description: The Clockgrove Factory reviewer's skill. Use to review a Clockgrove Factory PR (a PR on a factory/<issue> branch) in one pass of line-tied review comments, each naming the acceptance entry or repository rule it concerns, with behaviour-changing assumptions flagged. No verdict, no approval, no request for changes, no refusal. Load when asked to review a Clockgrove Factory PR or when running as the reviewer job.
+description: "Internal: the Clockgrove Factory reviewer's instructions, loaded only by Factory's reviewer job, its reviewer agents and the factory-review skill. One pass of line-tied review comments on a Clockgrove Factory PR, each naming the acceptance entry or repository rule it concerns, with behaviour-changing assumptions flagged; no verdict, no approval, no request for changes, no refusal."
+user-invocable: false
 ---
 
 # Review the PR

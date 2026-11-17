@@ -28,3 +28,7 @@ The dispatcher then starts it only once `<N>` is closed.
 ## The draft label
 
 When GitHub says `factory:draft` does not exist, create it, then run the draft's command again: `gh label create factory:draft --repo OWNER/NAME --color D4C5F9 --description "A draft Objective: Factory never runs it while this label is on"`.
+
+## Harness and models
+
+When the user wants another harness or model than the workflow's for this Objective, offer one label per kind: `factory:harness:claude`, `codex` or `copilot`; `factory:model:<id>` (worker); `factory:subagent-model:<id>`; `factory:reviewer-model:<id>`. A cheaper worker suits a small, bounded change, the strongest one trust, money or concurrency. Claude Code runs `claude-` models, Codex those in `<plugin root>/scripts/lib/codex-prices.json`; no provider prefix. Label names have length limits (Label limits).

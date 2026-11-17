@@ -1,11 +1,11 @@
 ---
 name: factory-file
-description: "/factory:factory-file. Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created on the user's yes either started (the factory:objective label) or saved as a draft (factory:draft) to refine and start later. Use when the user asks to file, create or queue a Clockgrove Factory Objective, or asks Clockgrove Factory to build something."
+description: "Turn what the user wants built into a Clockgrove Factory Objective: a GitHub issue in the current repository with a goal and acceptance entries, created on the user's yes either started (the factory:objective label) or saved as a draft (factory:draft) to refine and start later. Use when the user asks to file or create a Clockgrove Factory Objective, or asks Clockgrove Factory to build something. Not for an existing draft (factory-draft, factory-start)."
 ---
 
 # /factory:factory-file
 
-An Objective is a GitHub issue that is the whole specification: the worker cannot ask anything while it runs. Write the issue, show it, and create it only on a yes.
+An Objective is a GitHub issue that is the whole specification: the worker cannot ask anything while it runs. Write the issue, show it, and create it only on a yes. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
 ## Write the issue
 
@@ -18,7 +18,7 @@ Ask the user only for what the issue cannot be written without. Where they left 
 
 ## Harness and models
 
-The workflow sets the default harness and models (doctor names them). When the user wants others for this Objective, offer one label per kind: `factory:harness:claude`, `codex` or `copilot`; `factory:model:<id>` (worker); `factory:subagent-model:<id>`; `factory:reviewer-model:<id>`. A cheaper worker suits a small, bounded change, the strongest one trust, money or concurrency. Claude Code runs `claude-` models, Codex those in `<plugin root>/scripts/lib/codex-prices.json`; no provider prefix. Label names have length limits (reference.md).
+The workflow sets the default harness and models (doctor names them); for others on this Objective, offer the labels in [reference.md](reference.md), Harness and models.
 
 ## Check before creating
 

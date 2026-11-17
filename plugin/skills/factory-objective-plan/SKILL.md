@@ -1,6 +1,7 @@
 ---
 name: factory-objective-plan
-description: First step of working a Clockgrove Factory Objective (an issue labelled factory:objective). Use before any code is written to read the issue, write the plan, record every assumption and apply the Question rule. Load when a task card says to use factory-objective-plan, or when asked to plan an Objective.
+description: "Internal: the first stage of a Clockgrove Factory worker run, loaded only when a Factory task card names it. Reads the Objective's issue, writes the plan before any code, records every assumption and applies the Question rule."
+user-invocable: false
 ---
 
 # Plan the Objective

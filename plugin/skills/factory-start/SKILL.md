@@ -1,6 +1,6 @@
 ---
 name: factory-start
-description: "/factory:factory-start <issue>. Start a draft Clockgrove Factory Objective on the user's yes, after the same trust check as a new Objective: takes the issue's factory:draft label off and applies factory:objective, so Factory picks it up. Use when the user asks to start, launch or queue a draft Clockgrove Factory Objective, or says a draft is ready."
+description: "Start a draft Clockgrove Factory Objective by issue number on the user's yes, after the same trust check as a new Objective: takes the issue's factory:draft label off and applies factory:objective, so Factory picks it up. Use when the user asks to start, launch or queue a draft Clockgrove Factory Objective, or says a draft is ready. Not for refining the draft (factory-draft) or restarting a started one (factory-restart)."
 ---
 
 # /factory:factory-start <issue>

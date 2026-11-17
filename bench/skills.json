@@ -2,10 +2,15 @@
   "version": 2,
   "skills": {
     "factory-deliver-pr": {
-      "sha256": "8e801f979bf6c208addf3414358893e8ae701617b901e3ebb92eecbc57d553be",
-      "lines": 41,
-      "words": 692,
+      "sha256": "b9790896ecce4df67c523359618db358456e972219888ac5b3399c89889556d3",
+      "lines": 42,
+      "words": 686,
       "files": {
+        "agents/openai.yaml": {
+          "sha256": "72295268a0ebb8ffa0a896f704b097a86ad1e385fb7fc7379f5735e8e88ff347",
+          "lines": 4,
+          "words": 22
+        },
         "reference.md": {
           "sha256": "d284f416064eb648a78c293a9cfd5a8f50b9024d6aeea53d3c102c8e7d7cc73b",
           "lines": 24,
@@ -14,67 +19,114 @@
       }
     },
     "factory-doctor": {
-      "sha256": "38f9e90365ba3a8c5ce78b97dfa2984efc5895cb732453dbef08c855c018de9a",
+      "sha256": "5590d3ba981af1d3019abc2273de484f7eb759a82760b2da9b7cec6d03a17bda",
       "lines": 43,
-      "words": 700
-    },
-    "factory-draft": {
-      "sha256": "85dc4ee375fe8b213e690768a2c4fc2f0526e53e3e7ab4369886df216c30ada9",
-      "lines": 33,
-      "words": 445
-    },
-    "factory-file": {
-      "sha256": "faac49c780cf1f1c6a77378e530684911526481928006b69c356e22ab74a49a5",
-      "lines": 41,
-      "words": 694,
+      "words": 698,
       "files": {
         "reference.md": {
-          "sha256": "f13ab17c5e45d4b2008a18becdd2fcfff71124e8fcdabdd3ac86329bcd1a34a5",
-          "lines": 31,
-          "words": 440
+          "sha256": "c9efe5a36df23655a362898f49ea60afc1948cbce4e3e4b92ce28974654a70ad",
+          "lines": 4,
+          "words": 111
+        }
+      }
+    },
+    "factory-draft": {
+      "sha256": "412763c6df72d85367f242297201deb5fe62907425576a101c8a669d9262396f",
+      "lines": 33,
+      "words": 456
+    },
+    "factory-file": {
+      "sha256": "30d37c1c90e92431099ee8847f5730b28b20337a79b20dff0c2f3efd64db0d0c",
+      "lines": 41,
+      "words": 689,
+      "files": {
+        "reference.md": {
+          "sha256": "e58bf7f74fb262054a679ce58f4a0fe4b19a9378dcdd46711fcf64c84e3404c1",
+          "lines": 35,
+          "words": 506
         }
       }
     },
     "factory-handover": {
-      "sha256": "17fb329e42c945d31a4450dd206f27238c39b6f26b87ee777e4f9b73df9953dd",
+      "sha256": "c9b3a2e159fa52bd7198e43b2fd0f3765bffcfc7764289b39e3a8117dc898819",
       "lines": 21,
-      "words": 429
+      "words": 457
     },
     "factory-implement-split": {
-      "sha256": "42d68dbd6117818a4e82e6e44e859f512d66f8fdb02c650ca730428b8550503f",
-      "lines": 39,
-      "words": 700
+      "sha256": "421d5fffa2df941deddcba3059f6db0c1a6f282adc9be097ba9ea927d77940fb",
+      "lines": 40,
+      "words": 700,
+      "files": {
+        "agents/openai.yaml": {
+          "sha256": "0c0a0ee14bfd6452f70ca61e8ce2ba89ad3fac7bdea0ff82e2814356cab5d371",
+          "lines": 4,
+          "words": 22
+        }
+      }
     },
     "factory-objective-plan": {
-      "sha256": "72fc80e887e2038c4e723864ab46ece53b0dcd744648604e23ad2ca6da959297",
-      "lines": 42,
-      "words": 700
+      "sha256": "3cce347aff343a9ba314f765fa0a79c54d8eb498b845e034c3df6d5dbfaa8c6f",
+      "lines": 43,
+      "words": 690,
+      "files": {
+        "agents/openai.yaml": {
+          "sha256": "7e390742e1f5b3e7b9679b5e54b40614ab93b67e6a76684d12d820bc14465761",
+          "lines": 4,
+          "words": 22
+        }
+      }
     },
     "factory-prove-acceptance": {
-      "sha256": "cd92275b13c29f4f6248cc1942c0cf79f62b98caaf33016bbc1c7cb4e73be9e5",
-      "lines": 41,
-      "words": 697
-    },
-    "factory-queue": {
-      "sha256": "3f5e78db3c85a4173c1de2fb25444306d55e1063b31f7ecf0ed91bcb4548df9d",
-      "lines": 48,
-      "words": 700
-    },
-    "factory-restart": {
-      "sha256": "48b63572d5a72cddc4c63ad60f1c005ac8a336dd66a0f24678ef7176de7f0bad",
-      "lines": 31,
-      "words": 495
-    },
-    "factory-review": {
-      "sha256": "b6409c7f1f29837a65ac5d76861f5ceb8bddf70a8f8d172858f40e0695f9d49b",
-      "lines": 27,
-      "words": 592
-    },
-    "factory-review-pr": {
-      "sha256": "4cc5863c97c860e03d55ba479948706126a131884605aa48e41e00c6cf4891bf",
-      "lines": 49,
+      "sha256": "62128d57b926a8992d3e7179f569a1b17818af43ba3382a361456212c63e4eca",
+      "lines": 42,
       "words": 698,
       "files": {
+        "agents/openai.yaml": {
+          "sha256": "0bb5f0ed87eba912b2e01a1993bcdf14245c8f2d530feb1b05304e84bdd6849f",
+          "lines": 4,
+          "words": 22
+        }
+      }
+    },
+    "factory-queue": {
+      "sha256": "c24ea329ef5cec38a7a58011a804917a8b6d3ccbec2ff762bd9c35f0ecd560cd",
+      "lines": 44,
+      "words": 644,
+      "files": {
+        "reference.md": {
+          "sha256": "2cec9713e1adf9af6080fbadc95809ce6aae4bd62a1dd8d783e32c72fc905022",
+          "lines": 18,
+          "words": 383
+        }
+      }
+    },
+    "factory-restart": {
+      "sha256": "7710d83e56faa057152168a39efb7ce776e3ff5128c3217f572e71143b2a3588",
+      "lines": 31,
+      "words": 506
+    },
+    "factory-review": {
+      "sha256": "31aa29b77b2e1c75b23918d70dd9c72e7f9db6e0eaa3b6c580c88d5188a9db89",
+      "lines": 40,
+      "words": 699,
+      "files": {
+        "reference.md": {
+          "sha256": "d91b2f327b380f8c6b9f123e96e49bed6bc78de900b591146aedd9639e7e3cf9",
+          "lines": 14,
+          "words": 214
+        }
+      }
+    },
+    "factory-review-pr": {
+      "sha256": "405c81fbd881a88f92da7b9468e8a8338293fdf7db78b8d45f9f3025b6386679",
+      "lines": 50,
+      "words": 689,
+      "files": {
+        "agents/openai.yaml": {
+          "sha256": "7b2d3226382ada52c859b3e1909507c0a61c3801a48a2cfb2993b0f9a7bd1de5",
+          "lines": 4,
+          "words": 22
+        },
         "reference.md": {
           "sha256": "293c5f1977f07fe44f6ed8b0fa74df8f1cf4fa80766bfdbf514b79ab90a625b9",
           "lines": 54,
@@ -83,19 +135,26 @@
       }
     },
     "factory-run": {
-      "sha256": "111c0a1f032cbfbbc39ea943de933099a13e619930d9bb35d9509c7c52335b68",
-      "lines": 49,
-      "words": 700
+      "sha256": "4786c87dd082e54684a560dfa5271641455de6ccd8df2e3d6e64e58a6b167bdf",
+      "lines": 51,
+      "words": 699,
+      "files": {
+        "reference.md": {
+          "sha256": "35c7877ac9a7418a8f1b7ab1880d7f78f166de1621fdaa500748774acde0237e",
+          "lines": 17,
+          "words": 266
+        }
+      }
     },
     "factory-score": {
-      "sha256": "41feee99645f561db979bb5c96f2321f575868bba6c9187a231d16e673e0fe51",
+      "sha256": "95ed607ef04cbb748b78d240cb3f340c118396e2d31d56792872e6950d49e2a8",
       "lines": 30,
-      "words": 519
+      "words": 545
     },
     "factory-scoring": {
-      "sha256": "2c0b59b883e78f6e3aea91380dbdab76bb63208520c2a47b1e37bd0171f1e016",
+      "sha256": "e6fac839e0002b435224c5f6bce10643e56f4c04d266d3e055ab3f3bef3af314",
       "lines": 35,
-      "words": 700,
+      "words": 689,
       "files": {
         "reference.md": {
           "sha256": "bede505f936f2b9b24dfe6546041ff933f01a6557ce9f0d0beef75bc241a3014",
@@ -105,14 +164,21 @@
       }
     },
     "factory-serve": {
-      "sha256": "e7b4b18c8de23893f5846694f9ab99821da2167ba7b907c246874de204c7a822",
-      "lines": 34,
-      "words": 697
+      "sha256": "825de476cd987a5a445444781a575a8df975aec20415e9cdef7be139a765d08f",
+      "lines": 31,
+      "words": 612,
+      "files": {
+        "reference.md": {
+          "sha256": "e05a0b8d6e915318570215583ff1a3f8888641c0241f1828a3e50ec5b1383efa",
+          "lines": 8,
+          "words": 236
+        }
+      }
     },
     "factory-setup": {
-      "sha256": "923970486bcba011c9322b00fea25532f1fdd3bbfb3acb049dec906c4ea59438",
+      "sha256": "25cc517ca9ffaf65cd248852e05382002a0c10dd70ab003204ccdee82a7dd4d8",
       "lines": 47,
-      "words": 680,
+      "words": 688,
       "files": {
         "local.md": {
           "sha256": "94ba14f2587a82b7686bc02b51eb2aa22c731ee4cafde0e0c84ab2046ca078a8",
@@ -120,21 +186,21 @@
           "words": 661
         },
         "reference.md": {
-          "sha256": "a7d23f96ca525c99ddf11679da7cfc0302edaf88322cb741d0d930079a6c415c",
-          "lines": 44,
-          "words": 828
+          "sha256": "db0d5c06e90488024634af7208efa202faf3c8aed53a65008e322149ed4ec257",
+          "lines": 48,
+          "words": 924
         }
       }
     },
     "factory-start": {
-      "sha256": "a357f758d7c8c6dced0dfd075fbf1348815da190630e517a2adbc22df84a14b1",
+      "sha256": "0b7516aadd7621b62987a4ae2d1625219578e96da8dfd92fb0b72df6576d85c8",
       "lines": 36,
-      "words": 588
+      "words": 601
     },
     "factory-stop": {
-      "sha256": "09ae4d5394df83874232a0d691824db48d9a160058dca5769f8bc9c7ecff4797",
+      "sha256": "7d3866987f8b6e57a26c9238855f75b115d4abe2b53573b1f55d89e01190c9ca",
       "lines": 30,
-      "words": 444
+      "words": 459
     }
   }
 }

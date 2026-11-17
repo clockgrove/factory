@@ -1,19 +1,19 @@
 ---
 name: factory-scoring
-description: How Clockgrove Factory scores an Objective. Use to read the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective) from the issue, the PR, the job log and the harness's usage artifact, with the unit and basis for each harness. Load when asked to score, explain or compare Clockgrove Factory runs, or when building a scorecard row (the `factory-score` skill loads it).
+description: "How Clockgrove Factory scores an Objective: the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective), their units and basis per harness. Use when asked to explain or compare how Clockgrove Factory runs are scored, or when building a scorecard row (factory-score loads it). Not for building or printing the scorecard (factory-score)."
 ---
 
 # Score an Objective
 
 Job one: file an Objective, walk away, come back to correct, merged work at a reasonable cost. Four numbers per Objective say whether that happened. One scorecard row holds all four, plus the unit and basis of each, so rows from different harnesses are never compared as if they measured the same thing.
 
-The scorecard script and judge (`<factory clone>/bench/`) are not in the plugin; they need a clone of Factory's repository. Without one, score by hand.
+The scorecard script and judge (`<factory clone>/bench/`) need a clone of Factory's repository; without one, score by hand. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
 ## 1. Walk-away (binary)
 
-Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit, relabel, un-block, review, or hand-started or re-run Factory workflow run by a human (anyone but the Factory App and the harness) breaks it, an answered Question breaks it even when the answer is not on the issue or PR, and a card that reached Blocked is a miss. A workflow hand-over is an owner step, not input: reference.md, "Workflow hand-over". Report `yes` or `no` with the first human action, and the bucket: walk-away, External or miss. External: every stop was a Block whose notice records an external cause, with no Question and no input but the answers those Blocks asked for; the 1.0 streak skips it. Load [reference.md](reference.md), "Block causes", for the codes.
+Did it merge with zero human input after the label? Read from the issue and the PR timelines: the label event starts the clock; any later push, comment, edit, relabel, un-block, review, or hand-started or re-run Factory workflow run by a human (anyone but the Factory App and the harness) breaks it, an answered Question breaks it even when the answer is not on the issue or PR, and a card that reached Blocked is a miss. A workflow hand-over is an owner step, not input: reference.md, "Workflow hand-over". Report `yes` or `no` with the first human action, and the bucket: walk-away, External or miss. External: every stop was a Block whose notice records an external cause, with no Question and no input but the answers those Blocks asked for; the 1.0 streak skips it. Codes: [reference.md](reference.md), "Block causes".
 
-A merge that sat idle longer than the stall threshold between Factory's acts is a stall, not a walk-away, either way of counting. Load [reference.md](reference.md), "Stalls", for the threshold, what counts as Factory's acts and as idle, and what to report.
+A merge that sat idle longer than the stall threshold between Factory's acts is a stall, not a walk-away, either way of counting: [reference.md](reference.md), "Stalls".
 
 Split the human actions too. One is *asked for* when it follows a request Factory made (a Question, a Blocked notice, a review request) and comes before Factory next labels the Objective Running; any other is *unprompted*. Factory's posts carry `<!-- factory:... -->` markers, which tell them apart in local mode, where Factory posts as the operator; a local loop posts its `done` marker on a closed Objective before it removes the state labels that marker names, so those removals are Factory's. Report both counts, and walk-away a second way: counting only asked-for actions (Blocked is still a miss).
 
@@ -27,7 +27,7 @@ Minutes a human spent on this Objective after the label: reading and acting on a
 
 ## 4. Dollars per merged Objective
 
-Per harness, from the usage artifact the worker job uploads, plus the reviewer call. For the run's harness, load reference.md, "Dollars by harness": the fields to read, the unit and the basis.
+Per harness, from the usage artifact the worker job uploads, plus the reviewer call: reference.md, "Dollars by harness", for the fields, unit and basis.
 
 Beside the dollars, report runner minutes from the job log and wall time from label to merge. Wall time is never reported alone: the same Objective on a busy queue takes longer for no more dollars.
 

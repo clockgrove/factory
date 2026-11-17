@@ -1,6 +1,6 @@
 ---
 name: factory-restart
-description: "/factory:factory-restart <issue>. Restart one Clockgrove Factory Objective from its issue's current text, in any state, on the user's yes: applies the factory:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Clockgrove Factory Objective, or says one was built from the wrong text."
+description: "Restart one Clockgrove Factory Objective from its issue's current text, in any state, on the user's yes: applies the factory:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Clockgrove Factory Objective, or says one was built from the wrong text. Not for pausing one (factory-stop), or letting one go on after a fix or an answer (re-applying factory:objective)."
 ---
 
 # /factory:factory-restart <issue>
@@ -21,10 +21,10 @@ Show the issue's number, title and state, and say what the restart does:
 - Then the dispatcher closes the earlier pull request with a comment linking the restart (its commits and review stay readable there), deletes the `factory/<issue>` branch, sets the earlier plan aside, and queues the Objective again. The restarted run starts from the default branch and the issue's current text; comments made before the label was applied do not feed it.
 - The restart record on the issue names the deleted branch's last commit, so the branch can be restored. The retry and rebase counts start over. The scorecard counts the restart as a human action.
 
-Ask for a yes, saying that a repository set up before the label existed gets it created first. Factory restarts an Objective only for a person who can push to the repository or is a maintainer its workflow names; anyone else's label, an App's own token's included, is taken off with a comment.
+Ask for a yes, saying the label is created first when the repository lacks it. Factory restarts an Objective only for a person who can push to the repository or is a maintainer its workflow names; anyone else's label, an App's own token's included, is taken off with a comment.
 
 ## Restart it
 
-On a yes, run `gh issue edit <issue> --repo OWNER/NAME --add-label factory:restart` (with `--add-label factory:objective` too for a stopped one). When GitHub says the label does not exist, the repository was set up before it: create it with `gh label create factory:restart --repo OWNER/NAME --color 5319E7 --description "Restart this Objective from the issue's current text (any state)"`, then apply it.
+On a yes, run `gh issue edit <issue> --repo OWNER/NAME --add-label factory:restart` (with `--add-label factory:objective` too for a stopped one). When GitHub says the label does not exist (setup's labels step makes it), create it with `gh label create factory:restart --repo OWNER/NAME --color 5319E7 --description "Restart this Objective from the issue's current text (any state)"`, then apply it.
 
 Say it is restarting: the label comes off once the dispatcher has restarted it, and the issue's progress comment shows the new run.

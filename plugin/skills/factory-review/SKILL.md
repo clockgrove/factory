@@ -1,26 +1,39 @@
 ---
 name: factory-review
-description: "/factory:factory-review <pr>. Run the Clockgrove Factory reviewer in this session on one PR of the current repository: one comment-only pass of line-tied findings. Use when the user asks to review a Clockgrove Factory PR by number."
+description: "Review one Clockgrove Factory PR of the current repository by number: in this session with the reviewer's skill, posting one comment-only pass of line-tied findings as the user only once they have read it and said yes; or, on their yes, with local mode's sandboxed review stage (`factory review <pr> --wait`). Use when the user asks to review a Clockgrove Factory PR. Not for answering a review's comments, which the worker does (factory-run)."
 ---
 
 # /factory:factory-review <pr>
 
-Run one reviewer pass on a PR in this session, exactly as the Action's reviewer job does.
+One reviewer pass on a Factory PR, as the Action's review job makes it. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
 ## Gather
 
-1. `gh pr view <pr> --json number,title,body,headRefName,baseRefName,isDraft,headRefOid` and confirm the head is a `factory/<issue>` branch, or the user said to review it anyway.
-2. The Objective issue: the number from the branch, then `factory issue <issue> --out <file outside the clone>` (else `node <plugin root>/scripts/local.mjs issue <issue> --out <file>`) and read that file, never the issue from GitHub. It writes the issue only when its author, last editor and latest title renamer can push or are pinned maintainers; if it refuses, stop and relay its message: the review job Blocks such an Objective, and `post-review` posts nothing for it.
+1. `gh pr view <pr> --json number,title,body,headRefName,baseRefName,isDraft,headRefOid`; the head is a `factory/<issue>` branch, or the user said to review it anyway.
+2. The Objective issue: the number from the branch, then `factory issue <issue> --out <file outside the clone>`; read that file, never the issue on GitHub. It refuses an issue whose author, last editor or latest title renamer cannot push and is no pinned maintainer: stop and relay its message; the review job Blocks such an Objective, and `post-review` posts nothing for it.
 3. The diff: `gh pr diff <pr>`.
-4. The validation state: `gh pr checks <pr>`. If validation has not passed, say so; the reviewer job runs after validation, and a review of a red PR is the user's choice.
-5. Whether a review body already carries `<!-- factory:<issue>:review -->`: if so, the one pass has run; say so and stop unless the user wants another. On a foundation Objective whose reviews lack `<!-- factory:<issue>:foundation -->`, the foundation pass has not: re-applying `factory:review` has the review job run it alone.
+4. `gh pr checks <pr>`: if validation has not passed, say so; reviewing a red PR is the user's choice.
+5. Whether a review body already carries `<!-- factory:<issue>:review -->`: if so, the one pass has run; say so and stop unless the user wants another. A foundation Objective's own marker: [reference.md](reference.md).
+
+## Ask
+
+Offer two ways, the default first, saying what each writes and spends:
+
+- **In this session (default).** You make the pass here, on this session's model and spend; it is posted only on a second yes, once the user has read it (Review, below).
+- **Sandboxed: `factory review <pr> --wait`.** Local mode's review stage on this machine, in sandboxes on its harness login: the reviewer posts its one pass, the worker's answer pass answers it with commits on the PR's branch, and with `auto_merge` on it follows the PR through its checks and the merge queue to merged (without `--wait`, a PR not yet green waits for a running `factory serve` or the Action to merge it). The stage stops at `max_usd` (doctor's `settings` row); its spend is booked on the issue toward `daily_usd`. It needs local mode set up (the factory-setup skill); if it refuses, relay its message, which names the fix.
+
+Either posts a public review as the user (local mode's token, else their `gh` login). Ask which; act only on a yes.
+
+## Sandboxed
+
+Run it in the background and report its `[#<issue> …]` lines, its exit and the review's link. Where this harness cannot run a command in the background, give the user the command to run in a terminal of their own, and read its output once they say it has ended.
 
 ## Review
 
-Load the `factory-review-pr` skill and follow it. The reviewer is one model call on the top model: if this session's model is not the reviewer model pinned in this plugin's `agents/` for this harness, spawn the `reviewer` agent definition and give it the issue text, the diff and the PR body; otherwise do the pass yourself. Either way the result is the skill's JSON: `acceptance` (one judgment per entry) and `comments` (`path`, `line`, `entry`, `body`), each comment on an entry carrying its `entry`. When `factory issue` says the Objective is a foundation one (`factory:foundation`), run the foundation pass as well: spawn the `foundation-reviewer` agent definition the same way (or, on its model, follow the skill's reference.md, "Foundation review", yourself), and put its answer in the same JSON under `foundation`: `{"acceptance": [...], "comments": [...], "foundation": {"comments": [...]}}`. The review job runs it on such an Objective and this review replaces the job's, so `post-review` refuses a foundation Objective's file without it, and any other Objective's file with it.
+Read `<plugin root>/skills/factory-review-pr/SKILL.md` (the reviewer's skill) and follow it. The reviewer is one model call on the top model: if this session's model is not the reviewer model pinned in this plugin's `agents/` for this harness, spawn the `reviewer` agent definition and give it the issue text, the diff, the PR body and the skill's absolute path (`<plugin root>/skills/factory-review-pr/SKILL.md`, its `reference.md` beside it); otherwise do the pass yourself. Either way the result is the skill's JSON: `acceptance` (one judgment per entry) and `comments` (`path`, `line`, `entry`, `body`). A foundation Objective (`factory:foundation`, as `factory issue` says) needs the foundation pass too: [reference.md](reference.md).
 
-Write that JSON to a file outside the clone, and have Factory post it: `factory post-review <pr> <file>` (else `node <plugin root>/scripts/local.mjs post-review <pr> <file>`). Factory fits each comment to the diff, adds one for each entry judged not met without one, neutralises mentions and markers in the text, and posts one comment-only review with the judgments in its body on the head with the `<!-- factory:<issue>:review -->` marker, so the Action's review job does not repeat the pass. It posts nothing from a file with no reviewer JSON or no judgment of the issue's entries; fix the file and run it again. Post nothing yourself; never approve, never request changes.
+Write that JSON to a file outside the clone. Show the user the judgments and the comments, one per line as `path:line: first sentence`, and ask whether to post them. On a yes, run `factory post-review <pr> <file>` ([reference.md](reference.md), Posting). Post nothing yourself; never approve, never request changes.
 
 ## After
 
-Tell the user how many comments were posted and list them one per line as `path:line: first sentence`. The worker (`/factory:factory-run <issue>` on the branch, or the Action's worker pass) answers them; do not answer them yourself. The Action's answer pass answers this review like its own, since it carries the marker and comes from someone who can push.
+Say how many comments were posted. The worker (the factory-run skill on the branch, or the Action's worker pass) answers them, not you. The Action's answer pass answers this review like its own, since it carries the marker and comes from someone who can push.

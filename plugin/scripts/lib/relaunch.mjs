@@ -25,7 +25,7 @@ const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c));
  * `outage` (the stage ended on one) or `vanished` (no exit); `key` names the loss it answered (blockKey, stintKey), so a
  * tick that finds the same loss again does not count it twice; `start` is the person's start it counted against
  * (personStart), so a later start begins a new count with no clock compared; `run` is the Actions run that relaunched it
- * (its work job runs there: stintWorkJob).
+ * (its work job runs there: stintWorkJob). `updatedAt` is when the record comment was last written, on GitHub's clock.
  */
 export function relaunchRecordOf(comments, issue) {
   const head = `${marker(issue, "relaunch")}\n`;
@@ -38,7 +38,7 @@ export function relaunchRecordOf(comments, issue) {
   } catch {
     tries = [];
   }
-  return { tries, commentId: c.id };
+  return { tries, commentId: c.id, updatedAt: c.updated_at ?? c.created_at ?? null };
 }
 
 /**
@@ -106,12 +106,16 @@ export const triesSince = (record, start) => (record?.tries || []).filter((t) =>
 /**
  * What the dispatcher does with a lost stage: `{relaunch: true, tries}` with the record to write (`record`, null when the
  * same loss was counted already and only its relaunch is to finish), or `{block: true, tries}` once RELAUNCH_MAX
- * relaunches since `start` were used. `setup`: the step a vanished work job failed at before Pendulum ran (endedNotLost
+ * relaunches since `start` were used; the same loss found again (its `key`) is relaunched with no new try, its run
+ * (`run`) recorded when it changed. `setup`: the step a vanished work job failed at before Pendulum ran (endedNotLost
  * `{step, number}`), kept on the try so the next loss can be told to fail at the same step (setupAgain).
  */
 export function relaunchDecision({ record, start, key, lost, at, run = null, setup = null, max = RELAUNCH_MAX }) {
   const since = triesSince(record, start);
-  if (since.some((t) => t.key === key)) return { relaunch: true, tries: since.length, record: null };
+  const same = since.find((t) => t.key === key);
+  // The same loss again: a relaunch whose new stint was not written. This run makes that stint, so the record names it
+  // (stintRun reads the stint's job in the run the record names).
+  if (same) return { relaunch: true, tries: since.length, record: run && same.run !== String(run) ? { tries: (record?.tries || []).map((t) => (t === same ? { ...t, run: String(run) } : t)) } : null };
   if (since.length >= max) return { block: true, tries: since.length };
   const tries = [...(record?.tries || []), { at, lost, key, start: start ?? null, ...(run ? { run: String(run) } : {}), ...(setup ? { setup: { step: setup.step ?? null, number: setup.number ?? null } } : {}) }].slice(-KEEP_TRIES);
   return { relaunch: true, tries: since.length + 1, record: { tries } };
@@ -206,31 +210,6 @@ export function notLostBlock(end, note = "") {
 }
 
 /**
- * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that
- * applied `pendulum:running` named the job in its own run: `run`, when the record names the relaunch's run, is read
- * first; else the runs created in the hour up to the label (that run was created before it; any status, since a run's
- * wake job may still sleep), the newest first, at most `maxRuns` of them, one jobs read each.
- */
-export async function stintWorkJob(repo, n, since, opts, { run = null, maxRuns = 10 } = {}) {
-  const at = Date.parse(since);
-  if (!Number.isFinite(at)) return null;
-  const inStint = (j) => j.name === `work (${n})` && Date.parse(j.created_at ?? j.started_at) >= at - CLOCK_SKEW_MS;
-  const jobsOf = async (id) => (await rest(`repos/${repo.full}/actions/runs/${id}/jobs?per_page=100`, opts))?.jobs || [];
-  if (run) {
-    const job = (await jobsOf(run)).find(inStint);
-    if (job) return job;
-  }
-  const window = `${new Date(at - 60 * 60_000).toISOString()}..${new Date(at).toISOString()}`;
-  const runs = (await rest(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?created=${encodeURIComponent(window)}&per_page=${maxRuns}`, opts))?.workflow_runs || [];
-  for (const r of runs.slice(0, maxRuns)) {
-    if (String(r.id) === String(run)) continue;
-    const job = (await jobsOf(r.id)).find(inStint);
-    if (job) return job;
-  }
-  return null;
-}
-
-/**
  * How long a Running stint on the runners waits for its `work (N)` job to show up before the dispatcher judges it with
  * no live job: the grace is for a job GitHub has not started yet, so a job that already ended is judged within it
  * (jobEndedInStint), and the dispatcher's wake (logic.mjs `job-grace`) ticks at its end.
@@ -243,6 +222,81 @@ export const JOB_GRACE_MS = 15 * 60_000;
  * earlier stint's (a relaunch's new stint starts after the job it relaunched from ended).
  */
 export const jobEndedInStint = (job, since) => job?.status === "completed" && Date.parse(job.completed_at) > Date.parse(since);
+
+/**
+ * One tick's reads of the workflow's runs and jobs, shared by every Objective's stintWorkJob: each run's jobs read once,
+ * and one runs listing serving every window it covers. A listing is made from `pad` before the window asked for to now,
+ * up to 100 runs, newest first, so the windows of stints that began within `pad` of one another share it; one it cannot
+ * serve (more runs than one page holds before the window's newest `max`) is read for that window alone. A failed read
+ * stays failed for the tick.
+ */
+export function stintReads(repo, opts, { pad = JOB_GRACE_MS, now = Date.now } = {}) {
+  const jobs = new Map();
+  const listings = [];
+  const list = async (from, to, perPage) => {
+    const window = `${new Date(from).toISOString()}..${new Date(to).toISOString()}`;
+    const runs = (await rest(`repos/${repo.full}/actions/workflows/${workflowFile()}/runs?created=${encodeURIComponent(window)}&per_page=${perPage}`, opts))?.workflow_runs || [];
+    return { from, to, runs, complete: runs.length < perPage };
+  };
+  const inWindow = (l, from, to) => l.runs.filter((r) => Date.parse(r.created_at) >= from && Date.parse(r.created_at) <= to);
+  const serves = (l, from, to, max) => l.from <= from && l.to >= to && (l.complete || inWindow(l, from, to).length >= max);
+  return {
+    jobsOf(id) {
+      const key = String(id);
+      if (!jobs.has(key)) jobs.set(key, rest(`repos/${repo.full}/actions/runs/${encodeURIComponent(key)}/jobs?per_page=100`, opts).then((d) => d?.jobs || []));
+      return jobs.get(key);
+    },
+    async runsIn(from, to, max) {
+      let l = listings.find((x) => serves(x, from, to, max));
+      if (!l) {
+        l = await list(from - pad, Math.max(to, now()), 100);
+        listings.push(l);
+        if (!serves(l, from, to, max)) listings.push((l = await list(from, to, max)));
+      }
+      return inWindow(l, from, to)
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+        .slice(0, max);
+    },
+  };
+}
+
+/**
+ * The run a relaunch made the Objective's current stint in, or null: the latest try's `run` in the record, when the
+ * stint began with the first `pendulum:running` label applied after the record was last written (the relaunch writes its
+ * record, then that label). A stint begun any other way (a person's start after the relaunch) is no relaunch's.
+ */
+export function stintRun(record, events, since) {
+  const run = record?.tries?.at(-1)?.run;
+  const written = Date.parse(record?.updatedAt);
+  if (!run || !Number.isFinite(written) || !since) return null;
+  const first = (events || [])
+    .filter((e) => e?.event === "labeled" && e.label?.name === "pendulum:running" && Date.parse(e.created_at) >= written)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0];
+  return first && Date.parse(first.created_at) === Date.parse(since) ? String(run) : null;
+}
+
+/**
+ * The Running stint's `work (N)` job, or null: only a job created in the stint (from `since`) counts. The dispatcher that
+ * applied `pendulum:running` named the job in its own run: `run`, when the record names the relaunch's run, is read
+ * first, and with `only` (the stint is that relaunch's: stintRun) a job is that run's or none; else the runs created in
+ * the hour up to the label (that run was created before it; any status, since a run's wake job may still sleep), the
+ * newest first, at most `maxRuns` of them, one jobs read each. `reads`: the tick's shared reads (stintReads).
+ */
+export async function stintWorkJob(repo, n, since, opts, { run = null, only = false, maxRuns = 10, reads = stintReads(repo, opts) } = {}) {
+  const at = Date.parse(since);
+  if (!Number.isFinite(at)) return null;
+  const inStint = (j) => j.name === `work (${n})` && Date.parse(j.created_at ?? j.started_at) >= at - CLOCK_SKEW_MS;
+  if (run) {
+    const job = (await reads.jobsOf(run)).find((j) => inStint(j) && (j.run_id === undefined || String(j.run_id) === String(run)));
+    if (job || only) return job ?? null;
+  }
+  for (const r of await reads.runsIn(at - 60 * 60_000, at, maxRuns)) {
+    if (String(r.id) === String(run)) continue;
+    const job = (await reads.jobsOf(r.id)).find(inStint);
+    if (job) return job;
+  }
+  return null;
+}
 
 /** The Actions run that made the latest relaunch the record holds, or null. */
 export const relaunchRun = (record) => record?.tries?.at(-1)?.run ?? null;

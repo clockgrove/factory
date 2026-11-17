@@ -5,10 +5,10 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { blockCauseOf, marker, nextWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
+import { RETRY_WAKE_MS, blockCauseOf, marker, nextWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
 import { applyExit } from "../scripts/lib/session.mjs";
 import { setStateLabel } from "../scripts/lib/github.mjs";
-import { JOB_GRACE_MS, RELAUNCH_MAX, relaunchDecision, relaunchRecordOf } from "../scripts/lib/relaunch.mjs";
+import { JOB_GRACE_MS, RELAUNCH_MAX, relaunchDecision, relaunchRecordOf, stintRun } from "../scripts/lib/relaunch.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -23,7 +23,10 @@ const MIN = 60_000;
  * workflow's runs (listed newest first within a `created` range, `per_page` at most) and each run's jobs; `spend`: the
  * day's spend comments; `failRecord`: the relaunch record's post fails; `failComments`: the issues whose comment list
  * cannot be read (a network blip, 502); `prs`: an open PR per issue, `{ number, review }` (`review`: when the review
- * label went on, or none). `cfg` is read at each request, so a test may change it between ticks.
+ * label went on, or none); `live`: the runs listed by status (`{ in_progress: [{ id }] }`), whose jobs are `jobs`;
+ * `failLive`: how many status listings answer 502 first; `failJobs`: the runs whose jobs cannot be read (502); `fresh`: an
+ * issue as a fresh read of it shows it, where the listing is older. `cfg` is read at each request, so a test may change it
+ * between ticks.
  */
 function fakeGitHub(open, cfg = {}) {
   let last = 0;
@@ -62,7 +65,10 @@ function fakeGitHub(open, cfg = {}) {
       const label = u.searchParams.get("labels");
       return json([...issues.values()].map((i) => i.issue).filter((i) => i.labels.includes(label)).map((i) => ({ ...i, labels: i.labels.map((name) => ({ name })), updated_at: stamp() })));
     }
-    if (method === "GET" && /^\/issues\/\d+$/.test(path) && one) return json({ ...one.issue, labels: one.issue.labels.map((name) => ({ name })) });
+    if (method === "GET" && /^\/issues\/\d+$/.test(path) && one) {
+      const shown = cfg.fresh?.[n] ?? one.issue;
+      return json({ ...shown, labels: shown.labels.map((name) => ({ name })) });
+    }
     // The timeline carries the comments too, as `commented` events.
     if (method === "GET" && /^\/issues\/\d+\/timeline$/.test(path) && one)
       return json([...one.timeline, ...one.comments.map((c) => ({ event: "commented", actor: c.user, ...c }))].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)));
@@ -111,12 +117,18 @@ function fakeGitHub(open, cfg = {}) {
     if (method === "GET" && path === "/collaborators") return json([{ login: "maintainer" }]);
     if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) {
       const range = u.searchParams.get("created");
-      if (!range) return json({ workflow_runs: [] });
+      const status = u.searchParams.get("status");
+      if (status && cfg.failLive > 0) {
+        cfg.failLive -= 1;
+        return json({ message: "Bad Gateway" }, 502);
+      }
+      if (!range) return json({ workflow_runs: cfg.live?.[status] || [] });
       const [from, to] = range.split("..").map((t) => Date.parse(t));
       const hits = (cfg.runs || []).filter((r) => Date.parse(r.created_at) >= from && Date.parse(r.created_at) <= to).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
       return json({ workflow_runs: hits.slice(0, Number(u.searchParams.get("per_page") || 30)) });
     }
     const runJobs = /^\/actions\/runs\/(\d+)\/jobs$/.exec(path);
+    if (method === "GET" && runJobs && (cfg.failJobs === true || cfg.failJobs?.includes(Number(runJobs[1])))) return json({ message: "Bad Gateway" }, 502);
     if (method === "GET" && runJobs) return json({ jobs: cfg.jobs?.[runJobs[1]] || [] });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
     // The workflow file (raw) at the commit the test gives it at, only there.
@@ -603,4 +615,99 @@ test("on the runners, a Running stint with no job alive arms a wake at its grace
   cfg.jobs = { 55: [{ name: "work (7)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stintStart(gh, 7)) + 6_000).toISOString(), completed_at: ago(10 * MIN) }] };
   const woke = await tick(gh);
   assert.deepEqual(woke.vanished, [7]);
+});
+
+test("the stints of many Objectives in their grace share one runs listing and each run's jobs read once (#528)", async () => {
+  // Twelve Running Objectives that began 1 to 12 minutes ago, none with a job shown yet; a run a minute for the last hour.
+  const open = Array.from({ length: 12 }, (_, i) => ({ number: 20 + i, labels: [OBJ, "pendulum:running"], since: (i + 1) * MIN }));
+  const runs = Array.from({ length: 60 }, (_, i) => ({ id: 500 + i, created_at: ago(i * MIN + 30_000) }));
+  const gh = fakeGitHub(open, { runs, jobs: {} });
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
+  assert.equal(r.deadlines.filter((d) => d.kind === "job-grace").length, 12, "each waits for its grace's end");
+  const listings = gh.reads.filter((p) => /created=/.test(p));
+  const jobs = gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs/.test(p)).map((p) => p.replace(/\?.*/, ""));
+  assert.equal(listings.length, 1, "one runs listing serves every stint's window");
+  assert.equal(new Set(jobs).size, jobs.length, "no run's jobs read twice");
+  // Each window's newest ten runs, which overlap: the runs from 1.5 to 21.5 minutes ago (not 12 times 10).
+  assert.equal(jobs.length, 21);
+});
+
+test("a live work job whose final tick step has started arms a short wake, so its end is judged just after (#528)", async () => {
+  const step = (status) => ({ name: "Dispatch tick (this worker finished; a conflicting PR fires no review job)", status, conclusion: status === "completed" ? "success" : null, number: 9 });
+  const job = (n, steps) => ({ name: `work (${n})`, status: "in_progress", conclusion: null, created_at: ago(MIN), steps });
+  const gh = fakeGitHub([7, 9].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since: 2 * MIN })), {
+    live: { in_progress: [{ id: 60 }] },
+    jobs: { 60: [job(7, [step("in_progress")]), job(9, [{ ...step("queued"), status: "queued" }])] },
+  });
+  const before = Date.now();
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched], [[], []], "both jobs are alive");
+  const retries = r.deadlines.filter((d) => d.kind === "retry");
+  assert.deepEqual(retries.map((d) => d.issue), [7], "only the job whose final tick started");
+  assert.ok(Date.parse(retries[0].at) >= before + RETRY_WAKE_MS && Date.parse(retries[0].at) <= Date.now() + RETRY_WAKE_MS);
+  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [], "a live job needs no grace wake");
+});
+
+test("inside its grace, an ended job is not judged when the timeline no longer shows the stint Running, a restart waits, or a fresh read shows another state (#528)", async () => {
+  const since = 2 * MIN;
+  const cancelled = (n) => ({ name: `work (${n})`, status: "completed", conclusion: "cancelled", created_at: ago(since - 6_000), completed_at: ago(30_000) });
+  // #7: the listing is older than the timeline, whose newest pendulum:running event took the label off.
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(7)] } });
+  gh.issue(7).timeline.push({ event: "unlabeled", label: { name: "pendulum:running" }, actor: SELF, created_at: ago(20_000) });
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched, gh.blocks(7)], [[], [], []]);
+  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [], "no grace wake for a stint no longer Running");
+  assert.equal(gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs|created=/.test(p)).length, 0, "and no job read");
+  // #8: a fresh read shows it Blocked too (another writer's Block after the listing): left alone.
+  const cfg = { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(8)] } };
+  const two = fakeGitHub([{ number: 8, labels: [OBJ, "pendulum:running"], since }], cfg);
+  cfg.fresh = { 8: { ...two.issue(8).issue, labels: [OBJ, "pendulum:running", "pendulum:blocked"] } };
+  const t = await tick(two);
+  assert.deepEqual([t.vanished, t.relaunched, two.blocks(8)], [[], [], []]);
+  cfg.fresh = { 8: { ...two.issue(8).issue, state: "closed" } };
+  assert.deepEqual((await tick(two)).vanished, [], "a closed one is left alone too");
+  cfg.fresh = {};
+  assert.deepEqual((await tick(two)).vanished, [8], "shown Running alone: judged");
+  // #9: a restart is waiting for its running stage to stop (the live jobs could not be read for it): its restart's.
+  const three = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled(9)] }, failLive: 4 });
+  three.person(9, "labeled", "pendulum:restart");
+  const u = await tick(three);
+  assert.deepEqual([u.vanished, u.relaunched, u.restarted, three.blocks(9)], [[], [], [], []]);
+});
+
+test("inside its grace, a stint on the sandbox route reads no jobs, and one whose job read fails waits for its grace's end (#528)", async () => {
+  const since = 2 * MIN;
+  const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 6_000), completed_at: ago(30_000) };
+  const box = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled] } });
+  const s = await tick(box, { sandbox: "vercel" });
+  assert.deepEqual([s.vanished, s.relaunched], [[], []]);
+  assert.deepEqual(box.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs|created=/.test(p)), []);
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled] }, failJobs: [55] });
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched, gh.blocks(7)], [[], [], []]);
+  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [{ issue: 7, kind: "job-grace", at: graceEnd(gh, 7) }]);
+});
+
+test("a stint a relaunch made has its job in that relaunch's run alone; the same loss found again records the run that relaunched it (#528)", async () => {
+  const cfg = { runs: [], jobs: {} };
+  const re = fakeGitHub([{ number: 9, labels: [OBJ, "pendulum:running"], since: 20 * MIN }], cfg);
+  assert.deepEqual((await tick(re, { run: 77 })).relaunched, [9]);
+  // Another run's cancelled work (9), created in the stint: never this stint's, whose job is in run 77 (not shown yet).
+  const stint = stintStart(re, 9);
+  cfg.runs = [{ id: 88, created_at: new Date(Date.parse(stint) - 5_000).toISOString() }];
+  cfg.jobs = { 88: [{ name: "work (9)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stint) + 1_000).toISOString(), completed_at: new Date(Date.now() + 1_000).toISOString() }] };
+  re.reads.length = 0;
+  const r = await tick(re);
+  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
+  assert.equal(re.reads.filter((p) => /created=/.test(p)).length, 0, "no runs listing: the record names the stint's run");
+  // stintRun: the stint the relaunch's label began, not one a later start began.
+  const record = { tries: [{ run: "77" }], updatedAt: "2026-11-17T08:00:00Z" };
+  const label = (at) => ({ event: "labeled", label: { name: "pendulum:running" }, created_at: at });
+  assert.equal(stintRun(record, [label("2026-11-17T08:00:01Z")], "2026-11-17T08:00:01Z"), "77");
+  assert.equal(stintRun(record, [label("2026-11-17T08:00:01Z"), label("2026-11-17T08:30:00Z")], "2026-11-17T08:30:00Z"), null);
+  // The same loss found again by another run (its new stint was not written the first time): that run is recorded.
+  const tries = [{ at: "2026-11-17T08:00:00Z", lost: "vanished", key: "stint:x", start: null, run: "77" }];
+  assert.deepEqual(relaunchDecision({ record: { tries }, start: null, key: "stint:x", lost: "vanished", at: "2026-11-17T08:01:00Z", run: 78 }), { relaunch: true, tries: 1, record: { tries: [{ ...tries[0], run: "78" }] } });
+  assert.deepEqual(relaunchDecision({ record: { tries }, start: null, key: "stint:x", lost: "vanished", at: "2026-11-17T08:01:00Z", run: 77 }), { relaunch: true, tries: 1, record: null });
 });

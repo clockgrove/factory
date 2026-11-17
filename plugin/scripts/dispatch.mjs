@@ -15,7 +15,7 @@
 import { pathToFileURL } from "node:url";
 import { mintInstallationToken } from "./lib/app-token.mjs";
 import { imageOwedNow } from "./lib/image.mjs";
-import { activePendulumJobs, activeWorkIssues, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
+import { activePendulumJobs, addLabels, blockedByRelations, checksOn, downloadArtifactResult, findPr, findProject, getIssue, getRepo, getPrSettled, hasMergeQueue, labelRemovedAt, labeledBy, listComments, listIssuesByLabel, localSpendToday, actionsRun, runJobs, transientError, moveCard, objectiveLabeledAt, prComment, primeWriters, projectStatuses, recentlyClosedByLabel, removeLabel, repoOf, githubNow, requiredCheckSpecs, requiredChecks, rest, setStateLabel, todaysUsage, updatePrBranch, upsertComment } from "./lib/github.mjs";
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
@@ -36,7 +36,7 @@ import { startsOf } from "./lib/objective-trust.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, STOP_GRACE_MS, applyStop, goNoted, goTrust, labelTrust, refusedMarker, requeuedIn, restartObjective, stopCause } from "./lib/stop.mjs";
 import { RATE_LIMIT_SPENT, githubOrigin, quotaKey, spentUntil } from "./lib/network.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
-import { JOB_GRACE_MS, RELAUNCH_MAX, commentsOf, endedNotLost, jobEndedInStint, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
+import { JOB_GRACE_MS, RELAUNCH_MAX, commentsOf, endedNotLost, jobEndedInStint, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintReads, stintRun, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
 import { flushDecisionSpend } from "./lib/decision-spend.mjs";
@@ -771,15 +771,22 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
   }
   const runningIssues = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running");
   if (runningIssues.length) {
-    const alive = sandbox
-      ? new Set()
-      : await activeWorkIssues(repo, readToken).catch((e) => {
+    const live = sandbox
+      ? { work: new Set(), finishing: new Set() }
+      : await activePendulumJobs(repo, readToken, { strict: true }).catch((e) => {
           log(`live jobs could not be listed (${e.message.slice(0, 120)}); stale Running left alone`);
           retry("live jobs");
           return null;
         });
+    const alive = live?.work;
+    // The runs and jobs the stints' work jobs are read from, once a tick for every Objective (relaunch.mjs stintReads).
+    let stintReadsTick = null;
+    const runReads = () => (stintReadsTick ??= stintReads(repo, readToken));
     if (alive) {
       for (const issue of runningIssues) {
+        // A live job whose final tick step has started: the tick it fires may list it before GitHub marks it completed,
+        // so a short wake reads it again just after (a job that ended with the Objective still Running is judged then).
+        if (alive.has(issue.number) && live.finishing.has(issue.number) && !deadlines.some((d) => d.kind === "retry")) due(issue.number, "retry", now.getTime() + RETRY_WAKE_MS);
         if (alive.has(issue.number) || relaunched.includes(issue.number)) continue;
         // The issue's timeline, read once for this Objective (its Running time, the relaunch record), and the sandbox
         // record the sandbox route read for it.
@@ -907,9 +914,16 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
           continue;
         }
         // The stint's work job on the runners (relaunch.mjs stintWorkJob), read at most once a tick for this Objective:
-        // by the grace below or by the relaunch decision after it, and only once one of them needs it.
+        // by the grace below or by the relaunch decision after it, and only once one of them needs it. Runs and jobs are
+        // read once a tick for all Objectives (stintReads).
         let stintJob;
-        const workJob = async () => (stintJob === undefined ? (stintJob = await stintWorkJob(repo, issue.number, since, readToken, { run: relaunchRun(relaunchRecordOf(commentsOf(events), issue.number)) }).catch(() => null)) : stintJob);
+        const workJob = async () => {
+          if (stintJob !== undefined) return stintJob;
+          const record = relaunchRecordOf(commentsOf(events), issue.number);
+          const own = stintRun(record, events, since);
+          stintJob = await stintWorkJob(repo, issue.number, since, readToken, { run: own ?? relaunchRun(record), only: !!own, reads: runReads() }).catch(() => null);
+          return stintJob;
+        };
         // No claim: a runner job gets JOB_GRACE_MS to show up. Any other pendulum:local Objective waits for a loop on its
         // machine, so it gets the day a claim gets.
         if (!hold && since && Date.now() - Date.parse(since) < (local ? claimPause : JOB_GRACE_MS)) {
@@ -919,13 +933,26 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
           }
           // The grace is for a job GitHub has not started yet. On the runners, a stint whose work job already ended
           // (cancelled, or gone with no exit: GitHub's jobs API says completed, after the stint began) is judged now, on
-          // the tick that job's last step fires; one with no such job (not shown yet, queued, running, unread) waits,
-          // and the wake at the grace's end judges it then, with no final tick needed. A restarting one is its restart's.
-          // The timeline, read after the live jobs, must still show the stint Running: a job that wrote its exit and
-          // ended after this tick listed the issues is not judged on that older listing.
-          const runners = relaunches && !sandbox;
-          if (!runners || restarting[issue.number] || !runningStint(events).running || !jobEndedInStint(await workJob(), since)) {
-            if (runners) due(issue.number, "job-grace", Date.parse(since) + JOB_GRACE_MS + 1000);
+          // the tick that job's last step fires. A restarting one is its restart's. The timeline, read after the live
+          // jobs, must still show the stint Running (a job that wrote its exit and ended after this tick listed the
+          // issues is not judged on that older listing), and so must a fresh read of the issue: open, labelled
+          // pendulum:running and in no other state. A stint with no such job (not shown yet, queued, running, its read
+          // failed) waits, and the wake at the grace's end judges it then, with no final tick needed.
+          if (!relaunches || sandbox || restarting[issue.number] || !runningStint(events).running) continue;
+          const graceWake = () => due(issue.number, "job-grace", Date.parse(since) + JOB_GRACE_MS + 1000);
+          if (!jobEndedInStint(await workJob(), since)) {
+            graceWake();
+            continue;
+          }
+          const fresh = await getIssue(repo, issue.number, opts).catch(() => null);
+          const shown = (fresh?.labels || []).map((l) => (typeof l === "string" ? l : l.name));
+          if (!fresh) {
+            graceWake();
+            retry(`#${issue.number}'s state`);
+            continue;
+          }
+          if (fresh.state !== "open" || !shown.includes("pendulum:running") || shown.some((l) => /^pendulum:(blocked|question|in-review)$/.test(l))) {
+            log(`  #${issue.number}: its work job ended, but GitHub no longer shows it Running alone; left alone this tick`);
             continue;
           }
           log(`  #${issue.number}: its work job ended (${String(stintJob.conclusion ?? "no conclusion").slice(0, 40)}) inside its grace with the Objective still Running; judged now`);

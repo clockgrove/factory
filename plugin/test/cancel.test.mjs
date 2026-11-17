@@ -3,9 +3,9 @@
 // before it exits and before the seal step uploads the directory, and that record counts its stage once.
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +16,9 @@ import { objectiveSha, recordText } from "../scripts/lib/objective-trust.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { priceCodex } from "../scripts/lib/usage.mjs";
 import { prepareUpload } from "../scripts/lib/seal.mjs";
+import { setAgent } from "../scripts/lib/proc.mjs";
+import { dropSessions, keepSession } from "../scripts/lib/claude-runner.mjs";
+import { cancelledEnd, savedSessionNow } from "../scripts/lib/session.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { loadPrices } from "../../bench/lib/cost.mjs";
 import { cleanMerge } from "../../bench/test/fixtures/github.mjs";
@@ -186,6 +189,63 @@ test("the cancelled stage's record is uploaded readable, outside the seal, and b
   assert.deepEqual(r.sealed, ["events.jsonl"]);
   assert.equal(JSON.parse(readFileSync(join(to, "result.json"), "utf8")).exit, "cancelled");
   assert.ok(existsSync(join(to, "transcript.sealed")) && !existsSync(join(to, "events.jsonl")));
+});
+
+/** A Claude Code session's files as the agent's capture holds them (claude-runner.mjs keepSession): a tar and its names. */
+function capture(dir, id, text) {
+  mkdirSync(join(dir, "proj"), { recursive: true });
+  writeFileSync(join(dir, "proj", `${id}.jsonl`), text);
+  return { tar: execFileSync("tar", ["-cf", "-", "-C", dir, `proj/${id}.jsonl`], { env: { PATH: "/usr/bin:/bin" } }), files: [`proj/${id}.jsonl`] };
+}
+
+/** `fn` with an agent uid set and `PATH` led by a directory whose `tar` and `find` record that they ran. */
+function asAgentWithPlantedTools(fn) {
+  const planted = mkdtempSync(join(tmpdir(), "planted-"));
+  const ran = join(planted, "ran");
+  for (const t of ["tar", "find"]) writeFileSync(join(planted, t), `#!/bin/sh\necho ${t} >> ${ran}\nexit 0\n`, { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${planted}:${path}`;
+  setAgent({ user: "pendulum-agent", home: join(planted, "agent-home") });
+  try {
+    return fn(() => (existsSync(ran) ? readFileSync(ran, "utf8") : ""));
+  } finally {
+    setAgent(null);
+    dropSessions();
+    process.env.PATH = path;
+  }
+}
+
+test("on the agent uid, the cancelled stage's session is unpacked by the system's tar and find, never one on PATH, and masked", () => {
+  asAgentWithPlantedTools((planted) => {
+    const usageDir = join(mkdtempSync(join(tmpdir(), "agent-session-")), "u");
+    mkdirSync(usageDir);
+    const id = "5b0c3a1e-7d6f-4a40-9a51-0c1e2f3a4b5c";
+    keepSession(id, capture(mkdtempSync(join(tmpdir(), "cap-")), id, '{"note":"s3cret-value"}\n'));
+    const saved = savedSessionNow({ harness: "claude", sessionId: id, usageDir, checkout: "/c", secrets: ["s3cret-value"] });
+    assert.equal(planted(), "", "no tar or find from PATH ran");
+    assert.deepEqual([saved.id, saved.files], [id, [`proj/${id}.jsonl`]]);
+    assert.equal(readFileSync(join(usageDir, "transcript", "proj", `${id}.jsonl`), "utf8"), '{"note":"***"}\n');
+    assert.deepEqual(readdirSync(join(usageDir, "..")).sort(), ["u"], "nothing of the copy left beside the usage directory");
+  });
+});
+
+test("a session copy that fails leaves the cancelled stage's record and no session in the usage directory, masked or not", () => {
+  asAgentWithPlantedTools(() => {
+    const usageDir = join(mkdtempSync(join(tmpdir(), "agent-session-")), "u");
+    mkdirSync(usageDir);
+    const good = "5b0c3a1e-7d6f-4a40-9a51-0c1e2f3a4b5c";
+    const bad = "6c1d4b2f-8e70-4b51-ab62-1d2f3a4b5c6d";
+    keepSession(good, capture(mkdtempSync(join(tmpdir(), "cap-")), good, '{"note":"s3cret-value"}\n'));
+    // An archive tar cannot read, unpacked after one that it can: the copy fails part-way.
+    keepSession(bad, { tar: Buffer.alloc(4096, 1), files: [`proj/${bad}.jsonl`] });
+    // The stream's masking fails too (a directory where the file would be): the record is written before it, and stays.
+    mkdirSync(join(usageDir, "events.jsonl"));
+    const rec = cancelledEnd("SIGTERM", { usageDir, mask: [join(usageDir, "events.jsonl")], secrets: ["s3cret-value"], fields: () => ({ harness: "claude", model: "claude-opus-5-5", progressRun: "4242", account: null, passes: 1, credentialBasis: "none" }), sessionOf: () => ({ harness: "claude", sessionId: good, also: [bad], checkout: "/c" }) });
+    assert.equal(rec.exit, "cancelled");
+    assert.equal(JSON.parse(readFileSync(join(usageDir, "result.json"), "utf8")).session, null, "the record, with no session");
+    assert.ok(!existsSync(join(usageDir, "transcript")), "no part of the copy in the usage directory");
+    assert.deepEqual(readdirSync(join(usageDir, "..")).sort(), ["u"], "nor beside it");
+  });
 });
 
 /** A fake Codex: one turn per call; FAKE_HANG=1 writes `<FAKE_STATE>/running` and never reports its turn. */

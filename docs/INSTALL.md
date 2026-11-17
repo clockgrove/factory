@@ -100,7 +100,7 @@ gh workflow run pendulum.yml -f issue=811                              # one Obj
 
 Each job uploads `pendulum-usage-<issue>` (and `pendulum-usage-<issue>-review`) with `result.json` (`{harness, harnessVersion, model, ran: {worker, subagent, reviewer, labels}, usd, tokens: {input, output, cached, written}, models, basis, exit, turns, sessions, …}`, `ran` being the three models the stage ran on and the harness and model labels that chose them, `sessions` the harness calls and sessions in its event stream) and the harness's event stream and saved sessions: on a public repository sealed in `transcript.sealed` unless `publish_transcripts` is on, readable otherwise ([PRIVACY.md](PRIVACY.md), What goes to GitHub); `bench/score.mjs` turns them, the progress comments and the PR into the scorecard: walk-away, quality, operator minutes, cost by component, minutes per phase, turns, runs and sessions.
 
-A job cancelled while its stage runs still uploads `result.json`: the stage writes it on the runner's stop signal (`exit` `cancelled`, its finished passes' dollars, the pass it stopped as a run of unknown cost); a stage killed with no stop signal first leaves none, and the scorecard and `daily_usd` count it as one run of unknown cost.
+A job cancelled while its stage runs still uploads `result.json`: the stage writes it on the runner's stop signal (`exit` `cancelled`, its finished passes' dollars, the pass it stopped as a run of unknown cost). A stage killed with no stop signal first leaves none, and so does a review job cancelled before it has read its PR (it has not yet run anything); the scorecard and `daily_usd` count each as one run of unknown cost.
 
 ## Inputs that tune cost
 

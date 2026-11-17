@@ -606,6 +606,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   // The usage record the artifact carries: the vendor's dollars beside the harness's.
   let modelUsd = null;
   let modelUnknown = null;
+  let modelBilling = null;
   try {
     if (!usage) {
       const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
@@ -622,6 +623,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
     modelUsd = Number.isFinite(rec?.usd) ? rec.usd : null;
     // Its runs of unknown cost, beside the known dollars (usage.mjs UNKNOWN_WHY): never read as $0.
     modelUnknown = unknownOf([rec]);
+    modelBilling = { usdByBilling: rec?.usdByBilling ?? null, billing: rec?.billing ?? null };
     writeFileSync(file, `${JSON.stringify({ ...rec, vendor })}
 `);
   } catch (e) {
@@ -642,7 +644,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       if (!held.taken) return log(`#${n}: the ${record.stage} stage's vendor cost is booked by another process; its comment is that one's`);
       const head = marker(n, "vendor", key);
       // A stage that left no progress comment has its model dollars here, so the daily sum still counts them.
-      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, vendorUnknown: !!cost.usageUnknown, ...(mine ? {} : { modelUsd, modelUnknown }) })}`;
+      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, vendorUnknown: !!cost.usageUnknown, ...(mine ? {} : { modelUsd, modelUnknown, modelBilling }) })}`;
       const had = comments.find((c) => isSelf(c) && (c.body || "").startsWith(`${head}\n`));
       if (had) await api.rest(`repos/${repo.full}/issues/comments/${had.id}`, { ...opts, method: "PATCH", body: { body } });
       else await api.rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });

@@ -117,7 +117,7 @@ test("a run's record gains each thread's own share, priced at its own model; a t
   assert.deepEqual(out.tokens, { input: 2700500 + 1454076, cached: 2632832 + 1404544, written: 0, output: 5946 + 5122 });
   assert.equal(out.usd, Math.round((rec.usd + 0.2907384) * 10000) / 10000);
   assert.deepEqual(out.subAgents, [{ id: CHILD, parent: PARENT, model: MODEL, usd: 0.2907, tokens: CHILD_TOKENS }]);
-  assert.ok(!out.usdLowerBound);
+  assert.ok(!out.usdUnknown);
   // The same thread seen again (a resumed parent's rollout still names it): nothing new, nothing counted twice.
   const again = withSubAgents(rec, [thread], (id) => totals[id]);
   assert.equal(again.rec.usd, rec.usd);
@@ -128,14 +128,14 @@ test("a run's record gains each thread's own share, priced at its own model; a t
   // A sub-agent on a cheaper model is priced at its own rate.
   const mini = withSubAgents(rec, [{ ...thread, model: "openai/gpt-5.4-mini" }]);
   assert.equal(mini.rec.subAgents[0].usd, priceCodex("gpt-5.4-mini", CHILD_TOKENS));
-  // A model with no price: the dollars are a lower bound, never lowered, never null.
+  // A model with no price: the known dollars stay, never lowered, never null, and the run has unknown spend.
   const unpriced = withSubAgents(rec, [{ ...thread, model: "gpt-unlisted" }]);
   assert.equal(unpriced.rec.usd, rec.usd);
-  assert.equal(unpriced.rec.usdLowerBound, true);
-  // A run that reported no tokens of its own (no turn completed) still counts what its threads spent.
+  assert.deepEqual([unpriced.rec.usdUnknown, unpriced.rec.usdUnknownWhy], [1, ["sub-agent"]]);
+  // A run that reported no tokens of its own (no turn completed) counts what its threads spent and stays unknown.
   const cut = withSubAgents({ harness: "codex", model: MODEL, usd: null, tokens: { input: null, output: null, cached: null, written: null } }, [thread]);
   assert.equal(cut.rec.usd, 0.2907);
-  assert.equal(cut.rec.usdLowerBound, true);
+  assert.deepEqual([cut.rec.usdUnknown, cut.rec.usdUnknownWhy], [1, ["unreported"]]);
   assert.equal(withSubAgents(rec, []).rec, rec, "no threads: the record as it was");
   // The bench prices the same record the same way, the sub-agent at its own model.
   const stage = { ...mini.rec };
@@ -295,14 +295,14 @@ test("a resumed pass that ends without a total keeps the session's and its threa
     pass(files, stream(PARENT, PARENT_TOKENS));
     const later = await run(PARENT, "review-fix-1");
     assert.equal(later.usd, 0, "neither the thread nor its implementer counted again");
-    assert.ok(!later.usdLowerBound);
+    assert.ok(!later.usdUnknown);
   } finally {
     putBack(saved);
     rmSync(work, { recursive: true, force: true });
   }
 });
 
-test("sub-agent spend that could not be read leaves the dollars a lower bound; a failed read never fails the run", async () => {
+test("sub-agent spend that could not be read is unknown beside the known dollars; a failed read never fails the run", async () => {
   dropSessionTotals();
   const { work, pass, stream, run, saved } = fakeCodex();
   const GW = "01a1ce7d-369e-7983-89dd-9f98e083d64e";
@@ -313,15 +313,15 @@ test("sub-agent spend that could not be read leaves the dollars a lower bound; a
     pass({ [rel(GW, "06-41-14")]: fixture("codex-0.167-spawn-gateway-parent.jsonl") }, stream(GW, tokens));
     const missing = await run(null, "work-1");
     assert.equal(missing.usd, priceCodex(MODEL, tokens));
-    assert.equal(missing.usdLowerBound, true, "a named thread with no rollout");
+    assert.deepEqual([missing.usdUnknown, missing.usdUnknownWhy], [1, ["sub-agent"]], "a named thread with no rollout");
     // Sub-agent work in the stream and no rollout of the run's own to name its threads.
     const other = "01a1ce7d-0000-7000-8000-0000000000d1";
     pass({}, `${wait}${stream(other, tokens)}`);
-    assert.equal((await run(null, "work-2")).usdLowerBound, true);
+    assert.deepEqual((await run(null, "work-2")).usdUnknownWhy, ["sub-agent"]);
     // Neither, with no sub-agent work: no flag.
     const plain = "01a1ce7d-0000-7000-8000-0000000000d2";
     pass({}, stream(plain, tokens));
-    assert.equal((await run(null, "work-3")).usdLowerBound, undefined);
+    assert.equal((await run(null, "work-3")).usdUnknown, undefined);
   } finally {
     putBack(saved);
     rmSync(work, { recursive: true, force: true });

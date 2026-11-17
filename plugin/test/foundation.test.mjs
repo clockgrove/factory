@@ -138,7 +138,7 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.ok(at("reviewPost({ issue, review: reviewOf(answer), diff, entries, ok: answer.ok, splitPart, foundation: found?.review ?? null, since: sinceReviewed })") > pass, "posted with the first pass's comments");
   const block = src.slice(pass, at("const post = !alreadyReviewed"));
   assert.match(block, /over: \(\) => over\(\) \|\| overBudget,/, "max_usd: the job's own cap");
-  assert.match(block, /maxUsd: Math\.max\(0, inputs\.maxUsd - sumSpend\(records\)\),/, "each call capped at what is left");
+  assert.match(block, /maxUsd: Math\.max\(0, inputs\.maxUsd - sumSpend\(records\)\.usd\),/, "each call capped at what is left");
   assert.match(block, /mark\(rec, rec\);\n\s+records\.push\(rec\);/, "each call booked before the next check");
   assert.match(block, /if \(found\.stop === "cap"\) return blockedAtCap\("the foundation pass"\);\n\s+if \(found\.stop === "time"\) return blockedAtTime\("the foundation pass"\);/);
   assert.match(block, /exit: "blocked", reason, cause: last\.refusal \? refusalCause\(last\.refusal\) : "pendulum"[\s\S]*await finish\("blocked", reason\);\n\s+return;/, "no answer: nothing posted, Blocked");

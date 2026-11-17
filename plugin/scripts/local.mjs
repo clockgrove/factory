@@ -45,7 +45,7 @@ import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
 import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, markLocalRoute, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, previousKeyDirProblem, localClaim, LOCAL_TOKEN_PERMISSIONS, cloneRepo, cloneTop, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim, noTokenLine, repoFromRemote, saveLocalToken } from "./lib/local.mjs";
-import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
+import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, spendText, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
 import { checkHandover, openOutbox, scratchHistory } from "./lib/outbox.mjs";
@@ -1707,7 +1707,7 @@ export class Local {
           }
           // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
           // decision calls out), the progress outagePaused reads between pauses.
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usdUnknown: Number.isInteger(result?.usdUnknown) ? result.usdUnknown : 0, usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -2625,7 +2625,7 @@ export class Local {
 
   async review(issue, prNumber, { wait = false, reruns = 0 } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
-    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null ? `, $${review.usd.toFixed(2)}` : ""}`);
+    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null || review.usdUnknown ? `, ${spendText({ usd: review.usd, unknown: review.usdUnknown ?? 0 })}` : ""}`);
     // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back. `run` and
     // `review`, which may have no serve behind them, do the same here, so the label is never left off with nothing to
     // put it back, and then review again.
@@ -3011,7 +3011,7 @@ export class Local {
     });
     // The stage started: this loop's count of failed starts for it is over.
     this.startFailures?.delete(issue);
-    log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null ? `, $${work.usd.toFixed(2)}` : ""}`);
+    log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null || work.usdUnknown ? `, ${spendText({ usd: work.usd, unknown: work.usdUnknown ?? 0 })}` : ""}`);
     if (work.exit !== "delivered") return work;
     const pr = await findPr(this.repo, `pendulum/${issue}`, this.opts).catch(() => null);
     if (pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.review(issue, pr.number, { wait });
@@ -4003,7 +4003,7 @@ async function deliver(issue, flags) {
     await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
     await postNote(repo, issue, files["note.md"], opts);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: planNeeds, notify: inputs.notify, stage: "work", askOnIssue: true }, opts);
-    // A `--here` run is unmetered (skills/pendulum-score): its comment carries no spend line.
+    // A `--here` run is not counted (skills/pendulum-score): its comment carries no spend line.
     if (needs.repos.length) await progressReporter(repo, issue, opts, { stage: "work", soFar: null }).planAsked(needs.repos);
     log(`#${issue}: question at plan time (${planNeeds}); nothing pushed`);
     return 1;

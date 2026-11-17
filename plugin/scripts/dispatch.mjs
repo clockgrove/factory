@@ -19,7 +19,7 @@ import { activePendulumJobs, activeWorkIssues, addLabels, blockedByRelations, ch
 import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
-import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, spendText, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
 import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -67,7 +67,9 @@ const SERVE_FIX = "start `pendulum serve` on the machine that runs it, then re-a
 
 /**
  * Today's spend (UTC day) against daily_usd: the usage artifacts of Actions runs plus the spend lines local runs and
- * cloud sandbox stages write in their progress comments. Reading artifacts needs `actions: read`, which the job token
+ * cloud sandbox stages write in their progress comments. `spentToday` is the known dollars, which daily_usd compares;
+ * `unknownToday` the runs of unknown cost among them (usage.mjs UNKNOWN_WHY), shown beside it and never counted as
+ * dollars, so the day can pass daily_usd by spend that was never reported. Reading artifacts needs `actions: read`, which the job token
  * has (workflow-template.yml) and the App does not; the App stays at its four permissions. A failed read counts as the
  * cap reached (Infinity), so nothing starts on a sum Pendulum could not make.
  * With a cloud sandbox (PENDULUM_SANDBOX) no artifact is downloaded: every stage's artifact is marked `spendInProgress`
@@ -84,15 +86,16 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
     log(`today's usage could not be read (${usageError}); treating daily_usd as reached`);
   }
   // Local runs (any machine) upload no artifacts; each records its dollars in its progress comment instead.
-  let localUsd = 0;
+  let local = { usd: 0, unknown: 0 };
   try {
-    localUsd = await localSpendToday(repo, { dateIso: now.toISOString().slice(0, 10), token });
+    local = await localSpendToday(repo, { dateIso: now.toISOString().slice(0, 10), token });
   } catch (e) {
     usageError = usageError || e.message.slice(0, 200);
     log(`today's local spend could not be read (${e.message.slice(0, 120)}); treating daily_usd as reached`);
   }
   // A record whose stage also wrote a spend line (a cloud sandbox stage) is counted there, once.
-  return { spentToday: usageError ? Number.POSITIVE_INFINITY : sumSpend(records.filter((r) => !r?.spendInProgress)) + localUsd, records, usageError };
+  const artifacts = sumSpend(records.filter((r) => !r?.spendInProgress));
+  return { spentToday: usageError ? Number.POSITIVE_INFINITY : artifacts.usd + local.usd, unknownToday: usageError ? 0 : artifacts.unknown + local.unknown, records, usageError };
 }
 
 /** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
@@ -104,7 +107,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 /** A tick that named one issue it does not dispatch (a draft, no Objective): every list main() reports, empty. */
 /** Whether an Objective carries two account labels on GitHub Actions or the cloud sandbox with accounts declared (#267). */
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
-const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
+const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
 export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
@@ -694,7 +697,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const capHold = (n) => {
     if (!dayCapped) return false;
     if (!spentNow.usageError) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
-    log(`  #${n}: its stage was lost; relaunched once daily_usd allows (${spentNow.usageError ? "today's spend unread" : `$${spentNow.spentToday.toFixed(2)} of $${Number(inputs.dailyUsd)}`})`);
+    log(`  #${n}: its stage was lost; relaunched once daily_usd allows (${spentNow.usageError ? "today's spend unread" : `${spendText({ usd: spentNow.spentToday, unknown: spentNow.unknownToday })} of $${Number(inputs.dailyUsd)}`})`);
     return true;
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
@@ -1341,7 +1344,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // loop's paused ones too, which stay Running), never only the ones this route picks from. Drafts are not in `issues`.
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
-  const { spentToday, records, usageError } = await spend;
+  const { spentToday, unknownToday, records, usageError } = await spend;
   if (usageError) retry("today's spend");
   watch.mark("spend");
 
@@ -1430,6 +1433,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       maxConcurrent: inputs.issue ? running + 1 : inputs.maxConcurrent,
       dailyUsd: inputs.dailyUsd,
       spentToday,
+      unknownToday,
     });
   let picked = pick();
   // GitHub's REST quota spent, read once for this tick: nothing starts (below), so no start is read.
@@ -1640,7 +1644,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("mark");
   // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
   const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
-  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? null : spentToday, unknownToday: usageError ? 0 : unknownToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -1795,7 +1799,10 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   const summary = {
     ready: result.ready,
     running: result.running,
-    spent_today_usd: Math.round(result.spentToday * 100) / 100,
+    // Null when today's spend could not be read: shown as unknown, never $0.
+    spent_today_usd: Number.isFinite(result.spentToday) ? Math.round(result.spentToday * 100) / 100 : null,
+    // Today's runs of unknown cost (usage.mjs UNKNOWN_WHY): beside the known dollars, never in them.
+    spent_today_unknown_runs: result.unknownToday ?? 0,
     daily_usd: inputs.dailyUsd,
     max_concurrent: inputs.maxConcurrent,
     skipped: result.skipped,
@@ -1819,7 +1826,7 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: $${summary.spent_today_usd} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
+    log(`running: ${result.running}, spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs })} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
     for (const n of result.relaunched || []) log(`  #${n}: its stage was lost to a network failure or vanished; relaunched`);
     for (const n of result.relaunchesUsed || []) log(`  #${n}: its stage ended on its network with its relaunches used; Blocked`);
@@ -1904,7 +1911,7 @@ async function main() {
   setOutput("image_owed", owed ? "true" : "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: $${summary.spent_today_usd} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs })} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
   }
 }
 

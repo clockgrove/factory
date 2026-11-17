@@ -79,7 +79,7 @@ test("vendor booking: the launcher and the sweep booking one stage at once write
     assert.equal(s.bodyOf(N, marker(N, "progress", `work:9-${claim}`)), progress, `seed ${seed}: the progress comment is the stage's alone`);
     const vendor = s.bodyOf(N, marker(N, "vendor", `work:9-${claim}`));
     assert.match(vendor, /sandbox `pendulum-abc` stopped/);
-    const sum = [...s.comments.values()].reduce((t, c) => t + spendOf(c.body), 0);
+    const sum = [...s.comments.values()].reduce((t, c) => t + spendOf(c.body).usd, 0);
     assert.ok(Math.abs(sum - (0.5 + a.vendor.usd)) < 1e-9, `seed ${seed}: the daily sum counts model and vendor once each`);
     assert.equal(a.vendor.usd, b.vendor.usd);
   }

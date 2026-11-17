@@ -74,10 +74,10 @@ test("whichSync: a PATH scan, never a shell; names with separators or shell synt
 test("spend lines: a local run's dollars round-trip through its progress comment; prose and junk count 0", async () => {
   const { spendMarker, spendOf } = await import("../scripts/lib/logic.mjs");
   const body = `<!-- pendulum:7:progress:work:1 -->\nPendulum work run 1\n- 01:00Z exit: delivered; usd 0.34\n${spendMarker(0.3392)}`;
-  assert.equal(spendOf(body), 0.3392);
-  assert.equal(spendOf("- 01:00Z exit: delivered; usd 0.34"), 0, "the prose exit line is never read");
-  assert.equal(spendOf('<!-- pendulum:spend {"usd":"x"} -->'), 0);
-  assert.equal(spendOf('<!-- pendulum:spend {"usd":-5} -->'), 0);
+  assert.deepEqual(spendOf(body), { usd: 0.3392, unknown: 0 });
+  assert.deepEqual(spendOf("- 01:00Z exit: delivered; usd 0.34"), { usd: 0, unknown: 0 }, "the prose exit line is never read");
+  assert.deepEqual(spendOf('<!-- pendulum:spend {"usd":"x"} -->'), { usd: 0, unknown: 0 });
+  assert.deepEqual(spendOf('<!-- pendulum:spend {"usd":-5} -->'), { usd: 0, unknown: 0 });
 });
 
 test("Pendulum's git on the agent's checkout: locally always in srt's git profile, never on the host", () => {

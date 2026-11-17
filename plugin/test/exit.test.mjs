@@ -95,19 +95,19 @@ test("the question check's answer never drops a question that already named a te
   assert.equal(mergeChecked(lone, null), null);
 });
 
-test("exitRecord: an unfounded Question with no time, budget or metering left stands as raised, and the harness is not asked", async () => {
+test("exitRecord: an unfounded Question with no time or budget left stands as raised, and the harness is not asked", async () => {
   const text = JSON.stringify({ exit: "question", questions: ["Is the additive command ok?"], reason: "" });
   const base = { text, harness: "claude", model: "m", session: null, cwd: "/nonexistent", env: {}, eventsFile: null };
   const later = Date.now() + 60 * 60_000;
-  for (const [why, args] of [["unmetered", { deadlineAt: later, maxUsd: 5, unmetered: true }], ["time", { deadlineAt: Date.now(), maxUsd: 5 }], ["budget", { deadlineAt: later, maxUsd: 1, spentUsd: 1 }]]) {
+  for (const [why, args] of [["time", { deadlineAt: Date.now(), maxUsd: 5 }], ["budget", { deadlineAt: later, maxUsd: 1, spentUsd: 1 }]]) {
     const r = await exitRecord({ ...base, ...args });
     assert.deepEqual(r, { record: parseExitRecord(text), usage: [], basis: "exit file" }, why);
   }
   // A founded Question, a delivery or a block in the exit file is returned as written, with no call.
   const founded = JSON.stringify({ exit: "question", questions: [{ question: "q", test: "contract", existing: "x" }] });
   for (const t of [founded, '{"exit":"delivered"}', '{"exit":"blocked","reason":"r"}']) assert.deepEqual(await exitRecord({ ...base, text: t, deadlineAt: later, maxUsd: 5 }), { record: parseExitRecord(t), usage: [], basis: "exit file" });
-  // No exit file and metering lost: blocked without a call (the review answer pass relies on this as well).
-  assert.deepEqual((await exitRecord({ ...base, text: undefined, deadlineAt: later, maxUsd: 5, unmetered: true })).record, { exit: "blocked", reason: "unmetered: max_usd cannot be enforced", questions: [] });
+  // No exit file and no budget left: blocked without a call (the review answer pass relies on this as well).
+  assert.deepEqual((await exitRecord({ ...base, text: undefined, deadlineAt: later, maxUsd: 1, spentUsd: 1 })).record, { exit: "blocked", reason: "no exit record and no budget left to ask", questions: [] });
 });
 
 test("blocked: each reason in the worker contract, in priority order", () => {
@@ -539,10 +539,10 @@ test("harnessActivity: turns, tool calls, sub-agents, tokens and the status line
   c.feed('{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":5}}');
   // input_tokens already includes the cached part, output_tokens the reasoning part.
   assert.deepEqual([c.snapshot().turns, c.snapshot().toolCalls, c.snapshot().lastTool, c.snapshot().tokens], [1, 1, "command: npm test", { input: 100, output: 20, written: 0 }]);
-  // Claude reports a resumed session's cost as its running total: the line shows the pass's own share.
+  // Claude reports a resumed session's cost as its running total: the line shows the pass's own share (Claude Code 2.1.277 on).
   const r = harnessActivity(() => 0);
   r.since("s1", { usd: 12.9695405, tokens: { input: 1, output: 1 } });
-  r.feed('{"type":"system","subtype":"init","session_id":"s1"}');
+  r.feed('{"type":"system","subtype":"init","session_id":"s1","claude_code_version":"2.1.325"}');
   r.feed('{"type":"result","session_id":"s1","total_cost_usd":14.2617083}');
   assert.match(activityLine(r.snapshot(), { harness: "claude" }), /\$1\.29/);
   r.feed('{"type":"result","session_id":"s2","total_cost_usd":0.5}');
@@ -750,7 +750,8 @@ test("costByPhase: each harness run's cost by label on the exit line", async () 
   const { costByPhase } = await import("../scripts/lib/logic.mjs");
   assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }, { label: "validation-fix-1", usd: 0.543 }]), " (work-1 7.90, validation-fix-1 0.54)");
   assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }]), "");
-  assert.equal(costByPhase([{ label: "work-1", usd: null }, { label: "exit", usd: 0.1 }]), "");
+  assert.equal(costByPhase([{ label: "work-1", usd: null }, { label: "exit", usd: 0.1 }]), " (work-1 unknown, exit 0.10)", "a pass of unknown cost is named, never left out");
+  assert.equal(costByPhase([{ label: "work-1", usd: 0, noRun: true }, { label: "exit", usd: 0.1 }]), "", "a pass that never ran is none");
 });
 
 test("Git LFS: a plain blob is refused (renames aside), local mode commits media, comments are no LFS use", async () => {
@@ -1102,7 +1103,7 @@ test("a Question raised in review is answered during the run only by a writer's 
   assert.equal(answerDuring({ ...base, self: "someone-else", local: true, unread: answer, events: marked }), "", "local mode keeps the Question: serve runs a ready mark only while the issue is a Question");
 });
 
-test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is 0; unmetered runs add nothing", () => {
+test("capReached: a job's max_usd is spent at or past it; no cap when max_usd is 0; runs of unknown cost add nothing", () => {
   const runs = [{ usd: 20 }, { usd: null }, { usd: 4.5 }];
   assert.equal(capReached(25, runs), false);
   assert.equal(capReached(24.5, runs), true, "at the cap is spent: the review job starts no further run");
@@ -1447,7 +1448,6 @@ test("Block causes: each Block carries a code from the one closed list; refusals
   const ok = { ok: true };
   const cause = (args) => decideExit({ harness: ok, pr: { exists: true }, commits: 1, ...args }).cause;
   assert.equal(cause({ harness: { budgetExceeded: true } }), "max-usd");
-  assert.equal(cause({ harness: { budgetExceeded: true, unmetered: true } }), "pendulum");
   assert.equal(cause({ harness: { refusal: { harness: "codex", status: 429, type: "insufficient_quota" } } }), "provider-quota");
   assert.equal(cause({ harness: { refusal: { harness: "codex", status: null, type: "insufficient_funds" } } }), "gateway-budget");
   assert.equal(cause({ harness: { refusal: { harness: "claude", status: 401, type: "authentication_error" } } }), "setup");
@@ -1455,10 +1455,9 @@ test("Block causes: each Block carries a code from the one closed list; refusals
   assert.equal(cause({ validation: { passes: 1, green: false, notStarted: "GitHub never started the job" } }), "outage");
   assert.equal(cause({ validation: { passes: 2, green: false } }), "work");
   assert.equal(cause({ harness: { died: 2 } }), "pendulum");
-  // The relay: the gateway's own refusal is the cause; its shutdown is no max_usd overrun.
+  // The relay: the gateway's own refusal is the cause; calls of unknown cost never are (#483).
   assert.equal(stageBlockCause("work", { gatewayRefused: { type: "insufficient_funds" } }), "gateway-budget");
-  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, false), "pendulum");
-  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, true), "max-usd");
+  assert.equal(stageBlockCause("max-usd", { unknown: 7 }), "max-usd");
   assert.equal(stageBlockCause("work", null), "work");
   // The notice's cause line: read back by structure; a code off the list is written and read as nothing external.
   assert.equal(blockCauseOf(`@dev Blocked (work): dollar cap reached\n${blockMarker("max-usd")}`), "max-usd");

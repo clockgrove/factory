@@ -69,13 +69,14 @@ test("max_concurrent minus running caps the start list", () => {
   assert.equal(full.reason, "max_concurrent reached");
 });
 
-test("daily_usd reached starts nothing; unmetered usage counts as zero", () => {
+test("daily_usd reached starts nothing; a run of unknown cost adds no dollars and is named beside them", () => {
   const records = [{ usd: 40.5 }, { usd: null }, { usd: 60 }, { usd: "x" }];
-  assert.equal(sumSpend(records), 100.5);
-  const r = selectReady({ issues: [issue(1, ["P0"])], maxConcurrent: 3, dailyUsd: 100, spentToday: sumSpend(records) });
+  assert.deepEqual(sumSpend(records), { usd: 100.5, unknown: 2 });
+  const spent = sumSpend(records);
+  const r = selectReady({ issues: [issue(1, ["P0"])], maxConcurrent: 3, dailyUsd: 100, spentToday: spent.usd, unknownToday: spent.unknown });
   assert.deepEqual(r.ready, []);
   assert.equal(r.reason, "daily_usd reached");
-  assert.match(r.skipped[0].reason, /daily_usd reached \(\$100\.50 of \$100\)/);
+  assert.match(r.skipped[0].reason, /daily_usd reached \(\$100\.50 plus 2 runs of unknown cost of \$100\)/);
   const under = selectReady({ issues: [issue(1)], maxConcurrent: 3, dailyUsd: 100, spentToday: 99.99 });
   assert.deepEqual(under.ready, [1]);
   const uncapped = selectReady({ issues: [issue(1)], maxConcurrent: 3, dailyUsd: 0, spentToday: 1e6 });

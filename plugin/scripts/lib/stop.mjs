@@ -14,7 +14,8 @@ export const STOP_POLL_MS = 60_000;
 export const STOP_SETTLE_MS = 30_000;
 /**
  * The longest a stopping stage takes before it exits anyway: past it, what is left of its end is written at once,
- * synchronously (the usage, a lower bound; the spend line as the stop signal writes it), and the process exits.
+ * synchronously (the usage, each pass still running a run of unknown cost; the spend line as the stop signal writes it),
+ * and the process exits.
  */
 export const STOP_EXIT_MS = 120_000;
 /** How long a stopped stage gives its GitHub tidy (applyStop), its usage already written: the dispatcher finishes the rest. */
@@ -289,13 +290,13 @@ export async function applyStop(repo, issue, { pr = undefined, closed = false, p
 }
 
 /**
- * The stopped stage's records for its usage: each harness pass this stage ran (harness.mjs stagePasses). A pass the
- * stop ended before its harness reported dollars (a Claude run prints them only in its last line) counts its stream's
- * live reading (`stoppedUsd`, harness.mjs runOnce), a lower bound, so the stop's spend is recorded once and not lost.
- * `open`: the passes still running (harness.mjs openPasses), each at its live reading, a lower bound too.
+ * The stopped stage's records for its usage: each harness pass this stage ran (harness.mjs stagePasses) and `open`, the
+ * passes still running (harness.mjs openPasses). A pass the stop ended before its harness reported dollars (a Claude run
+ * prints them only in its last line) is a run of unknown cost as its record says (usage.mjs UNKNOWN_WHY), never $0 and
+ * never a reading of its stream; so is each pass still running.
  */
 export function stoppedRecords(passes, open = []) {
-  return [...(passes || []), ...open].map((r) => (r && r.stopped && !r.noRun && !Number.isFinite(r.usd) && Number.isFinite(r.stoppedUsd) ? { ...r, usd: r.stoppedUsd, usdLowerBound: true, basis: "lower bound: the stage was stopped before the harness reported its cost; the live reading of its stream" } : r));
+  return [...(passes || []), ...open].filter(Boolean);
 }
 
 /** The restart's record on the issue (logic.mjs restartedAt reads it): one per restart, keyed by its time. */

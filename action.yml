@@ -212,15 +212,6 @@ inputs:
   queue_stall_minutes:
     description: How long a merge queue commit may wait with no CI begun on it before Pendulum takes the PR out of the queue and puts it back once; 10 when empty. A number from 1 (under a minute every queue commit would be stalled as it is made) to 1440. Scheduling only.
     required: false
-  relay_unknown_shut:
-    description: How many failed calls through the gateway relay whose cost cannot be known and that may have been billed shut the relay for the stage (the stage Blocks); 6 when empty. A whole number from 1 to 1000. Set in the workflow file only, since it bounds spend.
-    required: false
-  relay_unknown_floor_usd:
-    description: The least dollars a failed relayed call of unknown cost is booked at against max_usd (the dearest call priced so far when that is more); 0.25 when empty. A number above 0, at most 100. Set in the workflow file only, since it bounds spend.
-    required: false
-  relay_slow_floor_usd:
-    description: The least dollars a failed relayed call that ran over 30 seconds upstream is booked at against max_usd; 1 when empty. A number above 0, at most 100. Set in the workflow file only, since it bounds spend.
-    required: false
   ai_gateway_api_key:
     description: 'A Vercel AI Gateway key (secret AI_GATEWAY_API_KEY) for Pendulum''s decision calls, which then ask the gateway''s decision models. Red-check triage: when a required check is red, each failing job is asked whether the change broke it or it is a flake; only when every failing job reads flaky at confidence 0.7 or more are the failed jobs rerun (once per head) instead of a fix pass. Each job''s log window and the PR''s file list go to the decision model. The drift advisory: while a worker''s harness runs, at most every two minutes, it is asked whether the agent is on task, drifting into scope creep or looping (the plan''s items, its last 12 activity entries and the files it edited go to the decision model); a drift label at confidence 0.7 or more writes one line on the progress comment, and never changes the run. The answer gate, on the triage model: whether what the answer and fix passes wrote after the review does only what its findings and the failing checks asked (that diff, the findings and the failures, up to 32 KiB in all, go to the decision model); anything else, or `only_asked` under confidence 0.7, gets a review pass. The finding check, on the triage model: whether each answer resolves its reviewer finding. The answer check, on the triage model: whether the writer comments since a Question give a decision on it (the Question''s notice and the comments go to the decision model); only `no_decision` at confidence 0.7 or more keeps the Question open; with a key the dispatcher and the launcher ask it before any stage starts, and each verdict is kept on the issue so no version of a comment is asked about twice. Empty: the stage''s own harness answers the same questions on its own credential, one short call with no tools per question (decision_route; docs/ADAPTERS.md, Decision model). Used by Pendulum''s own process only, never passed to the harness or any command.'
     required: false
@@ -281,6 +272,12 @@ outputs:
   pr:
     description: (work) The PR number for the branch, when one exists.
     value: ${{ steps.run.outputs.pr }}
+  usd:
+    description: (work) The stage's known dollars (what its harnesses and vendors reported); empty when none were reported.
+    value: ${{ steps.run.outputs.usd }}
+  usd_unknown:
+    description: (work) How many of the stage's runs are of unknown cost (spend nobody reported, never counted in `usd` or against a cap); 0 when none.
+    value: ${{ steps.run.outputs.usd_unknown }}
   issue_number:
     description: (review, gate, launch) The Objective issue number the reviewed PR or the event belongs to.
     value: ${{ steps.run.outputs.issue }}
@@ -507,9 +504,6 @@ runs:
         PENDULUM_INPUT_STEP_STALL_FACTOR: ${{ inputs.step_stall_factor }}
         PENDULUM_INPUT_STEP_STALL_FLOOR_MINUTES: ${{ inputs.step_stall_floor_minutes }}
         PENDULUM_INPUT_QUEUE_STALL_MINUTES: ${{ inputs.queue_stall_minutes }}
-        PENDULUM_INPUT_RELAY_UNKNOWN_SHUT: ${{ inputs.relay_unknown_shut }}
-        PENDULUM_INPUT_RELAY_UNKNOWN_FLOOR_USD: ${{ inputs.relay_unknown_floor_usd }}
-        PENDULUM_INPUT_RELAY_SLOW_FLOOR_USD: ${{ inputs.relay_slow_floor_usd }}
         # The harness the install step put in place (empty for the modes that install none): a stage that would run another Blocks.
         PENDULUM_STAGE_HARNESS: ${{ steps.install.outputs.harness }}
         # The account the job's account step picked (#267), whose credential alone the workflow passed: a stage whose labels pick another Blocks.

@@ -134,23 +134,25 @@ export function harnessBudgetUsd(maxUsd, { ceilingUsd, storageUsd = 0 }) {
  * One stage's vendor cost: the usage totals after its session (`after`, the sandbox stopped) less those before it
  * (`before`: the totals when it was resumed, or null for a sandbox created for it), plus the storage of the stretch the
  * sandbox was stopped before the stage (`stored`: {ms, bytes}). When a reading is missing or partial, or the session's
- * totals cannot have settled (`settled` false: the stop failed), the cost is `ceilingUsd` plus that storage, flagged
- * `upperBound`. Returns {usd, upperBound, activeCpuMs, wallMs, vcpus, memoryMb, computeUsd, creationUsd, storedUsd, storedMs, storedBytes}.
+ * totals cannot have settled (`settled` false: the stop failed), the vendor reported no usage for the stage: its compute
+ * is unknown (`computeUsd` null, `usageUnknown`: usage.mjs UNKNOWN_WHY `sandbox`), never a ceiling or a guess, and `usd`
+ * holds the parts that are still real (a creation at its listed price, the stored bytes at the published rate). Returns
+ * {usd, usageUnknown?, activeCpuMs, wallMs, vcpus, memoryMb, computeUsd, creationUsd, storedUsd, storedMs, storedBytes}.
  */
-export function stageVendorCost(rates, { before = null, after = null, created = false, stored = null, ceilingUsd = null, settled = true }) {
+export function stageVendorCost(rates, { before = null, after = null, created = false, stored = null, settled = true }) {
   const kept = { storedMs: finite(stored?.ms) ? stored.ms : 0, storedBytes: finite(stored?.bytes) ? stored.bytes : null };
   const storage = storedUsd(rates, { bytes: kept.storedBytes, ms: kept.storedMs });
   const base = created ? { wallMs: 0, activeCpuMs: 0 } : before;
   const ok = settled && after && base && finite(after.wallMs) && finite(after.activeCpuMs) && finite(base.wallMs) && finite(base.activeCpuMs) && finite(after.memoryMb);
   if (!ok) {
-    const bound = finite(ceilingUsd) ? ceilingUsd : null;
-    return { usd: bound === null ? null : round6(bound + storage), upperBound: bound !== null, activeCpuMs: null, wallMs: null, vcpus: after?.vcpus ?? null, memoryMb: after?.memoryMb ?? null, computeUsd: bound, creationUsd: created ? rates.creation : 0, storedUsd: storage, ...kept };
+    const creationUsd = created ? rates.creation : 0;
+    return { usd: round6(creationUsd + storage), usageUnknown: true, activeCpuMs: null, wallMs: null, vcpus: after?.vcpus ?? null, memoryMb: after?.memoryMb ?? null, computeUsd: null, creationUsd, storedUsd: storage, ...kept };
   }
   const activeCpuMs = Math.max(0, after.activeCpuMs - base.activeCpuMs);
   const wallMs = Math.max(0, after.wallMs - base.wallMs);
   const computeUsd = round6((activeCpuMs / HOUR_MS) * rates.activeCpuHour + memoryUsd(rates, after.memoryMb, wallMs));
   const creationUsd = created ? rates.creation : 0;
-  return { usd: round6(computeUsd + creationUsd + storage), upperBound: false, activeCpuMs, wallMs, vcpus: after.vcpus ?? null, memoryMb: after.memoryMb, computeUsd, creationUsd, storedUsd: storage, ...kept };
+  return { usd: round6(computeUsd + creationUsd + storage), activeCpuMs, wallMs, vcpus: after.vcpus ?? null, memoryMb: after.memoryMb, computeUsd, creationUsd, storedUsd: storage, ...kept };
 }
 
 const invalid = (msg) => new SandboxError("invalid", msg);

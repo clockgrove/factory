@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { STOP_GRACE_MS, applyStop, claimExit, holdIfStopped, requestStageStop, resetStageStop, stageStopped, stopCause, stopText, stoppedRecords, watchObjective } from "../scripts/lib/stop.mjs";
+import { sumSpend } from "../scripts/lib/logic.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
 RETRY.sleep = async () => {};
@@ -76,22 +77,17 @@ test("the stage's stop: asked once, its exit claimed once, and the main flow par
   }
 });
 
-test("stoppedRecords: a pass the stop ended before it reported dollars counts its live reading, a lower bound; nothing else changes", () => {
+test("stoppedRecords: a pass the stop ended before it reported dollars, and one still running, are runs of unknown cost, never a reading", () => {
   const passes = [
     { label: "work-1", usd: 1.5, ok: true },
-    { label: "work-2", usd: null, stopped: true, stoppedUsd: 0.75, basis: "unmetered" },
-    { label: "fix", usd: 0, stopped: true, noRun: true, stoppedUsd: 9 },
-    { label: "plan", usd: null, stopped: true },
-    { label: "codex", usd: 0.2, stopped: true, stoppedUsd: 0.5 },
+    { label: "work-2", usd: null, stopped: true, usdUnknown: 1, usdUnknownWhy: ["unreported"], basis: "unknown" },
+    { label: "fix", usd: 0, stopped: true, noRun: true },
+    { label: "codex", usd: 0.2, stopped: true },
   ];
-  const out = stoppedRecords(passes);
-  assert.deepEqual(out[0], passes[0]);
-  assert.equal(out[1].usd, 0.75);
-  assert.equal(out[1].usdLowerBound, true);
-  assert.match(out[1].basis, /lower bound: the stage was stopped/);
-  assert.deepEqual(out[2], passes[2], "a pass that never ran spent nothing");
-  assert.deepEqual(out[3], passes[3], "no reading: left as it was");
-  assert.deepEqual(out[4], passes[4], "a pass that reported dollars keeps them");
+  const open = [{ label: "work-3", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], stopped: true }];
+  const out = stoppedRecords(passes, open);
+  assert.deepEqual(out, [...passes, ...open], "every record as it was: nothing priced from a stream");
+  assert.deepEqual(sumSpend(out), { usd: 1.7, unknown: 2 }, "the stopped and the running pass count as unknown, never $0");
 });
 
 /** A fetch fake over one repository: `issues(label)` lists open issues, `pr(n)` the pendulum/<n> branch's open PR. */
@@ -201,7 +197,7 @@ test("dispatcher: a stopped Objective In review is left a draft and Queued at on
 const SCRIPTS = join(import.meta.dirname, "..", "scripts");
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 
-test("a stopped stage's harness pass ends at once, its live reading kept; no pass starts after the stop", async () => {
+test("a stopped stage's harness pass ends at once, the turn it reported kept; no pass starts after the stop", async () => {
   const root = mkdtempSync(join(tmpdir(), "stop-pass-"));
   mkdirSync(join(root, "bin"));
   // A fake Codex that reports one turn, then runs on for a minute unless it is ended; each start is counted.
@@ -212,12 +208,14 @@ const fs = require("node:fs");
 fs.appendFileSync(process.env.FAKE_STATE + "/starts", "x");
 console.log(JSON.stringify({ type: "thread.started", thread_id: "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 200000, cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } }));
+require("node:fs").writeFileSync(process.env.FAKE_STATE + "/printed", "");
 setTimeout(() => {}, 60000);
 `,
     { mode: 0o755 },
   );
   const script = `
-    import { passesRunning, runHarness, stageSpendSoFar, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { existsSync } from "node:fs";
+    import { passesRunning, runHarness, stagePasses } from ${JSON.stringify(LIB("harness.mjs"))};
     import { requestStageStop } from ${JSON.stringify(LIB("stop.mjs"))};
     const root = process.env.FAKE_STATE;
     const pass = (label) => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, timeoutMs: 120_000, label });
@@ -225,14 +223,15 @@ setTimeout(() => {}, 60000);
     // The caller of a pass the stop ended never goes on: the stop writes the stage's end.
     let returned = 0;
     pass("work-1").then(() => (returned += 1));
-    while (!((await stageSpendSoFar()).usd > 0) && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
+    while (!existsSync(root + "/printed") && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 200));
     requestStageStop("unlabeled");
     while (passesRunning() > 0 && Date.now() - started < 60_000) await new Promise((r) => setTimeout(r, 20));
     const ms = Date.now() - started;
     pass("work-2").then(() => (returned += 1));
     await new Promise((r) => setTimeout(r, 500));
     const [first, second] = stagePasses();
-    process.stdout.write(JSON.stringify({ ms, returned, first: { stopped: first.stopped, usd: first.usd, stoppedUsd: first.stoppedUsd }, second: { stopped: second.stopped, noRun: second.noRun, usd: second.usd }, passes: stagePasses().map((p) => p.label), home: (await import("node:os")).homedir() }) + "\\n");
+    process.stdout.write(JSON.stringify({ ms, returned, first: { stopped: first.stopped, usd: first.usd }, second: { stopped: second.stopped, noRun: second.noRun, usd: second.usd }, passes: stagePasses().map((p) => p.label), home: (await import("node:os")).homedir() }) + "\\n");
     process.exit(0);
   `;
   const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, FAKE_STATE: root, CODEX_HOME: join(root, "codex") }, stdio: ["ignore", "pipe", "pipe"] });
@@ -246,7 +245,7 @@ setTimeout(() => {}, 60000);
   assert.equal(r.home, homedir(), "#318: the stage process runs on the test's fake home");
   assert.ok(r.ms < 40_000, `the pass ran on after the stop (${r.ms} ms)`);
   assert.equal(r.first.stopped, true);
-  assert.ok(r.first.usd > 0 || r.first.stoppedUsd > 0, "the stopped pass's spend is recorded");
+  assert.ok(r.first.usd > 0, "the stopped pass's reported turn is recorded");
   assert.equal(r.returned, 0, "neither caller goes on after the stop");
   assert.deepEqual(r.second, { stopped: true, noRun: true, usd: 0 });
   assert.equal(readFileSync(join(root, "starts"), "utf8"), "x", "the harness started once: no pass after the stop");
@@ -262,12 +261,14 @@ test("stopStage: the stage's end on a stop: its passes settled into its records 
     `#!${process.execPath}
 console.log(JSON.stringify({ type: "thread.started", thread_id: "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 200000, cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } }));
+require("node:fs").writeFileSync(process.env.FAKE_STATE + "/printed", "");
 setTimeout(() => {}, 60000);
 `,
     { mode: 0o755 },
   );
   const script = `
-    import { runHarness, stageSpendSoFar } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { existsSync } from "node:fs";
+    import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
     import { stopStage } from ${JSON.stringify(LIB("session.mjs"))};
     const writes = [];
     globalThis.fetch = async (url, init = {}) => {
@@ -286,9 +287,10 @@ setTimeout(() => {}, 60000);
     process.env.GITHUB_API_URL = "https://github.test";
     const root = process.env.FAKE_STATE;
     const records = [];
-    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 120_000, label: "work-1" });
+    const run = runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STATE: root }, timeoutMs: 120_000, label: "work-1" });
     const started = Date.now();
-    while (!((await stageSpendSoFar()).usd > 0) && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
+    while (!existsSync(root + "/printed") && Date.now() - started < 20_000) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 200));
     const ends = [];
     const finish = async (exit, reason) => ends.push({ exit, reason, records: records.map((r) => ({ label: r.label, stopped: r.stopped, usd: r.usd })) });
     const repo = { owner: "acme", name: "app", full: "acme/app" };
@@ -313,7 +315,7 @@ setTimeout(() => {}, 60000);
   assert.equal(r.ends[0].reason, "`pendulum:objective` was removed");
   assert.equal(r.ends[0].records.length, 1, "the pass still running at the stop is in the records");
   assert.equal(r.ends[0].records[0].stopped, true);
-  assert.ok(r.ends[0].records[0].usd > 0, "with its spend");
+  assert.ok(r.ends[0].records[0].usd > 0, "with the turn it reported");
   assert.ok(r.writes.includes("draft PR_70") && r.writes.includes("DELETE /repos/acme/app/issues/70/labels/pendulum:review"), r.writes.join("\n"));
   assert.ok(r.writes.includes("DELETE /repos/acme/app/issues/7/labels/pendulum:running"));
 });

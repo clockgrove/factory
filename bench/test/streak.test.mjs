@@ -116,7 +116,7 @@ test("local mode: a clean run reads walk-away though the operator's login merged
   assert.deepEqual(row.operator, { minutes: 0, basis: "clean merge" });
 });
 
-test("local mode: dollars and harness from the spend lines when no usage artifact exists; a stage without one is unmetered", () => {
+test("local mode: dollars and harness from the spend lines when no usage artifact exists; a stage without one is of unknown cost", () => {
   const row = score(localMerge());
   assert.equal(row.cost.usd, 1.5);
   assert.equal(row.cost.unit, "usd");
@@ -130,12 +130,13 @@ test("local mode: dollars and harness from the spend lines when no usage artifac
   const pasted = localMerge();
   pasted.issueComments.push({ user: OWNER, created_at: "2031-03-02T01:55:00Z", body: "<!-- pendulum:60:progress:work:1 -->\n<!-- pendulum:spend {\"usd\":100} -->" });
   assert.equal(score(pasted).cost.usd, 1.5);
-  // A stage that wrote no spend line leaves the figure partial, never complete.
+  // A stage that wrote no spend line is a run of unknown cost beside the known figure, never $0.
   const partial = localMerge();
   partial.issueComments[2].body = partial.issueComments[2].body.replace(/\n<!-- pendulum:spend .*-->/, "");
   const p = score(partial);
   assert.equal(p.cost.usd, 1.25);
-  assert.match(p.cost.basis, /^partial: 1 of 2/);
+  assert.equal(p.cost.usdUnknown, 1);
+  assert.match(p.cost.basis, /; plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
   // An Actions Objective with no artifact and no spend line still says it has no usage.
   const actions = score(cleanMerge(42));
   assert.equal(actions.cost.usd, null);

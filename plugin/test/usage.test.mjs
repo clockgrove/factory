@@ -8,7 +8,7 @@ import { SHELL_SECRET_KEYS, VENDOR_TELEMETRY_OFF, credentialEnv, finalText, harn
 import { AGENT_SHELL_TELEMETRY_OFF, localSandbox } from "../scripts/lib/local.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
-import { copilotCount, decideExit, sumSpend, unmeteredRun } from "../scripts/lib/logic.mjs";
+import { capReached, copilotCount, decideExit, sumSpend } from "../scripts/lib/logic.mjs";
 import { clampTotal } from "../scripts/lib/usage.mjs";
 import { copilotCreditUsd } from "../scripts/lib/harness.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
@@ -50,16 +50,16 @@ test("claude: no result on stdout is an error record, not a crash", () => {
   assert.match(rec.error, /no JSON result/);
 });
 
-test("codex: a stream error (a dropped stream it reconnected) leaves the dollars a lower bound (#116)", () => {
+test("codex: a stream error (a dropped stream it reconnected) is a run of unknown cost beside its priced turns (#116, #483)", () => {
   const turn = { type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 100 } };
   const clean = parseCodex([{ type: "thread.started", thread_id: "t1" }, turn].map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
-  assert.equal(clean.usdLowerBound, undefined, "a clean stream is exact");
+  assert.equal(clean.usdUnknown, undefined, "a clean stream is all known");
   const lines = [{ type: "thread.started", thread_id: "t1" }, { type: "error", message: "Reconnecting... 1/5 (stream disconnected before completion: idle timeout waiting for SSE)" }, turn];
   const rec = parseCodex(lines.map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
-  assert.equal(rec.usdLowerBound, true, "the dropped attempt may be billed without reported tokens");
+  assert.deepEqual([rec.usdUnknown, rec.usdUnknownWhy], [1, ["failed-request"]], "the dropped attempt may be billed without reported tokens");
   assert.equal(rec.usd, clean.usd, "the reported tokens are still priced");
   const failed = parseCodex([{ type: "thread.started", thread_id: "t1" }, { type: "turn.failed", error: { message: "boom" } }].map((e) => JSON.stringify(e)).join("\n"), "gpt-6.1-sol");
-  assert.equal(failed.usdLowerBound, true);
+  assert.deepEqual([failed.usd, failed.usdUnknown, failed.usdUnknownWhy], [null, 1, ["failed-request", "unreported"]]);
 });
 
 test("codex: JSONL turn.completed usage summed and priced from the table", () => {
@@ -77,20 +77,22 @@ test("codex: JSONL turn.completed usage summed and priced from the table", () =>
   assert.equal(finalText("codex", fixture("codex-events.jsonl")).split("\n")[0], "Plan posted.");
 });
 
-test("codex: unknown model is unmetered, never zero", () => {
+test("codex: a model with no price row is a run of unknown cost, never zero", () => {
   const rec = parseCodex(fixture("codex-events.jsonl"), "gpt-unknown-9");
   assert.equal(rec.usd, null);
-  assert.match(rec.basis, /unmetered: no price for gpt-unknown-9/);
+  assert.deepEqual([rec.usdUnknown, rec.usdUnknownWhy], [1, ["no-price"]]);
+  assert.match(rec.basis, /unknown: no price for gpt-unknown-9/);
   assert.equal(priceCodex(null, { input: 1 }), null);
   assert.equal(priceCodex("gpt-5.5-codex-2026", { input: 1_000_000, cached: 0, output: 0 }), null, "no prefix match: an unlisted model is unmetered, not priced as gpt-5.5");
 });
 
-test("copilot: no usage output is unmetered, never zero; a non-zero exit is an error, not a death", () => {
+test("copilot: no usage output is a run of unknown cost, never zero; a non-zero exit is an error, not a death", () => {
   const rec = parseCopilot(fixture("copilot-stdout.txt"), null, 0);
   assert.equal(rec.ok, true);
   assert.equal(rec.usd, null);
+  assert.deepEqual([rec.usdUnknown, rec.usdUnknownWhy], [1, ["unreported"]]);
   assert.deepEqual(rec.tokens, { input: null, output: null, cached: null, written: null });
-  assert.match(rec.basis, /unmetered: Copilot wrote no usage/);
+  assert.match(rec.basis, /unknown: Copilot wrote no usage/);
   const bad = parseCopilot("", null, 2);
   assert.equal(bad.ok, false);
   assert.equal(bad.subtype, "error", "a subtype means the run is not counted as a process death");
@@ -114,7 +116,7 @@ test("copilot 1.0.91: the real JSONL and usage file (captured Nov 2): session id
   assert.deepEqual(bare.tokens, { input: null, output: null, cached: null, written: null });
   assert.equal(bare.usd, 0.0624);
   assert.match(bare.basis, /from the stream's usage checkpoint/);
-  assert.match(parseCopilot("", null, 0).basis, /^unmetered: Copilot wrote no usage/);
+  assert.match(parseCopilot("", null, 0).basis, /^unknown: Copilot wrote no usage/);
 });
 
 test("codex 0.160: the real probe JSONL (captured Nov 2) parses to one turn with cached tokens and a thread id", () => {
@@ -126,7 +128,7 @@ test("codex 0.160: the real probe JSONL (captured Nov 2) parses to one turn with
   assert.equal(finalText("codex", fixture("codex-probe.jsonl")), "ok");
 });
 
-test("mergeUsage sums runs and keeps null dollars only when every run is unmetered", () => {
+test("mergeUsage sums the known dollars, keeps null only when no run reported any, and counts the runs of unknown cost", () => {
   const a = parseClaude(fixture("claude-result.json"), "m");
   const b = parseClaude(fixture("claude-stream.jsonl"), "m");
   const m = mergeUsage([a, b]);
@@ -136,6 +138,9 @@ test("mergeUsage sums runs and keeps null dollars only when every run is unmeter
   assert.equal(m.budgetExceeded, true);
   const c = mergeUsage([parseCopilot("", null, 0), parseCopilot("", null, 0)]);
   assert.equal(c.usd, null);
+  assert.deepEqual([c.usdUnknown, c.usdUnknownWhy], [2, ["unreported"]]);
+  const mixed = mergeUsage([a, parseClaude("", "m"), parseCodex(fixture("codex-events.jsonl"), "gpt-unknown-9")]);
+  assert.deepEqual([mixed.usd, mixed.usdUnknown, mixed.usdUnknownWhy], [7.4312, 2, ["unreported", "no-price"]], "an unknown run adds nothing to usd and is counted");
   assert.equal(mergeUsage([]), null);
 });
 
@@ -399,8 +404,10 @@ test("sessions: a stage saves every session it ran (the reviewer's own too), mas
 });
 
 test("a resumed Claude pass counts its own share, not the session's running total", async () => {
-  // Shapes and numbers from a real run: the fix pass resumed the work session and reported the session's totals.
-  const result = (turns, usd, opus, sonnet) => JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: turns, session_id: "s1", total_cost_usd: usd,
+  // Shapes and numbers from a real run: the fix pass resumed the work session and reported the session's totals. Its
+  // stream's init line names the Claude Code that ran (2.1.277 and later carry the running total on a resume).
+  const init = JSON.stringify({ type: "system", subtype: "init", session_id: "s1", claude_code_version: "2.1.325" });
+  const result = (turns, usd, opus, sonnet) => init + "\n" + JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: turns, session_id: "s1", total_cost_usd: usd,
     modelUsage: { "claude-opus-5-5": { inputTokens: 500, cacheReadInputTokens: opus[0], cacheCreationInputTokens: opus[1], outputTokens: opus[2], costUSD: opus[3] },
       "claude-sonnet-5-5": { inputTokens: 100, cacheReadInputTokens: sonnet[0], cacheCreationInputTokens: sonnet[1], outputTokens: sonnet[2], costUSD: sonnet[3] } } });
   const sonnet = [945877, 60082, 16411, 0.4090027];
@@ -424,7 +431,7 @@ test("a session restored from an earlier job counts its own share: the transcrip
   assert.equal(prior.usd, 0.0060084, "the last cost-state line wins");
   assert.equal(prior.models["claude-haiku-5-5"].output, 150);
   assert.equal(transcriptTotal('{"type":"user"}\n'), null, "no cost-state: no prior total");
-  const reported = parseUsage("claude", JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, session_id: "s1", total_cost_usd: 0.00635726, modelUsage: { "claude-haiku-5-5": { inputTokens: 4, outputTokens: 182, cacheReadInputTokens: 21446, cacheCreationInputTokens: 21446, costUSD: 0.00635726 } } }), "claude-haiku-5-5", 0);
+  const reported = parseUsage("claude", JSON.stringify({ type: "system", subtype: "init", session_id: "s1", claude_code_version: "2.1.277" }) + "\n" + JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, session_id: "s1", total_cost_usd: 0.00635726, modelUsage: { "claude-haiku-5-5": { inputTokens: 4, outputTokens: 182, cacheReadInputTokens: 21446, cacheCreationInputTokens: 21446, costUSD: 0.00635726 } } }), "claude-haiku-5-5", 0);
   const own = sinceSession(reported, prior);
   assert.ok(Math.abs(own.usd - 0.00034886) < 1e-9, `resumed pass usd ${own.usd}`);
   assert.equal(own.models["claude-haiku-5-5"].output, 32);
@@ -496,7 +503,7 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
 
 test("a session total is only subtracted when it is a running total", async () => {
   const rec = (usd) => ({ usd, tokens: { input: 1, output: 1, cached: 1, written: 1 }, models: null, turns: 3 });
-  assert.equal(sinceSession(rec(2), rec(5)).usd, 2, "below the prior total: not cumulative, counted as reported");
+  assert.deepEqual([sinceSession(rec(2), rec(5)).usd, sinceSession(rec(2), rec(5)).usdUnknownWhy], [null, ["resumed-total"]], "below the prior total: no running total, so unknown");
   assert.equal(sinceSession(rec(7), rec(null)).usd, 7, "a prior pass with no total subtracts nothing");
   assert.equal(sinceSession(rec(7), rec(5)).usd, 2);
 });
@@ -585,14 +592,15 @@ test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the config
   assert.ok(Math.abs(stage.usd - 0.0638) < 1e-9, `stage usd ${stage.usd}`);
   assert.equal(copilotCount({ premiumRequests: 2, aiCredits: 6.385 }), "; 2 premium requests, 6.385 AI credits");
   assert.equal(copilotCount({ premiumRequests: null, aiCredits: null }), "", "other harnesses add nothing");
-  // A usage file with tokens but no AI credits (an older CLI) is unmetered, never zero.
+  // A usage file with tokens but no AI credits (an older CLI) is a run of unknown cost, never zero.
   const dir = mkdtempSync(join(tmpdir(), "pendulum-copilot-"));
   writeFileSync(join(dir, "u.json"), JSON.stringify({ totalPremiumRequestCost: 3, modelMetrics: { m: { usage: { inputTokens: 10, outputTokens: 2 } } } }));
   const old = parseCopilot("", null, 0, { usageFile: join(dir, "u.json") });
   rmSync(dir, { recursive: true, force: true });
   assert.equal(old.usd, null);
+  assert.deepEqual([old.usdUnknown, old.usdUnknownWhy], [1, ["credits"]]);
   assert.equal(old.premiumRequests, 3);
-  assert.match(old.basis, /^unmetered: no AI credits reported, 3 premium request\(s\)/);
+  assert.match(old.basis, /^unknown: no AI credits reported, 3 premium request\(s\)/);
 });
 
 test("copilot metering cannot be talked down: negative or forged-low credits, unpriced states, another session's total, an edited saved session", () => {
@@ -604,23 +612,24 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   };
   const checkpoint = (nano, requests) => JSON.stringify({ type: "session.usage_checkpoint", data: { totalNanoAiu: nano, totalPremiumRequests: requests } });
   const turn = JSON.stringify({ type: "assistant.turn_end" });
-  // A negative count is no count: unmetered, and no spend total ever goes down for it.
+  // A negative count is no count: unknown, and no spend total ever goes down for it.
   const neg = parseCopilot(turn, null, 0, { usageFile: write("neg.json", { totalNanoAiu: -9e12 }) });
   assert.equal(neg.usd, null);
-  assert.match(neg.basis, /^unmetered: a negative AI credit count/);
-  assert.equal(sumSpend([{ usd: 1 }, { usd: -5 }, { usd: 2 }]), 3);
+  assert.match(neg.basis, /^unknown: a negative AI credit count/);
+  assert.deepEqual(sumSpend([{ usd: 1 }, { usd: -5 }, { usd: 2 }]), { usd: 3, unknown: 0 });
   assert.equal(mergeUsage([{ usd: -5, tokens: {} }, { usd: 2, tokens: {} }]).usd, 2);
   // A usage file rewritten low loses to the stream's own checkpoint totals.
   const low = parseCopilot([checkpoint(6122800000, 1), checkpoint(90e9, 4), turn].join("\n"), null, 0, { usageFile: write("low.json", { totalNanoAiu: 1e6, totalPremiumRequestCost: 0 }) });
   assert.equal(low.usd, 0.9);
   assert.equal(low.premiumRequests, 4);
-  // Pending, unavailable or an unknown status is unmetered; partial is a flagged lower bound; zero credits for tokens is unmetered.
+  // Pending, unavailable or an unknown status is unknown; partial prices what was reported and the rest is unknown; zero
+  // credits for tokens is unknown.
   for (const status of ["pending", "unavailable", "complete\n::error::x"]) assert.equal(parseCopilot(turn, null, 0, { usageFile: write("s.json", { aiCreditsStatus: status }) }).usd, null, status);
   assert.match(parseCopilot(turn, null, 0, { usageFile: write("s.json", { aiCreditsStatus: "nope" }) }).basis, /AI credits unknown/);
   const partial = parseCopilot(turn, null, 0, { usageFile: write("p.json", { aiCreditsStatus: "partial" }) });
   assert.equal(partial.usd, 0.0612);
-  assert.equal(partial.usdLowerBound, true);
-  assert.match(partial.basis, /lower bound: AI credits partial/);
+  assert.deepEqual([partial.usdUnknown, partial.usdUnknownWhy], [1, ["credits", "unreported"]], "partial credits, and no result line after them");
+  assert.match(partial.basis, /AI credits partial: the rest unknown/);
   assert.equal(parseCopilot(turn, null, 0, { usageFile: write("z.json", { totalNanoAiu: 0 }) }).usd, null);
   // A model name from the file is cleaned before it reaches a log line or the step summary.
   const named = parseCopilot("", null, 0, { usageFile: write("m.json", { modelMetrics: { "evil\n::set-output name=x::y": real.modelMetrics["claude-sonnet-5.5"] } }) });
@@ -636,7 +645,7 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("copilot caps: --max-ai-credits from what is left (per process, at least 30); an unmetered run stops further passes; a bad rate is refused", () => {
+test("copilot caps: --max-ai-credits from what is left (per process, at least 30); a run with no priced credits is of unknown cost and stops nothing; a bad rate is refused", () => {
   const credits = (maxUsd, creditUsd) => {
     const a = harnessCommand({ harness: "copilot", prompt: "P", maxUsd, creditUsd }).args;
     return a.includes("--max-ai-credits") ? a[a.indexOf("--max-ai-credits") + 1] : null;
@@ -645,19 +654,16 @@ test("copilot caps: --max-ai-credits from what is left (per process, at least 30
   assert.equal(credits(0.1, 0.01), "30", "Copilot refuses fewer than 30");
   assert.equal(credits(25, 0.02), "1250");
   assert.equal(credits(0, 0.01), null, "no cap set, no flag");
-  assert.equal(unmeteredRun({ harness: "copilot", usd: null, turns: 3 }), true);
-  assert.equal(unmeteredRun({ harness: "copilot", usd: null, turns: 0 }), false);
-  assert.equal(unmeteredRun({ harness: "copilot", usd: 0.4, turns: 3 }), false);
-  assert.equal(unmeteredRun({ harness: "codex", usd: null, turns: 3 }), false);
-  assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
+  // The cap compares the known dollars only: a run of unknown cost adds none, and the stage goes on (#483).
+  assert.equal(capReached(25, [{ harness: "copilot", usd: null, usdUnknown: 1, usdUnknownWhy: ["credits"], turns: 3 }, { usd: 24.9 }]), false);
   assert.equal(decideExit({ harness: { budgetExceeded: true } }).reason, "dollar cap reached");
   assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: "0.02" }), 0.02);
   for (const bad of ["0", "-1", "abc"]) assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: bad }), 0.01, bad);
   assert.equal(copilotCreditUsd({}), 0.01);
 });
 
-test("copilot follow-ups: the session's running total is recorded and bounds a restored seed; no exit-record ask when unmetered; no run under the 30-credit floor", async () => {
-  const { writeUsage, exitRecord } = await import("../scripts/lib/session.mjs");
+test("copilot follow-ups: the session's running total is recorded and bounds a restored seed; no run under the 30-credit floor", async () => {
+  const { writeUsage } = await import("../scripts/lib/session.mjs");
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   // A three-stage session: this stage's own spend is small, the session's total is not; the seed is bounded by the total.
   const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
@@ -670,12 +676,7 @@ test("copilot follow-ups: the session's running total is recorded and bounds a r
   assert.equal(clampTotal(seed, result).usd, 0.4, "bounded by the session's total, not the stage's own $0.06");
   assert.equal(clampTotal(seed, { usd: 0.06 }).usd, 0.06, "an older result.json with no session total: the stage's own figures");
   assert.equal(clampTotal({ ...seed, usd: 7 }, result).usd, 0.5);
-  // With max_usd unenforceable the harness is not asked for an exit record; an exit file it wrote is still read.
-  const asked = await exitRecord({ text: undefined, harness: "copilot", deadlineAt: Date.now() + 3600_000, maxUsd: 25, unmetered: true });
-  assert.deepEqual([asked.record.exit, asked.record.reason, asked.usage.length], ["blocked", "unmetered: max_usd cannot be enforced", 0]);
-  assert.equal((await exitRecord({ text: '{"exit":"delivered"}', harness: "copilot", deadlineAt: Date.now() + 3600_000, maxUsd: 25, unmetered: true })).record.exit, "delivered");
-  assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
-  // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never an unmetered one.
+  // Under 30 AI credits left no Copilot run starts: a zero-cost record over budget, never one of unknown cost.
   const floor = await runHarness({ harness: "copilot", prompt: "p", maxUsd: 0.29, cwd: tmpdir(), env: { HOME: process.env.HOME }, timeoutMs: 1000, label: "work-1" });
-  assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, unmeteredRun(floor)], [true, 0, false, "dollar cap reached", false]);
+  assert.deepEqual([floor.budgetExceeded, floor.usd, floor.ok, floor.error, floor.usdUnknown], [true, 0, false, "dollar cap reached", undefined]);
 });

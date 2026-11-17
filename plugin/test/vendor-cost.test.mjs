@@ -28,8 +28,8 @@ test("rates: Vercel's are dated, sourced and complete, in one place", () => {
 test("stage cost: the totals' difference at list rates, memory rounded up to the minute, the stopped stretch's storage beside it", () => {
   const before = { wallMs: 10 * 60_000, activeCpuMs: 60_000, memoryMb: 4096, vcpus: 2 };
   const after = { wallMs: 10 * 60_000 + 30 * 60_000 + 1, activeCpuMs: 60_000 + 6 * 60_000, memoryMb: 4096, vcpus: 2 };
-  const c = stageVendorCost(R, { before, after, stored: { ms: 24 * H, bytes: 2e9 }, ceilingUsd: 1 });
-  assert.equal(c.upperBound, false);
+  const c = stageVendorCost(R, { before, after, stored: { ms: 24 * H, bytes: 2e9 } });
+  assert.equal(c.upperBound, undefined, "no bound: the vendor's own totals");
   assert.equal(c.activeCpuMs, 6 * 60_000);
   // 6 CPU-minutes, and 4 GB for 31 billed minutes (30 min and 1 ms rounds up).
   close(c.computeUsd, 0.1 * R.activeCpuHour + 4 * (31 / 60) * R.memoryGbHour, "compute");
@@ -42,14 +42,29 @@ test("stage cost: the totals' difference at list rates, memory rounded up to the
   assert.equal(fresh.activeCpuMs, after.activeCpuMs, "created: the totals are all this stage's");
 });
 
-test("stage cost: an unread, partial or unsettled reading is the session's ceiling, flagged as an upper bound", () => {
+test("stage cost: an unread, partial or unsettled reading leaves the compute unknown, never the session's ceiling or $0; the stored bytes stay real; its spend line says so", () => {
   const after = { wallMs: 1000, activeCpuMs: 10, memoryMb: 4096, vcpus: 2 };
+  const storedReal = storedUsd(R, { bytes: 1e9, ms: H });
   for (const args of [{ before: null, after }, { before: { wallMs: 0, activeCpuMs: 0 }, after: null }, { before: { wallMs: 0, activeCpuMs: 0 }, after: { ...after, activeCpuMs: null } }, { before: { wallMs: 0, activeCpuMs: 0 }, after, settled: false }]) {
     const c = stageVendorCost(R, { ...args, ceilingUsd: 0.25, stored: { ms: H, bytes: 1e9 } });
-    assert.equal(c.upperBound, true, JSON.stringify(args));
-    close(c.usd, 0.25 + storedUsd(R, { ms: H, bytes: 1e9 }), "ceiling plus storage");
+    assert.equal(c.usageUnknown, true, JSON.stringify(args));
+    assert.equal(c.computeUsd, null);
+    close(c.usd, storedReal, "the stored bytes at the published rate, the one real part");
+    assert.equal(Object.hasOwn(c, "upperBound"), false, "no bound field");
+    // The vendor comment's spend line: the known parts, and one run of unknown cost for the sandbox's usage.
+    const line = vendorLine({ id: "pendulum-a0dd", state: "running", cost: c, rates: R, error: "unavailable" });
+    assert.match(line, /running: usage not reported \(unavailable\), .* vendor \$0\.\d{4} plus its unknown usage this stage/);
+    const body = vendorBody({ line, vendorUsd: c.usd, vendorUnknown: c.usageUnknown, modelUsd: 2 });
+    const parts = spendParts(body);
+    assert.deepEqual([parts.modelUsd, parts.vendorUsd, parts.usdUnknown, parts.usdUnknownWhy], [2, c.usd, 1, ["sandbox"]]);
+    assert.deepEqual(spendOf(body).unknown, 1);
   }
-  assert.equal(stageVendorCost(R, { before: null, after }).usd, null, "no ceiling recorded: unknown, never zero");
+  // A created sandbox's creation is real too: listed per creation.
+  const made = stageVendorCost(R, { before: null, after: null, created: true });
+  close(made.usd, R.creation, "the creation at its listed price");
+  assert.equal(made.usageUnknown, true);
+  // No figure at all (an older booking): unknown in full.
+  assert.deepEqual(spendParts(vendorBody({ line: "x", vendorUsd: null, modelUsd: 2 })).usdUnknown, 1);
 });
 
 test("ceiling: every vCPU busy for the whole session plus its memory, so compute cannot pass it", () => {
@@ -66,17 +81,18 @@ test("vendor comment: the vendor line carries state, seconds, size and dated rat
   assert.match(line, /^- 01:16Z sandbox `pendulum-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
   const body = vendorBody({ line, vendorUsd: cost.usd });
   assert.ok(body.includes(line));
-  close(spendOf(body), cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");
-  assert.deepEqual(spendParts(body), { usd: spendOf(body), modelUsd: null, vendorUsd: spendOf(body) });
-  // A stage that left no progress comment: the usage record's model dollars are here, so the daily sum counts them.
-  const alone = vendorBody({ line, vendorUsd: 0.01, modelUsd: 2 });
-  close(spendOf(alone), 2.01, "model from the usage record");
+  close(spendOf(body).usd, cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");
+  assert.equal(spendOf(body).unknown, 0);
+  assert.deepEqual(spendParts(body), { usd: spendOf(body).usd, modelUsd: null, vendorUsd: spendOf(body).usd });
+  // A stage that left no progress comment: the usage record's model dollars are here, so the daily sum counts them, and
+  // its runs of unknown cost with them.
+  const alone = vendorBody({ line, vendorUsd: 0.01, modelUsd: 2, modelUnknown: { usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  close(spendOf(alone).usd, 2.01, "model from the usage record");
   close(spendParts(alone).modelUsd, 2);
-  // An upper bound says so; nothing but codes and numbers reaches the comment.
-  const bound = vendorLine({ id: "pendulum-a0dd", state: "running", cost: stageVendorCost(R, { before: null, after: null, ceilingUsd: 0.2 }), rates: R, error: "unavailable" });
-  assert.match(bound, /running: usage not settled \(unavailable\), counted at the session's ceiling, .* vendor at most \$0\.2000 this stage/);
+  assert.deepEqual([spendParts(alone).usdUnknown, spendParts(alone).usdUnknownWhy], [1, ["unreported"]]);
+  // Nothing but codes and numbers reaches the comment.
   assert.match(vendorLine({ id: "pendulum-x", state: "stopped", cost, rates: R, error: "vercel: <b>secret text</b>" }), /\(\?\)|stopped/);
-  assert.ok(!vendorLine({ id: "pendulum-x", state: "stopped", cost: { ...cost, upperBound: true }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
+  assert.ok(!vendorLine({ id: "pendulum-x", state: "stopped", cost: { ...cost, usd: null }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
 });
 
 test("progress key: the launcher names the stage's comment, so the end finds it; the record shows the stage's sandbox cost", () => {
@@ -160,7 +176,7 @@ test("start: the totals are read before the resume, the stopped stretch is price
   await assert.rejects(start(tight, { maxUsd: 0.05 }), (e) => e.code === "budget");
   assert.ok(tight.calls.includes("stop"));
 
-  // A usage read that fails starts the stage anyway; its end counts the ceiling.
+  // A usage read that fails starts the stage anyway; its end is of unknown cost.
   const blind = fakeAdapter({ usage: async () => Promise.reject(Object.assign(new Error("x"), { code: "unavailable" })) });
   const b = await start(blind, { maxUsd: 20 });
   assert.equal(b.meter.base, null);
@@ -176,7 +192,7 @@ test("book: the vendor's cost goes into the usage record beside the model's, or 
   const rec = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
   assert.equal(rec.usd, 0.4, "the model's dollars are untouched");
   assert.equal(rec.vendor.usd, r.vendor.usd);
-  assert.equal(rec.vendor.upperBound, false);
+  assert.equal(Object.hasOwn(rec.vendor, "upperBound"), false);
   assert.equal(rec.vendor.rates.date, R.date);
   assert.equal(rec.vendor.sandbox, "pendulum-abc");
 
@@ -185,9 +201,10 @@ test("book: the vendor's cost goes into the usage record beside the model's, or 
   assert.equal(none.usage.name, "pendulum-usage-7-review");
   const own = JSON.parse(readFileSync(join(none.usage.dir, "result.json"), "utf8"));
   assert.equal(own.usd, null, "the model's dollars are unknown, never zero");
+  assert.deepEqual([own.usdUnknown, own.usdUnknownWhy], [1, ["unreported"]], "one run of unknown cost, said in structure");
   assert.equal(own.spendInProgress, true, "the stage's progress comment carries its spend: daily_usd counts it there, once");
-  assert.equal(own.vendor.upperBound, true);
-  close(own.vendor.usd, 0.3, "the session's ceiling");
+  assert.deepEqual([own.vendor.usd, own.vendor.usageUnknown], [0, true], "the vendor's usage was not read: unknown (nothing else real to count), never the session's ceiling");
+  assert.match(own.vendor.basis, /^unknown: /);
   assert.equal(own.harness, "claude", "a record with no harness: the caller's");
   // A stage on an Objective's label harness (#224): its record names it, whatever the repository's default.
   const labelled = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { ...record, claim: "c2", harness: "codex" }, after: null, settled: true, state: "stopped", usage: null, harness: "claude", error: "unavailable" });

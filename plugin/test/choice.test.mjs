@@ -41,9 +41,8 @@ test("choice labels: two of one kind, an unknown harness or an empty id is refus
   assert.equal(choiceOf(["pendulum:harness:claude", "pendulum:harness:codex"]).ok, false);
 });
 
-test("label names: every model in Pendulum's defaults and price tables fits GitHub's 50 characters for every kind", () => {
-  const claude = Object.keys(JSON.parse(readFileSync(join(ROOT, "plugin", "scripts", "lib", "claude-prices.json"), "utf8")).perMillion);
-  const ids = new Set([...Object.values(MODEL_DEFAULTS).flatMap((d) => [d.model, d.subagent_model, d.reviewer_model]).filter(Boolean), ...claude, ...Object.keys(CODEX_PRICES.perMillion)]);
+test("label names: every model in Pendulum's defaults and price table fits GitHub's 50 characters for every kind", () => {
+  const ids = new Set([...Object.values(MODEL_DEFAULTS).flatMap((d) => [d.model, d.subagent_model, d.reviewer_model]).filter(Boolean), ...Object.keys(CODEX_PRICES.perMillion)]);
   for (const id of ids) for (const kind of ["model", "subagent_model", "reviewer_model"]) assert.ok(`${CHOICE_PREFIXES[kind]}${id}`.length <= LABEL_MAX, `${kind} ${id}`);
   assert.deepEqual(Object.fromEntries(Object.entries(CHOICE_PREFIXES).map(([k, p]) => [k, LABEL_MAX - p.length])), { harness: 33, model: 35, subagent_model: 26, reviewer_model: 26 }, "the room USAGE.md states");
 });

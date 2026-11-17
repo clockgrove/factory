@@ -228,11 +228,6 @@ export function dropSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = 
  */
 export const unrelayedGatewayKeys = (shell = {}) => Object.entries(shell).filter(([n, v]) => n !== RELAYED_NAME && (n.toUpperCase() === RELAYED_NAME || GATEWAY_KEY_SHAPE.test(String(v)))).map(([n]) => n);
 
-/**
- * The relay's spend limits from the repository's settings (inputs.mjs resolveInputs `relay`): relay_unknown_shut,
- * relay_unknown_floor_usd and relay_slow_floor_usd; none given (inputs built by hand), the relay's own defaults.
- */
-export const relayLimits = (inputs) => (inputs?.relay ? { unknownStageShut: inputs.relay.unknownShut, unknownFloorUsd: inputs.relay.unknownFloorUsd, slowFloorUsd: inputs.relay.slowFloorUsd } : {});
 
 /**
  * Open the stage's relay when `shell` (the worker's shell secrets, worker-secrets.mjs) carries RELAYED_NAME. Returns
@@ -307,7 +302,7 @@ export async function openWorkerRelay({ inputs, shell, usageDir, env = process.e
   }
   let relay;
   try {
-    relay = await open({ key, dir, socketDir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, ...relayLimits(inputs), callLog: join(usageDir, CALL_LOG), log });
+    relay = await open({ key, dir, socketDir, group, chgrp, tcp: !sandboxed, maxUsd: inputs.maxUsd, callLog: join(usageDir, CALL_LOG), log });
   } catch (e) {
     if (socketDir) rmSync(socketDir, { recursive: true, force: true });
     return out({ shell: rest, relay: null, blocked: `the gateway relay for ${RELAYED_NAME} could not start: ${String(e?.message || e).slice(0, 240)}` });

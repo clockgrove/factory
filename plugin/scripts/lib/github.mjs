@@ -1620,19 +1620,28 @@ const USAGE_DOWNLOADS = 8;
 /**
  * Today's spend by runs that upload no usage artifact (local mode, any machine, a cloud sandbox): the spend lines in
  * the progress comments and a sandbox stage's vendor comments updated today, written by Pendulum or someone who can
- * push. Actions runs write none, so nothing here is counted twice with the artifacts.
+ * push, as `{usd, unknown}` (logic.mjs spendOf: the known dollars and the runs of unknown cost). Actions runs write
+ * none, so nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   // One paged read of the repository's comments updated today (issues and PRs alike), not one per Objective.
   const comments = (await rest(`repos/${repo.full}/issues/comments?since=${dateIso}T00:00:00Z&per_page=100`, { token, paginate: true })) || [];
   let usd = 0;
+  let unknown = 0;
   for (const c of comments) {
-    if (trustedAuthor(c) && /^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "") && String(c.updated_at || "").startsWith(dateIso)) usd += spendOf(c.body);
+    if (!trustedAuthor(c) || !/^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "") || !String(c.updated_at || "").startsWith(dateIso)) continue;
+    const s = spendOf(c.body);
+    usd += s.usd;
+    unknown += s.unknown;
   }
-  return usd;
+  return { usd, unknown };
 }
 
-/** Usage artifacts uploaded today (UTC), as parsed result.json records. */
+/**
+ * Usage artifacts uploaded today (UTC), as parsed result.json records. An artifact with no result.json (a stage killed
+ * before it wrote one; the upload runs whatever happened) is one run of unknown cost (usage.mjs UNKNOWN_WHY), never
+ * dropped and never priced from its raw stream.
+ */
 export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
@@ -1644,15 +1653,18 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
     try {
       const rec = usageCache.has(a.id) ? usageCache.get(a.id) : await (download ?? downloadArtifactResult)(repo, a, token);
       if (!download) usageCache.set(a.id, rec);
-      return rec ? { artifact: a.name, ...rec } : null;
+      return rec ? { artifact: a.name, ...rec } : { artifact: a.name, ...NO_RESULT };
     } catch (e) {
-      return { artifact: a.name, usd: null, basis: `unreadable: ${e.message.slice(0, 120)}` };
+      return { artifact: a.name, ...NO_RESULT, basis: `unknown: the artifact could not be read (${e.message.slice(0, 120)})` };
     }
   };
   return (await pooled(today, USAGE_DOWNLOADS, one)).filter(Boolean);
 }
 
-/** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */
+/** An artifact with no result.json read from it: one run of unknown cost. */
+const NO_RESULT = Object.freeze({ usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], basis: "unknown: the artifact has no result.json (its stage ended before it wrote one)" });
+
+/** One artifact's result.json, or null when it has none; `gh run download` unpacks it, so nothing beyond gh is needed. */
 async function downloadArtifactResult(repo, artifact, token) {
   const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   try {

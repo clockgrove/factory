@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { refusalCause, refusalFields, usageLimited } from "./usage.mjs";
+import { UNKNOWN_WHY, claudeRunningTotals, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -808,13 +808,14 @@ export const doneRecord = (labels) => `Pendulum: this Objective is closed, so it
  *  statuses:    {number: cardStatus|null}
  *  openIssues:  Set of open issue numbers (to resolve body references)
  *  held:        {number: reason} for Queued issues the caller holds back for now (a requeue's backoff)
- *  maxConcurrent, dailyUsd, spentToday
+ *  maxConcurrent, dailyUsd, spentToday (the known dollars daily_usd compares), unknownToday (runs of unknown cost
+ *               today, usage.mjs UNKNOWN_WHY: shown beside the figure, never counted as dollars)
  *  deferred:    {number: reason} for issues that wait before their next start (a vendor quota's backoff)
  *  running:     the repository's Running Objectives, every route's (max_concurrent caps the repository as a whole);
  *               when absent, the Running ones among `issues`
  * Returns {ready: [numbers], skipped: [{number, reason}], running, reason}
  */
-export function selectReady({ issues, statuses = {}, openIssues = new Set(), held = {}, maxConcurrent, dailyUsd, spentToday = 0, deferred = {}, running: repoRunning = null }) {
+export function selectReady({ issues, statuses = {}, openIssues = new Set(), held = {}, maxConcurrent, dailyUsd, spentToday = 0, unknownToday = 0, deferred = {}, running: repoRunning = null }) {
   const skipped = [];
   let running = 0;
   const candidates = [];
@@ -850,7 +851,9 @@ export function selectReady({ issues, statuses = {}, openIssues = new Set(), hel
   if (Number.isFinite(repoRunning)) running = repoRunning;
 
   if (dailyUsd !== undefined && dailyUsd !== null && Number(dailyUsd) > 0 && spentToday >= Number(dailyUsd)) {
-    for (const c of candidates) skipped.push({ number: c.number, reason: `daily_usd reached ($${spentToday.toFixed(2)} of $${Number(dailyUsd)})` });
+    // A spend that could not be read is no figure: the gate holds, and says why.
+    const said = Number.isFinite(spentToday) ? `${spendText({ usd: spentToday, unknown: unknownToday })} of $${Number(dailyUsd)}` : "today's spend could not be read";
+    for (const c of candidates) skipped.push({ number: c.number, reason: `daily_usd reached (${said})` });
     return { ready: [], skipped, running, reason: "daily_usd reached" };
   }
   const slots = Math.max(0, Number(maxConcurrent) - running);
@@ -859,19 +862,36 @@ export function selectReady({ issues, statuses = {}, openIssues = new Set(), hel
   return { ready, skipped, running, reason: ready.length ? "" : slots === 0 ? "max_concurrent reached" : "nothing ready" };
 }
 
-/** Sum today's dollars from usage records; unmetered (null) counts as zero. */
+/**
+ * The dollars `records` hold: `{usd, unknown}`, `usd` the known dollars (reported figures only) and `unknown` the runs
+ * of unknown cost among them (usage.mjs UNKNOWN_WHY, unknownRuns), never read as $0. Every cap compares `usd` alone and
+ * the stage goes on, so a cap can be passed by spend that was never reported; every shown total says "plus N runs of
+ * unknown cost" (spendText).
+ */
 export function sumSpend(records) {
-  let total = 0;
-  // A negative figure (a forged or broken usage report) is no spend: it never lowers the job's or the day's total.
-  for (const r of records) if (r && typeof r.usd === "number" && Number.isFinite(r.usd)) total += Math.max(0, r.usd);
-  return total;
+  let usd = 0;
+  let unknown = 0;
+  for (const r of records || []) {
+    // A negative figure (a forged or broken usage report) is no spend: it never lowers the job's or the day's total.
+    if (r && typeof r.usd === "number" && Number.isFinite(r.usd)) usd += Math.max(0, r.usd);
+    unknown += unknownRuns(r);
+  }
+  return { usd, unknown };
 }
 
 /**
- * Whether a run left max_usd unenforceable: a Copilot run that did work (turns) but reported no priced AI credits.
- * Its caller stops further passes rather than spend blind (logic.mjs decideExit names it).
+ * "$1.20", "$1.20 plus 2 runs of unknown cost", "unknown", "unknown, 2 runs": a total (sumSpend's `{usd, unknown}`) as
+ * it is shown, worded as usdText words a stage's. Nothing known beside runs of unknown cost, or a total that is no
+ * number (one that could not be read), is "unknown", never $0.
  */
-export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === null || rec.usd === undefined) && (rec.turns ?? 0) > 0;
+export function spendText({ usd, unknown = 0 }) {
+  if (typeof usd !== "number" || !Number.isFinite(usd) || (usd === 0 && unknown > 0)) return unknownAlone(unknown);
+  return `$${usd.toFixed(2)}${unknownText(unknown)}`;
+}
+
+/** "unknown", or "unknown, 3 runs": a figure with nothing known, as spendText and usdText both word it. */
+const unknownAlone = (n) => `unknown${n > 1 ? `, ${n} runs` : ""}`;
+
 
 // --------------------------------------------------------------- exit logic
 
@@ -1068,7 +1088,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "pendulum" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
-  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "pendulum" : "max-usd" };
+  if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached", cause: "max-usd" };
   if (unresolved) return { exit: "blocked", reason: unresolved, cause: "work" };
   if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
   // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
@@ -1129,18 +1149,23 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
 
 export const EXITS = ["delivered", "question", "blocked"];
 
-/** Whether a job's dollar cap is spent: max_usd set and the runs so far at or past it (no cap when max_usd is 0). */
-export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records) >= maxUsd;
+/**
+ * Whether a job's dollar cap is spent: max_usd set and the runs' known dollars at or past it (no cap when max_usd is 0).
+ * A run of unknown cost adds nothing here: the stage goes on (sumSpend).
+ */
+export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records).usd >= maxUsd;
+
 
 /**
- * Whether Pendulum's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
- * shut, gateway-relay.mjs): the spend at the cap, the relay's refusal at it (`relayTotals.capped`), or a harness's own cap
- * (Claude Code's error_max_budget_usd, Copilot's start refused under its credit floor).
+ * The exit line's dollars: the known figure, with "plus N runs of unknown cost" and why (usage.mjs UNKNOWN_WHY) when the
+ * stage has runs of unknown cost; "unknown" with why when nothing was reported. Never a number for what was not reported.
  */
-export const maxUsdReached = (maxUsd, records, relayTotals = null) => capReached(maxUsd, records) || !!relayTotals?.capped || records.some((r) => r?.subtype === "error_max_budget_usd" || r?.error === "dollar cap reached");
-
-/** The exit line's dollars: the figure, else "unmetered" with why (its basis), so no reader takes it for a missing price. */
-export const usdText = (usage) => (typeof usage?.usd === "number" ? `${usage.usd}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unmetered"}, worker key ${usage.workerKeyUsd})` : ""}` : `unmetered${/^unmetered: ./.test(usage?.basis || "") ? ` (${usage.basis.slice("unmetered: ".length)})` : ""}`);
+export const usdText = (usage) => {
+  const n = unknownRuns(usage);
+  const why = n ? ` (${(unknownOf([usage]).usdUnknownWhy || []).map((w) => UNKNOWN_WHY[w]).join("; ")})` : "";
+  if (typeof usage?.usd !== "number") return `${unknownAlone(n)}${why}`;
+  return `${usage.usd}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unknown"}, worker key ${usage.workerKeyUsd})` : ""}${unknownText(n)}${why}`;
+};
 
 /** Copilot's own units beside the dollars on the progress line: "; 3 premium requests, 41.2 AI credits"; "" for others. */
 export function copilotCount(usage) {
@@ -1152,11 +1177,18 @@ export function copilotCount(usage) {
 }
 
 /**
- * " (work-1 7.90, validation-fix-1 0.54)": each harness pass's cost by its label, for the exit line; empty with one or no
- * priced pass. The stage's decision record (harness.mjs keepDecision) is no pass: its spend is in the total only.
+ * " (work-1 7.90, validation-fix-1 unknown, fix-2 0.30 plus unknown)": each harness pass's cost by its label, for the
+ * exit line: its known dollars, "unknown" for a pass that reported none, "plus unknown" for one that reported part
+ * (usage.mjs UNKNOWN_WHY); empty with one pass or none. A pass that never ran (`noRun`) and the stage's decision record
+ * (harness.mjs keepDecision) are no pass here: the decisions' spend is in the total only.
  */
 export function costByPhase(records) {
-  const parts = (records || []).filter((r) => r && !r.decision && typeof r.usd === "number" && r.label).map((r) => `${r.label} ${r.usd.toFixed(2)}`);
+  const one = (r) => {
+    const known = typeof r.usd === "number" && Number.isFinite(r.usd);
+    if (!unknownRuns(r)) return known ? r.usd.toFixed(2) : null;
+    return known ? `${r.usd.toFixed(2)} plus unknown` : "unknown";
+  };
+  const parts = (records || []).filter((r) => r && !r.decision && !r.noRun && r.label && one(r) !== null).map((r) => `${r.label} ${one(r)}`);
   return parts.length > 1 ? ` (${parts.join(", ")})` : "";
 }
 
@@ -1177,6 +1209,8 @@ export function harnessActivity(now = () => Date.now()) {
   // The command items started and not yet ended, by id.
   const open = new Set();
   let base = null;
+  // The Claude Code that runs, as its stream's init line names it (usage.mjs claudeRunningTotals).
+  let claudeVersion = null;
   const brief = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
   const feed = (line) => {
     const t = String(line || "").trim();
@@ -1189,6 +1223,7 @@ export function harnessActivity(now = () => Date.now()) {
     }
     s.events += 1;
     s.lastEventAt = now();
+    if (e.type === "system" && e.subtype === "init" && typeof e.claude_code_version === "string") claudeVersion = e.claude_code_version;
     // Claude
     if (e.type === "assistant" && e.message) {
       if (!e.parent_tool_use_id) s.turns += 1;
@@ -1219,9 +1254,12 @@ export function harnessActivity(now = () => Date.now()) {
     } else if (e.type === "result") {
       s.ended = true;
       open.clear();
-      // A total below the prior one is not a running total (usage.mjs sinceSession): as reported.
+      // A total below the prior one is not a running total (usage.mjs sinceSession): as reported. Unknown, as the usage
+      // record has it: a resumed total from a Claude Code before 2.1.277, or a crashed result's zeroed cost.
       const prior = priors.get(e.session_id)?.usd;
-      if (typeof e.total_cost_usd === "number") s.usd = typeof prior === "number" && e.total_cost_usd >= prior ? e.total_cost_usd - prior : e.total_cost_usd;
+      const resumedOld = typeof prior === "number" && !claudeRunningTotals(claudeVersion);
+      const zeroed = e.total_cost_usd === 0 && (e.is_error === true || (e.subtype && e.subtype !== "success")) && (s.tokens.input > 0 || s.tokens.output > 0);
+      if (typeof e.total_cost_usd === "number" && !resumedOld && !zeroed) s.usd = typeof prior === "number" && e.total_cost_usd >= prior ? e.total_cost_usd - prior : e.total_cost_usd;
     }
     // Codex: input_tokens already includes the cached and written parts and output_tokens the reasoning part.
     else if (e.type === "thread.started") base = priors.get(e.thread_id) ?? null;
@@ -2566,64 +2604,69 @@ export function decisionsSection(decisions, cap = 12_000) {
 
 /**
  * The spend line a run without a usage artifact (local mode) writes into its progress comment: structured, so a
- * dispatcher reads the number, never the prose exit line. Parsed by spendOf().
+ * dispatcher reads the number, never the prose exit line. `usd` is the known dollars; `parts` may carry `usdUnknown`
+ * (runs of unknown cost in it, usage.mjs UNKNOWN_WHY) and `usdUnknownWhy`. Parsed by spendParts() and spendOf().
  */
 export const spendMarker = (usd, parts = null) => `<!-- pendulum:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
 
-/**
- * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
- * dollars (0 for a clean rebase with no harness run, null unmetered), its bound marks as the spend line carries them
- * (`usdLowerBound`, `usdUpperBound`: stageSpendLine) and whether it was a conflict pass. The worker sums the earlier ones
- * on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
- */
-export const rebaseCostMarker = ({ usd, conflict, usdLowerBound = false, usdUpperBound = false }) =>
-  `<!-- pendulum:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...(usdLowerBound && Number.isFinite(usd) ? { usdLowerBound: true } : {}), ...(usdUpperBound && Number.isFinite(usd) ? { usdUpperBound: true } : {}) })} -->`;
+/** The unknown-spend fields of a figure (usage.mjs unknownOf) as a spend or rebase line carries them: {} when all is known. */
+const unknownParts = (rec) => {
+  const u = unknownOf([rec]);
+  return u.usdUnknown ? { usdUnknown: u.usdUnknown, usdUnknownWhy: u.usdUnknownWhy } : {};
+};
 
-/**
- * A rebase stage's cost for its rebase line, from what its spend line is made of (stageSpendLine: the usage record
- * `usage`, the pass `records`, `known` the stage's spend so far): {usd, usdLowerBound?, usdUpperBound?}. No harness pass
- * (none, or only `noRun` placeholders) is $0; passes with neither a recorded figure nor a live reading are unmetered.
- */
-export function rebaseCost(usage, { records = [], known = null } = {}) {
-  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  if (!records.some((r) => r && !r.noRun)) return { usd: 0 };
-  if (num(usage?.usd) === null && num(known?.usd) === null) return { usd: null };
-  const line = stageSpendLine(usage, { records, known });
-  return { usd: line.usd, ...(line.parts.usdLowerBound ? { usdLowerBound: true } : {}), ...(line.parts.usdUpperBound ? { usdUpperBound: true } : {}) };
-}
-
-/** Dollars with their bound marks, as a rebase line words them: "at least $1.20", "at most $1.20 (an estimate)". */
-const boundUsd = (usd, lower, upper) => {
-  const fmt = `$${usd.toFixed(2)}`;
-  if (lower && upper) return `about ${fmt} (part a lower bound, part an estimate)`;
-  if (lower) return `at least ${fmt}`;
-  return upper ? `at most ${fmt} (an estimate)` : fmt;
+/** A line's unknown-spend fields read back: a count of at least 1 and the codes UNKNOWN_WHY knows; {} for none or a broken one. */
+const unknownRead = (v) => {
+  if (!Number.isInteger(v?.usdUnknown) || v.usdUnknown < 1) return {};
+  const why = Array.isArray(v.usdUnknownWhy) ? [...new Set(v.usdUnknownWhy.filter((w) => typeof w === "string" && Object.hasOwn(UNKNOWN_WHY, w)))] : [];
+  return { usdUnknown: v.usdUnknown, usdUnknownWhy: why.length ? why : ["unreported"] };
 };
 
 /**
- * The send-back stage's words on its exit line: how it went by the harness passes that ran (`passes`: none is a clean
- * rebase with no model run; a `conflict` rebase's are its conflict pass, any other's are fix passes), its cost with its
- * bound marks, and, when the earlier rebases could be read (`before`, rebaseTally; null unread), which rebase of the
- * Objective it is and what all of them cost.
+ * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
+ * known dollars (0 for a clean rebase with no harness run, null when nothing was reported), its runs of unknown cost as
+ * the spend line carries them (`usdUnknown`, `usdUnknownWhy`: stageSpendLine) and whether it was a conflict pass. The
+ * worker sums the earlier ones on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
  */
-export function rebaseLine({ usd, conflict, passes = 0, usdLowerBound = false, usdUpperBound = false }, before = null) {
-  const how = !passes ? "clean, no model run" : conflict ? "a conflict pass" : `clean, ${passes} fix pass(es)`;
-  const cost = usd === null ? "unmetered" : boundUsd(usd, usdLowerBound, usdUpperBound);
-  if (!before) return `rebase (${how}): ${cost}`;
-  const unmetered = before.unmetered + (usd === null ? 1 : 0);
-  const metered = usd !== null;
-  const total = boundUsd(before.usd + (usd ?? 0), !!before.usdLowerBound || (metered && usdLowerBound), !!before.usdUpperBound || (metered && usdUpperBound));
-  return `rebase ${before.count + 1} of this Objective (${how}): ${cost}; all its rebases: ${total}${unmetered ? ` plus ${unmetered} unmetered` : ""}`;
+export const rebaseCostMarker = ({ usd, conflict, usdUnknown = 0, usdUnknownWhy = [] }) =>
+  `<!-- pendulum:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...unknownRead({ usdUnknown, usdUnknownWhy }) })} -->`;
+
+/**
+ * A rebase stage's cost for its rebase line, from its usage record (session.mjs writeUsage) and its pass `records`:
+ * {usd, usdUnknown?, usdUnknownWhy?}. No harness pass (none, or only `noRun` placeholders) is $0; otherwise the known
+ * dollars (null when none were reported) and the runs of unknown cost.
+ */
+export function rebaseCost(usage, { records = [] } = {}) {
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  if (!records.some((r) => r && !r.noRun)) return { usd: 0 };
+  return { usd: num(usage?.usd), ...unknownParts(usage) };
 }
 
-/** The rebase line in one comment body: {usd, conflict, usdLowerBound?, usdUpperBound?}, or null when it has none (or a broken one). */
+/** A rebase's dollars as its line words them: "$1.20", "$1.20 plus 1 run of unknown cost", "unknown". */
+const rebaseUsd = (usd, unknown) => (usd === null ? `unknown${unknown > 1 ? ` (${unknown} runs)` : ""}` : `$${usd.toFixed(2)}${unknownText(unknown)}`);
+
+/**
+ * The send-back stage's words on its exit line: how it went by the harness passes that ran (`passes`: none is a clean
+ * rebase with no model run; a `conflict` rebase's are its conflict pass, any other's are fix passes), its known cost and
+ * its runs of unknown cost, and, when the earlier rebases could be read (`before`, rebaseTally; null unread), which
+ * rebase of the Objective it is and what all of them cost.
+ */
+export function rebaseLine({ usd, conflict, passes = 0, usdUnknown = 0 }, before = null) {
+  const how = !passes ? "clean, no model run" : conflict ? "a conflict pass" : `clean, ${passes} fix pass(es)`;
+  const own = usdUnknown > 0 ? usdUnknown : usd === null ? 1 : 0;
+  const cost = rebaseUsd(usd, own);
+  if (!before) return `rebase (${how}): ${cost}`;
+  return `rebase ${before.count + 1} of this Objective (${how}): ${cost}; all its rebases: ${spendText({ usd: before.usd + (usd ?? 0), unknown: before.unknown + own })}`;
+}
+
+/** The rebase line in one comment body: {usd, conflict, usdUnknown?, usdUnknownWhy?}, or null when it has none (or a broken one). */
 export function rebaseCostOf(body) {
   const m = /^<!-- pendulum:rebase-cost (\{[^\n]*\}) -->$/m.exec(body || "");
   if (!m) return null;
   try {
     const v = JSON.parse(m[1]);
     const usd = typeof v.usd === "number" && Number.isFinite(v.usd) && v.usd >= 0 ? v.usd : null;
-    return { usd, conflict: v.conflict === true, ...(usd !== null && v.usdLowerBound === true ? { usdLowerBound: true } : {}), ...(usd !== null && v.usdUpperBound === true ? { usdUpperBound: true } : {}) };
+    return { usd, conflict: v.conflict === true, ...unknownRead(v) };
   } catch {
     return null;
   }
@@ -2631,13 +2674,13 @@ export function rebaseCostOf(body) {
 
 /**
  * Issue `issue`'s send-back rebases so far, from the rebase lines in the work stages' progress comments `comments`
- * written by `mine` (Pendulum's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`
- * and, when any summed figure carries one, its bound mark (`usdLowerBound`, `usdUpperBound`). `usd` is the metered
- * stages' sum with each one's sandbox dollars, read from the vendor comment keyed as its progress comment (vendorBody)
- * when `comments` holds it: a sandbox at the session's ceiling makes the sum an upper bound, one unpriced a lower bound.
+ * written by `mine` (Pendulum's own login, or in local mode the login it posts as): `{count, usd, unknown, conflicts}`.
+ * `usd` is the known dollars with each stage's sandbox dollars, read from the vendor comment keyed as its progress
+ * comment (vendorBody) when `comments` holds it; `unknown` counts the runs of unknown cost in them (a rebase with no
+ * reported figure, its runs of unknown cost, a sandbox whose usage the vendor did not report).
  */
 export function rebaseTally(comments, issue, mine = trustedAuthor) {
-  const out = { count: 0, usd: 0, unmetered: 0, conflicts: 0 };
+  const out = { count: 0, usd: 0, unknown: 0, conflicts: 0 };
   const keyOf = (body, kind) => new RegExp(`^<!-- pendulum:${issue}:${kind}:(work[A-Za-z0-9:-]{0,96}) -->`).exec(body || "")?.[1] ?? null;
   const vendor = new Map();
   for (const c of comments || []) {
@@ -2652,39 +2695,25 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
     if (!r) continue;
     out.count += 1;
     if (r.conflict) out.conflicts += 1;
-    if (r.usd === null) out.unmetered += 1;
-    else {
-      if (r.usdLowerBound) out.usdLowerBound = true;
-      if (r.usdUpperBound) out.usdUpperBound = true;
-    }
+    out.unknown += r.usdUnknown ?? (r.usd === null ? 1 : 0);
     const sandbox = vendor.get(keyOf(c.body, "progress"));
-    if (sandbox && sandbox.vendorUsd === null) out.usdLowerBound = true;
-    if (sandbox?.vendorUpperBound) out.usdUpperBound = true;
+    if (sandbox && (sandbox.vendorUsd === null || sandbox.usdUnknownWhy?.includes("sandbox"))) out.unknown += 1;
     const sum = (r.usd ?? 0) + (sandbox?.vendorUsd ?? 0);
     out.usd = Math.round((out.usd + sum) * 1e4) / 1e4;
   }
   return out;
 }
 /**
- * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage) and its pass `records`:
- * `{usd, parts}` for progress.spend. Every stage gets one; no harness pass (none, or only `noRun` placeholders) is a
- * known $0. When a pass that ran reported
- * no dollars, the figure is the larger of the record's and `known` (the stage's spend so far, harness.mjs
- * stageSpendSoFar, which holds that pass's live reading), marked `usdLowerBound`; or `usdUpperBound` when that reading
- * was priced at the table's dearest rates (`known.estimated`, a model with no price row). The record's own bounds are
- * kept. `workerKeyUsd`: the relayed key's share, already in `usd`. `limitPaused`: the stage ended paused on its
- * harness's usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox,
- * #268), which the scorecard counts per account (#266).
+ * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
+ * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
+ * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
+ * `workerKeyUsd`: the relayed key's share, already in `usd`. `limitPaused`: the stage ended paused on its harness's
+ * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
+ * the scorecard counts per account (#266).
  */
-export function stageSpendLine(usage, { records = [], known = null } = {}) {
+export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  // A placeholder for a pass that never ran (`noRun`: a clean rebase, an already-reviewed PR) spent nothing.
-  const unreported = records.some((r) => r && !r.noRun && num(r.usd) === null);
-  const usd = Math.max(num(usage?.usd) ?? 0, unreported ? (num(known?.usd) ?? 0) : 0);
-  const estimated = unreported && !!known?.estimated;
-  const lower = !!usage?.usdLowerBound || (unreported && !estimated);
-  const upper = !!usage?.usdUpperBound || estimated;
-  return { usd, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(lower ? { usdLowerBound: true } : {}), ...(upper ? { usdUpperBound: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...unknownParts(usage), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2699,15 +2728,18 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
 export const harnessMarker = (harness, model = "", ran = null) =>
   `<!-- pendulum:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}), ...(ran?.account ? { account: ran.account } : {}) })} -->`;
 const SPEND = /^<!-- pendulum:spend (\{[^\n]*\}) -->$/m;
-/** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
+/**
+ * What a progress comment's spend line records, as sumSpend's `{usd, unknown}`: its known dollars (the total, model and
+ * sandbox vendor together) and its runs of unknown cost; `{usd: 0, unknown: 0}` with no line.
+ */
 export function spendOf(body) {
-  const usd = spendParts(body)?.usd;
-  return Number.isFinite(usd) && usd > 0 ? usd : 0;
+  const p = spendParts(body);
+  return { usd: Number.isFinite(p?.usd) && p.usd > 0 ? p.usd : 0, unknown: p?.usdUnknown ?? 0 };
 }
 /**
- * The spend line's parts: `usd` (the total the daily sum counts), and for a sandbox stage `modelUsd` (the harness's)
- * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null unpriced), with `vendorUpperBound`
- * when that is the session's ceiling (vendorBody). Null when the body has no spend line.
+ * The spend line's parts: `usd` (the known total the daily sum counts), for a sandbox stage `modelUsd` (the harness's)
+ * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null when the vendor reported none), and
+ * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2715,7 +2747,7 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...(r?.vendorUpperBound === true && n(r?.vendorUsd) !== null ? { vendorUpperBound: true } : {}) };
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r) };
   } catch {
     return null;
   }
@@ -2734,28 +2766,27 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
   const size = Number.isFinite(cost.vcpus) || Number.isFinite(cost.memoryMb) ? `${cost.vcpus ?? "?"} vCPU / ${Number.isFinite(cost.memoryMb) ? Math.round(cost.memoryMb / 1024) : "?"} GB` : "size unknown";
   const r = rates || {};
   const rate = `${word(r.vendor)} ${word(r.plan)} list rates (${word(r.region)}, read ${word(r.date)}): ${money(r.activeCpuHour)}/CPU-hour, ${money(r.memoryGbHour)}/GB-hour, ${money(r.snapshotGbMonth)}/GB-month stored`;
-  const use = cost.upperBound
-    ? `usage not settled${error ? ` (${word(error)})` : ""}, counted at the session's ceiling`
-    : cost.usd === null
-      ? `usage not read${error ? ` (${word(error)})` : ""}`
-      : `${secs(cost.activeCpuMs)} active CPU in ${secs(cost.wallMs)}`;
+  const unreported = cost.usd === null || cost.usageUnknown;
+  const use = unreported ? `usage not reported${error ? ` (${word(error)})` : ""}` : `${secs(cost.activeCpuMs)} active CPU in ${secs(cost.wallMs)}`;
   const stored = cost.storedMs > 0 ? `; stopped ${(cost.storedMs / 3_600_000).toFixed(1)} h before it with ${Number.isFinite(cost.storedBytes) ? `${(cost.storedBytes / 1e9).toFixed(2)} GB` : "? GB"} saved: ${money(cost.storedUsd)}` : "";
   const id_ = typeof id === "string" && /^pendulum-[A-Za-z0-9_-]{1,60}$/.test(id) ? id : "?";
-  return `- ${clock} sandbox \`${id_}\` ${word(state)}: ${use}, ${size}; ${rate}; vendor ${cost.upperBound ? "at most " : ""}${money(cost.usd)} this stage${stored}`;
+  return `- ${clock} sandbox \`${id_}\` ${word(state)}: ${use}, ${size}; ${rate}; vendor ${cost.usd === null ? "unknown" : `${money(cost.usd)}${cost.usageUnknown ? " plus its unknown usage" : ""}`} this stage${stored}`;
 }
 
 /**
  * The vendor comment's body (`<!-- pendulum:<n>:vendor:<stage>:<key> -->`, one per stage, written by its one booker):
  * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
- * model dollars. `modelUsd`: the harness's dollars from the usage record, for a stage that left no progress comment.
- * `upperBound` (stageVendorCost's: the session's ceiling, its usage not read or not settled) is kept as
- * `vendorUpperBound`; a usage with no figure at all is `vendorUsd: null`, unpriced, counted as $0 in the daily sum.
+ * model dollars. `modelUsd`: the harness's known dollars from the usage record, for a stage that left no progress
+ * comment, with `modelUnknown` (usage.mjs unknownOf: `{usdUnknown, usdUnknownWhy}`) its runs of unknown cost. A usage
+ * the vendor did not report (`vendorUnknown`, or no figure at all: `vendorUsd: null`) is one run of unknown cost
+ * (UNKNOWN_WHY `sandbox`) beside the vendor's known dollars, never $0 or a bound.
  */
-export function vendorBody({ line, vendorUsd, modelUsd = null, upperBound = false }) {
+export function vendorBody({ line, vendorUsd, vendorUnknown = false, modelUsd = null, modelUnknown = null }) {
   const round = (n) => Math.round(n * 1e6) / 1e6;
   const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
-  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(vendor !== null && upperBound ? { vendorUpperBound: true } : {}) })}`;
+  const unknown = unknownOf([...(modelUnknown?.usdUnknown ? [{ usd: 0, ...modelUnknown }] : []), ...(vendor === null || vendorUnknown ? [{ usd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }] : [])]);
+  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...unknown })}`;
 }
 
 // ----------------------------------------------------------------- launch

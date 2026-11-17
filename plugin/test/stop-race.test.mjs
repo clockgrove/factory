@@ -170,7 +170,7 @@ test("stopStage: a stop racing the stage's own exit (being applied, or its merge
   assert.deepEqual(r.json, { took: false, ends: [], calls: [], again: true });
 });
 
-test("stopStage: the usage and spend line first, then a tidy bounded in time; a pass still running counts at its live reading; an end that runs out of time is written at once", async () => {
+test("stopStage: the usage and spend line first, then a tidy bounded in time; a pass still running is a run of unknown cost; an end that runs out of time is written at once", async () => {
   const root = mkdtempSync(join(tmpdir(), "stop-money-"));
   fakeCodex(root);
   // The PR's draft mutation never answers: the tidy hangs.
@@ -183,7 +183,7 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     // A pass whose process ignores the stop's SIGTERM: still running when the short settle ends.
     runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, cwd: root, env: { HOME: process.env.HOME, PATH: process.env.PATH, FAKE_STUBBORN: "1" }, timeoutMs: 120_000, label: "work-1" });
     const t0 = Date.now();
-    while (!((await stageSpendSoFar()).usd > 0) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
+    while (!((await stageSpendSoFar()).unknown > 0) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 20));
     const order = [];
     const records = [];
     const finish = async (exit) => {
@@ -192,9 +192,9 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
     };
     let exited = null;
     let ended = null;
-    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, low: !!r.usdLowerBound }))), exit: (code) => (exited = code) });
+    const took = stopStage({ cause: "unlabeled", label: "pendulum:objective", repo, issue: 7, pr: { number: 70, node_id: "PR_70" }, records, finish, opts: { token: "t" }, settleMs: 1, tidyMs: 500, exitMs: ${finishHangs ? 1500 : 60_000}, endNow: (recs) => (ended = recs.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 }))), exit: (code) => (exited = code) });
     const result = await Promise.race([took, new Promise((r) => setTimeout(() => r("pending"), 4000))]);
-    process.stdout.write(JSON.stringify({ result, order, ms: Date.now() - t0, exited, ended, records: records.map((r) => ({ label: r.label, usd: r.usd, low: !!r.usdLowerBound })) }) + "\\n");
+    process.stdout.write(JSON.stringify({ result, order, ms: Date.now() - t0, exited, ended, records: records.map((r) => ({ label: r.label, usd: r.usd, unknown: r.usdUnknown ?? 0 })) }) + "\\n");
     process.exit(0);
   `;
   const r = await stage(script(false), root, 60_000);
@@ -203,12 +203,12 @@ test("stopStage: the usage and spend line first, then a tidy bounded in time; a 
   assert.deepEqual(r.json.order, ["finish:0"], "the end is written before any GitHub call of the tidy");
   assert.equal(r.json.exited, null);
   assert.equal(r.json.records.length, 1);
-  assert.ok(r.json.records[0].usd > 0 && r.json.records[0].low, `the pass still running counts at its live reading, a lower bound: ${JSON.stringify(r.json.records)}`);
+  assert.deepEqual(r.json.records, [{ label: "work-1", usd: null, unknown: 1 }], "the pass still running is a run of unknown cost, never $0 and never a reading");
   const late = await stage(script(true), root, 60_000);
   assert.ok(late.json, late.err);
   assert.equal(late.json.result, "pending");
   assert.equal(late.json.exited, 1, "past its time the stage exits");
-  assert.ok(late.json.ended?.length === 1 && late.json.ended[0].usd > 0 && late.json.ended[0].low, "having written what it knew at once");
+  assert.deepEqual(late.json.ended, [{ label: "work-1", usd: null, unknown: 1 }], "having written what it knew at once");
 });
 
 test("the merge pass fails closed: an issue it cannot read merges nothing ('pending'); the dispatcher's listed issue costs no read", async () => {

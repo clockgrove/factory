@@ -84,12 +84,12 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -405,9 +405,9 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       const root = sessionRoot(harness);
       if (s.files.every((rel) => existsSync(join(root, rel)))) {
         let later = laterSessionTotal(workDir, { harness, id: s.id, after: src.at });
-        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Pendulum's reading was
-        // priced from its table. The lower of the two: a seed above the session's own total would make the next pass's
-        // total read as no running total at all (usage.mjs sinceSession), and count the whole session again.
+        // Claude's own running total is its live transcript's last cost-state, as Claude Code reported it. The lower of the
+        // two: a seed above the session's own total would make the next pass's total read as no running total (usage.mjs
+        // sinceSession), a run of unknown cost where Claude Code reported its share.
         if (later && harness === "claude") {
           const main = s.files.find((rel) => rel.split("/").at(-1) === `${s.id}.jsonl`);
           const own = main && lstatSync(join(root, main)).isFile() ? transcriptTotal(readFileSync(join(root, main), "utf8")) : null;
@@ -828,8 +828,7 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     if (io) await io.collect();
     usage.push(rec);
     if (rec.sessionId && session) session.id = rec.sessionId;
-    if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true;
-    if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
+    if (maxUsd > 0 && sumSpend([rec]).usd >= left) rec.budgetExceeded = true;
     const after = await read();
     return { usage, ...scopeTurnResult({ first: first.out, out: after.out, verdict: after.verdict, rec, exitBefore, exitNow: io?.files?.()?.["exit.json"] }) };
   }
@@ -902,13 +901,13 @@ export async function rebaseExitLine(progress, issue, { cost, conflict, passes =
 
 /**
  * The rebase line of a stopped rebase stage whose end ran out of time (worker endNow), unless the end set it already:
- * its passes' dollars as the stop read them (stop.mjs stoppedRecords: a pass cut short counts at its live reading, a
- * lower bound), with their bound marks (logic.mjs rebaseCost); a pass with no figure leaves the sum a lower bound.
+ * its passes' known dollars as the stop read them (stop.mjs stoppedRecords) and their runs of unknown cost (a pass cut
+ * short, one still running: usage.mjs UNKNOWN_WHY), through logic.mjs rebaseCost.
  */
 export function stoppedRebase(progress, conflict, recs = []) {
   if (progress.rebased()) return;
   const priced = recs.some((r) => r && !r.noRun && typeof r.usd === "number" && Number.isFinite(r.usd));
-  const usage = { usd: priced ? Math.round(sumSpend(recs) * 1e4) / 1e4 : null, usdLowerBound: recs.some((r) => r?.usdLowerBound), usdUpperBound: recs.some((r) => r?.usdUpperBound) };
+  const usage = { usd: priced ? Math.round(sumSpend(recs).usd * 1e4) / 1e4 : null, ...unknownOf(recs) };
   progress.rebase({ ...rebaseCost(usage, { records: recs }), conflict });
 }
 
@@ -918,11 +917,12 @@ export const STOP_WRITE_MS = 5_000;
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
  * progress.spend records the final figure, so a stage that dies (killed, the machine restarted) still leaves the spend
- * Pendulum last knew: marked `usdLowerBound`, or `usdUpperBound` when part of it is priced at the table's dearest rates.
+ * Pendulum last knew: its known dollars, and each pass that had not reported (one still running included) as a run of
+ * unknown cost (`usdUnknown`, usage.mjs UNKNOWN_WHY), never a figure for it.
  * Null when the stage records no spend in its progress comment (backend.mjs spendInProgress), or for a `--here` run.
  * `soFarNow`: the same read at once (harness.mjs stageSpendNow). A stage stopped by a signal (proc.mjs atStop: its
- * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it is more than
- * the comment's line shows, so a pass killed before the next status write is not left at the last line's figure.
+ * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it differs from
+ * what the comment's line shows, so a pass that ended before the next status write is not left at the last line's figure.
  */
 export function progressReporter(repo, issue, { token }, { stage, runId = progressRunId(), harness = null, model = "", soFar = spendInProgress() ? stageSpendSoFar : null, soFarNow = soFar === stageSpendSoFar ? stageSpendNow : null }) {
   const lines = [];
@@ -942,15 +942,15 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let writing = null;
   // The comment as the last write that landed left it: its id and the spend its line shows.
   let commentId = null;
-  let shown = 0;
+  let shown = { usd: 0, unknown: 0 };
   // The spend part of the last body that landed (bodyOf `interim`), and whether that body carried the rebase line.
   let shownInterim = {};
   let rebaseShown = false;
   let stopHook = null;
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
-  // Not final: a lower bound, or, with a reading at the price table's dearest rates, an estimate marked as such.
-  const interimOf = (live) => ({ spend: live.usd, spendParts: live.estimated ? { usdUpperBound: true } : { usdLowerBound: true } });
+  // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
+  const interimOf = (live) => ({ spend: live.usd, spendParts: live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : null });
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
@@ -960,10 +960,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
   };
   /**
-   * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. The
-   * session totals it counted are recorded when the write landed or may have (rest-sync.mjs `sent`: a 5xx, no answer in
-   * time), so the next stage never counts again what this line may show (it may count less: a lower bound); not when it
-   * certainly did not land (never sent, or refused), so the next stage counts what this line could not.
+   * Stopped by a signal, the harness already killed: the spend so far once more, if it differs from what the line shows.
+   * The session totals it counted are recorded when the write landed or may have (rest-sync.mjs `sent`: a 5xx, no answer
+   * in time), so the next stage never counts again what this line may show; not when it certainly did not land (never
+   * sent, or refused), so the next stage counts what this line could not.
    */
   const stopWrite = () => {
     if (spend !== null || commentId === null) return;
@@ -973,7 +973,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     } catch {
       live = null;
     }
-    const more = Number.isFinite(live?.usd) && live.usd > shown;
+    const more = Number.isFinite(live?.usd) && (live.usd !== shown.usd || (live.unknown ?? 0) !== shown.unknown);
     // A rebase line set since the last write that landed (progress.rebase) is written now too, the spend part kept.
     const withRebase = rebase !== null;
     if (!more && !(withRebase && !rebaseShown)) return;
@@ -992,7 +992,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const wrote = await upsertComment(repo, issue, key, body, { token }).then(
       (c) => {
         if (Number.isInteger(c?.id)) commentId = c.id;
-        shown = Number(interim.spend) || 0;
+        shown = { usd: Number(interim.spend) || 0, unknown: interim.spendParts?.usdUnknown ?? 0 };
         shownInterim = interim;
         if (withRebase) rebaseShown = true;
         return true;
@@ -1037,17 +1037,18 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   /** A run with no usage artifact (local mode) records its final dollars here, where any dispatcher can sum them. */
   /**
    * The stop signal's last write, made at once (rest-sync.mjs): a stopped stage whose end ran out of time (stopStage's
-   * backstop) leaves its live spend in its line as a stop signal would.
+   * backstop) leaves its spend so far in its line as a stop signal would.
    */
   progress.flushNow = () => {
     if (spend === null) return stopWrite();
     // The final figure set, its write not landed (the stage's end ran out of time on it): that figure, once, at once,
     // with the rebase line when that has not landed either.
     const withRebase = rebase !== null;
-    if (commentId === null || (!(spend > shown) && !(withRebase && !rebaseShown))) return;
+    const differs = spend !== shown.usd || (spendParts?.usdUnknown ?? 0) !== shown.unknown;
+    if (commentId === null || (!differs && !(withRebase && !rebaseShown))) return;
     const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf({ spend, spendParts })}` }, token }, { ms: STOP_WRITE_MS });
     if (r.ok) {
-      shown = spend;
+      shown = { usd: spend, unknown: spendParts?.usdUnknown ?? 0 };
       if (withRebase) rebaseShown = true;
     } else log(`progress: the stopped stage's final spend line (${spend} USD) ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
   };
@@ -1492,7 +1493,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       : [`Pendulum's validation pass ${red.passes} failed on the branch you delivered${red.failures.length > 1 ? ` (${red.failures.length} commands)` : ""}.`, ...failureText(red), "", fixClosing].join("\n");
     const resume = !fresh && session.canResume ? session.id : null;
     const full = `${taskCard}\n\n---\n\n${ask}`;
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart)) : 0;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onResume: live.onResume });
     await live.finish();
@@ -1500,14 +1501,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     usage.push(rec);
     if (!fresh) red.rec = rec;
     if (rec.sessionId) session.id = rec.sessionId;
-    if (maxUsd > 0 && sumSpend([rec]) >= left) rec.budgetExceeded = true; // Codex has no in-run cap; Copilot's is checked again here
-    if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
+    if (maxUsd > 0 && sumSpend([rec]).usd >= left) rec.budgetExceeded = true; // Codex has no in-run cap; Copilot's is checked again here
     // A fresh pass that reached its dollar or time cap: the caller Blocks with the unchanged red, the work's.
-    if (fresh && !rec.refusal && !rec.unmetered && (rec.timedOut || rec.budgetExceeded)) return { capped: rec.timedOut ? "time" : "dollar" };
+    if (fresh && !rec.refusal && (rec.timedOut || rec.budgetExceeded)) return { capped: rec.timedOut ? "time" : "dollar" };
     const end = (more) => ({ green: false, passes, lastOutput: red.tail, command: red.command, usage, ...more });
     if (rec.timedOut || rec.budgetExceeded || rec.refusal) return end({ harness: rec });
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
-    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage) + (decisionSpend() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
+    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage).usd + (decisionSpend() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
     usage.push(...held.usage);
     if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}) } : {}) });
     if (held.refused) {
@@ -1567,7 +1567,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         }
         // Read after the rerun's red (its reads can wait on a rate limit): what is left now.
         const runMs = Math.max(0, Date.parse(lastFix.rec?.ended) - Date.parse(lastFix.rec?.started)) || 0;
-        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]), leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
+        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]).usd, leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
         const said = denied ? `the fix pass changed nothing on ${head.slice(0, 7)}; no fresh worker pass (${denied})` : `the fix pass changed nothing on ${head.slice(0, 7)}; one fresh worker pass, a new session with the failing checks' output, before Blocking`;
         log(`${label}: ${said}`);
         if (onPhase) await onPhase(`${label}: ${said}`);
@@ -1666,7 +1666,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     handed = shape;
     redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
     // Each failure's whole output goes to $PENDULUM_IN/checks/ with the rest of what the fix run reads.
     if (io) await io.beforeFix(failures, { diff: detail?.diff ?? null });
@@ -1964,7 +1964,7 @@ export function stageQuota(records = []) {
 /** Write usage/result.json and return the merged record. */
 /**
  * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
- * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price, the AI Gateway's own budget or credits refusal as `gatewayRefused`, a call booked at its upper-bound estimate, the relay's shutdown and its per-call log as `callLog`).
+ * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, the AI Gateway's own budget or credits refusal as `gatewayRefused`, the calls of unknown cost as `unknown`, and its per-call log as `callLog`).
  * Empty when no relay ran.
  */
 export function keyBreakdown(records, workerKey = null) {
@@ -1981,7 +1981,7 @@ export function keyBreakdown(records, workerKey = null) {
     fields: {
       workerKeyUsd: keyUsd,
       harnessUsd: total === null ? null : Math.round(Math.max(0, total - keyUsd) * 1e6) / 1e6,
-      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), ...(workerKey.estimated ? { estimated: workerKey.estimated, estimatedUsd: workerKey.estimatedUsd } : {}), ...(workerKey.shut ? { shut: workerKey.shut } : {}), ...(workerKey.callLog ? { callLog: workerKey.callLog } : {}), refused: workerKey.refused } } : {}),
+      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), ...(workerKey.unknown ? { unknown: workerKey.unknown } : {}), ...(workerKey.callLog ? { callLog: workerKey.callLog } : {}), refused: workerKey.refused } } : {}),
     },
   };
 }
@@ -1995,8 +1995,12 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
   const runs = (records || []).filter((r) => r && !r.decision);
   const quota = stageQuota(records);
   const warm = cacheWarmUntil(records);
-  const merged = mergeUsage(records) || { harness, model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unmetered: no run", started: null, ended: null };
+  // No record: no run, a known $0.
+  const merged = mergeUsage(records) || { harness, model, usd: 0, tokens: { input: null, output: null, cached: null, written: null }, basis: "no run", started: null, ended: null };
   const kb = keyBreakdown(records, workerKey);
+  // Relayed calls of unknown cost outside every pass (one that ended after its pass did): one more run of unknown cost.
+  const keyUnknownOutside = (Number(workerKey?.unknown) || 0) > (records || []).reduce((s, r) => s + (Number(r?.workerKeyUnknown) || 0), 0);
+  const unknown = unknownOf([merged, ...(keyUnknownOutside ? [markUnknown({ usd: 0 }, "relay")] : [])]);
   const result = {
     harness,
     harnessVersion,
@@ -2045,10 +2049,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).
     premiumRequests: merged.premiumRequests ?? null,
     aiCredits: merged.aiu ?? null,
-    // The dollars are a lower bound: Copilot reported its AI credits as partial.
-    ...(merged.usdLowerBound ? { usdLowerBound: true } : {}),
-    // The dollars are an upper bound: the stage ended the harness before it reported its cost (stage.mjs killedUsage).
-    ...(merged.usdUpperBound ? { usdUpperBound: true } : {}),
+    // The runs whose cost was not reported, and why (usage.mjs UNKNOWN_WHY): `usd` is the known dollars only, and the
+    // daily sum and the scorecard say "plus N runs of unknown cost".
+    ...unknown,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
@@ -2062,10 +2065,6 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(inProgress ? { spendInProgress: true } : {}),
     // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
     ...kb.fields,
-    // A relayed call whose cost could not be determined: the dollars are a lower bound. One booked at its upper-bound
-    // estimate (gateway-relay.mjs): an upper bound.
-    ...(workerKey?.unpriced ? { usdLowerBound: true } : {}),
-    ...(workerKey?.estimated ? { usdUpperBound: true } : {}),
   };
   // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
   const stored = redactSecrets(result);
@@ -2229,8 +2228,8 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
  * (`cause`). Every harness pass is ended and none starts after; the stage's flow parks at its next step (stop.mjs
  * holdIfStopped). Nothing more when the stage had committed to its own exit (an exit being applied, a merge: false) or
  * was ending already (false). Otherwise its passes get up to `settleMs` to end and what they left is reaped (the
- * backend's sandbox.reap); its records are every pass this process ran, a pass ended before it reported dollars at its
- * live reading and one still running at its live reading too, lower bounds (stop.mjs stoppedRecords); and
+ * backend's sandbox.reap); its records are every pass this process ran, a pass ended before it reported dollars as a
+ * run of unknown cost and one still running too (stop.mjs stoppedRecords); and
  * `finish("stopped", reason)` writes the stage's end (its usage, its spend line, its last progress line) before
  * anything else. Only then is the Objective left stopped (stop.mjs applyStop: `pr`, else the branch's open PR, a draft),
  * for at most `tidyMs`: the dispatcher's stopped pass finishes what it did not. Past `exitMs` from the stop, with the
@@ -2257,7 +2256,7 @@ export async function stopStage({ cause, label, repo, issue, pr = undefined, rec
   try {
     const until = Date.now() + settleMs;
     while (passesRunning() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
-    if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; it counts at its live reading`);
+    if (passesRunning() > 0) log(`a harness pass still runs ${Math.round(settleMs / 1000)} s after the stop; it counts as a run of unknown cost`);
     await backend().sandbox.reap().catch((e) => log(`reap: ${String(e?.message || e).slice(0, 120)}`));
     records.splice(0, records.length, ...recordsNow());
     await stoppedEnd({ cause, label, repo, issue, pr, finish, opts, tidyMs, onEnded: () => (ended = true) });
@@ -2329,7 +2328,7 @@ const outageBlock = (lost) =>
  * A stage this machine's network ended (network.mjs: a NetworkDown past the stage's wait, or a bare connect-level
  * failure), which is no crash; or GitHub's primary rate limit, spent until a reset past that wait (a NetworkDown with
  * `resetAt`). The process stops waiting first, so what it still writes fails at once rather than waiting
- * again. Its records are every pass it ran (stagePasses, the ones still running at their live reading), so the usage
+ * again. Its records are every pass it ran (stagePasses, the ones still running as runs of unknown cost), so the usage
  * counts a pass the outage cut off. On the local route (`local`) the stage ends `paused` with the outage in result.json
  * (a rate limit's `reset` in it) and nothing written to GitHub: serve keeps the claim and resumes the Objective once the
  * host answers, or once the reset has passed (local.mjs). On any other route it Blocks through `block(reason, cause)`
@@ -2360,7 +2359,7 @@ export async function outageExit(e, { local, records, finish, block, deadlineAt 
  * A stage a harness's usage limit ended (harness.mjs UsageLimitReached: a reset past what the stage waits for in place,
  * or a usage limit or quota with no reset reported that moves the Objective to another account, `resetAt` null), which
  * is no crash and nothing wrong with the Objective. Its records are every pass it ran (stagePasses, the ones still
- * running at their live reading). On the local route (`local`) the stage ends `paused` with the limit in result.json
+ * running, runs of unknown cost). On the local route (`local`) the stage ends `paused` with the limit in result.json
  * (`usageLimit`: harness, reset (null with none reported, then `noReset`), since, and `continue`, the work pass's `pause`
  * record for the next work stage to weigh: continue.mjs) and nothing written to GitHub: serve keeps the claim, starts no
  * stage on that account until the reset (or its guess's end) and resumes the Objective after it, or on a free account
@@ -2457,14 +2456,13 @@ export async function markRunning(repo, issue, { token }) {
  * call, questionCheckPrompt: the harness keeps what meets a test and records the rest as assumptions in pr.md and
  * plan.md. `checked` is true when that call ran, so the caller re-reads $PENDULUM_OUT and updates the PR body.
  */
-export async function exitRecord({ text, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0, unmetered = false }) {
+export async function exitRecord({ text, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0 }) {
   const usage = [];
-  // One more harness call, resumed where it can; a short refusal code when no time, budget or metering is left.
+  // One more harness call, resumed where it can; a short refusal code when no time or budget is left (the known
+  // dollars: a run of unknown cost adds none).
   const ask = async (prompt, label) => {
     if (remainingMs(deadlineAt) < EXIT_ASK_MIN_MS) return { refused: "time" };
-    // A run that reported no priced AI credits left max_usd unenforceable: the harness is not asked again.
-    if (unmetered) return { refused: "unmetered" };
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd) : 0;
     if (maxUsd > 0 && left <= 0) return { refused: "budget" };
     const resume = session?.canResume ? session.id : null;
     const rec = await runHarness({ harness, model, effort, prompt, maxUsd: left, resume, cwd, env, timeoutMs: Math.min(10 * 60_000, remainingMs(deadlineAt)), eventsFile, label });
@@ -2486,7 +2484,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   if (!record) log(`${missing}; asking the harness`);
   if (!record) {
     const asked = await ask(EXIT_PROMPT, "exit");
-    const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", unmetered: "unmetered: max_usd cannot be enforced", budget: "no exit record and no budget left to ask" }[asked.refused];
+    const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", budget: "no exit record and no budget left to ask" }[asked.refused];
     if (refused) return { record: { exit: "blocked", reason: refused, questions: [] }, usage, basis: "none" };
     record = parseExitRecord(asked.text);
     if (!record) return { record: { exit: "blocked", reason: "the harness gave no exit record (neither the exit file nor a JSON answer)", questions: [] }, usage, basis: "none" };

@@ -3,7 +3,7 @@
 import "../../plugin/test/temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -265,14 +265,28 @@ test("question answered: merged, but the owner's answer and ready-for-review are
   assert.equal(row.wallMinutes, 33 * 60); // Mar 2 01:00 to Mar 3 10:00
 });
 
-test("cost: a raw Codex stream counts a resumed pass's own share", () => {
-  // Real Codex 0.167.0 streams as the worker tees them: `codex exec`, then `codex exec resume` on the same thread, whose
-  // turn.completed is the thread's running total. Together they cost what the thread reported last.
+test("cost: a raw stream is never priced; an artifact with no result.json is one run of unknown cost (#483)", () => {
+  // Real Codex 0.167.0 streams as the worker tees them, and a raw Claude result: neither is a stage's record.
   const fixtures = join(BENCH, "..", "plugin", "test", "fixtures");
   const pass = (label, f) => `{"type":"pendulum.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
-  const raw = parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl"), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
-  assert.equal(raw.turns, 2);
+  assert.equal(parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl")), null);
+  assert.equal(parseUsageText(read(join(USAGE, "claude-result.json"))), null);
+  // A stage killed before its result.json: its artifact holds only the raw stream (a Claude stream of two passes, each
+  // with a result line, the second a resumed session's running total). It scores as one run of unknown cost.
+  const dir = mkdtempSync(join(tmpdir(), "score-noresult-"));
+  try {
+    mkdirSync(join(dir, "pendulum-usage-61"));
+    const result = (usd) => JSON.stringify({ type: "result", subtype: "success", session_id: "s1", total_cost_usd: usd });
+    writeFileSync(join(dir, "pendulum-usage-61", "events.jsonl"), `${result(1)}\n${result(3)}\n`);
+    const records = usageFromDir(dir, { readdir: (p) => readdirSync(p), read: (p) => readFileSync(p, "utf8"), isDir: (p) => statSync(p).isDirectory() });
+    assert.equal(records.length, 1);
+    assert.deepEqual([records[0].usd, records[0].usdUnknown, records[0].usdUnknownWhy], [null, 1, ["unreported"]]);
+    const cost = costOf(records, prices, { harness: "claude" });
+    assert.deepEqual([cost.usd, cost.usdUnknown], [null, 1], "never $4 (both totals summed) and never $0");
+    assert.match(cost.basis, /plus 1 run of unknown cost/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("cost: Codex tokens are priced from the Codex price table, with its date in the basis", () => {
@@ -287,11 +301,9 @@ test("cost: Codex tokens are priced from the Codex price table, with its date in
   assert.equal(row.cost.note, null);
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);
-  const raw = parseUsageText(read(join(USAGE, "codex", "events.jsonl")), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 150000, output: 10000, cached: 115000, written: null });
-  assert.equal(costOf([raw], prices).usd, 0.1815);
-  assert.equal(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).usd, null);
-  assert.match(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
+  const rec = usage("codex")[0];
+  assert.equal(costOf([{ ...rec, model: "gpt-unknown-9" }], prices).usd, null);
+  assert.match(costOf([{ ...rec, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
 });
 
 test("cost: a Codex stage with no completed turn says so, in the worker's record, its exit line and the scorecard alike; never a missing price", () => {
@@ -300,20 +312,23 @@ test("cost: a Codex stage with no completed turn says so, in the worker's record
   const worker = mergeUsage([1, 2, 3].map(() => parseUsage("codex", events, "gpt-6.1-sol", 1)));
   assert.equal(worker.usd, null, "spend unknown, not zero: a cut turn may have spent tokens");
   assert.equal(worker.basis, CODEX_NO_TOKENS);
-  assert.equal(usdText(worker), "unmetered (no Codex turn completed, so Codex reported no tokens)");
-  // The scorecard, from the uploaded result.json (as session.mjs writes it) or from the raw events.
-  const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "pendulum-usage-498/result.json" };
-  for (const rec of [result, parseUsageText(events, { model: "gpt-6.1-sol" })]) {
+  assert.equal(worker.usdUnknown, 3, "three runs of unknown cost");
+  assert.match(usdText(worker), /^unknown, 3 runs \(.*the run ended before its harness reported its cost/);
+  // The scorecard, from the uploaded result.json (as session.mjs writes it): unknown, never $0.
+  const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, usdUnknown: worker.usdUnknown, usdUnknownWhy: worker.usdUnknownWhy, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "pendulum-usage-498/result.json" };
+  for (const [rec, n] of [[result, 3]]) {
     const cost = costOf([rec], prices);
     assert.equal(cost.usd, null);
-    assert.equal(cost.basis, CODEX_NO_TOKENS);
+    assert.equal(cost.usdUnknown, n);
+    assert.ok(cost.basis.startsWith(CODEX_NO_TOKENS), cost.basis);
+    assert.match(cost.basis, new RegExp(`plus ${n} runs? of unknown cost`));
   }
   // A model the table lacks, with tokens, is still a missing price.
   assert.match(costOf([{ ...result, model: "gpt-unknown-9", tokens: { input: 10, output: 1, cached: 0, written: null } }], prices).basis, /no price for gpt-unknown-9/);
   assert.equal(usdText({ usd: 0.25, basis: "x" }), "0.25");
 });
 
-test("cost: Copilot dollars are the AI credits the worker priced, premium requests beside; an old artifact without credits stays unmetered", () => {
+test("cost: Copilot dollars are the AI credits the worker priced, premium requests beside; an old artifact without credits is of unknown cost", () => {
   const work = { harness: "copilot", model: "claude-sonnet-5.5", artifact: "pendulum-usage-47/result.json", usd: 0.4123, premiumRequests: 3, aiCredits: 41.23, tokens: { input: 90000, output: 900, cached: 60000, written: 29000 }, basis: "harness-reported: 41.23 AI credits from copilot --usage-output-file at $0.01/credit, 3 premium request(s)", runs: 2 };
   const review = { ...work, artifact: "pendulum-usage-47-review/result.json", usd: 0.1, premiumRequests: 1, aiCredits: 10 };
   const row = scoreObjective(cleanMerge(47, [work, review]), { prices, now: NOW });
@@ -327,25 +342,19 @@ test("cost: Copilot dollars are the AI credits the worker priced, premium reques
   assert.match(markdownTable([row]), /\| \$0\.51 \(/);
   const old = scoreObjective(cleanMerge(46, usage("copilot")), { prices, now: NOW });
   assert.equal(old.cost.usd, null);
-  assert.match(old.cost.basis, /^unmetered: no AI credits in the usage artifact/);
+  assert.match(old.cost.basis, /^unknown: no AI credits in the usage artifact; plus 1 run of unknown cost/);
+  assert.equal(old.cost.usdUnknown, 1);
   assert.match(old.cost.note, /no AI credits/);
 });
 
-test("cost: the reviewer's artifact is summed with the worker's; a raw Claude result is read too", () => {
+test("cost: the reviewer's artifact is summed with the worker's, cache writes and the per-model split kept", () => {
   const both = [...usage("claude"), ...usage("review")];
   const row = scoreObjective(cleanMerge(48, both), { prices, now: NOW });
   assert.equal(row.cost.usd, 8.2312);
   assert.match(row.cost.basis, /2 artifacts summed/);
-  const raw = parseUsageText(read(join(USAGE, "claude-result.json")));
-  assert.equal(raw.harness, "claude");
-  assert.equal(raw.usd, 7.4312);
-  assert.equal(raw.model, "claude-fable-5-1");
-  assert.equal(raw.tokens.output, 50000);
   // Cache writes and the per-model split are kept: cost by component without re-reading the artifact.
-  assert.equal(typeof raw.tokens.written, "number");
-  assert.ok(raw.models && raw.models["claude-fable-5-1"]);
-  assert.equal(Object.values(raw.models).reduce((s, m) => s + m.output, 0), raw.tokens.output);
-  assert.equal(costOf([raw], prices).tokens.written, raw.tokens.written);
+  const [work] = usage("claude");
+  assert.equal(costOf([work], prices).tokens.written, work.tokens.written ?? null);
   assert.match(markdownTable([row]), /\$8\.23 \(\d+k in \/ \d+k cached \/ \d+k written \/ \d+k out\)/);
 });
 
@@ -694,22 +703,27 @@ test("interventions: what Pendulum asked for (Question, Blocked notice, review r
 
 test("cost: a sandbox stage's vendor cost is summed beside the model's, with a total, in the row, the table and the baseline", async () => {
   const rates = { vendor: "vercel", plan: "Pro", region: "iad1", date: "2026-11-08" };
-  const work = { harness: "claude", artifact: "pendulum-usage-50/result.json", usd: 0.26, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.0063, upperBound: false, storedUsd: 0, rates } };
-  const review = { harness: "claude", artifact: "pendulum-usage-50-review/result.json", usd: 0.5, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.21, upperBound: true, storedUsd: 0.0002, rates } };
+  const work = { harness: "claude", artifact: "pendulum-usage-50/result.json", usd: 0.26, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: 0.0063, storedUsd: 0, rates } };
+  const review = { harness: "claude", artifact: "pendulum-usage-50-review/result.json", usd: 0.5, runs: 1, tokens: { input: 1e5, output: 1e3, cached: 9e4, written: 5e3 }, vendor: { usd: null, storedUsd: 0.0002, rates } };
   const row = scoreObjective(cleanMerge(50, [work, review]), { prices, now: NOW });
   assert.equal(row.cost.usd, 0.76, "the model's dollars stay the harness's");
-  assert.equal(row.cost.vendorUsd, 0.2163);
-  assert.equal(row.cost.totalUsd, 0.9763);
+  // The review stage's sandbox usage was not reported: a run of unknown cost, never its session's ceiling.
+  assert.equal(row.cost.vendorUsd, 0.0063);
+  assert.equal(row.cost.totalUsd, 0.7663);
   assert.equal(row.cost.vendor.parts, 2);
-  assert.equal(row.cost.vendor.upperBound, true);
-  assert.match(row.cost.vendor.basis, /2 sandbox stage\(s\), 1 at the session's ceiling \(an upper bound\); vercel Pro list rates \(iad1\) read 2026-11-08/);
+  assert.equal(row.cost.vendor.usdUnknown, 1);
+  assert.equal(row.cost.totalUnknown, 1);
+  assert.match(row.cost.vendor.basis, /2 sandbox stage\(s\), 1 of unknown cost \(the sandbox vendor did not report the stage's usage\); vercel Pro list rates \(iad1\) read 2026-11-08/);
   const table = markdownTable([row]);
-  assert.match(table, /\$0\.76 \([^)]*\) \+ ≤\$0\.2163 sandbox = \$0\.98/);
+  assert.match(table, /\$0\.76 \([^)]*\) \+ \$0\.0063 sandbox plus 1 run of unknown cost = \$0\.77 plus 1 run of unknown cost/);
+  assert.doesNotMatch(table, /≤|at most|at least|upper bound/);
   assert.match(table, /- #50: sandbox 2 sandbox stage\(s\)/);
   const { baselineOf } = await import("../lib/baseline.mjs");
+  // A row with a run of unknown cost is left out of the dollar medians, and counted beside them.
   const line = baselineOf([row], {});
-  assert.equal(line.measures.vendorUsd.median, 0.2163);
-  assert.equal(line.measures.totalUsd.median, 0.98);
+  assert.deepEqual([line.measures.vendorUsd.median, line.measures.vendorUsd.leftOut, line.measures.totalUsd.leftOut], [null, 1, 1]);
+  const known = baselineOf([scoreObjective(cleanMerge(50, [work]), { prices, now: NOW })], {});
+  assert.deepEqual([known.measures.vendorUsd.median, known.measures.totalUsd.median], [0.0063, 0.27]);
   // One booking per stage: the same stage's booking carried by two artifacts (a retried launch) counts once.
   const once = { ...work, vendor: { ...work.vendor, claim: "0123456789ab" } };
   const twice = scoreObjective(cleanMerge(52, [once, { ...once, artifact: "pendulum-usage-52/result.json", usd: null }]), { prices, now: NOW });
@@ -1160,4 +1174,40 @@ test("local mode where no Action runs: the pendulum:local label a loop applied i
   const at = Date.parse("2031-03-02T01:00:40Z");
   assert.ok(pendulumActivity(serve).some(([a, b]) => a === at && b === at));
   assert.ok(!pendulumActivity(unmarked).some(([a, b]) => a === at && b === at));
+});
+
+test("cost: runs of unknown cost are counted beside the known dollars, from a result.json and a spend line alike; never a bound or $0", async () => {
+  const { spendRecords } = await import("../lib/objective.mjs");
+  // A work stage on Actions whose result.json holds $3 and one run that ended before its harness reported (#478), and a
+  // local review stage whose spend line holds $2 and one such run.
+  const artifact = { harness: "claude", model: "claude-opus-5-5", artifact: "pendulum-usage-61/result.json", usd: 3, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 2, tokens: { input: 1, output: 1, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)" };
+  const local = localMerge(61);
+  local.issueComments = local.issueComments.filter((c) => !c.body.includes(":progress:work:"));
+  local.issueComments[1].body = local.issueComments[1].body.replace(/<!-- pendulum:spend .*-->/, `<!-- pendulum:spend ${JSON.stringify({ usd: 2, usdUnknown: 1, usdUnknownWhy: ["zeroed"] })} -->`);
+  const lines = spendRecords(local, { all: true });
+  assert.deepEqual(lines.map((l) => [l.usd, l.usdUnknown, l.usdUnknownWhy]), [[2, 1, ["zeroed"]]]);
+  const cost = costOf([artifact, ...lines], prices, { harness: "claude" });
+  assert.equal(cost.usd, 5, "the known dollars only");
+  assert.equal(cost.usdUnknown, 2);
+  assert.deepEqual(cost.usdUnknownWhy, ["unreported", "zeroed"]);
+  assert.match(cost.basis, /; plus 2 runs of unknown cost \(the run ended before its harness reported its cost; Claude Code's error result carried a zeroed cost/);
+  assert.doesNotMatch(cost.basis, /lower bound|upper bound|estimate|at least|at most|partial/);
+  for (const k of ["usdLowerBound", "usdUpperBound", "usdEstimated"]) assert.equal(cost[k], undefined, k);
+  // The row and its table cell, local mode: the spend line's unknown run beside the known figure.
+  const row = scoreObjective(local, { prices, now: NOW });
+  assert.equal(row.cost.usd, 2);
+  assert.equal(row.cost.usdUnknown, 1);
+  assert.match(markdownTable([row]), /\| \$2\.00 plus 1 run of unknown cost \|/);
+});
+
+test("cost: a Codex run killed before any turn completed stays a run of unknown cost on the scorecard, beside the priced one; never $0, never dropped", () => {
+  const priced = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-62/result.json", usd: 0.1815, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };
+  const killed = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-62-review/result.json", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], tokens: { input: null, output: null, cached: null, written: null }, runs: 1, basis: CODEX_NO_TOKENS };
+  const cost = costOf([priced, killed], prices);
+  assert.equal(cost.usd, 0.1815);
+  assert.equal(cost.usdUnknown, 1);
+  assert.deepEqual(cost.parts.map((p) => [p.usd, p.usdUnknown]), [[0.1815, 0], [null, 1]]);
+  assert.match(cost.basis, /^tokens priced from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
+  const row = scoreObjective(cleanMerge(62, [priced, killed]), { prices, now: NOW });
+  assert.match(markdownTable([row]), /\$0\.18 plus 1 run of unknown cost \(/);
 });

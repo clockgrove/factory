@@ -22,7 +22,7 @@ import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, s
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
 import { STATE_LABELS, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
-import { pendulumOwn, throughApp } from "./finish-card.mjs";
+import { labelTime, pendulumOwn, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
@@ -42,11 +42,6 @@ export const COST_KINDS = Object.freeze([...BILLING, "sandbox"]);
 export const KIND_WORDS = Object.freeze({ ...BILLING_WORDS, api: "billed per use on an API key", sandbox: "the cloud sandbox vendor's cost at its list rates" });
 /** An Objective's end, from its labels and its PRs. */
 export const OUTCOMES = Object.freeze(["merged", "blocked", "question", "closed-unmerged", "open"]);
-/**
- * `--compare`: an arm with fewer merged Objectives than this is said to be small (`comparison.arms[].smallN`), and the
- * Markdown shows its rows. A fixed line for the caution, never a test of significance: the report makes no such claim.
- */
-export const SMALL_N = 10;
 
 const PER_PAGE = 100;
 const ms = (at) => (at ? Date.parse(at) : NaN);
@@ -90,6 +85,8 @@ export function reportCheck(f) {
   if (f.parent !== undefined && !Number.isSafeInteger(f.parent)) return "--parent takes an issue number";
   if ([f.issue, f.label, f.parent, f.compare ?? f["compare-label"]].filter((v) => v !== undefined).length > 1) return "give one of --issue, --label, --parent or --compare";
   if (f.compare !== undefined && f["compare-label"] !== undefined) return "give the two arms as experiment names (--compare) or as labels (--compare-label), not both";
+  // A period would cut a merged Objective's dollars to its stages in the window, which are then no longer its dollars.
+  if ((f.compare !== undefined || f["compare-label"] !== undefined) && (f.since !== undefined || f.until !== undefined)) return "--compare and --compare-label read each arm's Objectives whole: give no --since or --until";
   const arms = compareArms(f);
   if (arms && arms.some((a) => a === null)) return f.compare !== undefined ? `--compare takes experiment names (letters, digits, . _ -, up to 30; the part after ${EXPERIMENT_PREFIX}), not ${JSON.stringify(f.compare.join(" "))}` : `--compare-label takes label names, not ${JSON.stringify(f["compare-label"].join(" "))}`;
   if (arms && (arms.length !== 2 || arms[0].toLowerCase() === arms[1].toLowerCase())) return "--compare and --compare-label take two different arms (A,B, or the flag twice)";
@@ -326,7 +323,7 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
   const setMode = setScope(scope);
   const vetted = vettedLabels(scope);
   // Per vetted label: the issues listed under it, and those whose latest `labeled` event is by someone who can push or not.
-  const arms = vetted.map((label) => ({ label, listed: [], trusted: [], untrusted: [] }));
+  const arms = vetted.map((label) => ({ label, listed: [], trusted: [], untrusted: [], unverifiable: [] }));
   const started = new Map();
   let app = appId;
   try {
@@ -392,8 +389,7 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
         if (scope.label) arms[0].listed = [...issues.keys()];
         await vetArms(repo, arms, { budget, opts, started, objectiveLabel });
         // Only the Objectives a vetted label counts for are read on, and one both arms count for is in neither.
-        const counted = (n) => arms.filter((a) => a.trusted.includes(n)).length === 1;
-        for (const n of [...issues.keys()]) if (!counted(n)) issues.delete(n);
+        for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
       }
       if (scope.parent) for (const i of await paged(`${base}/issues/${scope.parent}/sub_issues`, budget, "issues", opts)) if (isIssue(i)) issues.set(i.number, i);
       // The comments: one paged read of the repository's, since the period's start or the set's oldest issue.
@@ -494,10 +490,20 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     if (e instanceof BudgetStop) source.stopped = e.what;
     else if (!(e instanceof NothingToRead)) throw e;
   }
+  // A budget stop during the label check leaves issues no label was found to count for: none of their records is read.
+  if (arms.length) for (const n of [...issues.keys()]) if (!armCounted(arms, n)) issues.delete(n);
   for (const n of issues.keys()) localOf(n);
   source.localRecords = [...local.values()].reduce((s, m) => s + m.size, 0);
   return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], issues, pulls, comments, artifacts, local, ...(arms.length ? { arms, started } : {}), source: { ...source, calls: budget } };
 }
+
+/** Whether a vetted label's check ended for issue `n` (trusted, untrusted or not verifiable). */
+const checked = (arm, n) => arm.trusted.includes(n) || arm.untrusted.includes(n) || arm.unverifiable.includes(n);
+/**
+ * Whether the vetted labels count issue `n`: every arm that lists it was checked, and exactly one of them trusts its label
+ * (one both arms count for is in neither).
+ */
+const armCounted = (arms, n) => arms.every((a) => !a.listed.includes(n) || checked(a, n)) && arms.filter((a) => a.trusted.includes(n)).length === 1;
 
 /** The latest `labeled` event of `label` (its name in any case, as GitHub matches labels) among timeline `events`: {at, actor}. */
 const latestLabeled = (events, label) => {
@@ -510,30 +516,40 @@ const latestLabeled = (events, label) => {
  * Who applied each vetted label (#545): each listed issue's timeline, read once (paged, within the budget), and each
  * label's latest `labeled` event on it vouched for as the choice labels are (objective-trust.mjs labelsVouched: a person
  * who can push, or a pinned maintainer; never a bot or an App), each labeller's permission read once. Fills each arm's
- * `trusted` and `untrusted`, and `started` with each issue's first `labeled` event of the Objective label (the start
- * of its wall clock, as the scorer counts it). A BudgetStop leaves the rest unchecked.
+ * `trusted`, `untrusted` and `unverifiable` (the labeller's permission could not be read: a 403, so not vouched for), and
+ * `started` with when each issue's Objective started (finish-card.mjs labelTime, the scorer's start of its wall clock).
+ * A BudgetStop leaves the rest unchecked.
  */
 async function vetArms(repo, arms, { budget, opts, started, objectiveLabel }) {
   const all = [...new Set(arms.flatMap((a) => a.listed))].sort((a, b) => a - b);
   if (!all.length) return;
   budget.plan(all.length, `the timelines of the ${all.length} Objective(s) labelled ${arms.map((a) => a.label).join(" or ")}: who applied the label (a paged read's first page each)`);
   const permissions = new Map();
+  const unreadable = new Set();
   const permission = async (r, login, o) => {
     const key = loginKey(login);
     if (!permissions.has(key)) {
       budget.plan(1, "a labeller's permission on the repository");
       budget.take("permissions");
-      permissions.set(key, await collaboratorPermission(r, login, o));
+      try {
+        permissions.set(key, await collaboratorPermission(r, login, o));
+      } catch (e) {
+        // A token that may not read collaborators' permissions: this labeller cannot be vouched for, and that is said.
+        if (e?.status !== 403) throw e;
+        permissions.set(key, null);
+        unreadable.add(key);
+      }
     }
     return permissions.get(key);
   };
   for (const n of all) {
     const events = await paged(`repos/${repo.full}/issues/${n}/timeline`, budget, "timelines", opts);
-    const start = events.filter((e) => e?.event === "labeled" && e.label?.name === objectiveLabel && Number.isFinite(ms(e.created_at))).map((e) => e.created_at).sort((a, b) => ms(a) - ms(b))[0];
+    const start = labelTime(null, events, objectiveLabel);
     if (start) started.set(n, start);
     for (const arm of arms.filter((a) => a.listed.includes(n))) {
-      const refused = await labelsVouched(repo, n, [arm.label], opts, { labelers: async () => ({ [arm.label]: latestLabeled(events, arm.label) }), permission });
-      arm[refused ? "untrusted" : "trusted"].push(n);
+      const last = latestLabeled(events, arm.label);
+      const refused = await labelsVouched(repo, n, [arm.label], opts, { labelers: async () => ({ [arm.label]: last }), permission });
+      arm[!refused ? "trusted" : last?.actor?.login && unreadable.has(loginKey(last.actor.login)) ? "unverifiable" : "untrusted"].push(n);
     }
   }
 }
@@ -673,7 +689,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
   // The arms' measures that are no field of an Objective's row (#545): the minutes of every harness pass, and the wall clock.
   const armMeasures = new Map();
   // With vetted labels, only the Objectives exactly one of them counts for (readReport vetArms): in an arm, not in both.
-  const counted = read.arms ? new Set([...issues.keys()].filter((n) => read.arms.filter((a) => a.trusted.includes(n)).length === 1)) : null;
+  const counted = read.arms ? new Set([...issues.keys()].filter((n) => armCounted(read.arms, n))) : null;
 
   // Each comment with a marker on its own issue, by its author: Pendulum's own, someone it cannot attribute, or ignored.
   const byIssue = new Map();
@@ -770,6 +786,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     const minutes = { priced: 0, passes: 0, usd: zeroCost(), unpriced: 0, all: 0, untimed: 0 };
     let ledgered = 0;
     let unledgered = 0;
+    // Stages Pendulum cannot attribute to itself: no ledger of theirs is read, so the arm measures leave this Objective out.
+    let unattributedStages = 0;
     cost.parts.forEach((part, i) => {
       const rec = all[i];
       const c = partCost(part, rec, claimOf(rec) === null || lastByClaim.get(claimOf(rec)) === i);
@@ -808,6 +826,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
       // The stage's passes, from its per-pass ledger (its usage record's, or local mode's own record of it).
       const ledger = [rec, recordOf, localRec].map((x) => x?.ledger).find(Array.isArray) ?? null;
+      if (rec.unattributed && !rec.notStage) unattributedStages += 1;
       if (rec.source === "decisions" || rec.unattributed) return;
       if (!ledger) {
         unledgered += 1;
@@ -859,10 +878,13 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     if (counted) {
       const start = read.started?.get(n);
       const mergedAt = row.outcome === "merged" ? newestPull(n, pulls)?.merged_at : null;
+      // Known only when each stage has a ledger (a stage Pendulum cannot attribute to itself has none it reads).
+      const whole = ledgered && !unledgered && !unattributedStages;
       armMeasures.set(n, {
-        // Every harness pass's minutes, known only when each stage has a ledger and each pass its start and end.
-        modelMinutes: ledgered && !unledgered && !minutes.untimed ? round2(minutes.all) : null,
-        // From the first `pendulum:objective` label to the merge, as the scorer counts it.
+        // Every harness pass's minutes, known only when each pass has its start and end too.
+        modelMinutes: whole && !minutes.untimed ? round2(minutes.all) : null,
+        fixPasses: whole ? row.passes.fix : null,
+        // From the Objective's start (finish-card.mjs labelTime) to the merge, as the scorer counts it.
         wallMinutes: start && mergedAt && ms(mergedAt) >= ms(start) ? round2((ms(mergedAt) - ms(start)) / 60_000) : null,
       });
     }
@@ -910,7 +932,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
  * merged Objective the median and p25..p75 (spread.mjs, the bench baseline's) of the dollars of each billing kind (a
  * merged Objective with runs of unknown cost left out of every dollar measure, and counted), the model minutes, the wall
  * clock, the review rounds and the fix passes (a merged Objective whose measure is not recorded left out of it), and the
- * runs of unknown cost. No total across kinds, no difference between the arms and no significance: the figures only.
+ * runs of unknown cost. No total across kinds, no difference between the arms and no significance: the figures only, with
+ * n in every measure and every arm's rows.
  */
 function comparisonOf(arms, objectives, measures) {
   const both = new Set(arms[0].trusted.filter((n) => arms[1].trusted.includes(n)));
@@ -920,7 +943,6 @@ function comparisonOf(arms, objectives, measures) {
     return { median: s.median, p25: s.p25, p75: s.p75, n: s.n, leftOut: rows.length - s.n };
   };
   return {
-    smallN: SMALL_N,
     inBoth: [...both].sort((a, b) => a - b),
     arms: arms.map((arm) => {
       const rows = objectives.filter((o) => arm.trusted.includes(o.issue) && !both.has(o.issue));
@@ -935,16 +957,16 @@ function comparisonOf(arms, objectives, measures) {
         n: rows.length,
         outcomes: Object.fromEntries([...OUTCOMES, null].map((k) => [k ?? "unread", rows.filter((o) => o.outcome === k).length])),
         merged: merged.length,
-        small: merged.length < SMALL_N,
         usdPerMerged: Object.fromEntries(COST_KINDS.map((k) => [k, { ...measured(known, (o) => o.cost.usd[k], 6), leftOut: merged.length - known.length }])),
         modelMinutes: measured(merged, (o) => m(o).modelMinutes ?? null, 2),
         wallMinutes: measured(merged, (o) => m(o).wallMinutes ?? null, 2),
         reviewRounds: measured(merged, (o) => o.stages.review, 2),
-        fixPasses: measured(merged, (o) => o.passes?.fix ?? null, 2),
+        fixPasses: measured(merged, (o) => m(o).fixPasses ?? null, 2),
         unknown: { runs: rows.reduce((t, o) => t + o.cost.unknownRuns, 0), objectives: rows.filter((o) => o.cost.unknownRuns).map((o) => o.issue), reasons: [...reasons].map(([code, count]) => ({ code, objectives: count, text: UNKNOWN_WHY[code] })).sort((a, b) => b.objectives - a.objectives || a.code.localeCompare(b.code)) },
         untrusted: [...arm.untrusted].sort((a, b) => a - b),
-        unchecked: arm.listed.filter((n) => !arm.trusted.includes(n) && !arm.untrusted.includes(n)).sort((a, b) => a - b),
-        objectives: rows.map((o) => ({ issue: o.issue, outcome: o.outcome, usd: { ...o.cost.usd }, unknownRuns: o.cost.unknownRuns, modelMinutes: m(o).modelMinutes ?? null, wallMinutes: m(o).wallMinutes ?? null, reviewRounds: o.stages.review, fixPasses: o.passes?.fix ?? null })),
+        unverifiable: [...arm.unverifiable].sort((a, b) => a - b),
+        unchecked: arm.listed.filter((n) => !checked(arm, n)).sort((a, b) => a - b),
+        objectives: rows.map((o) => ({ issue: o.issue, outcome: o.outcome, usd: { ...o.cost.usd }, unknownRuns: o.cost.unknownRuns, modelMinutes: m(o).modelMinutes ?? null, wallMinutes: m(o).wallMinutes ?? null, reviewRounds: o.stages.review, fixPasses: m(o).fixPasses ?? null })),
       };
     }),
   };
@@ -992,7 +1014,8 @@ function sourceOf(source, trust, missing, read) {
   // The vetted labels (#545): an issue whose label's last applier cannot push is not counted, nor one whose was not read.
   const arms = read.arms ?? [];
   add("label-untrusted", new Set(arms.flatMap((a) => a.untrusted)), `issues whose ${arms.map((a) => `\`${a.label}\``).join(" or ")} label was last applied by someone who cannot push (or by a bot or an App), or by no one the timeline names: not counted for it`);
-  add("label-unchecked", new Set(arms.flatMap((a) => a.listed.filter((n) => !a.trusted.includes(n) && !a.untrusted.includes(n)))), "issues whose label's applier the call budget stopped the report before reading: not counted");
+  add("label-unverifiable", new Set(arms.flatMap((a) => a.unverifiable)), "issues whose label's last applier's permission the token may not read (403): not vouched for, so not counted for it");
+  add("label-unchecked", new Set(arms.flatMap((a) => a.listed.filter((n) => !checked(a, n)))), "issues whose label's applier the call budget stopped the report before reading: not counted");
   if (arms.length === 2) add("in-both-arms", new Set(arms[0].trusted.filter((n) => arms[1].trusted.includes(n))), "issues both arms' labels count for: in neither arm");
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, issues: [], text: "usage artifacts that could not be downloaded" });
@@ -1066,7 +1089,7 @@ function renderSource(src) {
   return out;
 }
 
-/** `--compare`'s lines: one column per arm, each measure's median (p25..p75, n), the small-n note and its rows. */
+/** `--compare`'s lines: one column per arm, each measure's median (p25..p75, n), then each arm's rows. */
 function renderComparison(c, words) {
   const [a, b] = c.arms;
   const name = (arm) => arm.experiment ?? arm.label;
@@ -1079,6 +1102,8 @@ function renderComparison(c, words) {
     ["Merged", a.merged, b.merged],
     ["Blocked, question, closed unmerged, open", ...[a, b].map((x) => `${x.outcomes.blocked}, ${x.outcomes.question}, ${x.outcomes["closed-unmerged"]}, ${x.outcomes.open}${x.outcomes.unread ? ` (${x.outcomes.unread} unread)` : ""}`)],
     ...kinds.map((k) => [`$ per merged Objective: ${kindName[k]}`, fmt(a.usdPerMerged[k], money), fmt(b.usdPerMerged[k], money)]),
+    // No kind with dollars: one row still says how many were measured ($0 at every kind) and how many left out.
+    ...(kinds.length ? [] : [["$ per merged Objective (no kind has dollars)", fmt(a.usdPerMerged.api, money), fmt(b.usdPerMerged.api, money)]]),
     ["Model minutes", fmt(a.modelMinutes), fmt(b.modelMinutes)],
     ["Wall clock minutes", fmt(a.wallMinutes), fmt(b.wallMinutes)],
     ["Review rounds", fmt(a.reviewRounds), fmt(b.reviewRounds)],
@@ -1088,10 +1113,14 @@ function renderComparison(c, words) {
   const out = ["", "## Comparison", "", "Medians with p25..p75 over each arm's merged Objectives; `left out`: merged Objectives with runs of unknown cost (dollars) or with the measure not recorded. Each kind's dollars are apart, and nothing is added across kinds or arms. No difference between the arms is claimed to be significant: these are the figures only.", "", table(["Measure", name(a), name(b)], rows)];
   if (kinds.length) out.push("", `- ${kinds.map((k) => `${kindName[k]}: ${words[k]}`).join(". ")}.`);
   if (c.inBoth.length) out.push(`- In both arms, so in neither: ${c.inBoth.map((n) => `#${n}`).join(", ")}.`);
-  for (const arm of [a, b]) if (arm.untrusted.length) out.push(`- Not counted for ${name(arm)}, its label applied by someone who cannot push: ${arm.untrusted.map((n) => `#${n}`).join(", ")}.`);
+  const issues = (list) => list.map((n) => `#${n}`).join(", ");
   for (const arm of [a, b]) {
-    if (!arm.small) continue;
-    out.push("", `**Small n:** ${name(arm)} has ${arm.merged} merged Objective(s), fewer than ${c.smallN}: its medians and spreads describe these rows alone.`, "", table(["Issue", "Outcome", ...COST_KINDS.map((k) => kindName[k]), "Unknown runs", "Model min", "Wall min", "Review rounds", "Fix passes"], arm.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", ...COST_KINDS.map((k) => (o.usd[k] ? money(o.usd[k]) : "—")), o.unknownRuns, o.modelMinutes ?? "—", o.wallMinutes ?? "—", o.reviewRounds, o.fixPasses ?? "—"])));
+    if (arm.untrusted.length) out.push(`- Not counted for ${name(arm)}, its label applied by someone who cannot push: ${issues(arm.untrusted)}.`);
+    if (arm.unverifiable.length) out.push(`- Not counted for ${name(arm)}, its labeller's permission unreadable with this token: ${issues(arm.unverifiable)}.`);
+    if (arm.unchecked.length) out.push(`- Not counted for ${name(arm)}, its labeller not read before the call budget ran out: ${issues(arm.unchecked)}.`);
+  }
+  for (const arm of [a, b]) {
+    out.push("", `**${name(arm)}**: ${arm.n} Objective(s), ${arm.merged} merged.`, "", table(["Issue", "Outcome", ...COST_KINDS.map((k) => kindName[k]), "Unknown runs", "Model min", "Wall min", "Review rounds", "Fix passes"], arm.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", ...COST_KINDS.map((k) => (o.usd[k] ? money(o.usd[k]) : "—")), o.unknownRuns, o.modelMinutes ?? "—", o.wallMinutes ?? "—", o.reviewRounds, o.fixPasses ?? "—"])));
   }
   return out;
 }

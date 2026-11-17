@@ -1,14 +1,13 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { harnessMarker, setSelf } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
-import * as report_ from "../scripts/lib/report.mjs";
-import { renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
+import { readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 import { baselineOf } from "../../bench/lib/baseline.mjs";
 
@@ -106,7 +105,7 @@ function fakeGitHub(w) {
     let m = /^\/issues\/(\d+)\/timeline$/.exec(p);
     if (m) return page(w.timelines[m[1]] || [], u);
     m = /^\/collaborators\/([^/]+)\/permission$/.exec(p);
-    if (m) return json({ permission: w.permissions[decodeURIComponent(m[1])] ?? "read" });
+    if (m) return w.permissions[decodeURIComponent(m[1])] === 403 ? json({ message: "Must have push access to view repository collaborators." }, 403) : json({ permission: w.permissions[decodeURIComponent(m[1])] ?? "read" });
     if (p === "/pulls") return page(w.pulls, u);
     if (p === "/actions/artifacts") return page((w.artifacts[u.searchParams.get("name")] || []).map(({ record, ...a }) => a), u, (artifacts, total) => ({ total_count: total, artifacts }));
     return json({ message: "Not Found" }, 404);
@@ -118,20 +117,16 @@ function fakeGitHub(w) {
   return { fetch, download, calls };
 }
 
-/** `pendulum report` through its real command on the fake: {code, json, err, calls}. */
-async function report(w, args) {
+/** Run `fn(fake)` with the fake GitHub over `w` in place of api.github.com and a cache directory of its own. */
+async function withFake(w, fn) {
   const fake = fakeGitHub(w);
-  let out = "";
-  let err = "";
-  const parsed = parseArgs(["report", "--repo", REPO.full, "--checkout", tmpdir(), "--app", String(APP.id), ...args]);
   const realFetch = globalThis.fetch;
   const saved = { api: process.env.GITHUB_API_URL, cache: process.env.XDG_CACHE_HOME };
   process.env.GITHUB_API_URL = "https://github.test";
   process.env.XDG_CACHE_HOME = mkdtempSync(join(tmpdir(), "cache-"));
   globalThis.fetch = fake.fetch;
   try {
-    const code = await reportCommand(parsed.flags, { out: (t) => (out += t), err: (t) => (err += t), token: "t", download: fake.download, now: Date.parse("2026-11-18T00:00:00Z") });
-    return { code, out, json: args.includes("--json") ? JSON.parse(out) : null, err, calls: fake.calls };
+    return await fn(fake);
   } finally {
     globalThis.fetch = realFetch;
     setSelf(null);
@@ -140,6 +135,17 @@ async function report(w, args) {
       else process.env[k] = v;
     }
   }
+}
+
+/** `pendulum report` through its real command on the fake: {code, json, err, calls}. */
+async function report(w, args) {
+  let out = "";
+  let err = "";
+  const parsed = parseArgs(["report", "--repo", REPO.full, "--checkout", tmpdir(), "--app", String(APP.id), ...args]);
+  return withFake(w, async (fake) => {
+    const code = await reportCommand(parsed.flags, { out: (t) => (out += t), err: (t) => (err += t), token: "t", download: fake.download, now: Date.parse("2026-11-18T00:00:00Z") });
+    return { code, out, json: args.includes("--json") ? JSON.parse(out) : null, err, calls: fake.calls };
+  });
 }
 
 test("report --compare: an experiment label counts only where the person who last applied it can push", async () => {
@@ -208,15 +214,17 @@ test("report --compare: each arm's n, outcomes, and the exact median and p25..p7
     assert.deepEqual(Object.keys(arm.usdPerMerged).sort(), ["api", "credits", "sandbox", "subscription", "unknown"]);
     for (const k of ["total", "usd", "difference", "delta", "pValue", "significant"]) assert.ok(!Object.hasOwn(arm, k), k);
   }
-  // Small n: said for each arm, with its rows.
-  assert.equal(r.comparison.smallN, report_.SMALL_N);
-  assert.deepEqual([fast.small, slow.small], [true, true]);
+  // n is in every measure, and every arm's rows are shown: no line decides when n is "small".
+  for (const k of ["smallN"]) assert.ok(!Object.hasOwn(r.comparison, k), k);
+  for (const k of ["small"]) assert.ok(!Object.hasOwn(fast, k), k);
   const md = renderReport(r);
   assert.match(md, /^## Comparison$/m);
   assert.match(md, /\| Measure \| fast \| slow \|/);
   assert.match(md, /\| \$ per merged Objective: API \| \$2\.50 \(\$1\.75\.\.\$3\.25, n=3\) \| \$0\.00 \(\$0\.00\.\.\$0\.00, n=2, 1 left out\) \|/);
   assert.match(md, /\| Wall clock minutes \| 90 \(75\.\.135, n=3\) \| 120 \(75\.\.180, n=3\) \|/);
-  assert.match(md, /\*\*Small n:\*\* fast has 3 merged Objective\(s\), fewer than 10/);
+  assert.match(md, /^\*\*fast\*\*: 4 Objective\(s\), 3 merged\.$/m);
+  assert.match(md, /^\*\*slow\*\*: 3 Objective\(s\), 3 merged\.$/m);
+  assert.ok(!/small n/i.test(md));
   assert.match(md, /\| #23 \| merged \|/);
   assert.match(md, /No difference between the arms is claimed to be significant/);
   assert.ok(!/^## Totals$/m.test(md), "no figure across both arms");
@@ -243,13 +251,106 @@ test("report --compare: the planned calls equal the calls made", async () => {
 test("report --compare: the command line takes two different arms, by experiment name or by label, and nothing else", () => {
   assert.deepEqual(reportScope({ compare: ["fast,slow"] }).compare, [FAST, SLOW]);
   assert.deepEqual(reportScope({ "compare-label": ["wave-6", "wave-7"] }).compare, ["wave-6", "wave-7"]);
-  assert.equal(reportScope({ compare: ["a,b"] }).since, null, "a set: read whole unless a period is given");
+  assert.equal(reportScope({ compare: ["a,b"] }).since, null, "each arm read whole: no default period");
   assert.equal(reportCheck({ compare: ["fast"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
   assert.equal(reportCheck({ compare: ["fast", "FAST"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
   assert.equal(reportCheck({ compare: ["a,b,c"] }), "--compare and --compare-label take two different arms (A,B, or the flag twice)");
   assert.match(reportCheck({ compare: ["a", "b:c"] }), /^--compare takes experiment names/);
   assert.equal(reportCheck({ compare: ["a,b"], label: "x" }), "give one of --issue, --label, --parent or --compare");
   assert.equal(reportCheck({ compare: ["a"], "compare-label": ["b"] }), "give the two arms as experiment names (--compare) or as labels (--compare-label), not both");
-  assert.equal(reportCheck({ compare: ["a,b"], since: "2026-11-01" }), null);
+  // A period would cut a merged Objective's dollars to its stages in the window: refused.
+  for (const period of [{ since: "2026-11-01" }, { until: "2026-11-01" }]) {
+    assert.equal(reportCheck({ compare: ["a,b"], ...period }), "--compare and --compare-label read each arm's Objectives whole: give no --since or --until");
+    assert.equal(reportCheck({ "compare-label": ["a", "b"], ...period }), "--compare and --compare-label read each arm's Objectives whole: give no --since or --until");
+  }
+  assert.throws(() => parseArgs(["report", "--compare", "a,b", "--since", "2026-11-01"]), /give no --since or --until/);
   assert.deepEqual(parseArgs(["report", "--compare", "a", "--compare", "b"]).flags.compare, ["a", "b"]);
+});
+
+test("report --compare: a stage Pendulum cannot attribute to itself leaves its Objective out of the model minutes and fix passes", async () => {
+  const w = experiment();
+  // A teammate who can push pastes a work stage on #11: a stage of unknown cost whose ledger is never read.
+  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(11), user: { login: "teammate", type: "User" }, author_association: "MEMBER", created_at: at(40), updated_at: at(40), body: [`<!-- pendulum:11:progress:work:9911 -->`, "Pendulum work: started.", harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] })].join("\n") });
+  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
+  const [fast] = r.comparison.arms;
+  assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
+  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null });
+  // Its dollars are not known whole either: it is left out of every dollar measure.
+  assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
+});
+
+test("report --compare: the wall clock starts as the scorer's does: a draft started later, or the Running label with no Objective label event", async () => {
+  const w = experiment();
+  // #12: filed as a draft with the Objective label, started at 20 (the draft label off), Running at 25, the Objective
+  // label re-applied at 60 after a Block: the clock starts at 20, not 0 or 60. Merged at 90: 70 minutes.
+  w.timelines[12] = [
+    { event: "labeled", label: { name: "pendulum:draft" }, actor: ME, created_at: at(-10) },
+    { event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(0) },
+    { event: "labeled", label: { name: FAST }, actor: ME, created_at: at(1) },
+    { event: "unlabeled", label: { name: "pendulum:draft" }, actor: ME, created_at: at(20) },
+    { event: "labeled", label: { name: "pendulum:running" }, actor: BOT, created_at: at(25) },
+    { event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(60) },
+  ];
+  // #13: no Objective label event on its timeline, Running at 30: the clock starts at 30. Merged at 180: 150 minutes.
+  w.timelines[13] = [{ event: "labeled", label: { name: FAST }, actor: ME, created_at: at(1) }, { event: "labeled", label: { name: "pendulum:running" }, actor: BOT, created_at: at(30) }];
+  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
+  const [fast] = r.comparison.arms;
+  assert.deepEqual(fast.objectives.filter((o) => o.outcome === "merged").map((o) => [o.issue, o.wallMinutes]), [[11, 60], [12, 70], [13, 150]]);
+  assert.deepEqual(fast.wallMinutes, { median: 70, p25: 65, p75: 110, n: 3, leftOut: 0 });
+});
+
+test("report --compare: a labeller whose permission the token may not read (403) is not vouched for, said under its own code; the report goes on", async () => {
+  const w = experiment();
+  w.permissions.locked = 403;
+  w.timelines[22] = w.timelines[22].map((e) => (e.label?.name === SLOW ? { ...e, actor: { login: "locked", id: 9, type: "User" } } : e));
+  const { code, json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
+  assert.equal(code, 0);
+  const slow = r.comparison.arms[1];
+  assert.deepEqual(slow.objectives.map((o) => o.issue), [21, 23]);
+  assert.deepEqual([slow.unverifiable, slow.untrusted], [[22], [24]]);
+  assert.deepEqual(r.source.missing.find((m) => m.code === "label-unverifiable").issues, [22]);
+  assert.match(renderReport(r), /Not counted for slow, its labeller's permission unreadable with this token: #22\./);
+});
+
+test("report --compare: the latest application of the label counts: removed and re-applied by someone else", async () => {
+  const w = experiment();
+  const relabel = (n, first, then) => [w.timelines[n][0], { event: "labeled", label: { name: FAST }, actor: first, created_at: at(1) }, { event: "unlabeled", label: { name: FAST }, actor: first, created_at: at(2) }, { event: "labeled", label: { name: FAST }, actor: then, created_at: at(3) }];
+  w.timelines[11] = relabel(11, OUTSIDER, ME);
+  w.timelines[12] = relabel(12, ME, OUTSIDER);
+  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
+  const [fast] = r.comparison.arms;
+  assert.deepEqual(fast.objectives.map((o) => o.issue), [11, 13, 14]);
+  assert.deepEqual(fast.untrusted, [12, 15]);
+});
+
+test("report --compare: an issue counts only when every arm that lists it was checked, and no record of an uncounted issue is read", async () => {
+  // #16's slow label applied by another person who can push: the budget ends just before that person's permission read.
+  const w = experiment();
+  w.permissions.second = "write";
+  w.timelines[16] = w.timelines[16].map((e) => (e.label?.name === SLOW ? { ...e, actor: { login: "second", id: 8, type: "User" } } : e));
+  const full = await report(w, ["--compare", "fast,slow", "--json"]);
+  const before = full.calls.indexOf("GET /collaborators/second/permission");
+  assert.ok(before > 0);
+  const { code, json: r } = await report(w, ["--compare", "fast,slow", "--json", "--max-calls", String(before)]);
+  assert.equal(code, 3);
+  const [fast, slow] = r.comparison.arms;
+  assert.ok(!fast.objectives.some((o) => o.issue === 16), "trusted in fast, unchecked in slow: in neither");
+  assert.deepEqual(slow.unchecked, [16, 21, 22, 23, 24]);
+  // Local records (this clone's .pendulum/<n>/) are read only for the issues the labels count.
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  for (const n of [11, 15, 16, 21]) {
+    mkdirSync(join(clone, ".pendulum", String(n), "usage-a"), { recursive: true });
+    writeFileSync(join(clone, ".pendulum", String(n), "usage-a", "result.json"), JSON.stringify({ progressRun: "x", ledger: [] }));
+  }
+  const read = await withFake(w, (fake) => readReport(REPO, reportScope({ compare: ["fast,slow"] }), { token: "t", appId: APP.id, maxCalls: before, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  assert.deepEqual([...read.local.keys()].sort((a, b) => a - b), [11, 12, 13, 14]);
+});
+
+test("report --compare: with no billing kind holding dollars, one dollar row still gives n and the Objectives left out", async () => {
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  objective(w, 31, { arms: [FAST], work: [["work-1", 0, 5]], unknown: true, wall: 10 });
+  objective(w, 41, { arms: [SLOW], work: [["work-1", 0, 5]], wall: 20 });
+  const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
+  assert.match(renderReport(r), /\| \$ per merged Objective \(no kind has dollars\) \| none \(1 left out\) \| \$0\.00 \(\$0\.00\.\.\$0\.00, n=1\) \|/);
 });

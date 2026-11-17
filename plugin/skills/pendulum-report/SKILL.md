@@ -22,7 +22,7 @@ Shape it as the user asks: a table, a chart, an HTML page, a document. Every har
 - **Keep each kind apart**, labelled with `words`: `api` is billed per use; `subscription` reads "API-equivalent at list prices, on the subscription"; `credits` reads "Copilot AI credits, billed to the seat"; `unknown` is billing not recorded; `sandbox` is the cloud sandbox vendor's cost. A chart may stack kinds only with each labelled, never as one sum.
 - **Always show the unknown count** (`unknown.runs`), even at 0, with its reasons (`unknown.reasons[].text`). Never show unknown spend as $0 or as a number.
 - **Say what was read and what was missing**, from `source`: the calls made, the comments, artifacts and records read, and each `source.missing` entry's text. A partial report says it is partial.
-- **A comparison** (`comparison` set): the two `arms` side by side, each measure's median, p25..p75, n and `leftOut` as given. No difference or ratio between arms, no "better", no significance. A `small` arm: say so, show its `objectives`. Name `untrusted`, `unchecked` and `inBoth` issues. No `totals` figure is an arm's.
+- **A comparison** (`comparison` set): the two `arms` side by side, each measure's median, p25..p75, n and `leftOut` as given. No difference or ratio between arms, no "better", no significance. Show each arm's `objectives` rows. Name `untrusted`, `unverifiable`, `unchecked` and `inBoth` issues. No `totals` figure is an arm's.
 - **Hot spots** are lists ranked by exact counts (`rankBy`); show them as ranked, without calling any one too high: the report sets no threshold.
 - Show no account unless `--by account` was asked for. The JSON holds no reasons, Block text, transcripts or credentials; add none from elsewhere.
 

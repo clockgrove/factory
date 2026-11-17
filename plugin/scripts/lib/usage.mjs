@@ -1,9 +1,9 @@
 // Normalize each harness's headless output into one usage record:
-//   {harness, model, usd, tokens: {input, output, cached}, basis, started, ended,
+//   {harness, model, usd, usdUnknown?, usdUnknownWhy?, tokens: {input, output, cached}, basis, started, ended,
 //    sessionId, subtype, ok, error, turns}
-// usd is null when the run is unmetered (a Copilot run whose AI credits are missing,
-// pending or unavailable, or a Codex model missing from the price table), never zero. `basis` says where the dollars came from, so the scorecard shows it.
-// A count a harness does not report is null, never zero.
+// `basis` says where the dollars came from, so the scorecard shows it. A count a harness does not report is null, never
+// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate.
+
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,10 +12,80 @@ import { fileURLToPath } from "node:url";
 /**
  * Codex prices, USD per million tokens: the one table (codex-prices.json beside this file), which the bench reads too.
  * Codex reports tokens, not dollars, so the worker prices them here; the bench re-prices from the same file. The table
- * records its date and sources. Unknown models give usd: null and basis "unmetered: no price for <model>"; a run that
+ * records its date and sources. Unknown models give usd: null and basis "unknown: no price for <model>"; a run that
  * reported no tokens at all (no turn completed) gives CODEX_NO_TOKENS instead, whatever the model.
  */
 export const CODEX_PRICES = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "codex-prices.json"), "utf8"));
+
+/**
+ * Unknown spend (#478, #483). Every dollar figure Pendulum records, caps on or reports is real: a figure the harness or
+ * vendor reports (Claude Code's total_cost_usd, Copilot's AI credits, the AI Gateway's cost), or API-reported token
+ * counts at the vendor's published per-token rate (the Codex price table). Spend with no such figure is unknown: never
+ * $0, never a guess, never a bound. One shape carries it, on a pass's record and on every total made from records:
+ * - `usd`: the known dollars (the sum of what was reported), or null when nothing was;
+ * - `usdUnknown`: how many runs in the figure have spend that was not reported (absent or 0: none). A pass record counts
+ *   itself once; a total adds its parts' counts (unknownRuns). A run with `usd` set and `usdUnknown` too reported part
+ *   of its spend (a Codex turn that failed after others completed, a relayed key call the gateway never priced);
+ * - `usdUnknownWhy`: why, as codes from UNKNOWN_WHY (a closed list; a total keeps each code once).
+ * Caps compare the known dollars only (logic.mjs sumSpend), and a stage with unknown spend goes on: a cap can be passed
+ * by spend that was never reported. Displays say "plus N runs of unknown cost" (unknownText), never a number for it.
+ */
+export const UNKNOWN_WHY = {
+  // The pass ended before its harness reported a cost: killed (the wall clock, the hung check, the stage's end or stop),
+  // crashed or cut off. Claude Code printed no result line, Codex no turn.completed.
+  unreported: "the run ended before its harness reported its cost",
+  // Claude Code's result was an error with total_cost_usd 0 after its stream reported tokens: a crashed session's final
+  // result can carry zeroed totals.
+  zeroed: "Claude Code's error result carried a zeroed cost after its stream reported tokens",
+  // A resumed Claude session on a Claude Code before 2.1.277 (or one that named no version): its totals may restart at
+  // zero on resume, so no running total can be taken off them.
+  "resumed-total": "a resumed Claude session on a Claude Code older than 2.1.277, whose totals may restart at zero",
+  // A Codex model with no row in the price table, or no model named: its tokens have no published rate here.
+  "no-price": "the Codex model has no row in the price table",
+  // Codex reported a failed request (a stream `error` or `turn.failed`): the provider may have billed tokens Codex never reports.
+  "failed-request": "Codex reported a failed request whose tokens it never reports",
+  // Codex sub-agent threads that could not be read, or whose model has no price.
+  "sub-agent": "a Codex sub-agent thread could not be read or priced",
+  // Copilot reported no AI credits, or reported them partial, pending, unavailable, negative, or zero for a run that used tokens.
+  credits: "Copilot did not report the run's AI credits in full",
+  // Calls through the relayed AI Gateway key whose cost the gateway never reported (gateway-relay.mjs).
+  relay: "calls through the relayed gateway key whose cost the gateway did not report",
+  // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
+  sandbox: "the sandbox vendor did not report the stage's usage",
+};
+
+/** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
+export function markUnknown(rec, why) {
+  if (!rec) return rec;
+  if (!Object.hasOwn(UNKNOWN_WHY, why)) throw new Error(`unknown-spend code ${why} is not in UNKNOWN_WHY`);
+  rec.usdUnknown = Math.max(1, Number.isInteger(rec.usdUnknown) ? rec.usdUnknown : 0);
+  rec.usdUnknownWhy = [...new Set([...(Array.isArray(rec.usdUnknownWhy) ? rec.usdUnknownWhy : []), why])];
+  return rec;
+}
+
+/**
+ * How many runs of unknown cost `rec` holds: its `usdUnknown`; else 1 for a record that ran with no dollar figure (a
+ * site that did not mark it is still never read as $0); 0 for one that never ran (`noRun`, or a stage's result.json
+ * with `runs: 0`).
+ */
+export function unknownRuns(rec) {
+  if (!rec || typeof rec !== "object") return 0;
+  if (Number.isInteger(rec.usdUnknown) && rec.usdUnknown > 0) return rec.usdUnknown;
+  if (rec.noRun || rec.runs === 0) return 0;
+  return typeof rec.usd === "number" && Number.isFinite(rec.usd) ? 0 : 1;
+}
+
+/** The unknown-spend fields of a total of `records` (`{usdUnknown, usdUnknownWhy}`, or {} when all is known), to spread into it. */
+export function unknownOf(records) {
+  const list = (records || []).filter(Boolean);
+  const n = list.reduce((s, r) => s + unknownRuns(r), 0);
+  if (!n) return {};
+  const why = [...new Set(list.flatMap((r) => (unknownRuns(r) ? (Array.isArray(r.usdUnknownWhy) && r.usdUnknownWhy.length ? r.usdUnknownWhy : ["unreported"]) : [])))].filter((w) => Object.hasOwn(UNKNOWN_WHY, w));
+  return { usdUnknown: n, usdUnknownWhy: why };
+}
+
+/** " plus 2 runs of unknown cost" for `n` runs (unknownRuns), "" for none: what follows a known figure wherever it is shown. */
+export const unknownText = (n) => (Number.isInteger(n) && n > 0 ? ` plus ${n} run${n === 1 ? "" : "s"} of unknown cost` : "");
 
 /** A model id without its provider prefix: `openai/gpt-6.1-sol` (the AI Gateway's form) is `gpt-6.1-sol`. */
 export const bareModel = (model) => String(model ?? "").replace(/^[A-Za-z0-9._-]+\//, "");
@@ -23,7 +93,7 @@ export const bareModel = (model) => String(model ?? "").replace(/^[A-Za-z0-9._-]
 /**
  * The table's rates for `model`, or null: its exact id after any provider prefix, or that id plus a dated snapshot suffix
  * (`gpt-5.5-2026-04-23`). Nothing else matches, so `gpt-5-mini` never takes `gpt-5`'s rates: an unlisted model is
- * unmetered, not mispriced. Short-context rates (the table's `long` entry is recorded, not applied: Codex reports usage
+ * of unknown cost, not mispriced. Short-context rates (the table's `long` entry is recorded, not applied: Codex reports usage
  * per turn, so no request's context size is visible).
  */
 export function codexRate(table, model) {
@@ -42,7 +112,7 @@ export function codexRate(table, model) {
  */
 export function priceTokens(table, model, tokens) {
   if (!model || !tokens) return null;
-  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unmetered, not free
+  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unknown, not free
   const p = codexRate(table, model);
   if (!p) return null;
   const cached = tokens.cached ?? 0;
@@ -54,44 +124,43 @@ export function priceTokens(table, model, tokens) {
 
 /**
  * A Codex stage's dollars from its usage record at `table`'s rates: its sub-agent threads (`subAgents`, each run's own
- * share, codex-threads.mjs) each at its own model, the rest of `tokens` at `model`. `{usd, lowerBound}`: a sub-agent
- * whose model is unlisted leaves the dollars a lower bound; usd is null only when nothing could be priced.
+ * share, codex-threads.mjs) each at its own model, the rest of `tokens` at `model`. `{usd, unknown}`: `usd` what could
+ * be priced (null when nothing could), `unknown` whether any of it could not (an unlisted model's tokens, UNKNOWN_WHY).
  */
 export function priceStage(table, model, tokens, subAgents = []) {
   const subs = (Array.isArray(subAgents) ? subAgents : []).filter((t) => t?.tokens && typeof t.tokens === "object");
-  if (!subs.length) return { usd: priceTokens(table, model, tokens), lowerBound: false };
+  if (!subs.length) {
+    const usd = priceTokens(table, model, tokens);
+    return { usd, unknown: usd === null };
+  }
   const sum = (k) => subs.reduce((n, t) => n + (typeof t.tokens[k] === "number" ? t.tokens[k] : 0), 0);
   const rest = Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, tokens?.[k] === null || tokens?.[k] === undefined ? null : Math.max(0, tokens[k] - sum(k))]));
   let usd = priceTokens(table, model, rest);
-  let lowerBound = false;
+  let unknown = usd === null;
   for (const t of subs) {
     const p = priceTokens(table, t.model || model, t.tokens);
-    if (p === null) lowerBound = true;
-    else if (usd === null) {
-      usd = p;
-      lowerBound = true;
-    } else usd += p;
+    if (p === null) unknown = true;
+    else usd = (usd ?? 0) + p;
   }
-  return { usd: usd === null ? null : Math.round(usd * 10000) / 10000, lowerBound };
+  return { usd: usd === null ? null : Math.round(usd * 10000) / 10000, unknown };
 }
 
 /**
- * The warning for a Codex model with no row in the price table, else null: its runs are unmetered, so `max_usd` cannot
- * stop them (Codex has no in-run cap; Pendulum checks dollars after each run), and `daily_usd` counts them only at an
- * estimate (the stage's spend line, priced at the table's dearest rates, harness.mjs stageSpendSoFar); only a budget on
- * the provider's key bounds them. Doctor and the stage's progress comment say it.
+ * The warning for a Codex model with no row in the price table, else null: its runs are of unknown cost (UNKNOWN_WHY
+ * `no-price`), so neither `max_usd` nor `daily_usd` counts them (Codex has no in-run cap; Pendulum checks dollars after
+ * each run); only a budget on the provider's key bounds them. Doctor and the stage's progress comment say it.
  */
 export function unpricedCodex(harness, model, { gateway = false } = {}) {
   if (harness !== "codex" || !model || codexRate(CODEX_PRICES, model)) return null;
-  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are unmetered, so max_usd cannot stop them and daily_usd counts them only from a local or sandbox stage's spend line, at an estimate (the table's dearest rates); only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} bounds them`;
+  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are of unknown cost, so neither max_usd nor daily_usd counts them; only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} bounds them`;
 }
 
 /**
  * The basis of a Codex run that reported no token counts: no `turn.completed` (a refused request, a turn cut short). Its
- * spend is unknown, not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
+ * spend is unknown (UNKNOWN_WHY `unreported`), not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
  * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.
  */
-export const CODEX_NO_TOKENS = "unmetered: no Codex turn completed, so Codex reported no tokens";
+export const CODEX_NO_TOKENS = "unknown: no Codex turn completed, so Codex reported no tokens";
 const priceBasis = () => `priced from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -103,7 +172,7 @@ function empty(harness, model) {
     model: model ?? null,
     usd: null,
     tokens: { input: null, output: null, cached: null, written: null },
-    basis: "unmetered",
+    basis: "unknown",
     started: null,
     ended: null,
     sessionId: null,
@@ -581,10 +650,12 @@ export function parseClaude(stdout, model) {
   const failure = refusal || busy ? null : providerError("claude", lines);
   if (failure) rec.providerError = failure;
   if (outageError(failure)) rec.providerOutage = failure;
+  // The Claude Code that ran, as its stream's init line names it: whether a resumed total is a running total (sinceSession).
+  if (typeof init?.claude_code_version === "string") rec.harnessVersion = init.claude_code_version;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
-    return rec;
+    return markUnknown(rec, "unreported");
   }
   rec.subtype = result.subtype ?? null;
   rec.sessionId = result.session_id ?? init?.session_id ?? null;
@@ -612,10 +683,22 @@ export function parseClaude(stdout, model) {
       written,
     };
     rec.usd = num(result.total_cost_usd);
-    rec.basis = rec.usd === null ? "unmetered" : "harness-reported: total_cost_usd, usage (sub-agents excluded)";
+    if (rec.usd !== null) rec.basis = "harness-reported: total_cost_usd, usage (sub-agents excluded)";
   } else {
     rec.usd = num(result.total_cost_usd);
     if (rec.usd !== null) rec.basis = "harness-reported: total_cost_usd";
+  }
+  // A crashed session's final result can carry zeroed totals (Anthropic's cost-tracking docs): an error result at $0
+  // after the stream's own messages reported tokens is no $0.
+  const streamed = lines.some((l) => l?.type === "assistant" && ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].some((k) => num(l.message?.usage?.[k]) > 0));
+  if (rec.usd === 0 && (result.is_error === true || (result.subtype && result.subtype !== "success")) && streamed) {
+    rec.usd = null;
+    rec.basis = `unknown: ${UNKNOWN_WHY.zeroed}`;
+    markUnknown(rec, "zeroed");
+  }
+  if (rec.usd === null && !rec.usdUnknown) {
+    rec.basis = `unknown: ${UNKNOWN_WHY.unreported}`;
+    markUnknown(rec, "unreported");
   }
   return rec;
 }
@@ -712,7 +795,8 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
  * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
  * turn is a warning (Codex 0.167 reports a resumed thread's model change that way), not a failure. A stream `error` or
  * `turn.failed` event (a dropped stream Codex reconnects, a failed request) may be a request the provider billed whose
- * tokens Codex never reports: the dollars are then a lower bound (usdLowerBound). `rollout` (the thread's rollout text)
+ * tokens Codex never reports: the run then has unknown spend (UNKNOWN_WHY `failed-request`) beside what its turns
+ * reported. No turn completed is `unreported`; a model with no price row, `no-price`. `rollout` (the thread's rollout text)
  * and `since` (the pass's start, ISO) let a failed run's usage limit be read (providerRefusal).
  */
 export function parseCodex(stdout, model, { rollout = null, since = null } = {}) {
@@ -720,7 +804,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   const events = jsonLines(stdout);
   if (!events.length) {
     rec.error = "no JSONL events on stdout";
-    return rec;
+    rec.basis = CODEX_NO_TOKENS;
+    return markUnknown(rec, "unreported");
   }
   let input = null;
   let output = null;
@@ -746,7 +831,7 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
     }
     if (e.type === "turn.failed" || e.type === "error") {
       failed = e.error?.message || e.message || e.type;
-      rec.usdLowerBound = true;
+      markUnknown(rec, "failed-request");
     }
     if (e.type === "item.completed" && e.item?.type === "error") itemError = e.item.message || "item error";
     // Sub-agent work (spawn, wait, message): its threads' usage is not in this stream (codex-threads.mjs).
@@ -770,7 +855,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
   rec.usd = priceCodex(rec.model, rec.tokens);
-  rec.basis = rec.usd === null ? (input === null && output === null ? CODEX_NO_TOKENS : rec.model ? `unmetered: no price for ${rec.model}` : "unmetered: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
+  rec.basis = rec.usd === null ? (input === null && output === null ? CODEX_NO_TOKENS : rec.model ? `unknown: no price for ${rec.model}` : "unknown: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
+  if (rec.usd === null) markUnknown(rec, input === null && output === null ? "unreported" : "no-price");
   return rec;
 }
 
@@ -822,16 +908,16 @@ function copilotAccounting(u) {
 }
 
 /**
- * The dollars for `nano` billionths of an AI credit at `creditUsd`, or why there are none. Unmetered (usd null), never
+ * The dollars for `nano` billionths of an AI credit at `creditUsd`, or why there are none. Unknown (usd null), never
  * $0: no credits reported, a negative count, a `pending`, `unavailable` or unknown status, or zero credits for a run
- * that used tokens. A `partial` status is priced as a lower bound and says so.
+ * that used tokens. A `partial` status prices the credits reported, and the rest is unknown (`partial`).
  */
 function priceCredits({ nano, negative, status, tokens }, creditUsd) {
   if (negative) return { aiu: null, usd: null, why: "a negative AI credit count" };
   if (nano === null) return { aiu: null, usd: null, why: "no AI credits reported" };
   if (status && status !== "complete" && status !== "partial") return { aiu: null, usd: null, why: `AI credits ${status}` };
   if (nano === 0 && ((tokens?.input ?? 0) > 0 || (tokens?.output ?? 0) > 0)) return { aiu: 0, usd: null, why: "zero AI credits for a run that used tokens" };
-  return { aiu: Math.round(nano / 1e6) / 1e3, usd: Math.round((nano / 1e9) * creditUsd * 10000) / 10000, lowerBound: status === "partial", why: null };
+  return { aiu: Math.round(nano / 1e6) / 1e3, usd: Math.round((nano / 1e9) * creditUsd * 10000) / 10000, partial: status === "partial", why: null };
 }
 
 /**
@@ -872,7 +958,7 @@ export function clampTotal(seed, saved) {
  * cacheReadTokens, cacheWriteTokens, reasoningTokens}}}}` (sub-agents under agentMetrics, already summed into
  * modelMetrics). Tokens come from that file. Premium requests and AI credits are the larger of the file's and the
  * stream's, so a usage file rewritten low loses; the dollars are those credits at `creditUsd` (GitHub's $0.01 by
- * default), or unmetered (priceCredits). On `--resume` every count is the session's running total (sinceSession takes
+ * default), or unknown (priceCredits). On `--resume` every count is the session's running total (sinceSession takes
  * this pass's share). A non-zero exit is a harness error, not a death.
  */
 export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd = COPILOT_CREDIT_USD } = {}) {
@@ -930,7 +1016,9 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   if (failure) rec.providerError = failure;
   if (outageError(failure)) rec.providerOutage = failure;
   if (p.aiu !== null) rec.aiu = p.aiu;
-  if (p.lowerBound) rec.usdLowerBound = true;
+  // Credits not reported in full: the run's spend is unknown beyond what was (UNKNOWN_WHY), never $0 and never a bound.
+  if (p.usd === null) markUnknown(rec, a.tokens.input === null && a.tokens.output === null && a.nano === null ? "unreported" : "credits");
+  else if (p.partial) markUnknown(rec, "credits");
   rec.sessionStartTime = a.sessionStartTime;
   rec.turns = turns || null;
   rec.tokens = a.tokens;
@@ -941,10 +1029,10 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   const source = a.fromStream ? "the stream's usage checkpoint" : "copilot --usage-output-file";
   rec.basis =
     p.usd !== null
-      ? `harness-reported: ${rec.aiu} AI credits from ${source} at $${creditUsd}/credit${p.lowerBound ? " (lower bound: AI credits partial)" : ""}${req}`
+      ? `harness-reported: ${rec.aiu} AI credits from ${source} at $${creditUsd}/credit${p.partial ? " (AI credits partial: the rest unknown)" : ""}${req}`
       : a.tokens.input === null && a.tokens.output === null && a.nano === null
-        ? `unmetered: Copilot wrote no usage${req}`
-        : `unmetered: ${p.why}${req}`;
+        ? `unknown: Copilot wrote no usage${req}`
+        : `unknown: ${p.why}${req}`;
   return rec;
 }
 
@@ -961,7 +1049,6 @@ export function parseUsage(harness, stdout, model, exitCode = 0, extra = {}) {
 /** A refusal's structured fields in one line: "HTTP 400 invalid_request_error <code>". */
 export const refusalFields = (r) => [r.status !== null ? `HTTP ${r.status}` : null, r.type, r.code].filter(Boolean).join(" ");
 
-/** Sum several records of one run (first prompt, validation retry, review pass). */
 /** Per-model totals summed across runs; undefined when no run reported a split. */
 function mergeModels(a, b) {
   if (!a && !b) return undefined;
@@ -975,14 +1062,34 @@ function mergeModels(a, b) {
 
 const less = (a, b) => (a === null || a === undefined ? null : Math.max(0, a - (b ?? 0)));
 
+/** The first Claude Code whose resumed `claude -p` carries the session's running totals on (Anthropic's cost-tracking docs). */
+export const CLAUDE_RUNNING_TOTALS = [2, 1, 277];
+
+/** Whether Claude Code `version` (its stream's `claude_code_version`, "2.1.325") reports a resumed session's running total. */
+export function claudeRunningTotals(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(String(version ?? ""));
+  if (!m) return false;
+  const v = m.slice(1, 4).map(Number);
+  const at = v.findIndex((x, i) => x !== CLAUDE_RUNNING_TOTALS[i]);
+  // A pre-release of 2.1.277 itself comes before it (semver).
+  return at === -1 ? !m[4] : v[at] > CLAUDE_RUNNING_TOTALS[at];
+}
+
 /**
  * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
  * reported (in this process, or in its restored transcript or Pendulum's record of it). Turns are per process and stay.
- * Codex's first-turn cache split is that running total too, so it is counted the same way.
+ * Codex's first-turn cache split is that running total too, so it is counted the same way. A Claude Code before 2.1.277
+ * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, so its
+ * pass's dollars and tokens are unknown (UNKNOWN_WHY `resumed-total`): neither its total nor a share of it is taken.
  */
 export function sinceSession(rec, prior) {
   if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;
+  if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) {
+    const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, models: undefined, basis: `unknown: ${UNKNOWN_WHY["resumed-total"]} (${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "no version named"})` };
+    delete out.models;
+    return markUnknown(out, "resumed-total");
+  }
   // Copilot: only a total from the same session start is a running total of the one subtracted (Copilot keeps the
   // start time across --resume); anything else is counted as reported.
   if (rec.harness === "copilot" && (!rec.sessionStartTime || rec.sessionStartTime !== prior.sessionStartTime)) return rec;
@@ -1002,6 +1109,7 @@ export function sinceSession(rec, prior) {
   return { ...rec, ...counts, ...cache, usd: less(rec.usd, prior.usd), tokens: { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) }, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
 }
 
+/** Several records of one stage summed: the known dollars, tokens, turns and credits, and its runs of unknown cost (unknownOf). */
 export function mergeUsage(records) {
   // A stage's decision record (harness.mjs keepDecision) is never the base: its label, basis and model are no pass's.
   const all = records.filter(Boolean);
@@ -1011,10 +1119,12 @@ export function mergeUsage(records) {
   // A negative dollar figure is no spend: it never lowers a total (every harness).
   const spend = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : null);
   const out = { ...first, usd: spend(first.usd), tokens: { ...first.tokens } };
+  // The runs of unknown cost in it, from every record (UNKNOWN_WHY): `usd` is the known dollars only.
+  delete out.usdUnknown;
+  delete out.usdUnknownWhy;
+  Object.assign(out, unknownOf(live));
   for (const r of live.slice(1)) {
     out.usd = spend(r.usd) === null && out.usd === null ? null : (out.usd ?? 0) + (spend(r.usd) ?? 0);
-    out.usdLowerBound = out.usdLowerBound || r.usdLowerBound;
-    out.usdUpperBound = out.usdUpperBound || r.usdUpperBound;
     out.tokens.input = add(out.tokens.input, r.tokens.input);
     out.tokens.output = add(out.tokens.output, r.tokens.output);
     out.tokens.cached = add(out.tokens.cached, r.tokens.cached);

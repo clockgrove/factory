@@ -93,7 +93,7 @@ test("#266: the row gives each local account its stages, dollars and usage-limit
     { account: "alpha", stages: 1, usd: null, limitPauses: 0 },
     { account: "beta", stages: 2, usd: null, limitPauses: 0 },
   ]);
-  assert.match(markdownTable([score(bare)]), /accounts alpha \(1 stage, unmetered\), beta \(2 stages, unmetered\)/);
+  assert.match(markdownTable([score(bare)]), /accounts alpha \(1 stage, unknown\), beta \(2 stages, unknown\)/);
   assert.deepEqual(score(localMerge(64)).accountUse, [], "no account named: none");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", usageLimit: { harness: "claude" } }).parts, { limitPaused: true }, "the spend line marks a usage-limit pause");
   assert.deepEqual(stageSpendLine({ usd: 0.5, exit: "paused", outage: { host: "github.com" } }).parts, {}, "not an outage's");

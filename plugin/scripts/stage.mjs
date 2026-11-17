@@ -24,7 +24,7 @@ import { STAGE_GRACE_MS, dispatchLatency, sandboxMarkerLine, sandboxRecord, sess
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
 import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
-import { parseUsage } from "./lib/usage.mjs";
+import { UNKNOWN_WHY, markUnknown } from "./lib/usage.mjs";
 import { optedValues } from "./lib/worker-secrets.mjs";
 
 /** How long a lease lasts, and how often the stage renews it: a stage that dies frees the Objective within the lease. */
@@ -370,31 +370,14 @@ export function stageWriter({ issue, claim, launch = null, list, put }) {
 }
 
 /**
- * The usage record of a child the stage ended, from what its harness streamed. A Codex or Copilot stream is priced from
- * its tokens or credits as far as it got. A Claude stream reports dollars only in its last result, which a killed run
- * never prints (an earlier pass's result would undercount), and an unpriced stream of any harness is the same: those
- * count the stage's budget (`maxUsd`, the harness's own spend cap) as an upper bound, so daily_usd never misses it. A
- * Codex stream that shows sub-agent work is missing those threads' spend (codex-threads.mjs reads it after a run, which
- * a killed run never reaches): it counts the larger of its priced tokens and the budget (an upper bound when the budget
- * is the larger), or with no budget its priced tokens as a lower bound.
+ * The usage record of a child the stage ended before it wrote its own: one run of unknown cost (usage.mjs UNKNOWN_WHY
+ * `unreported`), never $0, never its budget and never a reading of its stream. The pass it was in never reported its
+ * cost, and the stream holds every pass of the stage, whose running totals no stream alone can split. The stage's
+ * progress comment keeps what its finished passes reported (session.mjs progressReporter), and `daily_usd` names this
+ * stage as a run of unknown cost without counting it.
  */
-export function killedUsage({ harness, model, events, maxUsd }) {
-  let rec = null;
-  try {
-    rec = parseUsage(harness, events, model);
-  } catch {
-    rec = null;
-  }
-  const tokens = rec?.tokens ?? { input: null, output: null, cached: null, written: null };
-  const cap = Number.isFinite(maxUsd) && maxUsd > 0 ? maxUsd : null;
-  const priced = typeof rec?.usd === "number" && Number.isFinite(rec.usd) ? rec.usd : null;
-  if (harness === "codex" && rec?.subAgentWork && priced !== null) {
-    // The basis stays the price table's (result.json reads its date from it); usdLowerBound says the rest.
-    if (cap === null || priced >= cap) return { ...rec, ok: false, error: "ended by the stage", usdLowerBound: true };
-    return { ...rec, ok: false, error: "ended by the stage", usd: cap, usdUpperBound: true, basis: "upper bound: ended by the stage before its sub-agent threads were read; counted at max_usd" };
-  }
-  if (harness !== "claude" && priced !== null) return { ...rec, ok: false, error: "ended by the stage" };
-  return { ...(rec || {}), harness, model: rec?.model ?? model ?? null, tokens, ok: false, error: "ended by the stage", usd: cap, usdUpperBound: cap !== null, basis: cap === null ? "unmetered: ended by the stage, no budget set" : "upper bound: ended by the stage before the harness reported its cost; counted at max_usd" };
+export function killedUsage({ harness, model }) {
+  return markUnknown({ harness, model: model ?? null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, ok: false, error: "ended by the stage", basis: `unknown: ended by the stage; ${UNKNOWN_WHY.unreported}` }, "unreported");
 }
 
 /**
@@ -415,10 +398,9 @@ async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDi
   // The child died before it wrote its usage: a result of Pendulum's own, so the stage's spend still counts.
   if (!existsSync(join(usageDir, "result.json"))) {
     try {
-      const events = existsSync(join(usageDir, "events.jsonl")) ? readFileSync(join(usageDir, "events.jsonl"), "utf8") : "";
       const harness = env.PENDULUM_HARNESS || "claude";
       const model = (stage === "review" ? env.PENDULUM_REVIEWER_MODEL : env.PENDULUM_MODEL) || null;
-      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, events, maxUsd: Number(env.PENDULUM_MAX_USD) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
+      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
     } catch (e) {
       log(`usage after the kill not written: ${String(e.message).slice(0, 120)}`);
     }

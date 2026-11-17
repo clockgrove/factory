@@ -289,13 +289,13 @@ export async function applyStop(repo, issue, { pr = undefined, closed = false, p
 }
 
 /**
- * The stopped stage's records for its usage: each harness pass this stage ran (harness.mjs stagePasses). A pass the
- * stop ended before its harness reported dollars (a Claude run prints them only in its last line) counts its stream's
- * live reading (`stoppedUsd`, harness.mjs runOnce), a lower bound, so the stop's spend is recorded once and not lost.
- * `open`: the passes still running (harness.mjs openPasses), each at its live reading, a lower bound too.
+ * The stopped stage's records for its usage: each harness pass this stage ran (harness.mjs stagePasses) and `open`, the
+ * passes still running (harness.mjs openPasses). A pass the stop ended before its harness reported dollars (a Claude run
+ * prints them only in its last line) is a run of unknown cost as its record says (usage.mjs UNKNOWN_WHY), never $0 and
+ * never a reading of its stream; so is each pass still running.
  */
 export function stoppedRecords(passes, open = []) {
-  return [...(passes || []), ...open].map((r) => (r && r.stopped && !r.noRun && !Number.isFinite(r.usd) && Number.isFinite(r.stoppedUsd) ? { ...r, usd: r.stoppedUsd, usdLowerBound: true, basis: "lower bound: the stage was stopped before the harness reported its cost; the live reading of its stream" } : r));
+  return [...(passes || []), ...open].filter(Boolean);
 }
 
 /** The restart's record on the issue (logic.mjs restartedAt reads it): one per restart, keyed by its time. */

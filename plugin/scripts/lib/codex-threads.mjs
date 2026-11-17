@@ -17,7 +17,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { jsonLines, priceCodex } from "./usage.mjs";
+import { jsonLines, markUnknown, priceCodex } from "./usage.mjs";
 
 /** A Codex thread id (a UUID, as Codex makes them): safe as a file name, a `find -name` pattern and an object key. */
 export const plainThread = (id) => typeof id === "string" && /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/.test(id);
@@ -159,8 +159,9 @@ const less = (a, b) => Math.max(0, (a ?? 0) - (b ?? 0));
  * total Pendulum already counted for it in an earlier pass or stage, so a resume never counts a child twice), priced at
  * the thread's own model (the run's when the rollout names none), added to the record's tokens and dollars and listed
  * in `subAgents`. Returns `{rec, totals}`: `totals` maps each thread to its running total, for the next pass's `prior`.
- * A thread whose model has no price leaves the dollars a lower bound (`usdLowerBound`); a run whose own dollars are
- * unknown (no turn completed) gets its threads' dollars as a lower bound, so the caps still count what is known.
+ * A thread whose model has no price is spend of unknown cost (usage.mjs UNKNOWN_WHY `sub-agent`); a run whose own
+ * dollars are unknown (no turn completed) gets its threads' known dollars and stays a run of unknown cost, so the caps
+ * still count what is known and nothing is read as $0.
  */
 export function withSubAgents(rec, threads, prior = () => null) {
   const totals = Object.create(null);
@@ -168,7 +169,7 @@ export function withSubAgents(rec, threads, prior = () => null) {
   const shares = [];
   const tokens = { ...rec.tokens };
   let usd = rec.usd;
-  let lowerBound = !!rec.usdLowerBound;
+  let unpriced = false;
   for (const t of threads) {
     if (!t.tokens) continue;
     const model = t.model || rec.model || null;
@@ -181,17 +182,16 @@ export function withSubAgents(rec, threads, prior = () => null) {
     shares.push({ id: t.id, parent: t.parent, model, usd: price, tokens: own });
     for (const k of KEYS) tokens[k] = add(tokens[k], own[k]);
     if (price === null) {
-      if (KEYS.some((k) => own[k] > 0)) lowerBound = true;
+      if (KEYS.some((k) => own[k] > 0)) unpriced = true;
     } else if (usd === null || usd === undefined) {
-      // Unmetered stays unmetered unless a thread spent something: never a $0 for a run whose spend is unknown.
-      if (price > 0) {
-        usd = price;
-        lowerBound = true;
-      }
+      // The run's own spend stays unknown (its record says so); a thread's known dollars are counted beside it.
+      if (price > 0) usd = price;
     } else usd += price;
   }
   if (!shares.length) return { rec, totals };
   const out = { ...rec, tokens, usd: typeof usd === "number" ? Math.round(usd * 10000) / 10000 : usd, subAgents: shares };
-  if (lowerBound) out.usdLowerBound = true;
+  if (unpriced) markUnknown(out, "sub-agent");
+  // The run's own spend stays unknown when its own dollars were (its record's mark, or `unreported` when it had none).
+  if ((rec.usd === null || rec.usd === undefined) && !out.usdUnknown) markUnknown(out, "unreported");
   return { rec: out, totals };
 }

@@ -119,8 +119,6 @@ export const DEFAULTS = {
   step_stall_floor_minutes: "15", // ... and never before its normal duration plus this
   queue_stall_minutes: "10", // a merge queue commit with no CI begun this long is stalled (logic.mjs queueStall)
   relay_unknown_shut: "6", // failed relayed calls of unknown cost that shut the gateway relay for a stage (gateway-relay.mjs)
-  relay_unknown_floor_usd: "0.25", // the least such a call is booked at
-  relay_slow_floor_usd: "1", // the least one that ran past 30 s upstream is booked at
 };
 
 export const SECRET_INPUTS = new Set(["app_private_key", "anthropic_api_key", "claude_code_oauth_token", "codex_api_key", "codex_gateway_key", "copilot_github_token", "ai_gateway_api_key", "worker_secret_values", "github_token", "app_token", "vercel_token"]);
@@ -220,7 +218,7 @@ export const WORKFLOW_ONLY_SETTINGS = new Set(
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
     ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
-    ...["RELAY_UNKNOWN_SHUT", "RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD"],
+    ...["RELAY_UNKNOWN_SHUT"],
   ].map((n) => `PENDULUM_${n}`),
 );
 /** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, the harness, models, effort, validation, sweep, scheduling. */
@@ -287,8 +285,6 @@ export const OWNER_LIMITS = {
   PENDULUM_STEP_STALL_FLOOR_MINUTES: { from: 1, max: 24 * 60 },
   PENDULUM_QUEUE_STALL_MINUTES: { from: 1, max: 24 * 60 },
   PENDULUM_RELAY_UNKNOWN_SHUT: { whole: true, from: 1, max: 1000 },
-  PENDULUM_RELAY_UNKNOWN_FLOOR_USD: { from: 0, above: true, max: 100 },
-  PENDULUM_RELAY_SLOW_FLOOR_USD: { from: 0, above: true, max: 100 },
   // At most half the claim pause's least (two hours): a stage waiting in place writes no heartbeat while this machine's
   // network is down, so its wait ends well before the dispatcher could take its quiet claim for a loop gone away.
   PENDULUM_LOCAL_WAIT_MINUTES: { from: 0, above: true, max: 60 },
@@ -710,7 +706,7 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     siblingWaitMs: limit("sibling_wait_hours") * 3600_000,
     maxParts: limit("max_parts"),
     stall: { factor: limit("step_stall_factor"), floorMs: limit("step_stall_floor_minutes") * 60_000, queueMs: limit("queue_stall_minutes") * 60_000 },
-    relay: { unknownShut: limit("relay_unknown_shut"), unknownFloorUsd: limit("relay_unknown_floor_usd"), slowFloorUsd: limit("relay_slow_floor_usd") },
+    relay: { unknownShut: limit("relay_unknown_shut") },
     project: get("project").trim(),
   };
 }

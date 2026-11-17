@@ -1,5 +1,6 @@
 // Every stage leaves a spend line in its progress comment (#152): $0 when it ran no harness pass, and while it runs the
-// spend Pendulum has read so far, marked a lower bound, so a stage that is killed mid-run is never read as nothing.
+// known spend so far with each pass still running as a run of unknown cost (#478, #483), so a stage that is killed
+// mid-run is never read as nothing and never at a guess.
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -11,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { refusingOrigin } from "./ports.mjs";
 import { spendMarker, spendOf, stageSpendLine } from "../scripts/lib/logic.mjs";
+import { mergeUsage } from "../scripts/lib/usage.mjs";
 import { costOf } from "../../bench/lib/cost.mjs";
 import { spendRecords } from "../../bench/lib/objective.mjs";
 
@@ -71,8 +73,9 @@ const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
 
 /**
  * A fake Codex: each call adds one turn to its thread's running total (kept in FAKE_STATE), as real Codex reports it.
- * FAKE_SPLIT=1: the turn is reported half done, the process lingers (FAKE_LINGER ms, 1500 by default), then its other
- * half lands in the thread (a pass that runs on after its stage was killed) and it writes `<FAKE_STATE>/done`.
+ * FAKE_SPLIT=1: half the turn lands in the thread and the process writes `<FAKE_STATE>/half`, lingers (FAKE_LINGER ms,
+ * 1500 by default), then its other half lands (a pass that runs on after its stage was killed), it reports the turn and
+ * writes `<FAKE_STATE>/done`.
  */
 function fakeCodex(bin) {
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
@@ -85,8 +88,12 @@ const add = (k) => { t.input += 200000 * k; t.cached += 100000 * k; t.output += 
 add(split ? 0.5 : 1);
 const id = resume || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724";
 console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
-console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: 0, output_tokens: t.output, reasoning_output_tokens: 0 } }));
-if (split) setTimeout(() => { add(0.5); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, Number(process.env.FAKE_LINGER) || 1500);
+const turn = () => console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: t.input, cached_input_tokens: t.cached, cache_write_input_tokens: 0, output_tokens: t.output, reasoning_output_tokens: 0 } }));
+if (!split) turn();
+else {
+  fs.writeFileSync(process.env.FAKE_STATE + "/half", "");
+  setTimeout(() => { add(0.5); turn(); fs.writeFileSync(process.env.FAKE_STATE + "/done", ""); }, Number(process.env.FAKE_LINGER) || 1500);
+}
 `, { mode: 0o755 });
 }
 
@@ -101,7 +108,7 @@ function stageProcess(script, env) {
   return { child, exited, out: () => out, err: () => err };
 }
 
-test("a stage killed after a real pass leaves that pass's dollars in its default progress writer's line, a lower bound", async () => {
+test("a stage killed after a real pass leaves that pass's reported dollars in its default progress writer's line", async () => {
   const gh = await fakeGitHub();
   const root = mkdtempSync(join(tmpdir(), "spend-kill-"));
   mkdirSync(join(root, "bin"));
@@ -128,8 +135,8 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
   const usd = Number(/written (\S+)/.exec(s.out())?.[1]);
   assert.ok(usd > 0, `the pass reported no dollars:\n${s.out()}\n${s.err()}`);
   const line = lineOf(gh.progress.at(-1));
-  assert.deepEqual(line, { usd, usdLowerBound: true });
-  assert.equal(spendOf(gh.progress.at(-1)), usd, "daily_usd counts it");
+  assert.deepEqual(line, { usd }, "the pass had ended: its dollars are known, nothing is unknown");
+  assert.deepEqual(spendOf(gh.progress.at(-1)), { usd, unknown: 0 }, "daily_usd counts it");
 });
 
 /**
@@ -138,7 +145,8 @@ test("a stage killed after a real pass leaves that pass's dollars in its default
  * - end: the stage's end as worker.mjs makes it (stageSpendLine, the final write) and its saved session and result.json;
  * - after: a phase line after the pass, then killed;
  * - window: killed as the pass ends, before any write shows it;
- * - mid: a phase line while the pass runs, then killed; the pass runs on and finishes in the session;
+ * - mid: a phase line while the pass runs (half its turn in the thread), then killed; the pass runs on and finishes in
+ *   the session;
  * - term: SIGTERM while the pass runs (as `pendulum serve` stops a stage), with no write since the pass began; the pass
  *   runs in its own process group, as locally, and is killed with the stage;
  * - term-unsent: as term, but GitHub is unreachable for the stop's write (nothing sent);
@@ -159,9 +167,10 @@ async function stages(plan) {
   const script = (name, how) => `
     import { existsSync, mkdirSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
-    import { runHarness, stageSpendSoFar } from ${JSON.stringify(LIB("harness.mjs"))};
+    import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
     import { progressReporter, restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};
     import { stageSpendLine } from ${JSON.stringify(LIB("logic.mjs"))};
+    import { existsSync as there } from "node:fs";
     import { mergeUsage } from ${JSON.stringify(LIB("usage.mjs"))};
     import { repoOf } from ${JSON.stringify(LIB("github.mjs"))};
     const how = ${JSON.stringify(how)};
@@ -179,7 +188,7 @@ async function stages(plan) {
     const run = pass();
     if (how === "mid" || how.startsWith("term")) {
       const until = Date.now() + 10_000;
-      while (!((await stageSpendSoFar()).usd > 0) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+      while (!there(join(root, "half")) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
       if (how.startsWith("term")) {
         // The status line the stop's write carries (no write now: the last was moments ago), or where it goes.
         if (how === "term-5xx") progress.live("FAIL-THIS", { everyMs: 3_600_000 });
@@ -203,7 +212,7 @@ async function stages(plan) {
       await progress("validation");
       process.exit(137);
     }
-    const line = stageSpendLine({ usd: mergeUsage([rec]).usd }, { records: [rec], known: await stageSpendSoFar() });
+    const line = stageSpendLine(mergeUsage([rec]));
     progress.spend(line.usd, line.parts);
     await progress("exit: delivered");
     const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-" + rec.sessionId + ".jsonl");
@@ -228,6 +237,7 @@ async function stages(plan) {
       const until = Date.now() + 15_000;
       if (how === "mid") while (!existsSync(join(root, "done")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
       rmSync(join(root, "done"), { force: true });
+      rmSync(join(root, "half"), { force: true });
     }
   } finally {
     gh.close();
@@ -242,32 +252,36 @@ async function stages(plan) {
 const PASS = (await import("../scripts/lib/usage.mjs")).priceCodex("gpt-6.1-sol", { input: 200000, output: 5000, cached: 100000, written: 0 });
 const near = (a, b) => Math.abs(a - b) < 1e-6;
 
-for (const [how, killed, own, passes] of [
-  ["after", "after a finished pass and a write that shows it", PASS, 3],
-  ["window", "as its pass ends, before a write shows it", 0, 3],
-  ["mid", "in the middle of a pass that then runs on", PASS / 2, 3],
-  ["failed", "after a second pass whose write failed to land", PASS, 4],
-  ["term", "by SIGTERM in the middle of a pass, before a write shows it", PASS / 2, 2.5],
-  // Its stop write never sent: no session totals recorded, so the resuming stage counts the killed half pass.
-  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, 2.5],
-  // Its stop write answered 502, so it may have landed: the totals are recorded, and the half pass is never counted twice
-  // (here it did not land, so it is not counted at all: a lower bound).
-  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, 2],
+// The killed stage's line holds the dollars its harness had reported when its last write landed, and each pass still
+// running then as a run of unknown cost; the session totals it recorded are reported ones only, so the resumed stage
+// counts the rest, from the session's own running total: every pass is counted once, none at a guess.
+const ONE = { usdUnknown: 1, usdUnknownWhy: ["unreported"] };
+for (const [how, killed, own, unknown, passes] of [
+  ["after", "after a finished pass and a write that shows it", PASS, {}, 3],
+  ["window", "as its pass ends, before a write shows it", 0, {}, 3],
+  ["mid", "in the middle of a pass that then runs on", 0, ONE, 3],
+  ["failed", "after a second pass whose write failed to land", PASS, {}, 4],
+  // The stop's write shows the pass still running as a run of unknown cost; the resumed stage counts its half.
+  ["term", "by SIGTERM in the middle of a pass, before a write shows it", 0, ONE, 2.5],
+  // Its stop write never sent: the line is the last that landed, and the resumed stage still counts the half pass.
+  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, {}, 2.5],
+  // Its stop write answered 502 (it may have landed): the totals it recorded are reported ones, so nothing is lost.
+  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, {}, 2.5],
 ]) {
-  test(`a stage killed ${killed}, then resumed: the stages' lines sum to ${passes} passes' spend, none counted twice`, async () => {
+  test(`a stage killed ${killed}, then resumed: the stages' lines sum to ${passes} passes' spend, none counted twice or guessed`, async () => {
     const lines = await stages(["end", how, "end"]);
     const sum = lines.reduce((s, l) => s + l.usd, 0);
     assert.ok(near(sum, passes * PASS), `${JSON.stringify(lines)} sum to ${sum}, not ${passes * PASS}`);
-    // The killed stage's line holds what it had written; the resumed stage counts the rest.
-    assert.ok(near(lines[1].usd, own) && lines[1].usdLowerBound === true, JSON.stringify(lines));
-    assert.ok(near(lines[0].usd, PASS) && !lines[0].usdLowerBound && !lines[2].usdLowerBound, JSON.stringify(lines));
+    assert.deepEqual({ ...lines[1], usd: near(lines[1].usd, own) }, { usd: true, ...unknown }, JSON.stringify(lines));
+    assert.ok(near(lines[0].usd, PASS) && !lines[0].usdUnknown && !lines[2].usdUnknown, JSON.stringify(lines));
   });
 }
 
-test("a stage stopped by SIGTERM before any status write shows its first pass leaves that pass's reading, a lower bound", async () => {
+test("a stage stopped by SIGTERM before any status write shows its first pass leaves it as a run of unknown cost, never $0 or a reading", async () => {
   // A fresh session that no later stage resumes: this line is all that records the pass.
   const [line] = await stages(["term"]);
-  assert.ok(near(line.usd, PASS / 2) && line.usd > 0 && line.usdLowerBound === true, JSON.stringify(line));
+  assert.deepEqual(line, { usd: 0, ...ONE });
+  assert.deepEqual(spendOf(spendMarker(line.usd, ONE)), { usd: 0, unknown: 1 }, "daily_usd names it");
 });
 
 test("restSync: a getter's token, the held secrets redacted here, and whether the request may have landed", async () => {
@@ -352,7 +366,7 @@ test("a final write waits for a status write in flight, and its spend line repla
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = `http://127.0.0.1:${server.address().port}`;
   try {
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, estimated: false }) });
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, unknown: 1 }) });
     progress.live("harness working", { force: true });
     await new Promise((r) => setTimeout(r, 30));
     progress.spend(1.25, null);
@@ -361,7 +375,7 @@ test("a final write waits for a status write in flight, and its spend line repla
     process.env.GITHUB_API_URL = saved;
     server.close();
   }
-  assert.deepEqual(landed.map(lineOf), [{ usd: 0.5, usdLowerBound: true }, { usd: 1.25 }]);
+  assert.deepEqual(landed.map(lineOf), [{ usd: 0.5, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, { usd: 1.25 }]);
   assert.match(landed.at(-1), /exit: delivered/);
 });
 
@@ -380,39 +394,21 @@ test("the default progress writer of a local stage carries the stage's spend so 
     for (const [k, v] of [["GITHUB_API_URL", saved[0]], ["PENDULUM_LOCAL", saved[1]]]) if (v === undefined) delete process.env[k];
     gh.close();
   }
-  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, usdLowerBound: true }, null]);
+  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0 }, null]);
 });
 
-test("stageSpendLine: $0 for no pass; the record's dollars and key share; a pass with no dollars counts what was read", () => {
-  const priced = { usd: 2 };
-  const none = { usd: null };
-  assert.deepEqual(stageSpendLine({ usd: null }, { records: [] }), { usd: 0, parts: {} });
-  assert.deepEqual(stageSpendLine({ usd: 1.25, workerKeyUsd: 0.25 }, { records: [{ usd: 1 }], known: { usd: 1.25 } }), { usd: 1.25, parts: { workerKeyUsd: 0.25 } });
-  assert.deepEqual(stageSpendLine({ usd: null }, { records: [none], known: { usd: 0.4 } }), { usd: 0.4, parts: { usdLowerBound: true } });
-  // One priced pass and one with no dollars: never below the interim figure, and marked.
-  assert.deepEqual(stageSpendLine({ usd: 2 }, { records: [priced, none], known: { usd: 5 } }), { usd: 5, parts: { usdLowerBound: true } });
-  // Never below the record either.
-  assert.deepEqual(stageSpendLine({ usd: 2 }, { records: [priced, none], known: { usd: 1 } }), { usd: 2, parts: { usdLowerBound: true } });
-  // A reading at the table's dearest rates (a model with no price row) is an estimate, not a lower bound.
-  assert.deepEqual(stageSpendLine({ usd: null }, { records: [none], known: { usd: 1.35, estimated: true } }), { usd: 1.35, parts: { usdUpperBound: true } });
-  assert.deepEqual(stageSpendLine({ usd: 0.9, usdLowerBound: true }, { records: [{ usd: 0.9 }] }), { usd: 0.9, parts: { usdLowerBound: true } });
+test("stageSpendLine: $0 for no pass; the record's known dollars and key share; runs of unknown cost named, never priced", () => {
+  const unknown = (n, why = ["unreported"]) => ({ usdUnknown: n, usdUnknownWhy: why });
+  assert.deepEqual(stageSpendLine(mergeUsage([]) ?? { usd: 0 }), { usd: 0, parts: {} });
+  assert.deepEqual(stageSpendLine(mergeUsage([{ usd: 1.25, workerKeyUsd: 0.25, tokens: {} }])), { usd: 1.25, parts: { workerKeyUsd: 0.25 } });
+  assert.deepEqual(stageSpendLine(mergeUsage([{ usd: null, tokens: {} }])), { usd: 0, parts: unknown(1) });
+  // One priced pass and one with no dollars: the known dollars, and the other named as unknown.
+  assert.deepEqual(stageSpendLine(mergeUsage([{ usd: 2, tokens: {} }, { usd: null, tokens: {}, ...unknown(1, ["zeroed"]) }])), { usd: 2, parts: unknown(1, ["zeroed"]) });
   // A placeholder for a pass that never ran (a clean rebase, an already-reviewed PR): a plain $0.
-  assert.deepEqual(stageSpendLine({ usd: null }, { records: [{ noRun: true, usd: null }], known: { usd: 0 } }), { usd: 0, parts: {} });
+  assert.deepEqual(stageSpendLine(mergeUsage([{ noRun: true, usd: 0, tokens: {} }])), { usd: 0, parts: {} });
 });
 
-test("a live meter on a model with no price row says its reading is an estimate", async () => {
-  const { liveSpend } = await import("../scripts/lib/live-spend.mjs");
-  const turn = JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 0, output_tokens: 100 } });
-  const unlisted = liveSpend("codex", "gpt-unlisted-9");
-  const listed = liveSpend("codex", "gpt-6.1-sol");
-  for (const m of [unlisted, listed]) m.line(turn);
-  assert.deepEqual([unlisted.estimated(), listed.estimated()], [true, false]);
-  const claude = liveSpend("claude", "claude-unlisted-1");
-  claude.line(JSON.stringify({ type: "assistant", message: { id: "m", usage: { input_tokens: 10, output_tokens: 1 } } }));
-  assert.equal(claude.estimated(), true);
-});
-
-test("the scorer: a $0 stage is metered, a lower-bound line marks the total, a relayed key's dollars count once", () => {
+test("the scorer: a $0 stage is known, a line with a run of unknown cost says so, a relayed key's dollars count once", () => {
   const app = { login: "pendulum-app[bot]", type: "Bot" };
   const c = (body) => ({ user: app, created_at: "2031-03-02T03:00:00Z", body });
   const collected = {
@@ -421,7 +417,7 @@ test("the scorer: a $0 stage is metered, a lower-bound line marks the total, a r
     issueComments: [
       c(`<!-- pendulum:48:progress:work:1 -->\nPendulum work run 1.\n${spendMarker(1.5, { workerKeyUsd: 0.5 })}`),
       c(`<!-- pendulum:48:progress:review:2 -->\nPendulum review run 2.\n${spendMarker(0)}`),
-      c(`<!-- pendulum:48:progress:work:3 -->\nPendulum work run 3.\n${spendMarker(0.2, { usdLowerBound: true })}`),
+      c(`<!-- pendulum:48:progress:work:3 -->\nPendulum work run 3.\n${spendMarker(0.2, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })}`),
     ],
   };
   const rows = spendRecords(collected, { app: app.login });
@@ -431,13 +427,10 @@ test("the scorer: a $0 stage is metered, a lower-bound line marks the total, a r
   // The key's $0.50 is inside the line's $1.50: the total is the lines' sum, the key broken out beside it.
   assert.equal(cost.usd, 1.7);
   assert.equal(cost.workerKeyUsd, 0.5);
-  assert.equal(cost.usdLowerBound, true);
-  assert.match(cost.basis, /lower bound/);
+  assert.equal(cost.usdUnknown, 1);
+  assert.match(cost.basis, /plus 1 run of unknown cost/);
+  assert.doesNotMatch(cost.basis, /lower bound|upper bound|estimate|at least|at most/);
   assert.match(cost.basis, /includes 0\.5 USD through a relayed worker key/);
-  // A line priced at the table's dearest rates reads as an estimate, not a lower bound.
-  const est = costOf(spendRecords({ ...collected, issueComments: [c(`<!-- pendulum:48:progress:work:4 -->\nPendulum work run 4.\n${spendMarker(1.35, { usdUpperBound: true })}`)] }, { app: app.login }), { date: "x", perMillion: {} }, { harness: "codex" });
-  assert.equal(est.usdLowerBound, undefined);
-  assert.match(est.basis, /estimate at the price table's dearest rates/);
 });
 
 test("a usage record whose dollars include a relayed worker key says so in its basis", async () => {
@@ -455,7 +448,7 @@ test("a Claude session resumed after a killed stage starts from the lower of the
   const id = "0b0c0d0e-0000-4000-8000-000000000001";
   const rel = join("-c", `${id}.jsonl`);
   const cost = (usd) => `${JSON.stringify({ type: "cost-state", totalCostUSD: usd })}\n`;
-  // A ended with its session at $1.00; B, killed, recorded $1.80 from its live reading; Claude's own live total is $1.50.
+  // A ended with its session at $1.00; B, killed, recorded $1.80 in its session totals; Claude's own live total is $1.50.
   mkdirSync(join(ws, "usage-work-a", "transcript", "-c"), { recursive: true });
   writeFileSync(join(ws, "usage-work-a", "transcript", rel), cost(1));
   writeFileSync(join(ws, "usage-work-a", "result.json"), JSON.stringify({ session: { harness: "claude", id, files: [rel], checkout: "/c" } }));
@@ -465,8 +458,8 @@ test("a Claude session resumed after a killed stage starts from the lower of the
   mkdirSync(join(root, "config", "projects", "-c"), { recursive: true });
   writeFileSync(join(root, "config", "projects", rel), cost(1) + cost(1.5));
   mkdirSync(join(root, "bin"));
-  // C's resumed pass: Claude reports the session's running total, $2.50.
-  writeFileSync(join(root, "bin", "claude"), `#!${process.execPath}\nconsole.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: ${JSON.stringify(id)}, total_cost_usd: 2.5, result: "ok" }));\n`, { mode: 0o755 });
+  // C's resumed pass on a Claude Code that carries running totals: it reports the session's running total, $2.50.
+  writeFileSync(join(root, "bin", "claude"), `#!${process.execPath}\nconsole.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(id)}, claude_code_version: "2.1.277" }));\nconsole.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: ${JSON.stringify(id)}, total_cost_usd: 2.5, result: "ok" }));\n`, { mode: 0o755 });
   const script = `
     import { runHarness } from ${JSON.stringify(LIB("harness.mjs"))};
     import { restoreTranscript } from ${JSON.stringify(LIB("session.mjs"))};

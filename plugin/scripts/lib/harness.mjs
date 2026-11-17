@@ -3,7 +3,7 @@
 // documented headless flags; the tests in plugin/test/usage.test.mjs pin them.
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { appendOwn, dropOwned, writeNew, writeOwn } from "./fsafe.mjs";
 import { dirname, join } from "node:path";
@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, answeredError, backgroundJobs, busyCode, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, subAgentRefusal, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, UNKNOWN_WHY, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -23,7 +23,6 @@ import { CODEX_GATEWAY_ENV, PENDULUM_CONTROL_KEYS, PENDULUM_SECRET_KEYS, GITHUB_
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
 import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
-import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
 import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
@@ -476,10 +475,11 @@ export function harnessVersion(harness, env = process.env) {
 const SESSION_TOTALS = new Map();
 const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 
-// This process's stage spend as Pendulum has read it: each finished pass's own dollars, and each running pass's live meter
-// (live-spend.mjs) with the session it resumed. What the progress comment's spend line carries until the stage records its
-// final figure. `dir` and `harness`: the stage's usage directory and harness, from its first pass.
-const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, harness: null, decisions: 0 };
+// This process's stage spend as Pendulum has read it: each finished pass's known dollars (`done`) and its runs of unknown
+// cost (`unknown`, usage.mjs UNKNOWN_WHY), and the passes still running (`open`), each with the session it resumed. What
+// the progress comment's spend line carries until the stage records its final figure. `dir` and `harness`: the stage's
+// usage directory and harness, from its first pass.
+const STAGE_SPEND = { done: 0, unknown: 0, open: new Map(), dir: null, harness: null, decisions: 0 };
 
 /**
  * The file in a stage's usage directory that holds each session's running total as the stage's progress comment last
@@ -490,67 +490,23 @@ const STAGE_SPEND = { done: 0, open: new Map(), estimated: false, dir: null, har
 export const SESSION_TOTALS_FILE = "session-totals.json";
 
 /**
- * The stage's spend so far, `{usd, estimated, commit}`: finished passes' harness dollars (a pass that reported none at
- * its live reading), running passes' live readings and the gateway relay's key spend (its total, which no harness figure
- * here holds). `estimated`: some of it is a live reading at the price table's dearest rates (a model with no row), an
- * over-estimate of the tokens read. Otherwise a lower bound: a pass that has not ended may spend more, and a meter that
- * cannot be read counts nothing. `commit()`: once a line with this figure is written, records the session totals it
- * counted (SESSION_TOTALS_FILE).
+ * The stage's spend so far, `{usd, unknown, commit}`: `usd` the known dollars (finished passes' reported figures and the
+ * gateway relay's key spend, its total, which no harness figure here holds), `unknown` the runs of unknown cost (finished
+ * passes that reported none, usage.mjs UNKNOWN_WHY, and every pass still running: what it has spent is not reported until
+ * it ends, so a stage that dies now leaves it unknown, never $0 and never a reading of its stream). `commit()`: once a
+ * line with this figure is written, records the session totals it counted (SESSION_TOTALS_FILE): only totals a harness
+ * reported, so the next stage that resumes a session counts what this line could not (a running pass's share).
  */
 export async function stageSpendSoFar() {
-  // What has finished is taken before any meter is read: a pass that ends meanwhile is never counted twice.
-  const base = stageSpendBase();
-  const reads = [];
-  for (const [m, { session }] of STAGE_SPEND.open) {
-    const read = await m.usd().catch(() => 0);
-    const est = read > 0 && !!m.estimated?.();
-    // The running pass's session as this figure counts it; none known (or an estimate) leaves the session out, so the
-    // next stage counts the pass again rather than not at all.
-    const counted = session && !est ? await m.session?.().catch(() => null) : null;
-    reads.push({ session, read, est, counted });
-  }
-  return stageSpendOf(base, reads);
+  return stageSpendNow();
 }
 
-/**
- * stageSpendSoFar read at once, with no await: each running pass's meter from its stream alone (live-spend.mjs `now`).
- * For a process that is stopping (session.mjs progressReporter), where nothing asynchronous runs any more.
- */
+/** stageSpendSoFar, read at once with no await: for a process that is stopping (session.mjs progressReporter). */
 export function stageSpendNow() {
-  const base = stageSpendBase();
-  const reads = [];
-  for (const [m, { session }] of STAGE_SPEND.open) {
-    let r = null;
-    try {
-      r = m.now?.() ?? null;
-    } catch {
-      // read as nothing
-    }
-    const read = Math.max(0, Number(r?.usd) || 0);
-    const est = read > 0 && !!m.estimated?.();
-    reads.push({ session, read, est, counted: session && !est ? (r?.session ?? null) : null });
-  }
-  return stageSpendOf(base, reads);
-}
-
-const stageSpendBase = () => ({ done: STAGE_SPEND.done, estimated: STAGE_SPEND.estimated, totals: Object.fromEntries(SESSION_TOTALS) });
-
-/**
- * The stage's spend: what had finished (`base`) and its running passes' readings ({session, read, est, counted}), with
- * its commit (stageSpendSoFar).
- */
-function stageSpendOf(base, reads) {
-  let usd = base.done;
-  let estimated = base.estimated;
-  const totals = base.totals;
-  for (const { session, read, est, counted } of reads) {
-    usd += read;
-    if (est) estimated = true;
-    if (!session) continue;
-    if (counted) totals[session] = counted;
-    else delete totals[session];
-  }
-  usd += Number(activeRelay()?.totals().usd) || 0;
+  // Each session's last reported total, as `usd` counted it: a running pass's share is not in either until it ends.
+  const totals = Object.fromEntries(SESSION_TOTALS);
+  const usd = STAGE_SPEND.done + (Number(activeRelay()?.totals().usd) || 0);
+  const unknown = STAGE_SPEND.unknown + STAGE_SPEND.open.size;
   const { dir, harness } = STAGE_SPEND;
   const commit = () => {
     if (!dir) return;
@@ -560,24 +516,29 @@ function stageSpendOf(base, reads) {
       log(`session totals not written: ${String(e?.message || e).slice(0, 120)}`);
     }
   };
-  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, estimated, commit };
+  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, unknown, commit };
 }
 /**
- * A pass's meter, counted from its start until `end(usd)` books its final dollars (its live reading when there are
- * none). `session`: the session it resumes, null for a fresh one.
+ * A pass counted as running from its start until `end(rec)` books its record: its known dollars, and its runs of unknown
+ * cost (usage.mjs unknownRuns) when it reported none or not all. `more(rec)` books runs of unknown cost the record gained
+ * after its end (a relayed key call the gateway did not price, gateway-relay.mjs addKeySpend). `session`: the session it
+ * resumes, null for a fresh one.
  */
-export function meterPass(meter, { session = null, label = "run", harness = null, model = null, decision = false } = {}) {
-  STAGE_SPEND.open.set(meter, { session, label, harness, model, decision });
+export function meterPass({ session = null, label = "run", harness = null, model = null, decision = false } = {}) {
+  const token = {};
+  let booked = 0;
+  STAGE_SPEND.open.set(token, { session, label, harness, model, decision });
   return {
-    end: async (usd) => {
-      if (!STAGE_SPEND.open.delete(meter)) return;
-      if (typeof usd === "number" && Number.isFinite(usd)) {
-        STAGE_SPEND.done += Math.max(0, usd);
-        return;
-      }
-      const read = await meter.usd().catch(() => 0);
-      STAGE_SPEND.done += read;
-      if (read > 0 && meter.estimated?.()) STAGE_SPEND.estimated = true;
+    end: (rec) => {
+      if (!STAGE_SPEND.open.delete(token)) return;
+      if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.done += Math.max(0, rec.usd);
+      booked = unknownRuns(rec);
+      STAGE_SPEND.unknown += booked;
+    },
+    more: (rec) => {
+      const now = unknownRuns(rec);
+      if (now > booked) STAGE_SPEND.unknown += now - booked;
+      booked = Math.max(booked, now);
     },
   };
 }
@@ -1220,8 +1181,8 @@ export function joinLost(lost, rec, { limit = false, busy = false, jobs = false 
     ...(m.models ? { models: m.models } : {}),
     ...(typeof m.premiumRequests === "number" ? { premiumRequests: m.premiumRequests } : {}),
     ...(typeof m.aiu === "number" ? { aiu: m.aiu } : {}),
-    ...(m.usdLowerBound ? { usdLowerBound: true } : {}),
-    ...(m.usdUpperBound ? { usdUpperBound: true } : {}),
+    usdUnknown: m.usdUnknown,
+    usdUnknownWhy: m.usdUnknownWhy,
     ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
     ...(subs.length ? { subAgents: subs } : {}),
     started: lost[0].started ?? rec.started,
@@ -1259,19 +1220,13 @@ async function runOnce(opts) {
 }
 
 /**
- * The passes still running, each as a record at its live reading (a lower bound): what a stage that stops before
- * they end counts for them (stop.mjs stoppedRecords). Read at once, with no await (live-spend.mjs `now`).
+ * The passes still running, each as a record of unknown cost (usage.mjs UNKNOWN_WHY `unreported`): what a stage that
+ * stops before they end counts for them (stop.mjs stoppedRecords). Never $0 and never a reading of its stream.
  */
 export function openPasses() {
   const out = [];
-  for (const [m, { label = "run", harness = null, model = null, decision = false }] of STAGE_SPEND.open) {
-    let usd = 0;
-    try {
-      usd = Math.max(0, Number(m.now?.()?.usd) || 0);
-    } catch {
-      usd = 0;
-    }
-    out.push({ harness, model, label, usd, usdLowerBound: true, ...(decision ? { decision: true, ok: true } : { ok: false }), stopped: true, error: "still running when the stage stopped", basis: "lower bound: still running when the stage stopped; the live reading of its stream", tokens: { input: null, output: null, cached: null, written: null } });
+  for (const { label = "run", harness = null, model = null, decision = false } of STAGE_SPEND.open.values()) {
+    out.push(markUnknown({ harness, model, label, usd: null, ...(decision ? { decision: true, ok: true } : { ok: false }), stopped: true, error: "still running when the stage stopped", basis: `unknown: still running when the stage stopped; ${UNKNOWN_WHY.unreported}`, tokens: { input: null, output: null, cached: null, written: null } }, "unreported"));
   }
   return out;
 }
@@ -1341,7 +1296,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     mkdirSync(dirname(eventsFile), { recursive: true });
     appendOwn(eventsFile, `${JSON.stringify({ type: "pendulum.run", label, harness, model: model || null, effort: effort || null, started: new Date().toISOString(), resume: !!resume })}\n`);
   }
-  // A resumed session's prior running total, for the live counter (onResume) and for this pass's own share (sinceSession).
+  // A resumed session's prior running total, for the status line (onResume) and for this pass's own share (sinceSession).
   const prior = RUNNING_TOTALS.has(harness) && resume ? (SESSION_TOTALS.get(resume) ?? null) : null;
   if (prior) onResume?.(resume, prior);
   const started = new Date().toISOString();
@@ -1383,12 +1338,11 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // A runner's Claude Code and Copilot: as the agent, in a unit bubblewrap can start in (claude-runner.mjs asClaudeAgent).
   // Codex: as the agent in the usual unit (its sandbox starts there: checked on both launchers).
   const [execCmd, execArgs, execEnv] = runner && (harness === "claude" || harness === "copilot") ? asClaudeAgent(runCmd, runArgs, childEnv, agentExtra, cwd) : [runCmd, runArgs, childEnv];
-  // The relay's cap shares the pass's budget with the harness's own spend, read live from its stream (live-spend.mjs).
-  // The same reading is the stage's spend so far in its progress comment (stageSpendSoFar), with or without a relay.
-  const live = liveSpend(harness, model || null, { prior, creditUsd, rollout: relay && harness === "codex" ? codexRolloutReader(runner, childEnv) : null });
-  const metered = meterPass(live, { session: resume || null, label, harness, model: model || null });
+  // Running: a run of unknown cost in the stage's spend so far until it ends (stageSpendSoFar). The relay's cap is the
+  // pass's budget, against the key spend the gateway reports.
+  const metered = meterPass({ session: resume || null, label, harness, model: model || null });
   if (eventsFile && !STAGE_SPEND.dir) Object.assign(STAGE_SPEND, { dir: dirname(eventsFile), harness });
-  relay?.beginPass(maxUsd, live.usd);
+  relay?.beginPass(maxUsd);
   // What the harness has in flight, from its own stream: the hung check names it.
   const activity = harnessActivity();
   // A Claude sub-agent's model refused (usage.mjs subAgentRefusal) stops the run there: the main session would go on
@@ -1396,7 +1350,6 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const subStop = harness === "claude" ? new AbortController() : null;
   let subRefused = null;
   const lines = (l) => {
-    live.line(l);
     activity.feed(l);
     onLine?.(l);
     if (subStop && !subRefused && l.includes('"is_api_error_message"')) {
@@ -1445,21 +1398,22 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const rec = counted.rec;
   for (const [id, total] of Object.entries(counted.totals)) SESSION_TOTALS.set(id, total);
   // Threads this run may have spawned that were not read (a rollout absent, too large or unreadable, the read limit),
-  // or sub-agent work in the stream with no thread read at all: the dollars are a lower bound, and the log says why. A
+  // or sub-agent work in the stream with no thread read at all: their spend is unknown (UNKNOWN_WHY), and the log says why. A
   // thread already counted whose rollout is gone (a runner restores only the lineage's own) is no miss, nor is the
   // run's own rollout missing (its stream's sub-agent work with no thread read is caught below).
   const missed = found.missed.filter((m) => m.id !== ranSession && !(m.id && m.why === "no rollout" && SESSION_TOTALS.has(m.id)));
   if (harness === "codex" && (missed.length || (reported.subAgentWork && !found.threads.length))) {
-    rec.usdLowerBound = true;
-    log(`${label}: Codex sub-agent spend may be missing, so the dollars are a lower bound (${missed.length ? missed.slice(0, 3).map((m) => `${m.id ? m.id.slice(0, 8) : "threads"}: ${m.why}`).join("; ") : "its stream shows sub-agent work but no sub-agent thread was read"})`);
+    markUnknown(rec, "sub-agent");
+    log(`${label}: Codex sub-agent spend may be missing, so the run has spend of unknown cost (${missed.length ? missed.slice(0, 3).map((m) => `${m.id ? m.id.slice(0, 8) : "threads"}: ${m.why}`).join("; ") : "its stream shows sub-agent work but no sub-agent thread was read"})`);
   }
   // Every thread this run's lineage has spawned so far, with its running total: kept with the session's total, so a
   // later stage that resumes the session never counts them again (session.mjs restoreTranscript).
   const children = Object.assign(Object.create(null), prior?.children ?? {}, counted.totals);
   const withChildren = (t) => ({ ...t, ...(Object.keys(children).length ? { children: { ...children } } : {}) });
-  // A pass with no result line (killed, crashed) reports no total; the session's last good one stays, with every
-  // thread counted so far, so a later stage counts neither the session nor its threads again.
-  if (RUNNING_TOTALS.has(harness) && reported.sessionId && reported.usd !== null) {
+  // A pass with no result line (killed, crashed) reports no total, and a resumed Claude Code before 2.1.277 no running
+  // one (usage.mjs sinceSession); the session's last good one stays, with every thread counted so far, so a later stage
+  // counts neither the session nor its threads again, and counts what this pass spent.
+  if (RUNNING_TOTALS.has(harness) && reported.sessionId && reported.usd !== null && !rec.usdUnknownWhy?.includes("resumed-total")) {
     const total = withChildren({ usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime });
     SESSION_TOTALS.set(reported.sessionId, total);
     // The session's running total as Pendulum read it (for Copilot the larger of the usage file and the stream), kept in
@@ -1472,16 +1426,14 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     if (kept) rec.sessionTotal = kept;
     else delete rec.sessionTotal;
   }
-  // A pass the stage's stop ended before its harness reported dollars: its stream's live reading, kept beside the record
-  // for the stopped stage's usage (stop.mjs stoppedRecords). metered.end books the same reading in the spend so far.
-  if (r.stopped && stageStopped() && !(typeof rec.usd === "number" && Number.isFinite(rec.usd))) rec.stoppedUsd = await live.usd().catch(() => null);
-  // The pass's own dollars join the stage's spend so far; its key spend is the relay's total there.
-  await metered.end(rec.usd);
+  // The pass's own dollars, or its unknown cost, join the stage's spend so far; its key spend is the relay's total there.
+  metered.end(rec);
   // The pass's spend through the relayed key joins its record (gateway-relay.mjs addKeySpend): max_usd, daily_usd, `usd`.
   if (relay) {
     const pass = await relay.endPass();
     addKeySpend(rec, pass);
-    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unpriced) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.estimated ? `; ${pass.estimated} call${pass.estimated === 1 ? "" : "s"} of unknown cost booked at an upper bound` : ""}${pass.unpriced ? `; ${pass.shut ? relayShutText(pass.shut) : "a call's cost could not be determined"}, so the relay refused every later call` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
+    metered.more(rec);
+    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unpriced) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.unpriced ? `; ${pass.shut ? relayShutText(pass.shut) : "a call's cost could not be determined"}, so the relay refused every later call` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
     // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
     if (!pass.pings && commandsRan(harness, r.stdout)) {
       rec.workerKeyUnreached = true;
@@ -1578,7 +1530,7 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
       if (t.code !== 0 || t.timedOut) throw new Error(t.timedOut ? "unpacking timed out" : "unpacking failed");
       return counts(t.stdout);
     }
-    // The newest rollout of the thread, the one this pass wrote (codexRolloutReader reads the same): one file, so the
+    // The newest rollout of the thread, the one this pass wrote: one file, so the
     // read is bounded by MAX_ROLLOUT_BYTES.
     const root = codexSessionRoot(env);
     const newest = codexRolloutFiles(root, threadId)
@@ -1592,32 +1544,6 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
     log(`${label}: Codex's rollout could not be read for its rate limits (${String(e?.message || e).slice(0, 160)})`);
     return null;
   }
-}
-
-/**
- * A Codex thread's rollout lines that carry its usage (live-spend.mjs rolloutTotal: `token_usage_record` lines and the last
- * `token_count` one), read as the run's Codex wrote it: on a runner as the agent from its CODEX_HOME, locally from the
- * CODEX_HOME in `env`. Bounded: those lines only, at most a few seconds (MAX_ROLLOUT_BYTES locally).
- */
-export function codexRolloutReader(runner, env) {
-  if (runner) {
-    const root = join(runner.codexHome, "sessions");
-    return async (id) => {
-      if (!plainThread(id)) return "";
-      // The newest rollout of the thread (a resumed thread can have more than one).
-      const r = await exec("/bin/sh", ["-c", 'f=$(ls -t "$1"/*/*/*/rollout-*-"$2".jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || exit 0; grep -h \'"token_usage_record"\' "$f"; grep -h \'"token_count"\' "$f" | tail -n 1; exit 0', "sh", root, id], { cwd: runner.agentHome, env: scrubbedEnv(env), timeoutMs: 5_000 });
-      if (r.code !== 0 || r.timedOut) throw new Error(`the rollout could not be read (${r.timedOut ? "timed out" : `exit ${r.code}`})`);
-      return String(r.stdout || "");
-    };
-  }
-  const root = codexSessionRoot(env);
-  return async (id) => {
-    // The newest rollout of the thread, read whole (its usage lines only), as the runner's read does.
-    const files = codexRolloutFiles(root, id).map((f) => join(root, f));
-    if (!files.length) return "";
-    const p = files.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
-    return readFileSync(p, "utf8").split("\n").filter((l) => l.includes('"token_usage_record"') || l.includes('"token_count"')).join("\n");
-  };
 }
 
 /** Whether a harness run's stream shows a shell command it ran (Claude Code's Bash tool, Codex's command execution). */
@@ -1834,16 +1760,16 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   if (!agent && !(await onPath(CLI[harness].bin, given))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   const dir = agent ? null : local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "pendulum-decision-"));
   const launch = decisionLaunch({ harness, model, prompt, env: given, maxUsd, creditUsd, effort, agent, outer: local && !agent ? backend(given).sandbox.outer(given) : null, dir });
-  const live = liveSpend(harness, model || null, { creditUsd });
-  const metered = meterPass(live, { label, harness, model: model || null, decision: true });
+  const metered = meterPass({ label, harness, model: model || null, decision: true });
   const started = at();
   let r;
   try {
     // The stage's stop ends it, and so does the caller's own `signal` (the drift advisory's stop at a pass's end).
-    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, onLine: live.line, group: local, signal: signal ? AbortSignal.any([signal, stageStopSignal()]) : stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
+    r = await exec(launch.cmd, launch.args, { cwd: launch.cwd ?? undefined, env: launch.env, input: launch.stdin, timeoutMs, group: local, signal: signal ? AbortSignal.any([signal, stageStopSignal()]) : stageStopSignal(), maxBytes: 16 * 1024 * 1024, killPastMax: true, fileStdio: true });
   } catch (e) {
-    await metered.end(0);
-    return { ...none(`${CLI[harness].bin} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
+    const rec = { ...none(`${CLI[harness].bin} did not start: ${String(e?.message || e).slice(0, 160)}`), started };
+    metered.end(rec);
+    return rec;
   } finally {
     if (dir) local ? dropOwned(dir) : rmSync(dir, { recursive: true, force: true });
   }
@@ -1855,7 +1781,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
     if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
   }
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
-  await metered.end(rec.usd);
+  metered.end(rec);
   if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
@@ -1879,7 +1805,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
  * with the stage's passes (keepDecisionPass) so a stopped stage counts it (stop.mjs stoppedRecords).
  */
 export function keepDecision(rec) {
-  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...(rec.usdLowerBound ? { usdLowerBound: true } : {}), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
+  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...unknownOf([rec]), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
 }
 
 /** One more call (`one`, keepDecision's) folded into the stage's decision record `kept`, in place: spend, tokens, credits, turns, end. */

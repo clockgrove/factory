@@ -37,7 +37,7 @@ const put = (o) => console.log(JSON.stringify(o));
 const command = process.env.FAKE_CMD;
 const result = (extra = {}) => put({ type: "result", subtype: "success", is_error: false, session_id: sid, num_turns: 1, total_cost_usd: process.argv.includes("--resume") ? 0.5 : 0.25, usage: { input_tokens: 1, output_tokens: 1 }, ...extra });
 if (mode === "refuse400") { process.stdout.write(fs.readFileSync(dir + "/refuse400.jsonl")); process.exit(1); }
-put({ type: "system", subtype: "init", session_id: sid });
+put({ type: "system", subtype: "init", session_id: sid, claude_code_version: "2.1.325" });
 if (mode === "ok") { result(); process.exit(0); }
 put({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", id: "toolu_q" + n, name: "Bash", input: { command, run_in_background: true } }], usage: { input_tokens: 1, output_tokens: 1 } } });
 put({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "bq" + n, task_type: "local_bash", description: "Run the full Wave 5 qualification" }], session_id: sid });

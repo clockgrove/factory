@@ -163,6 +163,7 @@ test("all four guards unchanged: the stage continues on the kept tree, nothing c
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.writeFileSync(${JSON.stringify(join(root, "call.json"))}, JSON.stringify({ args, prompt: fs.readFileSync(0, "utf8") }));
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: args[args.indexOf("--resume") + 1], claude_code_version: "2.1.325" }));
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 3, session_id: args[args.indexOf("--resume") + 1], total_cost_usd: 1.25, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }));
 `, { mode: 0o755 });
     delete process.env.PENDULUM_LOCAL;

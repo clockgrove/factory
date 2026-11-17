@@ -230,7 +230,7 @@ test("#379: one stage runs at most three decision calls at once on its harness, 
   assert.ok(Math.abs(kept[0].usd - 0.08) < 1e-9);
   const pass = { harness: "claude", model: "m-1", label: "work-1", usd: 1.5, tokens: { input: 10, output: 5, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd", started: "2026-11-16T00:00:00.000Z", ended: "2026-11-16T00:10:00.000Z", ok: true };
   const records = [kept[0], pass];
-  assert.ok(Math.abs(sumSpend(records) - 1.58) < 1e-9, "max_usd counts it");
+  assert.ok(Math.abs(sumSpend(records).usd - 1.58) < 1e-9, "max_usd counts it");
   assert.equal(costByPhase(records), "", "no pass of its own in the exit line");
   const dir = mkdtempSync(join(tmpdir(), "pendulum-decider-usage-"));
   const usage = writeUsage(dir, { harness: "claude", model: "m-1", records, passes: 1, exit: "pr", reason: "", credentialBasis: "login" });

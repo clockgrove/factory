@@ -23,27 +23,24 @@
 // - A call that cost nothing, by structure: one that never left this machine (its socket never connected, or never
 //   finished its TLS handshake: `unsent`); a refusal before any model ran (the gateway's known 4xx, or its error type
 //   for one, PRE_MODEL_ERRORS; a 5xx saying no generation ran, UNAVAILABLE_ERRORS); a redirect, which is never followed.
-// - A failed call whose cost is unknown (an error status, a broken answer, a timeout, a stream that carried an error and
-//   no finish) is never $0 (#142): it is booked at an upper bound, the dearest call priced so far or $0.25 ($1.00 on an
-//   image route until a call there is priced; the repository's relay_unknown_floor_usd), and relaying goes on. One that names its generation is booked so at once,
-//   and its record's cost replaces the estimate when it comes; with a cap, one such estimate at a time (HOLD_MAX_MS). A
-//   failure that ran past SLOW_FAILURE_MS upstream is booked at least $1.00 (relay_slow_floor_usd). The gateway shuts for the stage (the pass
-//   ends over budget, so the stage Blocks, and every later call is refused) once a run of such calls with no priced call
-//   between them is UNKNOWN_STREAK_SHUT long and has lasted UNKNOWN_WINDOW_MS; at the UNKNOWN_STAGE_SHUT-th (relay_unknown_shut) in the stage
-//   that may have been billed (a fast error status, FAST_ERROR_MS, is not one, so blips never end a stage by their
-//   count); and at once for a complete answer that cannot be priced. The call that shuts it is booked too.
+// - A failed call whose cost the gateway did not report (an error status, a broken answer, a timeout, a stream that
+//   carried an error and no finish) is a call of unknown cost (#483): never $0, never an estimate. It adds nothing to the
+//   dollars, is counted in the pass's and the stage's `unknown`, and marks the pass's usage record (usage.mjs
+//   UNKNOWN_WHY `relay`); relaying goes on. One that names its generation is looked up, and when the gateway's record
+//   comes its cost is booked and the call is no longer unknown; with a cap, one such call at a time waits for its record
+//   (HOLD_MAX_MS). The gateway shuts for the stage (the pass ends over budget, so the stage Blocks, and every later call is
+//   refused) once a run of such calls with no priced call between them is UNKNOWN_STREAK_SHUT long and has lasted
+//   UNKNOWN_WINDOW_MS; at the UNKNOWN_STAGE_SHUT-th (relay_unknown_shut) in the stage that may have been billed (a fast
+//   error status, FAST_ERROR_MS, is not one, so blips never end a stage by their count); and at once for a complete
+//   answer that cannot be priced. These shut rules bound how many calls of unknown cost a stage makes.
 // - The call log: one line per call in the stage's usage directory (CALL_LOG), no body and no key.
 // - The cap: calls are relayed only while a harness pass runs, one billable call at a time, each only once the calls
-//   before it are priced or booked at their estimate, and only while the pass's spend through the key plus the harness's
-//   own spend in the pass so far (read live from its stream, live-spend.mjs) is under the pass's budget (what max_usd
-//   left when the pass started). The check counts booked dollars, so key spend can pass what max_usd left by the cost of
-//   the call sent last, plus, while one failed call that names its generation waits for its record, what that record
-//   says above its estimate: about two calls (and what the harness spends after the check). Beyond that, an estimate
-//   that stands for good is counted at the estimate, and what its call really cost above it is beyond the count, the
-//   cap included: with a cap, at most UNKNOWN_STAGE_SHUT such failures that may have been billed in a stage; without
-//   one, those plus the calls already in flight when it shuts. A fast error status (FAST_ERROR_MS) is taken to cost no
-//   more than its estimate; should a provider bill one above it, only the cap, counting estimates, limits it, and the
-//   gateway key's own budget bounds what is really spent.
+//   before it are priced (or known to be of unknown cost), and only while the pass's spend through the key is under the
+//   pass's budget (what max_usd left when the pass started). The check counts the dollars the gateway reported, so key
+//   spend can pass what max_usd left by the cost of the call sent last. Spend the gateway did not report is unknown and
+//   never counted against the cap, so the cap can be passed by it; the harness's own spend in a running pass is not read
+//   here either (only its final, reported figure counts, between passes). The gateway key's own budget bounds what is
+//   really spent.
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, rmSync } from "node:fs";
 import http from "node:http";
@@ -51,6 +48,7 @@ import https from "node:https";
 import zlib from "node:zlib";
 import { dirname, join } from "node:path";
 import { secretForms } from "./inputs.mjs";
+import { markUnknown } from "./usage.mjs";
 
 /** The one host the relay forwards to. */
 export const GATEWAY_ORIGIN = "https://ai-gateway.vercel.sh";
@@ -72,8 +70,8 @@ export const LOOKUP_DELAYS_MS = [1000, 3000, 6000, 12000, 20000, 30000];
 export const LOOKUP_MAX_MS = 2 * 60_000;
 /**
  * How long a pass's end waits for the lookups once its calls in flight have ended: the prices of calls just answered,
- * and the records of failed calls booked at the estimate. Past it no lookup is tried again: an estimate still standing
- * stays booked, and a record that comes later is never read, so a pass's totals are final when given. The wait for the
+ * and the records of failed calls of unknown cost. Past it no lookup is tried again: a call still unpriced stays of
+ * unknown cost, and a record that comes later is never read, so a pass's totals are final when given. The wait for the
  * calls in flight before it is not bounded here: each may take up to UPSTREAM_TIMEOUT_MS (20 minutes).
  */
 export const ENDPASS_LOOKUP_MS = 5 * 60_000;
@@ -89,11 +87,11 @@ export const LOOKUP_RETRY_MS = 15_000;
 /** The most of a lookup's Retry-After the relay waits before its next try. */
 export const LOOKUP_RETRY_AFTER_MAX_MS = 60_000;
 /**
- * The Retry-After, in seconds, on the relay's own refusals a client should simply try again: its queue is full (429),
- * and the harness's live spend could not be read (503). A client that retries on its own backoff alone gives up within
- * seconds, while the queue ahead of it takes that long per call.
+ * The Retry-After, in seconds, on the relay's own refusal a client should simply try again: its queue is full (429). A
+ * client that retries on its own backoff alone gives up within seconds, while the queue ahead of it takes that long per
+ * call.
  */
-export const RELAY_RETRY_AFTER_S = { waiting: 10, live: 5 };
+export const RELAY_RETRY_AFTER_S = { waiting: 10 };
 /** How long a call may take upstream, sending to the last byte of its answer (a long image generation). */
 export const UPSTREAM_TIMEOUT_MS = 20 * 60_000;
 /**
@@ -153,7 +151,7 @@ export const GATEWAY_REFUSALS = new Set(["quota_for_entity_exceeded", "insuffici
 /**
  * The gateway's error types for a call it refused before any model ran (as `@ai-sdk/gateway` reads them): a key, a
  * request, a rate limit, a model or a route it would not take. Such an answer costs $0 only with a 4xx status and the
- * type at `error.type`; a 5xx is looked up or estimated whatever its type. A provider's failure (`failed_dependency`)
+ * type at `error.type`; a 5xx is looked up, or is of unknown cost, whatever its type. A provider's failure (`failed_dependency`)
  * or the gateway's own (`internal_server_error`) may come after a model ran: not these.
  */
 export const PRE_MODEL_ERRORS = new Set(["authentication_error", "invalid_request_error", "rate_limit_exceeded", "model_not_found", "not_found", "forbidden", "customer_verification_required"]);
@@ -163,35 +161,23 @@ export const PRE_MODEL_ERRORS = new Set(["authentication_error", "invalid_reques
  * Gateway reference), a provider overloaded (`overloaded_error`, Anthropic's, through `/v1/messages`) or rate limited
  * (`rate_limit_exceeded`, the gateway's; `rate_limit_error`, Anthropic's). With such a type at `error.type`, or at the
  * body's top level when it has no `error` object (the gateway writes both shapes, as for its 402), and no generation id
- * in the body or header, the call costs $0 and is no unknown cost; with an id it is booked at the estimate and looked up.
+ * in the body or header, the call costs $0 and is no unknown cost; with an id it is of unknown cost until its record comes.
  */
 export const UNAVAILABLE_ERRORS = new Set(["service_unavailable_error", "overloaded_error", "rate_limit_exceeded", "rate_limit_error"]);
-/**
- * The least a call whose cost stays unknown is booked at (#142): it, or the dearest call priced so far, the larger. The
- * default of the repository's relay_unknown_floor_usd (openRelay `unknownFloorUsd`).
- */
-export const UNKNOWN_COST_FLOOR_USD = 0.25;
-/**
- * The least an image call of unknown cost is booked at until a call on its route is priced: an image costs more than
- * the usual floor more often than not, and the estimate is an upper bound. Once one is priced, the dearest call so far
- * stands in for it. IMAGE_ROUTE: the relayed image routes (video is not relayed).
- */
-export const IMAGE_UNKNOWN_FLOOR_USD = 1;
-export const IMAGE_ROUTE = /\/ai\/image-model$|^\/v1\/images\//;
 /**
  * When a run of calls of unknown cost, with no priced call between them, shuts the gateway for the stage: once it is
  * UNKNOWN_STREAK_SHUT calls long AND has lasted UNKNOWN_WINDOW_MS, from the first call's answer to the last's. Six is
  * two client calls of three attempts (the AI SDK tries a 408, 409, 429 or 5xx three times, waiting 2 s and then 4 s). A
  * minute is what a blip is not: one client's retries, or several clients' at once, ride out a few seconds of failures
- * well inside it, while a gateway that still prices nothing after a minute is down. Every call in the run is booked at
- * the estimate, the one that shuts it included.
+ * well inside it, while a gateway that still prices nothing after a minute is down. Every call in the run is counted
+ * as a call of unknown cost, the one that shuts it included.
  */
 export const UNKNOWN_STREAK_SHUT = 6;
 export const UNKNOWN_WINDOW_MS = 60_000;
 /**
  * How many failed calls of unknown cost that may have been billed shut the gateway for the stage, priced calls between
  * them or not. A cheap priced call ends a run, so dear failures between cheap calls would never end one; this bounds the
- * estimates that stand for such failures in a stage, and so what they can understate. It never resets, so a fast error
+ * calls of unknown cost in a stage, and so the spend no count holds. It never resets, so a fast error
  * status (FAST_ERROR_MS) is not one of them: the edge's 5xx in a blip comes back within seconds and runs no model, and
  * counting blips over a stage of hours would end it. Those count only toward the run (UNKNOWN_STREAK_SHUT), which a
  * gateway that stays down still reaches within about a minute. The default of the repository's relay_unknown_shut (openRelay
@@ -203,21 +189,15 @@ export const UNKNOWN_STAGE_SHUT = 6;
  * a client retries (408, 409 or 5xx: FAST_ERROR_STATUS) that came within this long of sending. The edge's 502, 503 or
  * 504 in a blip answers in about a second, while a billed call with a large prompt that then fails rarely finishes
  * inside three, so the bound stays tight around the blip. A reset after sending, a broken or truncated answer, a
- * timeout or a slow error status is what a billed failure looks like. Should a provider bill a fast whole error above
- * its estimate, only the cap, counting estimates, limits it; the gateway key's own budget bounds what is really spent.
+ * timeout or a slow error status is what a billed failure looks like. Should a provider bill a fast whole error, it is
+ * still counted as a call of unknown cost; the gateway key's own budget bounds what is really spent.
  */
 export const FAST_ERROR_MS = 3_000;
 export const FAST_ERROR_STATUS = (status) => status === 408 || status === 409 || (status >= 500 && status < 600);
 /**
- * A failed call that ran this long upstream before it ended ran a model: its estimate is at least SLOW_UNKNOWN_FLOOR_USD
- * on any route, as an image call's is (the default of the repository's relay_slow_floor_usd, openRelay `slowFloorUsd`).
- */
-export const SLOW_FAILURE_MS = 30_000;
-export const SLOW_UNKNOWN_FLOOR_USD = 1;
-/**
  * With a cap, how long a failed call that names its generation holds the turn waiting for another such call's record.
- * Past it the call goes on, booked at the estimate as a failure that names no generation, so a record that never comes
- * holds each later failure for this long at most, not for its lookup's two minutes.
+ * Past it the call goes on as a failure that names no generation (of unknown cost, never looked up), so a record that
+ * never comes holds each later failure for this long at most, not for its lookup's two minutes.
  */
 export const HOLD_MAX_MS = 15_000;
 /**
@@ -530,13 +510,12 @@ function eventReader() {
  * less: no cap). `socketDir`: where the socket goes, when not in `dir` (worker-relay.mjs relaySocketDir: a short
  * directory the caller made, mode 700); its path must fit UNIX_SOCKET_PATH_MAX. `editsMaxBytes`: an image edit's body
  * cap (EDITS_MAX_BYTES; a test sets it small, as it sets the other limits and delays). `upstreamClock`: what a call's
- * time upstream is read on, against fastErrorMs and slowFailureMs (Date.now; a test sets its own, so a loaded machine's
- * pause never turns a fast answer slow). `unknownStageShut`, `unknownFloorUsd`, `slowFloorUsd`: the repository's
- * relay_unknown_shut, relay_unknown_floor_usd and relay_slow_floor_usd (UNKNOWN_STAGE_SHUT, UNKNOWN_COST_FLOOR_USD and
- * SLOW_UNKNOWN_FLOOR_USD by default). Returns the relay: {url, port,
+ * time upstream is read on, against fastErrorMs (Date.now; a test sets its own, so a loaded machine's
+ * pause never turns a fast answer slow). `unknownStageShut`: the repository's relay_unknown_shut (UNKNOWN_STAGE_SHUT by
+ * default). Returns the relay: {url, port,
  * tcpPort, socketPath, dir, socketDir, token, probeId, beginPass(budget), endPass(), totals(), close()}.
  */
-export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, slowFailureMs = SLOW_FAILURE_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, unknownStageShut = UNKNOWN_STAGE_SHUT, unknownFloorUsd = UNKNOWN_COST_FLOOR_USD, slowFloorUsd = SLOW_UNKNOWN_FLOOR_USD, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
+export async function openRelay({ key, dir, socketDir = null, group = null, chgrp = null, tcp = false, maxUsd = 0, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, lookupDelaysMs = LOOKUP_DELAYS_MS, lookupMaxMs = LOOKUP_MAX_MS, lookupOutageMs = LOOKUP_OUTAGE_MS, lookupRetryMs = LOOKUP_RETRY_MS, unknownWindowMs = UNKNOWN_WINDOW_MS, endPassLookupMs = ENDPASS_LOOKUP_MS, fastErrorMs = FAST_ERROR_MS, holdMaxMs = HOLD_MAX_MS, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS, unknownStageShut = UNKNOWN_STAGE_SHUT, bodyTimeoutMs = BODY_TIMEOUT_MS, editsMaxBytes = EDITS_MAX_BYTES, maxPricedBytes = MAX_PRICED_BYTES, callLog = null, callLogMaxLines = CALL_LOG_MAX_LINES, upstreamClock = Date.now, log = () => {} }) {
   if (typeof key !== "string" || !key) throw new Error("the relay needs the key");
   const token = `pendulum-relay-${randomBytes(32).toString("base64url")}`;
   const probeId = randomBytes(12).toString("hex");
@@ -545,7 +524,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     const c = keyCutter(key);
     return Buffer.concat([c.push(Buffer.from(String(t), "utf8")), c.end()]).toString("utf8");
   };
-  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0, gateway: 0, gone: 0 }, gatewayRefused: null, dearest: 0, pricedPaths: new Set(), seq: 0, lastUnknownSeq: 0, run: { count: 0, first: 0, last: 0 }, unknownTotal: 0, lookupsEndBy: null, lookupsEnd: new AbortController(), estimated: 0, estimatedUsd: 0, shut: null, logged: 0, unlogged: 0, busy: false, waiters: [], failClosed: false, capped: false, pass: null, inflight: new Set(), pending: new Set(), checks: new Set(), reconciles: new Set(), said: new Set() };
+  const s = { pings: 0, spent: 0, late: 0, lateUnpriced: 0, calls: 0, failed: 0, unpriced: 0, refused: { cap: 0, unpriced: 0, token: 0, pass: 0, route: 0, gateway: 0, gone: 0 }, gatewayRefused: null, seq: 0, lastUnknownSeq: 0, run: { count: 0, first: 0, last: 0 }, unknownTotal: 0, lookupsEndBy: null, lookupsEnd: new AbortController(), unknown: 0, lateUnknown: 0, shut: null, logged: 0, unlogged: 0, busy: false, waiters: [], failClosed: false, capped: false, pass: null, inflight: new Set(), pending: new Set(), checks: new Set(), reconciles: new Set(), said: new Set() };
   const once = (what, line) => {
     if (s.said.has(what)) return;
     s.said.add(what);
@@ -572,53 +551,42 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
   };
   const round6 = (n) => Math.round(n * 1e6) / 1e6;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
-  // Dollars added to the stage's spend (or taken off it, when an estimate's record says less): in the pass that runs,
-  // else kept for the next endPass (a call that finished after its pass ended).
+  // Dollars the gateway reported, added to the stage's spend: in the pass that runs, else kept for the next endPass (a
+  // call that finished after its pass ended).
   const add = (usd) => {
     s.spent += usd;
     if (s.pass) s.pass.usd += usd;
     else s.late += usd;
   };
-  // A cost the gateway gave for call `seq` on `path`: it sets the dearest call so far (on its route too), and it ends
-  // the run of unknown costs, unless a call of unknown cost was sent after it: an older call's record says nothing of
-  // what the gateway does now.
-  const pricedCall = (usd, { seq, path }) => {
-    s.dearest = Math.max(s.dearest, usd);
-    if (path) s.pricedPaths.add(path);
+  // A cost the gateway gave for call `seq`: it ends the run of unknown costs, unless a call of unknown cost was sent
+  // after it: an older call's record says nothing of what the gateway does now.
+  const pricedCall = ({ seq }) => {
     if (seq > s.lastUnknownSeq) s.run = { count: 0, first: 0, last: 0 };
   };
-  // One call's cost: priced (`ctx`: its seq and path, see pricedCall), or an estimate (`ctx` null).
-  const book = (usd, ctx = null) => {
+  // One call's reported cost (`ctx`: its seq, see pricedCall).
+  const book = (usd, ctx) => {
     add(usd);
-    if (ctx) pricedCall(usd, ctx);
+    pricedCall(ctx);
     if (s.pass) s.pass.calls += 1;
   };
   // A looked-up cost above what the call was booked at: added to the spend, not counted as a call of its own.
-  const bookExtra = (usd, total) => {
-    add(usd);
-    s.dearest = Math.max(s.dearest, total);
-  };
-  // The upper bound a call of unknown cost is booked at (#142): the dearest call priced so far in the stage, at least
-  // unknownFloorUsd; on an image route at least IMAGE_UNKNOWN_FLOOR_USD until a call on that route is priced; and
-  // for a call that ran past slowFailureMs upstream, at least slowFloorUsd. `ctx`: the call's path and `slow`.
-  // It counts against max_usd like any spend. Returns what dropEstimate takes back.
-  const bookEstimate = ({ path, slow = false }) => {
-    const image = IMAGE_ROUTE.test(path) && !s.pricedPaths.has(path) ? IMAGE_UNKNOWN_FLOOR_USD : 0;
-    const usd = round6(Math.max(s.dearest, unknownFloorUsd, image, slow ? slowFloorUsd : 0));
+  const bookExtra = (usd) => add(usd);
+  // A call whose cost the gateway did not report: counted as a call, and as one of unknown cost (in the pass that runs,
+  // else kept for the next endPass), with nothing added to the dollars. Returns what dropUnknown takes back.
+  const bookUnknown = () => {
     const pass = s.pass;
-    book(usd);
-    s.estimated += 1;
-    s.estimatedUsd += usd;
-    if (pass) pass.estimated = (pass.estimated || 0) + 1;
-    else s.lateEstimated = (s.lateEstimated || 0) + 1;
-    return { usd, pass };
+    s.unknown += 1;
+    if (pass) {
+      pass.calls += 1;
+      pass.unknown += 1;
+    } else s.lateUnknown += 1;
+    return { pass };
   };
-  // An estimate its generation's record replaced is no estimate any more.
-  const dropEstimate = ({ usd, pass }) => {
-    s.estimated -= 1;
-    s.estimatedUsd -= usd;
-    if (pass && pass === s.pass) pass.estimated -= 1;
-    else if (!pass && s.lateEstimated) s.lateEstimated -= 1;
+  // A call of unknown cost whose generation's record came: its cost is booked by the caller, and it is unknown no more.
+  const dropUnknown = ({ pass }) => {
+    s.unknown -= 1;
+    if (pass && pass === s.pass) pass.unknown -= 1;
+    else if (!pass && s.lateUnknown) s.lateUnknown -= 1;
   };
   // The gateway shut for the stage: the pass ends over budget (the stage stops) and every later call is refused.
   // `shut`: what the Block names (relayShutText).
@@ -631,18 +599,18 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     s.shut = { ...shut, why };
     once("unpriced", `${relayShutText(s.shut)}: the pass ends over budget and every later call is refused`);
   };
-  // One more call of unknown cost, its estimate already booked (`ctx`: its seq; `at`, when its answer ended; `fast`, a
-  // fast error status). The gateway shuts for the stage once a run of them with no priced call between them is
+  // One more call of unknown cost, already counted (`ctx`: its seq; `at`, when its answer ended; `fast`, a fast error
+  // status). The gateway shuts for the stage once a run of them with no priced call between them is
   // UNKNOWN_STREAK_SHUT long and has gone on for unknownWindowMs, or at the unknownStageShut-th in the stage that may
   // have been billed (not a fast error status). Returns the call log's basis for it.
-  const strike = (why, usd, { seq, at, fast = false }) => {
+  const strike = (why, { seq, at, fast = false }) => {
     if (!fast) s.unknownTotal += 1;
     s.lastUnknownSeq = Math.max(s.lastUnknownSeq, seq);
     const run = s.run;
     run.first = run.count ? Math.min(run.first, at) : at;
     run.last = run.count ? Math.max(run.last, at) : at;
     run.count += 1;
-    if (s.failClosed) return "estimate";
+    if (s.failClosed) return "unknown";
     if (!fast && s.unknownTotal >= unknownStageShut) {
       shutDown(why, { calls: s.unknownTotal, stage: true });
       return "shut";
@@ -651,22 +619,22 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       shutDown(why, { calls: run.count });
       return "shut";
     }
-    log(`gateway relay: a call's cost could not be determined (${why}); booked $${usd.toFixed(4)} against max_usd, an upper bound, and relaying goes on (${run.count} in a row over ${Math.round((run.last - run.first) / 1000)} s; ${s.unknownTotal} in the stage that may have been billed; the gateway shuts for the stage at ${UNKNOWN_STREAK_SHUT} in a row over ${Math.round(unknownWindowMs / 1000)} s, or at ${unknownStageShut} that may have been billed)`);
-    return "estimate";
+    log(`gateway relay: a call's cost could not be determined (${why}); counted as a call of unknown cost, not against max_usd, and relaying goes on (${run.count} in a row over ${Math.round((run.last - run.first) / 1000)} s; ${s.unknownTotal} in the stage that may have been billed; the gateway shuts for the stage at ${UNKNOWN_STREAK_SHUT} in a row over ${Math.round(unknownWindowMs / 1000)} s, or at ${unknownStageShut} that may have been billed)`);
+    return "unknown";
   };
   // A call that failed (a network error after it was sent, a broken or truncated answer, a timeout, an error status, a
-  // stream that carried an error and no finish) and that nothing prices: booked at the estimate, and a strike. Returns
-  // what the call log records.
+  // stream that carried an error and no finish) and that nothing prices: a call of unknown cost, and a strike. Returns
+  // what the call log records (`usd` null: not reported).
   const unknown = (why, ctx) => {
-    const { usd } = bookEstimate(ctx);
-    return { usd, basis: strike(why, usd, ctx), unpriced: why };
+    bookUnknown();
+    return { usd: null, basis: strike(why, ctx), unpriced: why };
   };
   // A complete answer that cannot be priced: its route and shape are the caller's choice, so the gateway shuts at once.
-  // The call was billed, so it is booked at the estimate all the same.
-  const unpricedAnswer = (why, ctx) => {
-    const { usd } = bookEstimate(ctx);
+  // The call was billed: a call of unknown cost all the same.
+  const unpricedAnswer = (why) => {
+    bookUnknown();
     shutDown(why, { calls: 1, complete: true });
-    return { usd, basis: "shut", unpriced: why };
+    return { usd: null, basis: "shut", unpriced: why };
   };
   // One try at a generation's record, given `timeoutMs`: {usd}, {none} (the gateway answered 404: no record), or
   // {failed} (anything else: a 5xx, a 429, a redirect, a network error, a record with no cost yet), with the wait its
@@ -743,32 +711,32 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       s.checks,
       lookup(id).then((looked) => {
         if (looked.usd === null || looked.usd <= booked) return;
-        bookExtra(looked.usd - booked, looked.usd);
+        bookExtra(looked.usd - booked);
         record({ ...call, id, usd: looked.usd, basis: "lookup", reconciled: round6(looked.usd - booked) });
       }),
     );
-  // A failed call that names its generation: booked at the estimate at once, so the next call need not wait for the
-  // record, which then replaces the estimate (a priced call, on a line of its own). A record that never comes, or has
-  // not come when the pass's end stops the lookups, leaves the estimate standing, and is then a strike. endPass waits
-  // for these (ENDPASS_LOOKUP_MS at most), so a pass's totals are final when given. With a cap, only one such estimate
-  // stands at a time (price, below).
-  const estimateThenLookup = (id, why, call, ctx) => {
-    const est = bookEstimate(ctx);
+  // A failed call that names its generation: of unknown cost at once, so the next call need not wait for the record,
+  // which then books the gateway's cost and makes it known (a priced call, on a line of its own). A record that never
+  // comes, or has not come when the pass's end stops the lookups, leaves it of unknown cost, and is then a strike.
+  // endPass waits for these (ENDPASS_LOOKUP_MS at most), so a pass's totals are final when given. With a cap, only one
+  // such call waits for its record at a time (price, below).
+  const unknownThenLookup = (id, why, call, ctx) => {
+    const held = bookUnknown();
     aside(
       s.reconciles,
       lookup(id).then((looked) => {
         if (looked.usd !== null) {
-          add(looked.usd - est.usd);
-          pricedCall(looked.usd, ctx);
-          dropEstimate(est);
-          record({ ...call, id, usd: looked.usd, basis: "lookup", reconciled: round6(looked.usd - est.usd) });
+          add(looked.usd);
+          pricedCall(ctx);
+          dropUnknown(held);
+          record({ ...call, id, usd: looked.usd, basis: "lookup", reconciled: round6(looked.usd) });
           return;
         }
         const unpriced = `${why}; generation ${id} ${looked.cut ? "had no record when the pass ended" : "has no record"}`;
-        record({ ...call, id, usd: est.usd, basis: strike(unpriced, est.usd, ctx), unpriced, reconciled: 0 });
+        record({ ...call, id, usd: null, basis: strike(unpriced, ctx), unpriced, reconciled: 0 });
       }),
     );
-    return { usd: est.usd, basis: "estimate", id, unpriced: `${why}; generation ${id} is looked up` };
+    return { usd: null, basis: "unknown", id, unpriced: `${why}; generation ${id} is looked up` };
   };
   // One billable call at a time while a cap is on: the next starts once the one before it is priced.
   const acquire = () =>
@@ -873,32 +841,15 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     const started = Date.now();
     if (billable) {
       const running = s.pass && !s.pass.ended ? s.pass : null;
-      // The harness's own spend in the pass (live-spend.mjs): a figure that cannot be read refuses the call.
-      let harnessUsd = 0;
-      if (running?.live && running.budget !== null) {
-        let v;
-        try {
-          v = await Promise.race([Promise.resolve(running.live()), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10_000).unref())]);
-        } catch {
-          v = undefined;
-        }
-        if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
-          free();
-          s.refused.live = (s.refused.live || 0) + 1;
-          once("live", "gateway relay: the harness's own spend in the pass could not be read; the call is refused, as the cap cannot be checked");
-          return refusal(res, 503, "the model's own spend in this pass could not be read, so the Objective's dollar cap cannot be checked; the call is refused. Try once more; if it fails again, stop and report it", { retryAfter: RELAY_RETRY_AFTER_S.live });
-        }
-        harnessUsd = v;
-      }
-      // Checked once the calls before it are priced or booked at their estimate: the cap can be passed by this call's cost
-      // and what one estimate still waiting for its record hides (price, below). And checked
-      // after the waits above: a pass that ended meanwhile gave its totals, so the call is refused, never sent.
+      // Checked once the calls before it are priced or known to be of unknown cost: the cap counts reported dollars only,
+      // so it can be passed by this call's cost and by spend the gateway never reports. And checked after the wait above:
+      // a pass that ended meanwhile gave its totals, so the call is refused, never sent.
       const p = running && !running.ended && s.pass === running ? running : null;
       if (p && !s.failClosed && s.gatewayRefused) {
         free();
         return gatewayRefused();
       }
-      const over = !!p && p.budget !== null && p.usd + harnessUsd >= p.budget;
+      const over = !!p && p.budget !== null && p.usd >= p.budget;
       if (!p || s.failClosed || over) {
         free();
         if (over) {
@@ -906,15 +857,15 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
           s.capped = true;
           p.capped = true;
           record({ method: req.method, path: req.url, model, status: 402, refused: "max_usd" });
-          once("cap", `gateway relay: max_usd reached ($${p.usd.toFixed(4)} through the key and $${harnessUsd.toFixed(4)} by the harness this pass, $${p.budget.toFixed(4)} was left); further calls are refused`);
-          return refusal(res, 402, `Pendulum's dollar cap is reached: the Objective's max_usd ($${p.usd.toFixed(2)} spent through the key and $${harnessUsd.toFixed(2)} by the model in this pass, of the $${p.budget.toFixed(2)} left); no further call is relayed. Stop and report it: the cap is Pendulum's, for this Objective, not the AI Gateway's budget`, { type: "pendulum_max_usd" });
+          once("cap", `gateway relay: max_usd reached ($${p.usd.toFixed(4)} through the key this pass, $${p.budget.toFixed(4)} was left); further calls are refused`);
+          return refusal(res, 402, `Pendulum's dollar cap is reached: the Objective's max_usd ($${p.usd.toFixed(2)} spent through the key in this pass, of the $${p.budget.toFixed(2)} left); no further call is relayed. Stop and report it: the cap is Pendulum's, for this Objective, not the AI Gateway's budget`, { type: "pendulum_max_usd" });
         }
         s.refused[s.failClosed ? "unpriced" : "pass"] += 1;
         record({ method: req.method, path: req.url, model, status: 403, refused: s.failClosed ? "shut" : "pass" });
         return refusal(res, 403, s.failClosed ? `${relayShutText(s.shut)}; no further call is relayed in this stage` : "calls are relayed only while a Pendulum pass runs");
       }
     }
-    // The client may have hung up while the call waited (its turn, the live spend): one nobody waits for is never sent,
+    // The client may have hung up while the call waited its turn: one nobody waits for is never sent,
     // so never billed.
     if (res.destroyed || req.socket?.destroyed) {
       free();
@@ -1011,11 +962,10 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     const price = async (o) => {
       const headerId = typeof o.headerId === "string" && GEN_ID.test(o.headerId) ? o.headerId : null;
       const call = { method: req.method, path: req.url, model };
-      // The call's place in the order, when its answer ended, and its route: for the run of unknown costs and the estimate.
-      // `fast`: a whole 408, 409 or 5xx answer within fastErrorMs of sending, a fast error status (UNKNOWN_STAGE_SHUT).
-      // `slow`: it ran past slowFailureMs upstream (SLOW_FAILURE_MS).
+      // The call's place in the order and when its answer ended: for the run of unknown costs. `fast`: a whole 408, 409
+      // or 5xx answer within fastErrorMs of sending, a fast error status (UNKNOWN_STAGE_SHUT).
       const upstreamMs = typeof o.upstreamMs === "number" ? o.upstreamMs : 0;
-      const ctx = { seq, at: Date.now(), path: req.url, fast: !o.sentError && !o.broken && !o.overflow && FAST_ERROR_STATUS(o.status) && upstreamMs <= fastErrorMs, slow: upstreamMs > slowFailureMs };
+      const ctx = { seq, at: Date.now(), path: req.url, fast: !o.sentError && !o.broken && !o.overflow && FAST_ERROR_STATUS(o.status) && upstreamMs <= fastErrorMs };
       // Never sent: the request cannot have left this machine (upstreamRequest `unsent`: its socket never connected, or
       // never finished its TLS handshake), so the gateway saw nothing and billed nothing. $0, and no unknown cost.
       if (o.sentError && o.unsent) {
@@ -1062,7 +1012,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
           return { usd: looked.usd, basis: "lookup", id: headerId };
         }
         if (looked?.cut) return { ...unknown("the answer was too large to read its cost and its generation's record had not come when the pass ended", ctx), id: headerId };
-        return { ...unpricedAnswer(headerId ? "the answer was too large to read its cost and its generation's record never came" : "the answer was too large to read its cost", ctx), ...(headerId ? { id: headerId } : {}) };
+        return { ...unpricedAnswer(headerId ? "the answer was too large to read its cost and its generation's record never came" : "the answer was too large to read its cost"), ...(headerId ? { id: headerId } : {}) };
       }
       if (!complete) {
         // Any other error answered whole: a 4xx the gateway gave before any model ran (its `error.type`, never its status
@@ -1085,19 +1035,19 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
           s.failed += 1;
           return { usd: 0, basis: "unavailable", type: said };
         }
-        // Else its cost is unknown: the estimate. With a generation named, booked at once and replaced by its record's
-        // cost when that comes; with none, a strike now.
+        // Else its cost is unknown. With a generation named, looked up, and its record's cost booked when that comes;
+        // with none, a strike now.
         const why = o.sentError ? `the call failed after it was sent: ${o.error}` : o.broken ? `the answer broke off: ${o.broken}` : streamFailed ? "the stream carried an error event and no finish" : o.overflow ? "the error answer was too large to read" : `the gateway answered ${o.status}${said ? ` (${said})` : ""}`;
-        // With a cap, one estimate at a time waits for its record: the cap is checked against booked dollars, and an
-        // estimate under its record hides the difference, so while one stands this call holds the turn until it settles,
-        // holdMaxMs at most. Past that it is booked as a failure that names no generation (its estimate final, never
-        // looked up). Without a cap nothing is checked against it, and the lookups run side by side.
+        // With a cap, one such call at a time waits for its record: the cap is checked against reported dollars, and a
+        // record still to come would leave its cost out, so while one waits this call holds the turn until it settles,
+        // holdMaxMs at most. Past that it goes on as a failure that names no generation (of unknown cost, never looked
+        // up). Without a cap nothing is checked against it, and the lookups run side by side.
         if (id && capOn && s.reconciles.size) {
           const until = Date.now() + holdMaxMs;
           while (s.reconciles.size && Date.now() < until) await Promise.race([...s.reconciles, sleep(until - Date.now())]);
           if (s.reconciles.size) return { ...unknown(`${why}; generation ${id} not looked up: another failed call's record was still awaited`, ctx), id, ...(said ? { type: said } : {}) };
         }
-        return { ...(id ? estimateThenLookup(id, why, call, ctx) : unknown(`${why}; no generation id`, ctx)), ...(said ? { type: said } : {}) };
+        return { ...(id ? unknownThenLookup(id, why, call, ctx) : unknown(`${why}; no generation id`, ctx)), ...(said ? { type: said } : {}) };
       }
       const { usd, id } = costOf(o.doc, route.family, o.first, headerId);
       if (usd !== null) {
@@ -1115,7 +1065,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       // The pass ended before the lookup could finish: the cost is unknown, as for a failed call, and nothing says the
       // caller shaped it so.
       if (looked?.cut && looked.usd === null) return { ...unknown("the gateway reported no cost and its generation's record had not come when the pass ended", ctx), id };
-      if (!looked || looked.usd === null) return { ...unpricedAnswer(!id ? "the answer named no cost and no generation" : looked.failed ? "the gateway reported no cost and the lookup of its generation's cost kept failing" : "the gateway reported no cost and its generation's record never came", ctx), ...(id ? { id } : {}) };
+      if (!looked || looked.usd === null) return { ...unpricedAnswer(!id ? "the answer named no cost and no generation" : looked.failed ? "the gateway reported no cost and the lookup of its generation's cost kept failing" : "the gateway reported no cost and its generation's record never came"), ...(id ? { id } : {}) };
       book(looked.usd, ctx);
       return { usd: looked.usd, basis: "lookup", id };
     };
@@ -1180,27 +1130,27 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     token,
     probeId,
     /**
-     * A harness pass starts: calls are relayed while the key's spend in it, plus `live()` (the harness's own spend in the
-     * pass so far, live-spend.mjs), stays under `budget` (null: no cap).
+     * A harness pass starts: calls are relayed while the key's reported spend in it stays under `budget` (null: no cap).
      */
-    beginPass(budget, live = null) {
+    beginPass(budget) {
       s.lookupsEndBy = null;
       s.lookupsEnd = new AbortController();
-      s.pass = { budget: capOn ? Math.max(0, Number(budget) || 0) : null, live, usd: 0, calls: 0, unpriced: 0, estimated: 0, capped: false, pings: 0 };
+      s.pass = { budget: capOn ? Math.max(0, Number(budget) || 0) : null, usd: 0, calls: 0, unpriced: 0, unknown: 0, capped: false, pings: 0 };
     },
     /**
      * The pass ended: its spend through the key once every call in it is priced (or failed closed), with any spend booked
-     * since the last pass ended (a call that finished after it), so every dollar reaches a usage record.
+     * since the last pass ended (a call that finished after it), so every dollar reaches a usage record:
+     * {usd, calls, unpriced, unknown, capped, pings, gatewayRefused, shut}. `usd` is the gateway's reported dollars only;
+     * `unknown` counts the calls whose cost it did not report (addKeySpend marks the pass's record so).
      */
     async endPass() {
       // Ended first: a call still waiting for its turn sees the pass ended and is refused, never sent. What is in flight
       // still books into it.
-      const p = s.pass || { usd: 0, calls: 0, unpriced: 0, estimated: 0, capped: false, pings: 0 };
+      const p = s.pass || { usd: 0, calls: 0, unpriced: 0, unknown: 0, capped: false, pings: 0 };
       p.ended = true;
       // Every call in flight, to the end of its answer (UPSTREAM_TIMEOUT_MS at most). Then the lookups: the calls' prices
-      // and the estimates waiting for their generation's record get ENDPASS_LOOKUP_MS in all, after which no lookup is
-      // tried again and an estimate still standing stays booked. So the totals given below are final, and no later
-      // record changes them.
+      // and the records of failed calls get ENDPASS_LOOKUP_MS in all, after which no lookup is tried again and a call
+      // still unpriced stays of unknown cost. So the totals given below are final, and no later record changes them.
       while (s.inflight.size) await Promise.allSettled([...s.inflight]);
       s.lookupsEndBy = Date.now() + endPassLookupMs;
       const ending = s.lookupsEnd;
@@ -1212,13 +1162,14 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       s.pass = null;
       const late = s.late;
       const lateUnpriced = s.lateUnpriced;
-      const lateEstimated = s.lateEstimated || 0;
+      const lateUnknown = s.lateUnknown;
       s.late = 0;
       s.lateUnpriced = 0;
-      s.lateEstimated = 0;
-      return { usd: Math.max(0, Math.round((p.usd + late) * 1e6) / 1e6), calls: p.calls, unpriced: p.unpriced + lateUnpriced, estimated: (p.estimated || 0) + lateEstimated, capped: p.capped, pings: p.pings, gatewayRefused: p.gatewayRefused ?? null, shut: s.shut };
+      s.lateUnknown = 0;
+      return { usd: Math.max(0, Math.round((p.usd + late) * 1e6) / 1e6), calls: p.calls, unpriced: p.unpriced + lateUnpriced, unknown: p.unknown + lateUnknown, capped: p.capped, pings: p.pings, gatewayRefused: p.gatewayRefused ?? null, shut: s.shut };
     },
-    totals: () => ({ usd: Math.max(0, Math.round(s.spent * 1e6) / 1e6), pings: s.pings, calls: s.calls, failed: s.failed, unpriced: s.unpriced, capped: s.capped, failClosed: s.failClosed, gatewayRefused: s.gatewayRefused, estimated: s.estimated, estimatedUsd: Math.max(0, Math.round(s.estimatedUsd * 1e6) / 1e6), shut: s.shut, callLog: callLog && s.logged ? { file: CALL_LOG, lines: s.logged, ...(s.unlogged ? { unlogged: s.unlogged } : {}) } : null, refused: { ...s.refused } }),
+    /** The stage's totals: `usd` the gateway's reported dollars, `unknown` the calls whose cost it did not report. */
+    totals: () => ({ usd: Math.max(0, Math.round(s.spent * 1e6) / 1e6), pings: s.pings, calls: s.calls, failed: s.failed, unpriced: s.unpriced, unknown: s.unknown, capped: s.capped, failClosed: s.failClosed, gatewayRefused: s.gatewayRefused, shut: s.shut, callLog: callLog && s.logged ? { file: CALL_LOG, lines: s.logged, ...(s.unlogged ? { unlogged: s.unlogged } : {}) } : null, refused: { ...s.refused } }),
     async close() {
       while (s.pending.size || s.reconciles.size) await Promise.allSettled([...s.pending, ...s.reconciles]);
       await Promise.allSettled([...s.checks]);
@@ -1249,9 +1200,10 @@ export const activeRelay = () => ACTIVE;
 
 /**
  * A pass's spend through the key added to its usage record: `workerKeyUsd` and `workerKeyCalls` beside the harness's own
- * dollars (`harnessUsd`), `usd` their sum, so max_usd between passes, daily_usd and the progress line count it. A pass
- * the relay refused at the cap is over budget, as one the harness stopped at its own cap; so is a pass in which the
- * relay shut (the stage stops there; its dollars, the estimates in them, are marked a lower bound as well).
+ * dollars (`harnessUsd`), `usd` their known sum, so max_usd between passes, daily_usd and the progress line count it.
+ * Calls whose cost the gateway did not report (`pass.unknown`) are `workerKeyUnknown`, and the record has spend of
+ * unknown cost (usage.mjs UNKNOWN_WHY `relay`): nothing is added for them. A pass the relay refused at the cap is over
+ * budget, as one the harness stopped at its own cap; so is a pass in which the relay shut (the stage stops there).
  */
 export function addKeySpend(rec, pass) {
   if (!rec || !pass) return rec;
@@ -1259,14 +1211,11 @@ export function addKeySpend(rec, pass) {
   rec.workerKeyUsd = pass.usd;
   rec.workerKeyCalls = pass.calls;
   if (pass.usd > 0 || rec.usd !== null) rec.usd = Math.round(((rec.usd ?? 0) + pass.usd) * 1e6) / 1e6;
-  if (rec.harnessUsd === null && pass.usd > 0) rec.usdLowerBound = true;
-  // A call booked at its upper-bound estimate (#142): the dollars are an upper bound; the pass goes on.
-  if (pass.estimated) {
-    rec.usdUpperBound = true;
-    rec.workerKeyEstimated = pass.estimated;
+  if (pass.unknown > 0) {
+    rec.workerKeyUnknown = pass.unknown;
+    markUnknown(rec, "relay");
   }
   if (pass.unpriced) {
-    rec.usdLowerBound = true;
     rec.workerKeyUnpriced = pass.unpriced;
     rec.budgetExceeded = true;
     if (pass.shut) rec.workerKeyShut = pass.shut;

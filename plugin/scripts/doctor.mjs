@@ -167,7 +167,7 @@ export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
     `a sibling waited for ${h(inputs.siblingWaitMs)} at most`,
     `${inputs.maxParts} part(s) per Objective at most`,
     `a queue check's step hung past ${stall.factor} x its normal duration and at least ${min(stall.floorMs)} over it, a queue commit with no CI begun stalled after ${min(stall.queueMs)}`,
-    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost, each booked at least $${relay.unknownFloorUsd} ($${relay.slowFloorUsd} past 30 s upstream)`,
+    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost (never counted against max_usd)`,
   ];
   const own = local ? localLimits(stage) : null;
   if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);

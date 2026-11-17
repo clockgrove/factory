@@ -299,22 +299,16 @@ A claim comment with a heartbeat marks an Objective a local loop is running, so 
 
 Each local run writes its dollars into its progress comment, so the `daily_usd` cap counts local and Actions spend together, on any machine.
 Every stage writes one: $0 when it ran no harness pass.
-A `--here` run writes no spend line; it stays unmetered.
+A `--here` run writes no spend line; it is not counted.
 
-**While a stage runs,** each write of its comment carries the spend Pendulum has read so far, marked `usdLowerBound` (`usdUpperBound` when part of it is priced at a price table's dearest rates, for a model with no row), so a stage that is killed or loses its machine still counts what it spent.
-- A stage stopped by a signal (Ctrl-C, SIGTERM or SIGHUP, or its loop stopping) writes that reading once more as it stops, after its harness is killed, when it is more than the line shows, waiting at most 5 s for GitHub.
-- The reading is what the harness has reported so far.
-  Claude Code reports each model response and Copilot each usage checkpoint, so their passes killed before the next write still count.
-  Codex reports usage only when a turn ends, so a Codex pass killed before its turn ends adds nothing for that pass.
+**While a stage runs,** each write of its comment carries the dollars its harness passes have reported so far (`usd`) and, as runs of unknown cost (`usdUnknown`, with why in `usdUnknownWhy`), each pass that ended without reporting and each pass still running, so a stage that is killed or loses its machine leaves what it knew: never $0 and never a reading of a pass's stream.
+- A stage stopped by a signal (Ctrl-C, SIGTERM or SIGHUP, or its loop stopping) writes its line once more as it stops, after its harness is killed, when it differs from what the line shows, waiting at most 5 s for GitHub.
+- A pass reports its cost when it ends: Claude Code in its result line, Codex when its turn completes, Copilot in its usage file. A pass killed before that is a run of unknown cost, and `daily_usd` names it beside the known dollars ("plus N runs of unknown cost") without counting it, so the day can pass `daily_usd` by it.
 
-**A resumed session counts once.** After each such write lands, the stage records in its usage directory (`session-totals.json`) the session totals that line counted.
-A stage that resumes the live session after a killed one starts from them, so what the killed stage's line counted is not counted again and what it missed is counted by the resuming stage.
-- The stopping write records them when it landed or may have (a 5xx answer, or no answer in 5 s, which includes a connection still being opened then), so it is never counted twice; one that may have landed but did not leaves that part uncounted.
-- When it certainly did not land (the connection refused or its host not found at once, or a refusal), nothing is recorded and the resuming stage counts that part.
-
-Two exceptions:
-- a reading priced at a table's dearest rates is not recorded, so the resuming stage counts that pass again (an over-count, never an under-count);
-- a stage killed after its result.json but before its last write keeps its last interim line, and the stage after it starts from that result.json.
+**A resumed session counts once.** After each such write lands, the stage records in its usage directory (`session-totals.json`) the session totals that line counted: only totals a harness reported when a pass ended.
+A stage that resumes the live session after a killed one starts from them, so what the killed stage's line counted is not counted again, and what it did not (a pass still running, or one that ended after the last write) is counted by the resuming stage from the session's own running total.
+- The stopping write records them when it landed or may have (a 5xx answer, or no answer in 5 s, which includes a connection still being opened then); they are the same reported totals either way.
+- A stage killed after its result.json but before its last write keeps its last interim line, and the stage after it starts from that result.json.
 
 ### This machine's network
 

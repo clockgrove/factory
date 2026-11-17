@@ -8,7 +8,7 @@ import { CLAIM_PAUSE_MS } from "../scripts/lib/local.mjs";
 import { WAIT_MAX_MS } from "../scripts/lib/overlap.mjs";
 import { MAX_PARTS, nextPart } from "../scripts/lib/handoff.mjs";
 import { QUEUE_STALL_MS, STALL_DEFAULTS, STEP_STALL_FLOOR_MS, jobStall, queueStall, renderTaskCard, setSelf, stepStallMs, taskCardValues } from "../scripts/lib/logic.mjs";
-import { SLOW_UNKNOWN_FLOOR_USD, UNKNOWN_COST_FLOOR_USD, UNKNOWN_STAGE_SHUT } from "../scripts/lib/gateway-relay.mjs";
+import { UNKNOWN_STAGE_SHUT } from "../scripts/lib/gateway-relay.mjs";
 import { ownerLimitChecks } from "../scripts/doctor.mjs";
 import { Local } from "../scripts/local.mjs";
 import { readFileSync } from "node:fs";
@@ -25,7 +25,7 @@ test("#423: every owner limit is a setting whose default is today's value; a val
   const d = resolveInputs({ env: {} });
   assert.deepEqual(
     [d.usageLimitWaits, d.usageLimitMoveMs, d.claimPauseMs, d.siblingWaitMs, d.maxParts, d.stall, d.relay],
-    [LIMIT.waits, LIMIT.movePastMs, CLAIM_PAUSE_MS, WAIT_MAX_MS, MAX_PARTS, { ...STALL_DEFAULTS }, { unknownShut: UNKNOWN_STAGE_SHUT, unknownFloorUsd: UNKNOWN_COST_FLOOR_USD, slowFloorUsd: SLOW_UNKNOWN_FLOOR_USD }],
+    [LIMIT.waits, LIMIT.movePastMs, CLAIM_PAUSE_MS, WAIT_MAX_MS, MAX_PARTS, { ...STALL_DEFAULTS }, { unknownShut: UNKNOWN_STAGE_SHUT }],
   );
   assert.deepEqual(localLimits({}), { waitMs: OUTAGE.stageWaitMs, outageMs: OUTAGE.blockMs });
 
@@ -40,13 +40,11 @@ test("#423: every owner limit is a setting whose default is today's value; a val
       PENDULUM_STEP_STALL_FLOOR_MINUTES: "5",
       PENDULUM_QUEUE_STALL_MINUTES: "20",
       PENDULUM_RELAY_UNKNOWN_SHUT: "40",
-      PENDULUM_RELAY_UNKNOWN_FLOOR_USD: "0.05",
-      PENDULUM_RELAY_SLOW_FLOOR_USD: "0.5",
     },
   });
   assert.deepEqual(
     [set.usageLimitWaits, set.usageLimitMoveMs, set.claimPauseMs, set.siblingWaitMs, set.maxParts, set.stall, set.relay],
-    [0, 30 * MIN, 48 * HOUR, 1.5 * HOUR, 10, { factor: 2, floorMs: 5 * MIN, queueMs: 20 * MIN }, { unknownShut: 40, unknownFloorUsd: 0.05, slowFloorUsd: 0.5 }],
+    [0, 30 * MIN, 48 * HOUR, 1.5 * HOUR, 10, { factor: 2, floorMs: 5 * MIN, queueMs: 20 * MIN }, { unknownShut: 40 }],
   );
   assert.deepEqual(localLimits({ PENDULUM_LOCAL_WAIT_MINUTES: "45", PENDULUM_LOCAL_OUTAGE_HOURS: "6" }), { waitMs: 45 * MIN, outageMs: 6 * HOUR });
 
@@ -73,7 +71,9 @@ test("#423: each limit's bound keeps every time it makes a valid Date, counted f
 });
 
 test("#423: the relay's limits are set in the workflow file only, as they bound spend; the rest a repository variable may set, and an unusable one is named", () => {
-  for (const n of ["RELAY_UNKNOWN_SHUT", "RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD"]) assert.ok(WORKFLOW_ONLY_SETTINGS.has(`PENDULUM_${n}`) && !VARIABLE_SETTINGS.has(`PENDULUM_${n}`), n);
+  assert.ok(WORKFLOW_ONLY_SETTINGS.has("PENDULUM_RELAY_UNKNOWN_SHUT") && !VARIABLE_SETTINGS.has("PENDULUM_RELAY_UNKNOWN_SHUT"));
+  // No estimate floor is a setting (#483): a call of unknown cost is never booked at a figure.
+  for (const n of ["RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD"]) assert.ok(!WORKFLOW_ONLY_SETTINGS.has(`PENDULUM_${n}`) && !VARIABLE_SETTINGS.has(`PENDULUM_${n}`), n);
   for (const n of ["USAGE_LIMIT_WAITS", "USAGE_LIMIT_MOVE_MINUTES", "CLAIM_PAUSE_HOURS", "SIBLING_WAIT_HOURS", "MAX_PARTS", "STEP_STALL_FACTOR", "STEP_STALL_FLOOR_MINUTES", "QUEUE_STALL_MINUTES", "LOCAL_WAIT_MINUTES", "LOCAL_OUTAGE_HOURS"]) assert.ok(VARIABLE_SETTINGS.has(`PENDULUM_${n}`), n);
   assert.deepEqual(variableSettings({ PENDULUM_RELAY_UNKNOWN_SHUT: "50" }).excluded, ["PENDULUM_RELAY_UNKNOWN_SHUT"]);
   const v = variableSettings({ PENDULUM_SIBLING_WAIT_HOURS: "500", PENDULUM_MAX_PARTS: "3", PENDULUM_LOCAL_OUTAGE_HOURS: "0" });
@@ -157,7 +157,7 @@ test("#423: doctor shows the limits in force, and warns when the local outage bo
   const inputs = resolveInputs({ env: { PENDULUM_CLAIM_PAUSE_HOURS: "8", PENDULUM_MAX_PARTS: "4", PENDULUM_RELAY_UNKNOWN_SHUT: "30" } });
   const [row, ...rest] = ownerLimitChecks({ inputs });
   assert.equal(row.status, "PASS");
-  for (const said of ["a quiet local claim Blocked after 8 h", "4 part(s) per Objective at most", "a sibling waited for 6 h at most", "shut at 30 calls of unknown cost, each booked at least $0.25 ($1 past 30 s upstream)", "past 3 x its normal duration and at least 15 min over it", "no CI begun stalled after 10 min", "waited out in place 2 time(s) per pass", "over 60 min away moves to a free account"]) assert.ok(row.detail.includes(said), said);
+  for (const said of ["a quiet local claim Blocked after 8 h", "4 part(s) per Objective at most", "a sibling waited for 6 h at most", "shut at 30 calls of unknown cost (never counted against max_usd)", "past 3 x its normal duration and at least 15 min over it", "no CI begun stalled after 10 min", "waited out in place 2 time(s) per pass", "over 60 min away moves to a free account"]) assert.ok(row.detail.includes(said), said);
   assert.deepEqual(rest, [], "off the local route nothing about local limits");
   const local = ownerLimitChecks({ inputs, local: true, stage: { PENDULUM_LOCAL_WAIT_MINUTES: "20", PENDULUM_LOCAL_OUTAGE_HOURS: "10" } });
   assert.match(local[0].detail, /a local stage waits in place 20 min, and an Objective paused on one outage Blocks after 10 h/);

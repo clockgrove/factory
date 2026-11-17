@@ -229,10 +229,10 @@ export function dropSocketDir(usageDir, { uid = process.getuid?.() ?? 0, root = 
 export const unrelayedGatewayKeys = (shell = {}) => Object.entries(shell).filter(([n, v]) => n !== RELAYED_NAME && (n.toUpperCase() === RELAYED_NAME || GATEWAY_KEY_SHAPE.test(String(v)))).map(([n]) => n);
 
 /**
- * The relay's spend limits from the repository's settings (inputs.mjs resolveInputs `relay`): relay_unknown_shut,
- * relay_unknown_floor_usd and relay_slow_floor_usd; none given (inputs built by hand), the relay's own defaults.
+ * The relay's limit from the repository's settings (inputs.mjs resolveInputs `relay`): relay_unknown_shut; none given
+ * (inputs built by hand), the relay's own default.
  */
-export const relayLimits = (inputs) => (inputs?.relay ? { unknownStageShut: inputs.relay.unknownShut, unknownFloorUsd: inputs.relay.unknownFloorUsd, slowFloorUsd: inputs.relay.slowFloorUsd } : {});
+export const relayLimits = (inputs) => (inputs?.relay ? { unknownStageShut: inputs.relay.unknownShut } : {});
 
 /**
  * Open the stage's relay when `shell` (the worker's shell secrets, worker-secrets.mjs) carries RELAYED_NAME. Returns

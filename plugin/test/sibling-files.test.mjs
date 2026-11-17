@@ -1201,10 +1201,10 @@ test("#277: a run named by hand gets no note; with no active sibling and one slo
 });
 
 test("#277: the rebase exit line names the passes that ran, and leaves out the count and total when the earlier rebases were unread", () => {
-  assert.equal(rebaseLine({ usd: 0, conflict: false, passes: 0 }, { count: 1, usd: 2, unmetered: 0 }), "rebase 2 of this Objective (clean, no model run): $0.00; all its rebases: $2.00");
-  assert.equal(rebaseLine({ usd: 0.8, conflict: false, passes: 2 }, { count: 0, usd: 0, unmetered: 0 }), "rebase 1 of this Objective (clean, 2 fix pass(es)): $0.80; all its rebases: $0.80");
+  assert.equal(rebaseLine({ usd: 0, conflict: false, passes: 0 }, { count: 1, usd: 2, unknown: 0 }), "rebase 2 of this Objective (clean, no model run): $0.00; all its rebases: $2.00");
+  assert.equal(rebaseLine({ usd: 0.8, conflict: false, passes: 2 }, { count: 0, usd: 0, unknown: 0 }), "rebase 1 of this Objective (clean, 2 fix pass(es)): $0.80; all its rebases: $0.80");
   assert.equal(rebaseLine({ usd: 1.25, conflict: true, passes: 1 }, null), "rebase (a conflict pass): $1.25");
-  assert.equal(rebaseLine({ usd: null, conflict: true, passes: 0 }, null), "rebase (clean, no model run): unmetered");
+  assert.equal(rebaseLine({ usd: null, conflict: true, passes: 0 }, null), "rebase (clean, no model run): unknown");
 });
 
 test("#277: a rebase stage's progress comment carries its rebase line on every route, and the tally and scorecard read it back", async () => {
@@ -1222,7 +1222,7 @@ test("#277: a rebase stage's progress comment carries its rebase line on every r
     // The Actions route: no spend line in the progress comment (its dollars are in the usage artifact).
     const progress = progressReporter(repoOf(REPO), 7, { token: "t" }, { stage: "work", runId: "42", soFar: null });
     progress.rebase({ usd: 1.25, conflict: true });
-    await progress(`exit: delivered; usd 1.25; ${rebaseLine({ usd: 1.25, conflict: true, passes: 1 }, { count: 2, usd: 0.5, unmetered: 0 })}`);
+    await progress(`exit: delivered; usd 1.25; ${rebaseLine({ usd: 1.25, conflict: true, passes: 1 }, { count: 2, usd: 0.5, unknown: 0 })}`);
   } finally {
     globalThis.fetch = realFetch;
     if (savedUrl === undefined) delete process.env.GITHUB_API_URL;
@@ -1238,7 +1238,7 @@ test("#277: a rebase stage's progress comment carries its rebase line on every r
   const clean = `${marker(7, "progress", "work:41")}\nPendulum work: started.\n<!-- pendulum:rebase-cost {"usd":0,"conflict":false} -->`;
   const pasted = { id: 99, user: { login: "someone", type: "User" }, author_association: "NONE", body: `${marker(7, "progress", "work:9")}\n<!-- pendulum:rebase-cost {"usd":50,"conflict":true} -->`, created_at: at(9) };
   const comments = [own(clean, 1), own(body.startsWith("<!--") ? body : `${marker(7, "progress", "work:42")}\n${body}`, 2), pasted];
-  assert.deepEqual(rebaseTally(comments, 7, (c) => c.user.login === SELF), { count: 2, usd: 1.25, unmetered: 0, conflicts: 1 });
+  assert.deepEqual(rebaseTally(comments, 7, (c) => c.user.login === SELF), { count: 2, usd: 1.25, unknown: 0, conflicts: 1 });
 
   const pr = { number: 12, state: "closed", merged_at: at(30), head: { ref: "pendulum/7", sha: "b".repeat(40) }, base: { sha: "c".repeat(40) }, created_at: at(0) };
   const notices = [rebaseNotice(7, { head: { sha: "1".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty" }, 0), rebaseNotice(7, { head: { sha: "2".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty" }, 1)];
@@ -1252,7 +1252,7 @@ test("#277: a rebase stage's progress comment carries its rebase line on every r
     pullDetails: { 12: { comments: notices.map((b, i) => own(b, 10 + i)), commits: [], timeline: [], reviews: [], reviewComments: [] } },
   };
   const rebases = rebasesOf(collected);
-  assert.deepEqual(rebases, { sentBack: 2, stages: 2, usd: 1.25, unmetered: 0, conflicts: 1 });
+  assert.deepEqual(rebases, { sentBack: 2, stages: 2, usd: 1.25, unknown: 0, conflicts: 1 });
   const row = { issue: 7, exit: "merged", parked: false, walkAway: { value: true, interventions: { asked: 0, unprompted: 0 }, askedOnly: { value: true } }, quality: { status: "pending" }, operator: { minutes: 0 }, cost: { usd: 3, tokens: { input: null }, unit: "usd", basis: "b" }, missing: [], rebases, activity: {} };
   const table = markdownTable([row]);
   assert.match(table.split("\n")[0], /\| Rebases \| Harness \|$/);
@@ -1304,23 +1304,22 @@ test("#277: a stopped rebase stage whose end runs out of time still leaves its r
     const clean = await run(`progress.spend(0);
       stoppedRebase(progress, false, [{ label: "rebase", usd: 0, noRun: true }]);`);
     assert.deepEqual(rebaseCostOf(clean), { usd: 0, conflict: false });
-    // A stopped pass counts at its live reading (stop.mjs stoppedRecords), a lower bound; so does a sum missing a pass.
-    const cut = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: 0.42, usdLowerBound: true }]);`);
-    assert.deepEqual(rebaseCostOf(cut), { usd: 0.42, conflict: false, usdLowerBound: true });
+    // A stopped pass with no figure (stop.mjs stoppedRecords) is a run of unknown cost beside the known dollars.
+    const cut = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] }]);`);
+    assert.deepEqual(rebaseCostOf(cut), { usd: null, conflict: false, usdUnknown: 1, usdUnknownWhy: ["unreported"] });
     const part = await run(`stoppedRebase(progress, false, [{ label: "fix-1", usd: 0.2 }, { label: "fix-2", usd: null }]);`);
-    assert.deepEqual(rebaseCostOf(part), { usd: 0.2, conflict: false, usdLowerBound: true });
+    assert.deepEqual(rebaseCostOf(part), { usd: 0.2, conflict: false, usdUnknown: 1, usdUnknownWhy: ["unreported"] });
   } finally {
     server.close();
   }
 });
 
-test("#277: a rebase's partial cost keeps its bound marks from the end's figure to the tally and the scorecard, and a sandbox rebase counts its sandbox", async () => {
-  // As the spend line: a pass with no price beside a priced one leaves a lower bound; one priced at the dearest rates an estimate.
-  assert.deepEqual(rebaseCost({ usd: 1.2, usdLowerBound: true }, { records: [{ usd: 1.2 }, { usd: null }] }), { usd: 1.2, usdLowerBound: true });
-  assert.deepEqual(rebaseCost({ usd: 0.5, usdUpperBound: true }, { records: [{ usd: 0.5, usdUpperBound: true }] }), { usd: 0.5, usdUpperBound: true });
-  assert.deepEqual(rebaseCost(null, { records: [{ usd: null }], known: { usd: 0.3 } }), { usd: 0.3, usdLowerBound: true });
-  assert.deepEqual(rebaseCost({ usd: null }, { records: [{ usd: null }] }), { usd: null });
-  assert.deepEqual(rebaseCost({ usd: null }, { records: [{ usd: null, noRun: true }] }), { usd: 0 });
+test("#277: a rebase's runs of unknown cost go from the end's figure to the tally and the scorecard, and a sandbox rebase counts its sandbox", async () => {
+  // As the spend line: a pass with no figure beside a priced one is a run of unknown cost beside the known dollars.
+  const one = { usdUnknown: 1, usdUnknownWhy: ["unreported"] };
+  assert.deepEqual(rebaseCost({ usd: 1.2, ...one }, { records: [{ usd: 1.2 }, { usd: null }] }), { usd: 1.2, ...one });
+  assert.deepEqual(rebaseCost({ usd: null }, { records: [{ usd: null }] }), { usd: null, ...one });
+  assert.deepEqual(rebaseCost({ usd: 0 }, { records: [{ usd: null, noRun: true }] }), { usd: 0 });
 
   const written = [];
   const realFetch = globalThis.fetch;
@@ -1334,7 +1333,7 @@ test("#277: a rebase's partial cost keeps its bound marks from the end's figure 
   let line;
   try {
     const progress = progressReporter(repoOf(REPO), 7, { token: "t" }, { stage: "work", runId: "43", soFar: null });
-    const cost = rebaseCost({ usd: 1.2, usdLowerBound: true }, { records: [{ usd: 1.2 }, { usd: null }] });
+    const cost = rebaseCost({ usd: 1.2, ...one }, { records: [{ usd: 1.2 }, { usd: null }] });
     const before = `${marker(7, "progress", "work:41")}\nPendulum work: started.\n<!-- pendulum:rebase-cost {"usd":0.5,"conflict":false} -->`;
     line = await rebaseExitLine(progress, 7, { cost, conflict: true, passes: 2 }, async () => [{ id: 1, user: { login: SELF, type: "Bot" }, body: before }]);
     await progress(`exit: delivered; ${line}`);
@@ -1343,9 +1342,9 @@ test("#277: a rebase's partial cost keeps its bound marks from the end's figure 
     if (savedUrl === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = savedUrl;
   }
-  assert.equal(line, "rebase 2 of this Objective (a conflict pass): at least $1.20; all its rebases: at least $1.70");
+  assert.equal(line, "rebase 2 of this Objective (a conflict pass): $1.20 plus 1 run of unknown cost; all its rebases: $1.70 plus 1 run of unknown cost");
   const body = written.at(-1);
-  assert.deepEqual(rebaseCostOf(body), { usd: 1.2, conflict: true, usdLowerBound: true });
+  assert.deepEqual(rebaseCostOf(body), { usd: 1.2, conflict: true, ...one });
 
   const at = (m) => new Date(Date.UTC(2026, 10, 14, 10, m)).toISOString();
   const own = (b, m) => ({ id: m, user: { login: SELF, type: "Bot" }, body: b, created_at: at(m) });
@@ -1353,32 +1352,32 @@ test("#277: a rebase's partial cost keeps its bound marks from the end's figure 
   const sandbox = own(`${marker(7, "progress", "work:44")}\nPendulum work: started.\n<!-- pendulum:rebase-cost {"usd":0.3,"conflict":false} -->`, 3);
   const vendor = own(`${marker(7, "vendor", "work:44")}\n${vendorBody({ line: "sandbox", vendorUsd: 0.05 })}`, 4);
   const comments = [own(body.startsWith("<!--") ? body : `${marker(7, "progress", "work:43")}\n${body}`, 2), sandbox, vendor];
-  assert.deepEqual(rebaseTally(comments, 7, (c) => c.user.login === SELF), { count: 2, usd: 1.55, unmetered: 0, conflicts: 1, usdLowerBound: true });
+  assert.deepEqual(rebaseTally(comments, 7, (c) => c.user.login === SELF), { count: 2, usd: 1.55, unknown: 1, conflicts: 1 });
 
   const collected = { repository: REPO, issue: { number: 7, title: "x", created_at: at(0), labels: [], state: "open" }, issueTimeline: [{ event: "labeled", label: { name: "pendulum:running" }, actor: { login: SELF, type: "Bot" }, created_at: at(0) }], issueComments: comments, pulls: [], pullDetails: {} };
   const rebases = rebasesOf(collected);
-  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 1.55, unmetered: 0, conflicts: 1, usdLowerBound: true });
-  assert.match(rebaseCell(rebases), /^0, at least \$1\.55/);
+  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 1.55, unknown: 1, conflicts: 1 });
+  assert.match(rebaseCell(rebases), /^0, \$1\.55 plus 1 run of unknown cost/);
 });
 
-test("#277: a sandbox rebase's vendor cost keeps its marks: the session's ceiling makes the rebases an upper bound, an unpriced sandbox a lower bound, in the tally, the cell and the row's cost", () => {
+test("#277: a sandbox rebase's vendor cost: a reported one adds its dollars, one the vendor did not report is a run of unknown cost, in the tally, the cell and the row's cost", () => {
   const at = (m) => new Date(Date.UTC(2026, 10, 14, 10, m)).toISOString();
   const own = (b, m) => ({ id: m, user: { login: SELF, type: "Bot" }, body: b, created_at: at(m) });
   const stage = (run, m) => own(`${marker(7, "progress", `work:${run}`)}\nPendulum work: started.\n<!-- pendulum:spend {"usd":0.3} -->\n<!-- pendulum:rebase-cost {"usd":0.3,"conflict":false} -->`, m);
-  // stageVendorCost's ceiling (its usage not read or not settled), booked as the launcher books it.
-  const ceiling = own(`${marker(7, "vendor", "work:51")}\n${vendorBody({ line: "sandbox", vendorUsd: 0.08, upperBound: true })}`, 2);
+  // A sandbox the vendor reported, and one whose usage it did not (stageVendorCost: null), booked as the launcher books them.
+  const priced = own(`${marker(7, "vendor", "work:51")}\n${vendorBody({ line: "sandbox", vendorUsd: 0.08 })}`, 2);
   const unpriced = own(`${marker(7, "vendor", "work:52")}\n${vendorBody({ line: "sandbox", vendorUsd: null })}`, 4);
-  assert.equal(spendOf(unpriced.body), 0, "an unpriced sandbox adds nothing to the daily sum");
+  assert.deepEqual(spendOf(unpriced.body), { usd: 0, unknown: 1 }, "an unreported sandbox adds no dollars to the daily sum and is counted as unknown");
   const mine = (c) => c.user.login === SELF;
-  assert.deepEqual(rebaseTally([stage(51, 1), ceiling], 7, mine), { count: 1, usd: 0.38, unmetered: 0, conflicts: 0, usdUpperBound: true });
-  assert.deepEqual(rebaseTally([stage(52, 3), unpriced], 7, mine), { count: 1, usd: 0.3, unmetered: 0, conflicts: 0, usdLowerBound: true });
-  assert.equal(rebaseLine({ usd: 0.1, conflict: false, passes: 1 }, rebaseTally([stage(51, 1), ceiling], 7, mine)), "rebase 2 of this Objective (clean, 1 fix pass(es)): $0.10; all its rebases: at most $0.48 (an estimate)");
+  assert.deepEqual(rebaseTally([stage(51, 1), priced], 7, mine), { count: 1, usd: 0.38, unknown: 0, conflicts: 0 });
+  assert.deepEqual(rebaseTally([stage(52, 3), unpriced], 7, mine), { count: 1, usd: 0.3, unknown: 1, conflicts: 0 });
+  assert.equal(rebaseLine({ usd: 0.1, conflict: false, passes: 1 }, rebaseTally([stage(52, 3), unpriced], 7, mine)), "rebase 2 of this Objective (clean, 1 fix pass(es)): $0.10; all its rebases: $0.40 plus 1 run of unknown cost");
 
-  const comments = [stage(51, 1), ceiling, stage(52, 3), unpriced];
+  const comments = [stage(51, 1), priced, stage(52, 3), unpriced];
   const collected = { repository: REPO, issue: { number: 7, title: "x", created_at: at(0), labels: [], state: "open" }, issueTimeline: [{ event: "labeled", label: { name: "pendulum:running" }, actor: { login: SELF, type: "Bot" }, created_at: at(0) }], issueComments: comments, pulls: [], pullDetails: {} };
   const rebases = rebasesOf(collected);
-  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 0.68, unmetered: 0, conflicts: 0, usdLowerBound: true, usdUpperBound: true });
-  assert.match(rebaseCell(rebases), /^0, about \$0\.68/);
-  // The row's cost reads the same vendor comments: the ceiling stays an upper bound, the unpriced one unpriced.
-  assert.deepEqual(spendRecords(collected).map((r) => r.vendor), [{ usd: 0.08, upperBound: true }, { usd: null }]);
+  assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 0.68, unknown: 1, conflicts: 0 });
+  assert.match(rebaseCell(rebases), /^0, \$0\.68 plus 1 run of unknown cost/);
+  // The row's cost reads the same vendor comments: the reported one priced, the unreported one unknown.
+  assert.deepEqual(spendRecords(collected).map((r) => r.vendor), [{ usd: 0.08 }, { usd: null }]);
 });

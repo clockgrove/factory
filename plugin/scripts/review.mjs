@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits, stageSpendSoFar } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
@@ -816,8 +816,6 @@ async function main() {
   };
   const finishNow = async (exit, reason, outage = null, usageLimit = null) => {
     keeper.stop();
-    // The stage's spend as last read, the relay's key spend in it: what a pass that reported no dollars counts.
-    const known = await stageSpendSoFar().catch(() => null);
     // Totals once the relay has closed: every call in flight is priced by then.
     await closeWorkerRelay(relay);
     const workerKey = relay ? relay.totals() : null;
@@ -833,7 +831,7 @@ async function main() {
       // Only now, and whatever happened: the transcript's archive above is made in Pendulum's temp directory (its TMPDIR).
       dropOwned(tmp.pendulum);
     }
-    log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usage.usd ?? "unmetered"}`);
+    log(`review exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}`);
     // Blocked on its account's usage limit with no reset reported: automatic account choice passes the account over a while.
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
     // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
@@ -841,7 +839,7 @@ async function main() {
     // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
-      const line = stageSpendLine(usage, { records, known });
+      const line = stageSpendLine(usage);
       progress.spend(line.usd, line.parts);
     }
     await progress(`exit: ${exit}${reason ? ` (${reason})` : ""}; usd ${usdText(usage)}${copilotCount(usage)}${costByPhase(records)}`);
@@ -1408,7 +1406,7 @@ async function main() {
     model: inputs.reviewerModel,
     effort: inputs.reviewerEffort,
     prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness, decisions, part, handover: handoverPatch }),
-    maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+    maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records).usd),
     agent: inputs.harness === "codex" ? undefined : "reviewer",
     reviewer: true,
     cwd: checkout,
@@ -1456,7 +1454,7 @@ async function main() {
       model: again.model,
       effort: again.effort,
       prompt: reviewerPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness, decisions, part, handover: handoverPatch }),
-      maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+      maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records).usd),
       agent: inputs.harness === "codex" ? undefined : "reviewer",
       reviewer: true,
       cwd: checkout,
@@ -1506,7 +1504,7 @@ async function main() {
             label,
             timeoutMs,
             prompt: foundationPrompt({ issue, issueTitle: issueData.title, issueBody: issueData.body, prBody: pr.body, diff: reviewDiff, since: sinceReviewed, harness: inputs.harness }),
-            maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+            maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records).usd),
             cwd: checkout,
             env: harnessEnv,
             eventsFile,
@@ -1695,7 +1693,7 @@ async function main() {
         prompt: answerPrompt({ taskCard: resume ? "" : taskCard, prNumber: pr.number, comments, decisions: listed, afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }),
         // A resume the provider refuses for the session alone runs fresh with the full card (harness.mjs runHarness).
         ...(resume ? { freshPrompt: answerPrompt({ taskCard, prNumber: pr.number, comments, decisions: listedFor(null), afterPush: afterPush.length > 0, red, question: newDecisions.length > 0 }) } : {}),
-        maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records)),
+        maxUsd: Math.max(0, inputs.maxUsd - sumSpend(records).usd),
         cwd: checkout,
         env: passEnv,
         timeoutMs: remainingMs(deadlineAt),
@@ -1736,7 +1734,7 @@ async function main() {
     let out = await io.collect();
     // Toolchain files the answer changed outside its scope: one turn to put them back, else the push below is refused.
     if (!crashed(rec) && !rec.timedOut && !rec.budgetExceeded && !rec.refusal) {
-      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), label: "answer-scope", progress, io });
+      const held = await holdScope({ outbox, session, harness: inputs.harness, model: inputs.model, effort: inputs.effort, taskCard, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, label: "answer-scope", progress, io });
       for (const r of held.usage) mark(r, r);
       records.push(...held.usage);
       if (held.usage.length) out = io.files();
@@ -1762,7 +1760,7 @@ async function main() {
     if (replied) repliesPosted = out["replies.json"];
     // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
     // A provider's refusal is not asked again: the answer Blocks with it.
-    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), unmetered });
+    const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : unmetered && typeof io.files()["exit.json"] !== "string" ? { record: { exit: "blocked", reason: capReason(), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, unmetered });
     records.push(...asked.usage);
     for (const r of asked.usage) mark(r);
     answerRecord = asked.record;
@@ -1787,7 +1785,7 @@ async function main() {
   }
   // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
   const validation = answering && !unmetered && !outbox.failed && !heldQuestion && !answerRun?.refusal
-    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records), session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
+    ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
     : { green: true, passes: 0, usage: [] };
   records.push(...validation.usage);
   passes += validation.passes;

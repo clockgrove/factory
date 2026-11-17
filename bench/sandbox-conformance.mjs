@@ -195,7 +195,7 @@ async function main() {
   await adapter.stop(id);
   const after = await adapter.usage(id);
   const stage = stageVendorCost(adapter.rates, { before: use, after });
-  row("a session's cost from two readings", burn.exitCode === 0 && !stage.upperBound && stage.activeCpuMs > 0 && stage.wallMs > 0 && stage.usd > 0, `${stage.activeCpuMs} ms CPU in ${stage.wallMs} ms, $${stage.usd} at list rates`);
+  row("a session's cost from two readings", burn.exitCode === 0 && stage.usd !== null && stage.activeCpuMs > 0 && stage.wallMs > 0 && stage.usd > 0, `${stage.activeCpuMs} ms CPU in ${stage.wallMs} ms, $${stage.usd} at list rates`);
 
   await adapter.destroy(id);
   destroyed = true;

@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
+import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -83,7 +83,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -940,9 +940,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
-  // The dollars by billing: the passes' at the credential's, the relayed key's (`keyUsd`) as billed API spend.
+  // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
+  // relayed key's as `api`); a reading with no split books the passes' at the credential's.
   const interimOf = (live) => {
-    const byBilling = addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
+    const byBilling = live.byBilling ? addBilling(live.byBilling) : addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
     const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}) };
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
@@ -1015,9 +1016,13 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   /** The comment's key (its run id), which the stage's usage record names too (writeUsage `progressRun`). */
   progress.runId = runId;
-  /** The stage credential's billing (usage.mjs BILLING, credentialEnv's), which the spend line names from the next write. */
+  /**
+   * The stage credential's billing (usage.mjs BILLING, credentialEnv's): each pass is booked by its own from then on
+   * (harness.mjs setStageBilling), and the spend line and the status line name it.
+   */
   progress.billing = (kind) => {
-    billing = Object.hasOwn(BILLING, kind ?? "") ? kind : null;
+    billing = BILLING.includes(kind) ? kind : null;
+    setStageBilling(billing);
   };
   /** That billing, for the status line's dollars (liveActivity). */
   progress.billingOf = () => billing;
@@ -2045,9 +2050,12 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
-    // What the known dollars are (usage.mjs BILLING, from the credential `billing` that ran the passes, credentialEnv's):
-    // billed API spend, a subscription's API-equivalent figure or Copilot's included credits, each part's dollars.
+    // What the known dollars are (usage.mjs BILLING): each pass's at its own kind (stamped as it ended, else passBilling
+    // on the stage credential's `billing`), the relayed key's as `api`.
     usdByBilling: usdByBilling(records || [], billing, { extraKeyUsd: kb.extra }),
+    // The kind its harness passes share (usage.mjs stageBilling; `unknown` when they differ or none ran): what the
+    // scorer reads for the stage's harness dollars, the relayed key's being `api` in usdByBilling.
+    billing: stageBilling(records || [], billing),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

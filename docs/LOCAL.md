@@ -302,7 +302,13 @@ Each local run writes its dollars into its progress comment, so `daily_usd` coun
 Every stage writes one: $0 when it ran no harness pass.
 A `--here` run writes no spend line; it is not counted.
 
-**On a login, the dollars are API-equivalent.** A local run on the harness's own login, a Claude plan token or a Codex ChatGPT login records what its passes would cost at API list prices (Claude Code's `total_cost_usd`, Codex tokens priced from the API table): not a charge, and every figure says so, "$1.20 API-equivalent (subscription)". Copilot's AI credits are "API-equivalent (included credits)". A Claude pass whose Claude Code reports an API key (a Console login, `ANTHROPIC_API_KEY` in the shell) or a provider other than Anthropic's is billed spend and shown bare, as is an API key's or the AI Gateway's. The spend line keeps the parts (`usdByBilling`), the day's total and the scorecard say each, and `max_usd` and `daily_usd` count the figure whatever it is.
+**How a local run's dollars are billed.** Each figure says it, on a positive sign only:
+- On the harness's own login, a pass is "API-equivalent at list prices, on the subscription" when the harness reports the subscription itself: Claude Code its rate-limit windows (a claude.ai login), Codex a ChatGPT plan's rate limits in its rollout. A Claude plan token (`CLAUDE_CODE_OAUTH_TOKEN`) and a Codex account whose `auth.json` names a ChatGPT auth mode are the subscription's from the start.
+- A pass on a key is billed per use and shown bare: Claude Code reporting an API key (`ANTHROPIC_API_KEY` in the shell, an `apiKeyHelper`, a Console login), `ANTHROPIC_AUTH_TOKEN`, Bedrock or Vertex, a Codex API key or API auth mode, or the AI Gateway.
+- Copilot's are "Copilot AI credits, billed to the seat".
+- Anything else is "billing not recorded": an `ANTHROPIC_BASE_URL` of your own with no key, a key source Pendulum does not know, or a login with no sign either way.
+
+The spend line keeps the parts (`billing`, `usdByBilling`), the day's total and the scorecard say each, and `max_usd` and `daily_usd` count the figure whatever its billing.
 
 **While a stage runs,** each write of its comment carries the dollars its harness passes have reported so far (`usd`) and, as runs of unknown cost (`usdUnknown`, with why in `usdUnknownWhy`), each pass that ended without reporting and each pass still running, so a stage that is killed or loses its machine leaves what it knew: never $0 and never a reading of a pass's stream.
 - A stage stopped by a signal (Ctrl-C, SIGTERM or SIGHUP, or its loop stopping) writes its line once more as it stops, after its harness is killed, when it differs from what the line shows, waiting at most 5 s for GitHub.

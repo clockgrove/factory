@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { BILLING, UNKNOWN_WHY, addBilling, billingRead, billingText, claudeRunningTotals, passBilling, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -881,7 +881,7 @@ export function sumSpend(records) {
 }
 
 /**
- * "$1.20", "$1.20 API-equivalent (subscription) plus 2 runs of unknown cost", "unknown (1 run)": a total (sumSpend's
+ * "$1.20", "$1.20 API-equivalent at list prices, on the subscription plus 2 runs of unknown cost", "unknown (1 run)": a total (sumSpend's
  * `{usd, unknown, byBilling}`) as it is shown, with what its dollars are (usage.mjs billingText).
  */
 export function spendText({ usd, unknown = 0, byBilling = null }) {
@@ -1156,7 +1156,7 @@ export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records).u
 
 /**
  * The exit line's dollars: the known figure and what it is (usage.mjs billingText on the record's `usdByBilling`: billed
- * API spend bare, "API-equivalent (subscription)" or "API-equivalent (included credits)", each part of a mix), with
+ * API spend bare, else its kind's words (usage.mjs BILLING_WORDS), each part of a mix), with
  * "plus N runs of unknown cost" and why (usage.mjs UNKNOWN_WHY) when the stage has runs of unknown cost; "unknown" with
  * why when nothing was reported. Never a number for what was not reported.
  */
@@ -1164,7 +1164,8 @@ export const usdText = (usage) => {
   const n = unknownRuns(usage);
   const why = n ? ` (${(unknownOf([usage]).usdUnknownWhy || []).map((w) => UNKNOWN_WHY[w]).join("; ")})` : "";
   if (typeof usage?.usd !== "number") return `unknown${n > 1 ? `, ${n} runs` : ""}${why}`;
-  return `${usage.usd}${billingText(usage.usd, usage.usdByBilling, (v) => String(Math.round(v * 1e6) / 1e6))}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unknown"}, worker key ${usage.workerKeyUsd})` : ""}${unknownText(n)}${why}`;
+  const parts = billingText(usage.usd, usage.usdByBilling, { fmt: (v) => String(Math.round(v * 1e6) / 1e6), unit: 1e-6 });
+  return `${usage.usd}${parts}${usage.workerKeyUsd > 0 ? `; harness ${usage.harnessUsd ?? "unknown"}, worker key ${usage.workerKeyUsd}` : ""}${unknownText(n)}${why}`;
 };
 
 /** Copilot's own units beside the dollars on the progress line: "; 3 premium requests, 41.2 AI credits"; "" for others. */
@@ -1219,6 +1220,8 @@ export function harnessActivity(now = () => Date.now()) {
     if (e.type === "system" && e.subtype === "init" && typeof e.claude_code_version === "string") claudeVersion = e.claude_code_version;
     // Where Claude Code's key came from (usage.mjs passBilling): what the line's dollars are.
     if (e.type === "system" && e.subtype === "init" && typeof e.apiKeySource === "string" && e.apiKeySource.length <= 60) s.apiKeySource = e.apiKeySource;
+    // A subscription's rate-limit windows, which Claude Code reports on a claude.ai login only (usage.mjs parseClaude).
+    if (e.type === "rate_limit_event") s.planLimits = true;
     // Claude
     if (e.type === "assistant" && e.message) {
       if (!e.parent_tool_use_id) s.turns += 1;
@@ -1282,7 +1285,7 @@ export function harnessActivity(now = () => Date.now()) {
     const active = all.filter((a) => !a.done && a.kind !== "command").map((a) => ({ ...a, minutes: Math.round((t - a.startedAt) / 60000) }));
     const done = all.filter((a) => a.done && a.kind !== "command").length;
     const commands = all.filter((a) => !a.done && a.kind === "command").length;
-    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended, ...(s.apiKeySource ? { apiKeySource: s.apiKeySource } : {}) };
+    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended, ...(s.apiKeySource ? { apiKeySource: s.apiKeySource } : {}), ...(s.planLimits ? { planLimits: true } : {}) };
   };
   const since = (thread, prior) => {
     if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
@@ -1302,8 +1305,9 @@ export function activityLine(snap, { harness = "harness", model = null, label = 
   const agents = snap.subagentsActive.length ? `; sub-agents ${snap.subagentsActive.length} active (${snap.subagentsActive.map((a) => `${a.type}: ${a.description || "?"}, ${a.minutes} min`).join("; ")})${snap.subagentsDone ? `, ${snap.subagentsDone} done` : ""}` : snap.subagentsDone ? `; sub-agents ${snap.subagentsDone} done` : "";
   const bg = snap.backgroundCommands ? `; ${snap.backgroundCommands} background command${snap.backgroundCommands > 1 ? "s" : ""} running` : "";
   const last = snap.ended ? "ended" : snap.idleMin === null ? "" : snap.idleMin === 0 ? "active now" : `last event ${snap.idleMin} min ago`;
-  const kind = passBilling(billing, { harness, apiKeySource: snap.apiKeySource });
-  const cost = snap.usd !== null ? `, $${snap.usd.toFixed(2)}${kind && kind !== "api" ? ` ${BILLING[kind]}` : ""}` : "";
+  // What the pass's dollars are, as its record will say when it ends (usage.mjs passBilling); none before the stage reads its credential.
+  const kind = billing ? passBilling(billing, { harness, apiKeySource: snap.apiKeySource, planLimits: snap.planLimits === true }) : null;
+  const cost = snap.usd !== null ? `, $${snap.usd.toFixed(2)}${kind && kind !== "api" ? ` ${BILLING_WORDS[kind]}` : ""}` : "";
   return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}${bg}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
 }
 
@@ -2627,12 +2631,16 @@ const unknownRead = (v) => {
  * the spend line carries them (`usdUnknown`, `usdUnknownWhy`: stageSpendLine) and whether it was a conflict pass. The
  * worker sums the earlier ones on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
  */
-export const rebaseCostMarker = ({ usd, conflict, usdUnknown = 0, usdUnknownWhy = [], usdByBilling = null }) =>
-  `<!-- pendulum:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...unknownRead({ usdUnknown, usdUnknownWhy }), ...billingParts({ usdByBilling }) })} -->`;
+export const rebaseCostMarker = ({ usd, conflict, usdUnknown = 0, usdUnknownWhy = [], usdByBilling = null, billing = null }) =>
+  `<!-- pendulum:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...unknownRead({ usdUnknown, usdUnknownWhy }), ...billingParts({ usdByBilling, billing }) })} -->`;
 
-/** A figure's dollars by billing (usage.mjs BILLING) as a spend or rebase line carries them: {} when it names none. */
+/**
+ * A figure's billing (usage.mjs BILLING) as a spend or rebase line carries it: its dollars by kind (`usdByBilling`) and the
+ * kind its harness passes share (`billing`); {} when it names none.
+ */
 const billingParts = (rec) => {
   const b = billingRead(rec?.usdByBilling);
+  if (Object.keys(b).length && billingCode(rec?.billing)) return { usdByBilling: b, billing: rec.billing };
   return Object.keys(b).length ? { usdByBilling: b } : {};
 };
 
@@ -2647,7 +2655,7 @@ export function rebaseCost(usage, { records = [] } = {}) {
   return { usd: num(usage?.usd), ...unknownParts(usage), ...billingParts(usage) };
 }
 
-/** A rebase's dollars as its line words them: "$1.20", "$1.20 API-equivalent (subscription) plus 1 run of unknown cost", "unknown". */
+/** A rebase's dollars as its line words them: "$1.20", "$1.20 Copilot AI credits, billed to the seat plus 1 run of unknown cost", "unknown". */
 const rebaseUsd = (usd, unknown, byBilling = null) => (usd === null ? `unknown${unknown > 1 ? ` (${unknown} runs)` : ""}` : `$${usd.toFixed(2)}${billingText(usd, byBilling)}${unknownText(unknown)}`);
 
 /**
@@ -2716,14 +2724,13 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
  * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
  * `workerKeyUsd`: the relayed key's share, already in `usd`. `usdByBilling`: the known dollars by what they are (usage.mjs
- * BILLING), so the daily sum and the scorecard say which are billed and which API-equivalent. `limitPaused`: the stage ended paused on its harness's
+ * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
  * the scorecard counts per account (#266).
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  const byBilling = billingRead(usage?.usdByBilling);
-  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...unknownParts(usage), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2759,8 +2766,7 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    const byBilling = billingRead(r?.usdByBilling);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}) };
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r) };
   } catch {
     return null;
   }
@@ -2790,7 +2796,7 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
  * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
  * model dollars. `modelUsd`: the harness's known dollars from the usage record, for a stage that left no progress
  * comment, with `modelUnknown` (usage.mjs unknownOf: `{usdUnknown, usdUnknownWhy}`) its runs of unknown cost and
- * `modelBilling` its dollars by billing (the record's `usdByBilling`, usage.mjs BILLING; the vendor's are in none). A
+ * `modelBilling` its billing (the record's `{usdByBilling, billing}`, usage.mjs BILLING; the vendor's dollars are in none). A
  * usage the vendor did not report is `vendorUsd: null`: one run of unknown cost (UNKNOWN_WHY `sandbox`), never $0 or a bound.
  */
 export function vendorBody({ line, vendorUsd, modelUsd = null, modelUnknown = null, modelBilling = null }) {
@@ -2798,8 +2804,7 @@ export function vendorBody({ line, vendorUsd, modelUsd = null, modelUnknown = nu
   const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
   const unknown = unknownOf([...(modelUnknown?.usdUnknown ? [{ usd: 0, ...modelUnknown }] : []), ...(vendor === null ? [{ usd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }] : [])]);
-  const byBilling = model === null ? {} : billingRead(modelBilling);
-  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...unknown })}`;
+  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(model === null ? {} : billingParts(modelBilling)), ...unknown })}`;
 }
 
 // ----------------------------------------------------------------- launch

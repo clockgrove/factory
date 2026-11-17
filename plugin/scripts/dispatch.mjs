@@ -1799,6 +1799,10 @@ export function closedIssueTicks(eventName, payload, { objectiveLabel }) {
 const WAKE_OWNED = new Set(["launch-grace", "review-grace", "checks-grace", "answer-grace", "local-pause"]);
 
 /** The tick's summary (JSON with `json`, else log lines), as main() reports it; returns the summary. */
+/** The tick's step summary (Markdown) from its result and reportDispatch's summary: ready, running, today's spend and how it is billed, the skips. */
+export const dispatchStepSummary = (result, inputs, summary) =>
+  `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: ${spendText({ usd: result.spentToday, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`;
+
 export function reportDispatch(result, inputs, { json = false } = {}) {
   const summary = {
     ready: result.ready,
@@ -1806,7 +1810,7 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
     spent_today_usd: Math.round(result.spentToday * 100) / 100,
     // Today's runs of unknown cost (usage.mjs UNKNOWN_WHY): beside the known dollars, never in them.
     spent_today_unknown_runs: result.unknownToday ?? 0,
-    // Today's known dollars by what they are (usage.mjs BILLING): billed API spend, API-equivalent figures.
+    // Today's known dollars by billing (usage.mjs BILLING): per use on a key, on a subscription, Copilot credits, not recorded.
     spent_today_by_billing: result.billingToday ?? {},
     daily_usd: inputs.dailyUsd,
     max_concurrent: inputs.maxConcurrent,
@@ -1831,7 +1835,7 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
+    log(`running: ${result.running}, spent today: ${spendText({ usd: result.spentToday, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
     for (const n of result.relaunched || []) log(`  #${n}: its stage was lost to a network failure or vanished; relaunched`);
     for (const n of result.relaunchesUsed || []) log(`  #${n}: its stage ended on its network with its relaunches used; Blocked`);
@@ -1916,7 +1920,7 @@ async function main() {
   setOutput("image_owed", owed ? "true" : "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, dispatchStepSummary(result, inputs, summary));
   }
 }
 

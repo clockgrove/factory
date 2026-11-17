@@ -13,16 +13,17 @@
 //
 // A count a harness does not report is null, never zero. Dollars are real or unknown (plugin usage.mjs UNKNOWN_WHY):
 // `usd` sums the known dollars and `usdUnknown` counts the runs of unknown cost, shown as "plus N runs of unknown
-// cost", never as $0, an estimate or a bound. What the known dollars are (billed API spend, a subscription's
-// API-equivalent figure, Copilot's included credits: plugin usage.mjs BILLING) comes from each record's `usdByBilling`,
-// which the worker writes from its credential; the row keeps it as `usdByBilling` and its basis says it.
+// cost", never as $0, an estimate or a bound. What the known dollars are (billed per use on a key, API-equivalent at
+// list prices on a subscription, Copilot AI credits billed to the seat, or billing not recorded: plugin usage.mjs
+// BILLING) comes from each record's `usdByBilling` and `billing`, which the worker writes; the row keeps `usdByBilling`
+// and its basis says it.
 //
 // A stage that ran in a cloud sandbox also carries the vendor's cost in its record (`vendor`, booked by the launcher
 // from the vendor's usage totals at list rates: plugin/scripts/launch.mjs bookVendor). It is summed beside the model's
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BILLING, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { BILLING_WORDS, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingCode, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 
 /** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
 export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
@@ -234,26 +235,28 @@ export function stageOf(rec) {
  */
 /**
  * A part's known dollars by billing (plugin usage.mjs BILLING) from its record's `usdByBilling`: as recorded, except a
- * Codex part the bench re-priced, whose harness dollars (the part's less the relayed key's) take the record's harness
- * kind (its one kind besides the key's `api`, else `api`) and the key's stay `api`. {} when the record names none.
+ * Codex part the bench re-priced, whose harness dollars (the part's less the relayed key's) take the record's own
+ * `billing` (the kind its harness passes share, as the worker wrote it) and the key's stay `api`. {} when the record
+ * names none.
  */
 function partBilling(rec, part) {
   const map = billingRead(rec.usdByBilling);
   if (rec.harness !== "codex" || rec.source === "spend" || !Object.keys(map).length) return map;
   const key = num(rec.workerKeyUsd) ?? 0;
-  const kinds = Object.keys(map);
-  const kind = kinds.find((k) => k !== "api") ?? (kinds.includes("api") && (map.api > key || !key) ? "api" : null);
   const harnessUsd = part.usd === null ? 0 : Math.max(0, part.usd - key);
-  return addBilling(kind ? { [kind]: harnessUsd } : {}, key > 0 ? { api: key } : {});
+  return addBilling({ [billingCode(rec.billing) ?? "unknown"]: harnessUsd }, key > 0 ? { api: key } : {});
 }
 
-/** The basis's words on what the dollars are: "; all billed API spend", "; $1.20 of it API-equivalent (subscription), not a charge". */
+/**
+ * The basis's words on what the dollars are: "; billed per use on API keys" when all are, else each kind's dollars:
+ * "; 1.2 USD API-equivalent at list prices, on the subscription; 0.3 USD billed per use".
+ */
 function billingNote(byBilling) {
   const kinds = Object.entries(byBilling);
   if (!kinds.length) return "";
-  const equivalent = kinds.filter(([k]) => k !== "api");
-  if (!equivalent.length) return "; billed API spend";
-  return `; ${equivalent.map(([k, n]) => `${round4(n)} USD ${BILLING[k]}`).join(", ")}, not a charge${byBilling.api > 0 ? `; ${round4(byBilling.api)} USD billed API spend` : ""}`;
+  const other = kinds.filter(([k]) => k !== "api");
+  if (!other.length) return "; billed per use on API keys";
+  return `; ${other.map(([k, n]) => `${round4(n)} USD ${BILLING_WORDS[k]}`).join("; ")}${byBilling.api > 0 ? `; ${round4(byBilling.api)} USD billed per use` : ""}`;
 }
 
 export function costOf(records, prices, { harness: declared = null } = {}) {

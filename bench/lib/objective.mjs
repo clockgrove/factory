@@ -26,7 +26,7 @@
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
-import { UNKNOWN_WHY, addBilling, billingRead, billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 
 export const ROW_VERSION = 1;
@@ -840,7 +840,7 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
     const modelUnknown = own && lineUnknown.usdUnknown && sandbox?.usd === null ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling), ...(billingCode(spend.billing) ? { billing: spend.billing } : {}) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!all && !out.some((r) => r.usd !== null || r.vendor)) return [];
@@ -1137,7 +1137,7 @@ export function markdownTable(rows) {
     const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     // The known dollars, and the runs of unknown cost beside them: never a figure for what was not reported.
-    // What the dollars are (plugin usage.mjs BILLING): billed API spend bare, an API-equivalent figure said, each part of a mix.
+    // How the dollars are billed (plugin usage.mjs BILLING): billed per use bare, any other kind said, each part of a mix.
     const known = r.cost.usd === null && r.cost.usdUnknown ? spendText({ usd: null, unknown: r.cost.usdUnknown }) : `${fmtUsd(r.cost.usd)}${r.cost.usd === null ? "" : billingText(r.cost.usd, r.cost.usdByBilling)}${unknownText(r.cost.usdUnknown)}`;
     const model = r.cost.usd !== null && r.cost.tokens.input !== null ? `${known} (${fmtTokens(r.cost.tokens)})` : known;
     // The spend through a relayed gateway key (#97) is in the dollars: named beside them.

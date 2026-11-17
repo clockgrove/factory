@@ -623,7 +623,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
     modelUsd = Number.isFinite(rec?.usd) ? rec.usd : null;
     // Its runs of unknown cost, beside the known dollars (usage.mjs UNKNOWN_WHY): never read as $0.
     modelUnknown = unknownOf([rec]);
-    modelBilling = rec?.usdByBilling ?? null;
+    modelBilling = { usdByBilling: rec?.usdByBilling ?? null, billing: rec?.billing ?? null };
     writeFileSync(file, `${JSON.stringify({ ...rec, vendor })}
 `);
   } catch (e) {

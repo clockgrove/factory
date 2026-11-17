@@ -2,8 +2,8 @@
 //   {harness, model, usd, usdUnknown?, usdUnknownWhy?, tokens: {input, output, cached}, basis, started, ended,
 //    sessionId, subtype, ok, error, turns, apiKeySource?}
 // `basis` says where the dollars came from, so the scorecard shows it. A count a harness does not report is null, never
-// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate; what they are (billed or API-equivalent)
-// comes from the credential that ran them (BILLING, below).
+// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate; how they are billed
+// comes from the credential that ran them and the harness's own report (BILLING, below).
 
 
 import { existsSync, readFileSync } from "node:fs";
@@ -89,35 +89,70 @@ export function unknownOf(records) {
 export const unknownText = (n) => (Number.isInteger(n) && n > 0 ? ` plus ${n} run${n === 1 ? "" : "s"} of unknown cost` : "");
 
 /**
- * What a figure's dollars are (#481), from the credential that ran it (harness.mjs credentialEnv `billing`), never from
- * prose or a guess. One closed list, each code with the words that follow its dollars wherever they are shown:
- * - `api`: billed spend on an API key or the AI Gateway (Claude Code's total_cost_usd on an API key, Codex tokens on an
- *   API key or the gateway, the relayed worker key's calls); shown as the bare figure;
- * - `subscription`: an API-equivalent figure on a plan or login credential, not a charge (Claude Code's total_cost_usd
- *   on `credential: plan` or a local login, Codex on a ChatGPT login priced from the API table);
- * - `included-credits`: Copilot AI credits at copilot_credit_usd each, an API-equivalent figure, not a charge.
- * Caps compare the figure whatever its billing: max_usd and daily_usd stay in dollars. A total keeps its known dollars by
- * billing in `usdByBilling` ({api?, subscription?, "included-credits"?}: usdByBilling); dollars of a record that names
- * none (a sandbox vendor's, a record written before Pendulum named billing) are in `usd` and in no part of it.
+ * What a figure's dollars are (#481): one closed list, decided on a positive signal from the credential that ran them
+ * (harness.mjs credentialEnv `billing`, from the environment the harness child gets) and the harness's own report on the
+ * pass (passBilling), never from prose and never assumed:
+ * - `api`: billed per use on a known key: an Anthropic API key (`ANTHROPIC_API_KEY`, an `apiKeyHelper`, a Console
+ *   `/login managed key`), a bearer token to a gateway or proxy (`ANTHROPIC_AUTH_TOKEN`), Bedrock or Vertex, a Codex API
+ *   key or one of its API auth modes, the AI Gateway key, a relayed worker key's calls;
+ * - `subscription`: Claude Code's total_cost_usd on a Claude OAuth login (a `CLAUDE_CODE_OAUTH_TOKEN`, or a pass whose
+ *   Claude Code reported a subscription's rate-limit windows), or Codex tokens priced from the API table on a ChatGPT
+ *   auth mode: what the run would cost at API list prices, on the subscription;
+ * - `credits`: Copilot's AI credits at copilot_credit_usd each, billed to the Copilot seat;
+ * - `unknown`: none of those signals: shown as "billing not recorded".
+ * Caps compare the figure whatever its billing: max_usd and daily_usd stay in dollars. Every pass record carries its
+ * `billing`; a stage's record and spend line carry `billing` (its harness passes' kind) and `usdByBilling` (its known
+ * dollars by kind, a relayed key's share as `api`). Dollars that name no billing at all (a sandbox vendor's, a record from
+ * before the field) are in `usd` and in no part of `usdByBilling`.
  */
-export const BILLING = {
+export const BILLING = Object.freeze(["api", "subscription", "credits", "unknown"]);
+
+/** The words after a figure of each kind (billingText); `api` alone is the bare figure. */
+export const BILLING_WORDS = Object.freeze({
   api: "API",
-  subscription: "API-equivalent (subscription)",
-  "included-credits": "API-equivalent (included credits)",
-};
+  subscription: "API-equivalent at list prices, on the subscription",
+  credits: "Copilot AI credits, billed to the seat",
+  unknown: "billing not recorded",
+});
+
+/** Claude Code's init-line `apiKeySource` values that name a key it bills per use (any other value but "none" is unknown). */
+export const CLAUDE_KEY_SOURCES = new Set(["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key"]);
+
+/** Claude Code's `provider` (modelUsage) values billed per use on a cloud account; another non-Anthropic provider is unknown. */
+const CLAUDE_CLOUD_PROVIDERS = new Set(["bedrock", "vertex"]);
+
+const isKind = (k) => typeof k === "string" && BILLING.includes(k);
 
 /**
- * One harness pass's billing (BILLING) on a credential of `billing`: the credential's, except a Claude pass on a plan or
- * login credential that Claude Code reports ran on an API key (its init line's `apiKeySource` other than "none") or on
- * a provider other than Anthropic's own (a model's `provider` other than "firstParty": Bedrock, Vertex, a gateway): that
- * pass is billed spend. Null when the credential's billing is not known.
+ * One harness pass's billing (BILLING) on a credential of `billing` (credentialEnv's), from what the harness reported:
+ * - Copilot: `credits`.
+ * - Claude: an `apiKeySource` in CLAUDE_KEY_SOURCES is `api`, any other but "none" (a legacy or unknown source) is
+ *   `unknown`; a model served by Bedrock or Vertex is `api`, by another provider than Anthropic's own `unknown`. Else the
+ *   credential's, and on a credential of unknown billing a pass whose Claude Code reported a subscription's rate-limit
+ *   windows (`planLimits`, parseClaude) is `subscription`: "none" alone proves nothing, a bearer token reports it too.
+ * - Codex: the credential's, and on one of unknown billing a pass whose rollout carried a ChatGPT plan's rate limits
+ *   (`planLimits`, codexPlanLimits) is `subscription`.
+ * A pass record that already names its billing keeps it. `unknown` when nothing positive is known.
  */
 export function passBilling(billing, rec) {
-  if (!Object.hasOwn(BILLING, billing ?? "")) return null;
-  if (billing !== "subscription" || rec?.harness !== "claude") return billing;
-  const keyed = typeof rec.apiKeySource === "string" && rec.apiKeySource !== "none";
-  const thirdParty = Object.values(rec.models ?? {}).some((m) => typeof m?.provider === "string" && m.provider !== "firstParty");
-  return keyed || thirdParty ? "api" : billing;
+  if (isKind(rec?.billing)) return rec.billing;
+  if (rec?.harness === "copilot") return "credits";
+  const cred = isKind(billing) ? billing : "unknown";
+  if (rec?.harness === "claude") {
+    const src = rec.apiKeySource;
+    if (typeof src === "string" && CLAUDE_KEY_SOURCES.has(src)) return "api";
+    if (typeof src === "string" && src !== "none") return "unknown";
+    const providers = Object.values(rec.models ?? {}).map((m) => m?.provider).filter((p) => typeof p === "string" && p !== "firstParty");
+    if (providers.length) return providers.every((p) => CLAUDE_CLOUD_PROVIDERS.has(p)) ? "api" : "unknown";
+  }
+  if (cred === "unknown" && rec?.planLimits === true && (rec.harness === "claude" || rec.harness === "codex")) return "subscription";
+  return cred;
+}
+
+/** The kind the stage's harness passes share (BILLING): one kind, or `unknown` when they differ, name none or none ran. */
+export function stageBilling(records, billing) {
+  const kinds = new Set((records || []).filter((r) => r && !r.noRun).map((r) => (isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : "unknown")));
+  return kinds.size === 1 ? [...kinds][0] : "unknown";
 }
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
@@ -125,9 +160,9 @@ const nonNeg = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0,
 
 /**
  * The known dollars of a stage's pass `records` by billing (BILLING), on a credential of `billing`: each pass's own
- * dollars at passBilling, its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the relay's spend
- * outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing. {} when
- * the credential's billing is not known and no key spend was booked.
+ * dollars at its kind (passBilling), its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the
+ * relay's spend outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing;
+ * a record that names no billing, on a credential of none (a record from before the field), is in no part.
  */
 export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
   const out = {};
@@ -137,7 +172,8 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
   for (const r of (records || []).filter((x) => x && !x.noRun)) {
     const key = nonNeg(r.workerKeyUsd);
     const usd = nonNeg(r.usd);
-    put(passBilling(billing, r), usd === null ? null : Math.max(0, usd - (key ?? 0)));
+    // A record that names no billing, on a credential of none, is in no part.
+    put(isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : null, usd === null ? null : Math.max(0, usd - (key ?? 0)));
     if (key) put("api", key);
   }
   if (extraKeyUsd > 0) put("api", extraKeyUsd);
@@ -147,8 +183,11 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
 /** A `usdByBilling` read back from a stored record or line: its BILLING codes at finite non-negative dollars; {} for none or a broken one. */
 export function billingRead(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-  return Object.fromEntries(Object.entries(v).filter(([k, n]) => Object.hasOwn(BILLING, k) && typeof n === "number" && Number.isFinite(n) && n >= 0));
+  return Object.fromEntries(Object.entries(v).filter(([k, n]) => isKind(k) && typeof n === "number" && Number.isFinite(n) && n >= 0));
 }
+
+/** A stored `billing` code read back: one of BILLING, else null. */
+export const billingCode = (v) => (isKind(v) ? v : null);
 
 /** Several `usdByBilling` maps summed (each read through billingRead). */
 export function addBilling(...maps) {
@@ -158,24 +197,29 @@ export function addBilling(...maps) {
 }
 
 /**
- * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling), `fmt` writing a part's
- * dollars: "" for billed API spend alone, or when nothing names a billing; " API-equivalent (subscription)" or
- * " API-equivalent (included credits)" for that kind alone; for a mix, every part: " ($0.30 API + $1.20 API-equivalent
- * (subscription))", with dollars no record named a billing for (a sandbox vendor's) as a bare part.
+ * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling); `fmt` writes a part's
+ * dollars and `unit` is the smallest amount it shows (a part, or a remainder no kind names, under half of it is not shown):
+ * - "" for billed API spend alone, or when nothing names a billing;
+ * - " API-equivalent at list prices, on the subscription", " Copilot AI credits, billed to the seat" or " billing not
+ *   recorded" for that kind alone;
+ * - for a mix, every part: ": $1.20 API-equivalent at list prices, on the subscription + $0.30 API", with dollars no
+ *   record named a billing for (a sandbox vendor's) as a bare part.
  */
-export function billingText(usd, byBilling, fmt = (n) => `$${n.toFixed(2)}`) {
+export function billingText(usd, byBilling, { fmt = (n) => `$${n.toFixed(2)}`, unit = 0.01 } = {}) {
   const map = billingRead(byBilling);
   const kinds = Object.keys(map);
   if (!kinds.length) return "";
+  const shown = (n) => n >= unit / 2;
   const named = Object.values(map).reduce((s, n) => s + n, 0);
   const rest = typeof usd === "number" && Number.isFinite(usd) ? round6(usd - named) : 0;
-  const parts = Object.entries(map).filter(([, n]) => n > 0);
-  if (rest >= 0.00005) parts.push(["", rest]);
-  // Nothing above $0: the one kind named, if there is one.
-  if (!parts.length) return kinds.length === 1 && kinds[0] !== "api" ? ` ${BILLING[kinds[0]]}` : "";
-  if (parts.length === 1) return parts[0][0] && parts[0][0] !== "api" ? ` ${BILLING[parts[0][0]]}` : "";
+  const parts = Object.entries(map).filter(([, n]) => shown(n));
+  if (shown(rest)) parts.push(["", rest]);
+  const words = (k) => (k && k !== "api" ? ` ${BILLING_WORDS[k]}` : "");
+  // Nothing shown: the largest kind named.
+  if (!parts.length) return words(kinds.reduce((a, k) => (map[k] > map[a] ? k : a), kinds[0]));
+  if (parts.length === 1) return words(parts[0][0]);
   if (parts.every(([k]) => k === "api" || k === "")) return "";
-  return ` (${parts.map(([k, n]) => `${fmt(n)}${k ? ` ${BILLING[k]}` : ""}`).join(" + ")})`;
+  return `: ${parts.map(([k, n]) => `${fmt(n)}${k ? ` ${BILLING_WORDS[k]}` : ""}`).join(" + ")}`;
 }
 
 /** A model id without its provider prefix: `openai/gpt-6.1-sol` (the AI Gateway's form) is `gpt-6.1-sol`. */
@@ -627,6 +671,24 @@ const QUOTA_WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 const QUOTA_WINDOWS_MAX = 8;
 
 /**
+ * Whether a Codex run's rollout (from `since`) carried a ChatGPT plan's rate limits: a `token_count` whose `rate_limits`
+ * names a `plan_type`, which Codex records on a ChatGPT login only (an API key or the AI Gateway gets no such headers).
+ * The positive sign of a subscription for a Codex login of unknown auth mode (passBilling).
+ */
+export function codexPlanLimits(rollout, since = null) {
+  if (typeof rollout !== "string") return false;
+  const from = Date.parse(since);
+  for (const line of rollout.split("\n")) {
+    if (!line.includes('"plan_type"')) continue;
+    const o = jsonLines(line)[0];
+    if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
+    if (Number.isFinite(from) && !(Date.parse(o.timestamp) >= from)) continue;
+    if (typeof o.payload.rate_limits?.plan_type === "string" && o.payload.rate_limits.plan_type) return true;
+  }
+  return false;
+}
+
+/**
  * How much of its subscription's usage limits a pass's account had used, as the harness reported it during the pass:
  * {harness, windows: {<window>: {used, resetsAt}}}, `used` the fraction of the window spent (1 is all of it) and
  * `resetsAt` (ms) when the window starts again; null when the harness reported none. Only a window with both numbers is
@@ -768,8 +830,11 @@ export function parseClaude(stdout, model) {
   if (outageError(failure)) rec.providerOutage = failure;
   // The Claude Code that ran, as its stream's init line names it: whether a resumed total is a running total (sinceSession).
   if (typeof init?.claude_code_version === "string") rec.harnessVersion = init.claude_code_version;
-  // Where its key came from ("none": an OAuth login or token, no API key): what the pass's dollars are (passBilling).
+  // Where its key came from ("none": no API key, which an OAuth login and a bearer token both report): passBilling.
   if (typeof init?.apiKeySource === "string" && init.apiKeySource.length <= 60) rec.apiKeySource = init.apiKeySource;
+  // A subscription's rate-limit windows (`rate_limit_event`), which Claude Code reports on a claude.ai login only: the
+  // positive sign of a subscription (passBilling).
+  if (lines.some((l) => l?.type === "rate_limit_event")) rec.planLimits = true;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -1254,6 +1319,10 @@ export function mergeUsage(records) {
     out.error = out.error || r.error;
     out.budgetExceeded = out.budgetExceeded || r.budgetExceeded;
     out.ended = r.ended ?? out.ended;
+    // What says what the dollars are (passBilling): the first key source named, any plan's limits, one billing or unknown.
+    if (out.apiKeySource === undefined && typeof r.apiKeySource === "string") out.apiKeySource = r.apiKeySource;
+    if (r.planLimits === true) out.planLimits = true;
+    if (out.billing !== undefined || r.billing !== undefined) out.billing = out.billing === r.billing ? out.billing : "unknown";
   }
   return out;
 }

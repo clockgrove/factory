@@ -332,7 +332,7 @@ test("a pass's key spend joins its record: usd, max_usd and daily_usd count it; 
     const usage = writeUsage(dir, { harness: "claude", model: "m", records, passes: 1, exit: "delivered", reason: "", credentialBasis: "x", workerKey: { usd: 0.9, calls: 3, failed: 0, capped: false, refused: { cap: 0 } } });
     assert.deepEqual([usage.usd, usage.workerKeyUsd, usage.harnessUsd], [2.4, 0.9, 1.5], "a call booked outside every pass still counts");
     assert.equal(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).workerKey.calls, 3);
-    assert.equal(usdText(usage), "2.4 (harness 1.5, worker key 0.9)");
+    assert.equal(usdText(usage), "2.4; harness 1.5, worker key 0.9");
     assert.deepEqual(keyBreakdown([{ usd: 1 }]), { fields: {}, extra: 0 }, "no relay, no fields");
   } finally {
     rmSync(dir, { recursive: true, force: true });

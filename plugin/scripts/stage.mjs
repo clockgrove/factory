@@ -23,6 +23,7 @@ import { holdSecrets, input, log } from "./lib/inputs.mjs";
 import { STAGE_GRACE_MS, dispatchLatency, sandboxMarkerLine, sandboxRecord, sessionCapNote, setSelf, stageDeadline, stageMarker, stageMinutes, stagePartComment, watchdogMs } from "./lib/logic.mjs";
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
+import { SESSION_TOTALS_FILE } from "./lib/harness.mjs";
 import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
 import { UNKNOWN_WHY, markUnknown } from "./lib/usage.mjs";
 import { optedValues } from "./lib/worker-secrets.mjs";
@@ -370,14 +371,29 @@ export function stageWriter({ issue, claim, launch = null, list, put }) {
 }
 
 /**
- * The usage record of a child the stage ended before it wrote its own: one run of unknown cost (usage.mjs UNKNOWN_WHY
- * `unreported`), never $0, never its budget and never a reading of its stream. The pass it was in never reported its
- * cost, and the stream holds every pass of the stage, whose running totals no stream alone can split. The stage's
- * progress comment keeps what its finished passes reported (session.mjs progressReporter), and `daily_usd` names this
- * stage as a run of unknown cost without counting it.
+ * The usage record of a child the stage ended before it wrote its own: the spend its progress comment's last line
+ * showed (`soFar`, harness.mjs SESSION_TOTALS_FILE `spend`: the dollars its finished passes reported, and its runs of
+ * unknown cost), and at least one run of unknown cost (usage.mjs UNKNOWN_WHY `unreported`) for the pass it was in;
+ * never $0 for that pass, never its budget and never a reading of its stream (which holds every pass of the stage,
+ * whose running totals no stream alone can split). With no line read, the stage is one run of unknown cost.
  */
-export function killedUsage({ harness, model }) {
-  return markUnknown({ harness, model: model ?? null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, ok: false, error: "ended by the stage", basis: `unknown: ended by the stage; ${UNKNOWN_WHY.unreported}` }, "unreported");
+export function killedUsage({ harness, model, soFar = null }) {
+  const usd = typeof soFar?.usd === "number" && Number.isFinite(soFar.usd) && soFar.usd >= 0 ? soFar.usd : null;
+  const unknown = Math.max(1, Number.isInteger(soFar?.unknown) ? soFar.unknown : 0);
+  const rec = { harness, model: model ?? null, usd, tokens: { input: null, output: null, cached: null, written: null }, ok: false, error: "ended by the stage", basis: `${usd === null ? "unknown" : "the stage's last spend line"}: ended by the stage; ${UNKNOWN_WHY.unreported}` };
+  markUnknown(rec, "unreported");
+  rec.usdUnknown = unknown;
+  return rec;
+}
+
+/** The spend the stage's progress comment last showed, from its usage directory (harness.mjs SESSION_TOTALS_FILE); null when none. */
+export function lastSpendLine(usageDir) {
+  try {
+    const spend = JSON.parse(readFileSync(join(usageDir, SESSION_TOTALS_FILE), "utf8"))?.spend;
+    return spend && typeof spend === "object" ? spend : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -400,7 +416,7 @@ async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDi
     try {
       const harness = env.PENDULUM_HARNESS || "claude";
       const model = (stage === "review" ? env.PENDULUM_REVIEWER_MODEL : env.PENDULUM_MODEL) || null;
-      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
+      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, soFar: lastSpendLine(usageDir) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
     } catch (e) {
       log(`usage after the kill not written: ${String(e.message).slice(0, 120)}`);
     }

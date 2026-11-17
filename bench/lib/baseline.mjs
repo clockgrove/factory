@@ -8,7 +8,15 @@ const quantile = (xs, q, digits = 1) => {
   const k = 10 ** digits;
   return Math.round((s[lo] + (s[hi] - s[lo]) * (pos - lo)) * k) / k;
 };
-const spread = (xs, digits = 1) => ({ median: quantile(xs, 0.5, digits), p25: quantile(xs, 0.25, digits), p75: quantile(xs, 0.75, digits), n: xs.filter((x) => typeof x === "number").length });
+const spread = (xs, digits = 1, leftOut = 0) => ({ median: quantile(xs, 0.5, digits), p25: quantile(xs, 0.25, digits), p75: quantile(xs, 0.75, digits), n: xs.filter((x) => typeof x === "number").length, ...(leftOut ? { leftOut } : {}) });
+
+/**
+ * Whether a row's dollars hold runs of unknown cost (plugin usage.mjs UNKNOWN_WHY: the model's, a relayed key's or a
+ * sandbox's): its known dollars are then not its cost, so it is left out of every dollar measure and counted beside it.
+ */
+const unknownCost = (r) => (r.cost?.usdUnknown ?? 0) > 0 || (r.cost?.totalUnknown ?? 0) > 0 || (r.cost?.vendor?.usdUnknown ?? 0) > 0;
+/** The measures in dollars: a row with runs of unknown cost is left out of them. */
+const DOLLARS = new Set(["usd", "workerKeyUsd", "vendorUsd", "totalUsd"]);
 
 export const MEASURES = [
   ["modelMinutes", (r) => r.phases?.modelMinutes ?? null, "model min"],
@@ -45,12 +53,16 @@ export function selectRows(rows, { repo = null, last = null, since = null } = {}
 export function baselineOf(rows, opts = {}) {
   const picked = selectRows(rows, opts);
   const line = { label: opts.label ?? null, repo: opts.repo ?? null, rows: picked.length, issues: picked.map((r) => r.issue), from: picked.at(-1)?.mergedAt ?? null, to: picked[0]?.mergedAt ?? null, walkAway: picked.length ? Math.round((100 * picked.filter((r) => r.walkAway?.value).length) / picked.length) : null, walkAwayAskedOnly: picked.length && picked.every((r) => r.walkAway?.askedOnly) ? Math.round((100 * picked.filter((r) => r.walkAway.askedOnly.value).length) / picked.length) : null, measures: {} };
-  for (const [key, pick, , digits] of MEASURES) line.measures[key] = spread(picked.map(pick), digits);
+  for (const [key, pick, , digits] of MEASURES) {
+    const rows = DOLLARS.has(key) ? picked.filter((r) => !unknownCost(r)) : picked;
+    line.measures[key] = spread(rows.map(pick), digits, picked.length - rows.length);
+  }
   return line;
 }
 
 export function formatBaseline(line) {
   const head = `baseline ${line.label ?? ""}${line.repo ? ` ${line.repo}` : ""}: ${line.rows} merged Objective(s)${line.from ? ` ${line.from.slice(0, 10)}..${line.to.slice(0, 10)}` : ""}, walk-away ${line.walkAway ?? "?"}% (${line.walkAwayAskedOnly ?? "?"}% counting only input Pendulum asked for)\n`;
-  const fmt = (m) => (m.median === null ? "none" : `${m.median} (${m.p25}..${m.p75}, n=${m.n})`);
+  const out = (m) => (m.leftOut ? `; ${m.leftOut} left out: runs of unknown cost` : "");
+  const fmt = (m) => (m.median === null ? `none${m.leftOut ? ` (${m.leftOut} left out: runs of unknown cost)` : ""}` : `${m.median} (${m.p25}..${m.p75}, n=${m.n}${out(m)})`);
   return head + MEASURES.map(([key, , name]) => `  ${name.padEnd(12)} ${fmt(line.measures[key])}`).join("\n") + "\n";
 }

@@ -5,7 +5,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { setSelf } from "../scripts/lib/logic.mjs";
-import { billingText } from "../scripts/lib/usage.mjs";
 import { badge, centsOf, finishData, finishMarker, gateChecks, objectiveRecords, renderFinishCard, withFinishBlock } from "../scripts/lib/finish-card.mjs";
 
 RETRY.sleep = async () => {};
@@ -64,7 +63,7 @@ test("finish card: the merged run, every figure from the run's own records (scra
   assert.match(md, /\| Stage \| Time \| Cost \|\n\| --- \| ---: \| ---: \|\n\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| Review · Fable 5\.2 \| 35 s \| \$0\.16 \|\n\| Merge queue · your CI \| 44 s \| — \|\n\| \*\*Total\*\* \| \*\*3 min 54 s\*\* \| \*\*\$0\.52\*\* \|/);
   assert.match(md, /pie showData\n {4}"Plan \+ build" : 0\.36\n {4}"Review" : 0\.16\n```/);
   // No billing recorded: the card says so rather than call it billed or API-equivalent.
-  assert.match(md, /<sub>These are the costs Pendulum recorded for this run; it did not record which were billed and which are API-equivalent figures\./);
+  assert.match(md, /<sub>These are the costs Pendulum recorded for this run\. Pendulum did not record how these dollars were billed\./);
   assert.match(md, /<details><summary>Full run log<\/summary>\n\n- 02:23:42 labelled `pendulum:objective`: the clock starts\n- 02:24:34 plan \+ build stage started \(claude-opus-5-5\)\n/);
   assert.match(md, /- 02:27:36 PR #4 merged, 1 check green\n\n<\/details>$/);
 
@@ -110,30 +109,42 @@ test("finish card: a record of a stage that ran no harness pass is a known $0, n
   assert.match(renderFinishCard(d), /<h3 align="center">Merged in 3 min 54 s for \$0\.16\.<\/h3>/);
 });
 
-test("finish card: what the dollars are comes from #508's usdByBilling, on records, spend lines and vendor comments (B4)", () => {
+test("finish card: what the dollars are comes from #508's usdByBilling, on records, spend lines and vendor comments; billing not recorded is no billing (B4)", () => {
   const records = real.records.map((r) => ({ ...r, usdByBilling: { subscription: r.usd } }));
-  const sub = withSelf(() => data({ records }));
-  const words = billingText(0.519812, { subscription: 0.519812 });
-  assert.match(words, /API-equivalent/);
-  const md = renderFinishCard(sub);
-  assert.ok(md.includes(`<h3 align="center">Merged in 3 min 54 s for $0.52${words}.</h3>`));
-  assert.ok(md.includes(`<img alt="${words.trim()}: $0.52"`), "the badge says what the dollars are");
-  assert.ok(md.includes(`| Stage | Time | Cost, ${words.trim()} |`), "one kind: the column says it once");
+  const md = renderFinishCard(withSelf(() => data({ records })));
+  assert.ok(md.includes('<h3 align="center">Merged in 3 min 54 s for $0.52 API-equivalent.</h3>'));
+  assert.ok(md.includes('<img alt="API-equivalent: $0.52"'), "the badge says what the dollars are");
+  assert.ok(md.includes("| Stage | Time | Cost (API-equivalent) |"), "one kind: the column says it once");
   assert.match(md, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|/);
-  assert.match(md, /An API-equivalent figure is what the usage would cost at API prices, covered by your plan and not billed\./);
+  assert.match(md, /An API-equivalent figure is what the usage would cost at API list prices, on your subscription; it is not billed\./);
   assert.doesNotMatch(md, /alt="cost:/);
 
   // The same from local stages' spend lines; billed API spend reads as plain dollars.
   const local = renderFinishCard(withSelf(() => data({ comments: withSpend({ work: { usd: 0.35637, usdByBilling: { subscription: 0.35637 } }, review: { usd: 0.163442, usdByBilling: { subscription: 0.163442 } } }), records: [] })));
-  assert.ok(local.includes(`for $0.52${words}.`));
+  assert.match(local, /for \$0\.52 API-equivalent\.<\/h3>/);
   const api = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { api: r.usd } })) })));
   assert.match(api, /for \$0\.52\.<\/h3>/);
-  assert.match(api, /These are the costs Pendulum recorded for this run, billed spend on your API key or AI Gateway key\./);
-  // A mix: the headline names each part (usage.mjs billingText).
-  const mixed = withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { api: 0.35637 } }, { ...real.records[1], usdByBilling: { subscription: 0.163442 } }] }));
-  assert.ok(renderFinishCard(mixed).includes(`for $0.52${billingText(0.519812, { api: 0.35637, subscription: 0.163442 })}.`));
-  assert.match(renderFinishCard(mixed), /alt="cost: \$0\.52"/);
-  assert.ok(renderFinishCard(mixed).includes(`| Review · Fable 5.2 | 35 s | $0.16${billingText(0.163442, { subscription: 0.163442 })} |`), "a mix: each cell says what it is");
+  assert.match(api, /They are billed spend on your API key or AI Gateway key\./);
+  // A mix: the headline says which part is what; each cell says its own.
+  const mixed = renderFinishCard(withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { api: 0.35637 } }, { ...real.records[1], usdByBilling: { subscription: 0.163442 } }] })));
+  assert.match(mixed, /for \$0\.52 \(part API-equivalent\)\.<\/h3>/);
+  assert.match(mixed, /alt="cost: \$0\.52"/);
+  assert.match(mixed, /\| Plan \+ build · Opus 5\.5 \| 1 min 21 s \| \$0\.36 \|\n\| Review · Fable 5\.2 \| 35 s \| \$0\.16 API-equivalent \|/);
+  // Copilot AI credits are billed to the seat: named, never API-equivalent.
+  const credits = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { credits: r.usd } })) })));
+  assert.match(credits, /for \$0\.52 in Copilot AI credits\.<\/h3>/);
+  assert.ok(credits.includes('<img alt="Copilot AI credits: $0.52"'));
+  assert.doesNotMatch(credits, /API-equivalent/);
+  // #508's `unknown`: billing not recorded. It is no kind of billing: no badge label, no API-equivalent words.
+  const unrecorded = renderFinishCard(withSelf(() => data({ records: real.records.map((r) => ({ ...r, usdByBilling: { unknown: r.usd } })) })));
+  assert.match(unrecorded, /for \$0\.52 \(billing not recorded\)\.<\/h3>/);
+  assert.ok(unrecorded.includes('<img alt="cost: $0.52"'));
+  assert.ok(unrecorded.includes("| Stage | Time | Cost (billing not recorded) |"));
+  assert.match(unrecorded, /Pendulum did not record how they were billed\./);
+  assert.doesNotMatch(unrecorded, /API-equivalent/);
+  const half = renderFinishCard(withSelf(() => data({ records: [{ ...real.records[0], usdByBilling: { subscription: 0.35637 } }, { ...real.records[1], usdByBilling: { unknown: 0.163442 } }] })));
+  assert.match(half, /for \$0\.52 \(part API-equivalent, part billing not recorded\)\.<\/h3>/);
+  assert.match(half, /\| Review · Fable 5\.2 \| 35 s \| \$0\.16 \(billing not recorded\) \|/);
 });
 
 test("finish card: a sandbox stage's vendor comment counts whenever it was written; one with no progress comment is a stage of its own, its unknowns kept (B2, S8)", () => {

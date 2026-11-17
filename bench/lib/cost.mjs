@@ -3,26 +3,26 @@
 // job uploads (`pendulum-usage-<issue>`, and `pendulum-usage-<issue>-review`
 // for the reviewer pass): its normalized `result.json` (action/scripts/lib/
 // usage.mjs: {harness, model, usd, tokens, basis, started, ended, runs,
-// passes, exit, reason, credential, turns, priceTableDate}). A raw Claude
-// result (`{type: "result", total_cost_usd, modelUsage}`) or a raw Codex
-// JSONL (`events.jsonl`) is accepted too, for runs made outside the Action.
+// passes, exit, reason, credential, turns, priceTableDate}). A raw stream is
+// never priced: an artifact with no result.json is a run of unknown cost.
 //
 //   claude   unit usd      total_cost_usd, modelUsage (sub-agents included)
-//   codex    unit usd      tokens priced from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
+//   codex    unit usd      tokens priced at OpenAI's Standard rates from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
 //   copilot  unit usd      AI credits from --usage-output-file at the run's $/credit (GitHub: $0.01), premium requests beside
 //
 // A count a harness does not report is null, never zero. Dollars are real or unknown (plugin usage.mjs UNKNOWN_WHY):
 // `usd` sums the known dollars and `usdUnknown` counts the runs of unknown cost, shown as "plus N runs of unknown
-// cost", never as $0, an estimate or a bound. What the known dollars are (billed API spend, a subscription's
-// API-equivalent figure, Copilot's included credits: plugin usage.mjs BILLING) comes from each record's `usdByBilling`,
-// which the worker writes from its credential; the row keeps it as `usdByBilling` and its basis says it.
+// cost", never as $0, an estimate or a bound. What the known dollars are (billed per use on a key, API-equivalent at
+// list prices on a subscription, Copilot AI credits billed to the seat, or billing not recorded: plugin usage.mjs
+// BILLING) comes from each record's `usdByBilling` and `billing`, which the worker writes; the row keeps `usdByBilling`
+// and its basis says it.
 //
 // A stage that ran in a cloud sandbox also carries the vendor's cost in its record (`vendor`, booked by the launcher
 // from the vendor's usage totals at list rates: plugin/scripts/launch.mjs bookVendor). It is summed beside the model's
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BILLING, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { BILLING_WORDS, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingCode, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 
 /** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
 export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
@@ -30,7 +30,6 @@ const PRICES_NAME = "codex-prices.json";
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
-const less = (a, b) => (a === null ? null : Math.max(0, a - (b ?? 0)));
 const round4 = (n) => (n === null ? null : Math.round(n * 10000) / 10000);
 
 export function loadPrices(file = PRICES_FILE) {
@@ -41,56 +40,6 @@ export function loadPrices(file = PRICES_FILE) {
 
 /** USD for Codex tokens at the table's rates (usage.mjs codexRate: exact id or dated snapshot); null when unlisted. */
 export { priceTokens };
-
-/** Non-JSON lines are skipped (CLIs print warnings on stdout). */
-function jsonLines(text) {
-  const out = [];
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t.startsWith("{")) continue;
-    try {
-      out.push(JSON.parse(t));
-    } catch {
-      // partial line
-    }
-  }
-  return out;
-}
-
-/** A raw Claude result object (json or the last stream-json line) to the normalized record. */
-export function fromClaudeResult(result, model = null) {
-  const rec = { harness: "claude", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unknown", turns: num(result.num_turns), exit: null, runs: 1 };
-  const byModel = result.modelUsage && typeof result.modelUsage === "object" ? result.modelUsage : null;
-  if (byModel && Object.keys(byModel).length) {
-    let input = null;
-    let output = null;
-    let cached = null;
-    let written = null;
-    let cost = null;
-    rec.models = {};
-    for (const [name, u] of Object.entries(byModel)) {
-      const m = { input: num(u.inputTokens), cached: num(u.cacheReadInputTokens), written: num(u.cacheCreationInputTokens), output: num(u.outputTokens), usd: num(u.costUSD) };
-      input = add(input, add(m.input, add(m.cached, m.written)));
-      output = add(output, m.output);
-      cached = add(cached, m.cached);
-      written = add(written, m.written);
-      if (m.usd !== null) cost = add(cost, m.usd);
-      rec.models[name] = m;
-      if (!rec.model) rec.model = name;
-    }
-    rec.tokens = { input, output, cached, written };
-    rec.usd = num(result.total_cost_usd) ?? cost;
-    rec.basis = "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
-  } else {
-    const u = result.usage || {};
-    const cached = num(u.cache_read_input_tokens);
-    const written = num(u.cache_creation_input_tokens);
-    rec.tokens = { input: add(num(u.input_tokens), add(cached, written)), output: num(u.output_tokens), cached, written };
-    rec.usd = num(result.total_cost_usd);
-    rec.basis = rec.usd === null ? "unknown: no total_cost_usd" : "harness-reported: total_cost_usd, usage (sub-agents excluded)";
-  }
-  return rec;
-}
 
 /**
  * The prompt cache across an Objective's artifacts (the usage record's `cache`, session.mjs writeUsage): the TTLs
@@ -134,84 +83,31 @@ export function vendorOf(records) {
   const withVendor = [...byStage.values()];
   if (!withVendor.length) return null;
   const priced = withVendor.filter((r) => num(r.vendor.usd) !== null);
+  // A stage whose usage the vendor did not report: its known parts (a creation, storage) are summed, its compute unknown.
+  const unreported = (r) => num(r.vendor.usd) === null || r.vendor.usageUnknown === true || (r.vendor.usdUnknown ?? 0) > 0;
   const rates = withVendor.map((r) => r.vendor.rates).find((x) => x && typeof x === "object");
   const usd = priced.length ? round4(priced.reduce((s, r) => s + r.vendor.usd, 0)) : null;
-  const unknown = withVendor.length - priced.length;
+  const unknown = withVendor.filter(unreported).length;
   const basis = `${withVendor.length} sandbox stage(s)${unknown ? `, ${unknown} of unknown cost (${UNKNOWN_WHY.sandbox})` : ""}; ${rates ? `${rates.vendor ?? "vendor"} ${rates.plan ?? ""} list rates (${rates.region ?? "?"}) read ${rates.date ?? "?"}` : "list rates"}`;
   return { usd, parts: withVendor.length, ...(unknown ? { usdUnknown: unknown } : {}), basis, storedUsd: round4(withVendor.reduce((s, r) => s + (num(r.vendor.storedUsd) ?? 0), 0)) };
-}
-
-/**
- * Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already
- * includes the reasoning tokens, and `input_tokens` the cached and written ones (`cache_write_input_tokens`). Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
- * the stream reports the thread's running total, so it counts only its own share (as the worker's runHarness does).
- */
-export function fromCodexEvents(text, model = null) {
-  const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
-  const totals = new Map();
-  let thread = null;
-  let pass = null;
-  const close = () => {
-    if (!pass) return;
-    const prior = thread ? totals.get(thread) : null;
-    if (thread) totals.set(thread, pass);
-    for (const k of ["input", "output", "cached", "written"]) rec.tokens[k] = add(rec.tokens[k], prior ? less(pass[k], prior[k]) : pass[k]);
-    pass = null;
-  };
-  for (const e of jsonLines(text)) {
-    if (e.type === "thread.started") {
-      close();
-      thread = typeof e.thread_id === "string" ? e.thread_id : null;
-    }
-    if (e.type !== "turn.completed") continue;
-    rec.turns += 1;
-    const u = e.usage || {};
-    pass ??= { input: null, output: null, cached: null, written: null };
-    pass.input = add(pass.input, num(u.input_tokens));
-    pass.output = add(pass.output, num(u.output_tokens));
-    pass.cached = add(pass.cached, num(u.cached_input_tokens));
-    pass.written = add(pass.written, num(u.cache_write_input_tokens));
-  }
-  close();
-  return rec;
 }
 
 /** Harness calls and distinct sessions in a raw event stream (the worker's own reading, usage.mjs streamSessions). */
 export const sessionsOf = streamSessions;
 
-/** Any usage file's content to a normalized record, by shape; null when it is none of them. */
-export function parseUsageText(text, { model = null } = {}) {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return null;
+/**
+ * A usage file's content to its record: a stage's result.json (the worker's normalized record), else null. A raw
+ * stream (events.jsonl, a harness's own output) is never priced here: a resumed pass's running total would count
+ * twice and a killed pass not at all; the stage's own record says what was reported and what is unknown.
+ */
+export function parseUsageText(text) {
   let value = null;
-  if (!trimmed.includes("\n") || trimmed.startsWith("{\n") || trimmed.startsWith("{\r\n")) {
-    try {
-      value = JSON.parse(trimmed);
-    } catch {
-      value = null;
-    }
+  try {
+    value = JSON.parse(String(text || "").trim());
+  } catch {
+    return null;
   }
-  if (value && typeof value === "object") {
-    if (value.harness) return { ...value, runs: value.runs ?? 1 };
-    if (value.type === "result" || "total_cost_usd" in value) return fromClaudeResult(value, model);
-  }
-  const lines = jsonLines(trimmed);
-  if (!lines.length) return null;
-  if (lines.some((l) => l.type === "turn.completed" || l.type === "thread.started")) return fromCodexEvents(trimmed, model);
-  // The worker appends one result per harness run (the first prompt, each validation fix pass): sum them all.
-  const results = lines.filter((l) => l.type === "result").map((r) => fromClaudeResult(r, model));
-  if (!results.length) return null;
-  const sum = results[0];
-  for (const r of results.slice(1)) {
-    sum.usd = sum.usd === null && r.usd === null ? null : (sum.usd ?? 0) + (r.usd ?? 0);
-    sum.tokens = { input: add(sum.tokens.input, r.tokens.input), output: add(sum.tokens.output, r.tokens.output), cached: add(sum.tokens.cached, r.tokens.cached), written: add(sum.tokens.written, r.tokens.written) };
-    sum.models = mergeModels(sum.models, r.models);
-    sum.turns = add(sum.turns, r.turns);
-    sum.model = sum.model ?? r.model;
-  }
-  sum.usd = round4(sum.usd);
-  sum.runs = results.length;
-  return sum;
+  return value && typeof value === "object" && !Array.isArray(value) && value.harness ? { ...value, runs: value.runs ?? 1 } : null;
 }
 
 /**
@@ -234,26 +130,28 @@ export function stageOf(rec) {
  */
 /**
  * A part's known dollars by billing (plugin usage.mjs BILLING) from its record's `usdByBilling`: as recorded, except a
- * Codex part the bench re-priced, whose harness dollars (the part's less the relayed key's) take the record's harness
- * kind (its one kind besides the key's `api`, else `api`) and the key's stay `api`. {} when the record names none.
+ * Codex part the bench re-priced, whose harness dollars (the part's less the relayed key's) take the record's own
+ * `billing` (the kind its harness passes share, as the worker wrote it) and the key's stay `api`. {} when the record
+ * names none.
  */
 function partBilling(rec, part) {
   const map = billingRead(rec.usdByBilling);
   if (rec.harness !== "codex" || rec.source === "spend" || !Object.keys(map).length) return map;
   const key = num(rec.workerKeyUsd) ?? 0;
-  const kinds = Object.keys(map);
-  const kind = kinds.find((k) => k !== "api") ?? (kinds.includes("api") && (map.api > key || !key) ? "api" : null);
   const harnessUsd = part.usd === null ? 0 : Math.max(0, part.usd - key);
-  return addBilling(kind ? { [kind]: harnessUsd } : {}, key > 0 ? { api: key } : {});
+  return addBilling({ [billingCode(rec.billing) ?? "unknown"]: harnessUsd }, key > 0 ? { api: key } : {});
 }
 
-/** The basis's words on what the dollars are: "; all billed API spend", "; $1.20 of it API-equivalent (subscription), not a charge". */
+/**
+ * The basis's words on what the dollars are: "; billed per use on API keys" when all are, else each kind's dollars:
+ * "; 1.2 USD API-equivalent at list prices, on the subscription; 0.3 USD billed per use".
+ */
 function billingNote(byBilling) {
   const kinds = Object.entries(byBilling);
   if (!kinds.length) return "";
-  const equivalent = kinds.filter(([k]) => k !== "api");
-  if (!equivalent.length) return "; billed API spend";
-  return `; ${equivalent.map(([k, n]) => `${round4(n)} USD ${BILLING[k]}`).join(", ")}, not a charge${byBilling.api > 0 ? `; ${round4(byBilling.api)} USD billed API spend` : ""}`;
+  const other = kinds.filter(([k]) => k !== "api");
+  if (!other.length) return "; billed per use on API keys";
+  return `; ${other.map(([k, n]) => `${round4(n)} USD ${BILLING_WORDS[k]}`).join("; ")}${byBilling.api > 0 ? `; ${round4(byBilling.api)} USD billed per use` : ""}`;
 }
 
 export function costOf(records, prices, { harness: declared = null } = {}) {
@@ -287,15 +185,21 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
       // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's. The spend
       // through a relayed gateway key is no harness spend: kept as the worker priced it.
-      const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents);
+      // A promotional rate prices only spend before its end (usage.mjs codexRow): the record's end dates it (a stage's
+      // record ends with its latest pass or call, usage.mjs mergeUsage), and a record with none is of unknown cost there.
+      const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents, { at: rec.ended ?? null });
       const key = num(rec.workerKeyUsd);
       part.usd = priced.usd === null && key === null ? null : round4((priced.usd ?? 0) + (key ?? 0));
       // The record's own runs of unknown cost (a turn that failed, a sub-agent thread not read), or one for tokens this
       // table cannot price: never $0 for them.
       part.usdUnknown = Number.isInteger(rec.usdUnknown) && rec.usdUnknown > 0 ? rec.usdUnknown : priced.unknown ? 1 : 0;
+      // Why this table could not price it (no row, a promotional rate ended, a long-context share not read), beside
+      // the record's own reasons.
+      if (priced.unknown) part.usdUnknownWhy = [...new Set([...(Array.isArray(rec.usdUnknownWhy) ? rec.usdUnknownWhy : []), ...priced.why])].filter((w) => Object.hasOwn(UNKNOWN_WHY, w));
       // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
       const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
-      part.basis = priced.usd === null ? (noTokens ? CODEX_NO_TOKENS : `unknown: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}`) : `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+      const why = priced.why.find((w) => w !== "unreported") ?? "no-price";
+      part.basis = priced.usd === null ? (noTokens ? CODEX_NO_TOKENS : why === "no-price" ? `unknown: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}` : `unknown: ${UNKNOWN_WHY[why]} (${rec.model ?? "unknown model"}, ${PRICES_NAME})`) : `tokens priced at OpenAI's Standard rates from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
     } else if (rec.harness === "copilot") {
       // The worker prices the AI credits its usage file reports (usage.mjs parseCopilot); an artifact from before that,
       // or a run that reported none, is of unknown cost.
@@ -311,7 +215,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.usdUnknown = unknownRuns(rec);
       part.basis = rec.basis ?? "unknown harness";
     }
-    if (part.usdUnknown) part.usdUnknownWhy = unknownOf([{ ...rec, usdUnknown: part.usdUnknown }]).usdUnknownWhy;
+    if (part.usdUnknown && !part.usdUnknownWhy?.length) part.usdUnknownWhy = unknownOf([{ ...rec, usdUnknown: part.usdUnknown }]).usdUnknownWhy;
     // What the part's dollars are (plugin usage.mjs BILLING), as the worker recorded them from its credential.
     const billed = partBilling(rec, part);
     if (Object.keys(billed).length) part.usdByBilling = billed;
@@ -354,7 +258,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // Dollars priced from the table are the measure (PLAN.md); tokens stay the unit only while unpriced.
       out.unit = priced.length ? "usd" : "tokens";
       out.priceTableDate = prices.date;
-      out.basis = priced.length ? `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unpriced[0].basis;
+      out.basis = priced.length ? `tokens priced at OpenAI's Standard rates from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unpriced[0].basis;
       out.note = prices.status === "placeholder" ? `${PRICES_NAME} carries placeholder rates; replace them before reading this as dollars` : null;
       break;
     case "copilot":

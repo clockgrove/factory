@@ -1764,7 +1764,7 @@ async function main() {
         });
     if (toAnswer.length) log(`${replied} of ${toAnswer.length} reviewer comment(s) answered`);
     if (replied) repliesPosted = out["replies.json"];
-    // An exit file the pass wrote is read as ever; with the cap unenforceable the harness is not asked for one.
+    // An exit file the pass wrote is read as ever; with none, the harness is asked for one within what max_usd left.
     // A provider's refusal is not asked again: the answer Blocks with it.
     const asked = rec.refusal ? { record: { exit: "blocked", reason: refusalReason(rec.refusal), questions: [] }, usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: passEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd });
     records.push(...asked.usage);
@@ -1789,7 +1789,7 @@ async function main() {
     }
     if (answerRecord.exit === "question") log(`answer pass raised a question: ${(answerRecord.questions[0] || answerRecord.reason || "").slice(0, 160)}`);
   }
-  // No fix pass starts once a run left the cap unenforceable; the job Blocks below.
+  // No fix pass after a failed push, a held Question or the provider's refusal; a run of unknown cost stops nothing.
   const validation = answering && !outbox.failed && !heldQuestion && !answerRun?.refusal
     ? await validationLoop({ onPhase: progress, progress, checks: inputs.ciChecks.length ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null, outbox, checkout, commands: inputs.validation, harness: inputs.harness, model: inputs.model, effort: inputs.effort, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, session, taskCard, env: passEnv, deadlineAt, eventsFile, label: "review-validation", io, triage: openTriage({ inputs, repo, issue, prNumber: pr.number, token: token.token, actionsToken: inputs.githubToken || token.token, progress, stage: decisionStage }), drift, progressCheck: stageProgress })
     : { green: true, passes: 0, usage: [] };

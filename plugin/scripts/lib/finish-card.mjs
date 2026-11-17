@@ -11,7 +11,7 @@ import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, isPlaceholder, isSelf, marker, rebaseCostOf, selfLogin, spendParts } from "./logic.mjs";
-import { BILLING, addBilling, billingRead, billingText, unknownRuns } from "./usage.mjs";
+import { BILLING_WORDS, addBilling, billingRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
 const ms = (at) => (typeof at === "number" ? at : at ? Date.parse(at) : NaN);
@@ -270,10 +270,38 @@ export function centsOf(rows) {
   return out;
 }
 
-/** The cost as the headline says it, with what the dollars are (usage.mjs billingText). */
+/**
+ * What a figure's dollars are, from its dollars by billing (usage.mjs BILLING, read through billingRead): the kinds that
+ * hold at least half a cent of it, "" standing for dollars no record names a billing for (a sandbox vendor's).
+ */
+function kindsOf(usd, byBilling) {
+  const map = billingRead(byBilling);
+  const out = Object.keys(map).filter((k) => map[k] >= 0.005);
+  const unnamed = typeof usd === "number" ? usd - Object.values(map).reduce((s, n) => s + n, 0) : 0;
+  if (out.length && unnamed >= 0.005) out.push("");
+  return out;
+}
+
+/** The card's short words for a kind other than billed API spend; `unknown` is no billing, so it says none was recorded. */
+const SHORT = { subscription: "API-equivalent", credits: "Copilot AI credits", unknown: "billing not recorded" };
+
+/**
+ * The words after a dollar figure: none for billed API spend or when nothing names a billing; for one other kind
+ * " API-equivalent", " in Copilot AI credits" or " (billing not recorded)"; for a mix the kinds other than billed spend,
+ * " (part API-equivalent, part billing not recorded)". The table spells each stage out.
+ */
+export function billingWords(usd, byBilling) {
+  const kinds = kindsOf(usd, byBilling);
+  const odd = kinds.filter((k) => k && k !== "api" && SHORT[k]);
+  if (!odd.length) return "";
+  if (kinds.length === 1) return { subscription: " API-equivalent", credits: " in Copilot AI credits", unknown: " (billing not recorded)" }[odd[0]];
+  return ` (part ${odd.map((k) => SHORT[k]).join(", part ")})`;
+}
+
+/** The cost as the headline says it, with what the dollars are (billingWords). */
 function headlineCost({ usd, unknown, byBilling }) {
   if (unknown > 0 && !(usd > 0)) return "; its cost is unknown";
-  return ` for ${dollars(usd)}${billingText(usd, byBilling)}${unknown > 0 ? " plus spend that was not reported" : ""}`;
+  return ` for ${dollars(usd)}${billingWords(usd, byBilling)}${unknown > 0 ? " plus spend that was not reported" : ""}`;
 }
 
 /** The headline: time to merge and the cost. */
@@ -289,12 +317,13 @@ export function badge(label, message, color) {
 }
 
 /**
- * The cost badge's label: what its dollars are (usage.mjs BILLING's words) when they are all of one kind other than
- * billed API spend; "cost" otherwise (billed, unnamed, or a mix, which the headline and table spell out).
+ * The cost badge's label: what its dollars are when they are all of one kind other than billed API spend and that kind
+ * is a billing (an API-equivalent figure, Copilot AI credits); "cost" otherwise (billed, not recorded, or a mix, which the
+ * headline and table spell out).
  */
 function costLabel(t) {
-  const words = billingText(t.usd, t.byBilling).trim();
-  return words && Object.values(BILLING).includes(words) ? words : "cost";
+  const kinds = kindsOf(t.usd, t.byBilling);
+  return kinds.length === 1 && (kinds[0] === "subscription" || kinds[0] === "credits") ? SHORT[kinds[0]] : "cost";
 }
 
 /** The badges: status, wall clock and cost. */
@@ -330,12 +359,13 @@ export function summary(d) {
 /** The source line: where the times and dollars come from, and what the dollars are. */
 function sources(d, t) {
   const unknownLine = t.unknown ? ` ${t.unknown === 1 ? "One run has" : `${t.unknown} runs have`} no reported cost, so ${t.unknown === 1 ? "it shows" : "they show"} as unknown, not as a number.` : "";
-  const kinds = Object.keys(t.byBilling);
-  const what = !kinds.length
-    ? "These are the costs Pendulum recorded for this run; it did not record which were billed and which are API-equivalent figures."
-    : kinds.every((k) => k === "api")
-      ? "These are the costs Pendulum recorded for this run, billed spend on your API key or AI Gateway key."
-      : "These are the costs Pendulum recorded for this run. An API-equivalent figure is what the usage would cost at API prices, covered by your plan and not billed.";
+  const kinds = t.usd > 0 ? kindsOf(t.usd, t.byBilling) : [];
+  const said = [];
+  if (kinds.length && kinds.every((k) => k === "api")) said.push("They are billed spend on your API key or AI Gateway key.");
+  if (kinds.includes("subscription")) said.push("An API-equivalent figure is what the usage would cost at API list prices, on your subscription; it is not billed.");
+  if (kinds.includes("credits")) said.push(`Copilot AI credits are ${BILLING_WORDS.credits.replace(/^Copilot AI credits, /, "")}.`);
+  if (t.usd > 0 && (!kinds.length || kinds.includes("unknown") || kinds.includes(""))) said.push(kinds.length ? "For some of these dollars Pendulum did not record how they were billed." : "Pendulum did not record how these dollars were billed.");
+  const what = ["These are the costs Pendulum recorded for this run.", ...said].join(" ");
   return `${what}${unknownLine} Your CI minutes are not included. Times come from the issue, the PR and the run records.`;
 }
 
@@ -417,12 +447,13 @@ function pie(rows, t) {
 /** The cost table by stage and model, with the merge queue's time and the total. */
 function costTable(d, t, rows) {
   // All of one kind other than billed spend: the column says what the dollars are, once; otherwise each cell does.
-  const one = costLabel(t) !== "cost" ? costLabel(t) : null;
-  const cell = (r) => (r.usd === null ? "unknown" : `${r.unknown > 0 ? `${cents(r.cents)} + unknown` : cents(r.cents)}${one ? "" : billingText(r.usd, r.byBilling)}`);
+  const all = kindsOf(t.usd, t.byBilling);
+  const one = all.length === 1 && SHORT[all[0]] ? SHORT[all[0]] : null;
+  const cell = (r) => (r.usd === null ? "unknown" : `${r.unknown > 0 ? `${cents(r.cents)} + unknown` : cents(r.cents)}${one ? "" : billingWords(r.usd, r.byBilling)}`);
   const lines = rows.map((r) => `| ${r.name}${r.model ? ` · ${modelName(r.model)}` : ""} | ${r.time} | ${cell(r)} |`);
   const queued = d.queue.reduce((s, q) => s + (ms(q.end) - ms(q.start)), 0);
   if (d.queue.length) lines.push(`| Merge queue · your CI | ${durationText(queued)} | — |`);
-  return [`| Stage | Time | ${one ? `Cost, ${one}` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingText(t.usd, t.byBilling) : ""}** |`].join("\n");
+  return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
 }
 
 /** The run log: every recorded event, oldest first. */

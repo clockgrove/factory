@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
+import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -39,6 +39,7 @@ import {
   getIssue,
   getPr,
   getRepo,
+  workflowFile,
   getPrSettled,
   listComments,
   objectiveLabeledAt,
@@ -80,10 +81,10 @@ import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
 import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
-import { artifactStage, openSealed } from "./seal.mjs";
+import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -351,9 +352,11 @@ export const ARTIFACT_LOOKS = 3;
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
  * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
  * stage continuing its pause, continue.mjs). An artifact's session comes under the job's `seal` (seal.mjs usageSeal:
- * the stage's key and the repository's policy): sealed, it is opened for this Objective and the artifact's stage, and
- * under the sealed policy an unsealed one is refused (seal.mjs openSealed); with no seal given, the sealed policy with no
- * key. Returns `{id, from, reason}`: `id` is the session to resume, or null with the reason it is not.
+ * the stage's key and the repository's policy): sealed, it is opened for this Objective, the artifact's stage and the
+ * record beside it, and under the sealed policy an unsealed one is refused (seal.mjs openSealed); under the published
+ * policy the artifact is taken only from a run of this repository's Pendulum workflow (seal.mjs artifactRunProblem);
+ * with no seal given, the sealed policy with no key. Returns `{id, from, reason}`: `id` is the session to resume, or
+ * null with the reason it is not.
  */
 export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null, seal = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
@@ -363,7 +366,14 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
   // newest first, to the most recent one that did. Locally each is a file read: every stage directory is looked at. On
   // Actions each is an artifact download: at most ARTIFACT_LOOKS of them.
   let last = "no earlier run saved a session";
+  const policy = () => (seal ? seal.policy() : Promise.resolve("sealed"));
   for (const src of fromStageDirs ? sources : sources.slice(0, ARTIFACT_LOOKS)) {
+    // A published session is readable, so nothing in it vouches for it: its run must be this repository's Pendulum
+    // workflow's, checked before anything of it is downloaded.
+    if (!fromStageDirs && (await policy()) === "published") {
+      const problem = artifactRunProblem(await src.run(), { repoFull: repo.full, workflowPath: `${WORKFLOWS_DIR}${workflowFile()}` });
+      if (problem) return { id: null, from: src.name, reason: problem };
+    }
     const dir = await src.dir();
     if (!dir) {
       last = src.error || last;
@@ -384,7 +394,7 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     // An artifact's session: opened from its seal, or refused when the policy is sealed and it is not; then the stage
     // starts fresh (an older artifact's session would be an earlier point of the same lineage, so none is looked for).
     if (!fromStageDirs) {
-      const opened = await openSealed(dir, seal?.key ?? null, { policy: seal ? await seal.policy() : "sealed", bind: { issue, stage: artifactStage(src.name) } });
+      const opened = await openSealed(dir, seal?.key ?? null, { policy: await policy(), bind: { issue, stage: artifactStage(src.name) } });
       if (!opened.ok) return { id: null, from: src.name, reason: opened.reason };
     }
     for (const rel of s.files) if (!existsSync(join(dir, "transcript", rel))) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
@@ -395,9 +405,9 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       const root = sessionRoot(harness);
       if (s.files.every((rel) => existsSync(join(root, rel)))) {
         let later = laterSessionTotal(workDir, { harness, id: s.id, after: src.at });
-        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Pendulum's reading was
-        // priced from its table. The lower of the two: a seed above the session's own total would make the next pass's
-        // total read as no running total at all (usage.mjs sinceSession), and count the whole session again.
+        // Claude's own running total is its live transcript's last cost-state, as Claude Code reported it. The lower of the
+        // two: a seed above the session's own total would make the next pass's total read as no running total (usage.mjs
+        // sinceSession), a run of unknown cost where Claude Code reported its share.
         if (later && harness === "claude") {
           const main = s.files.find((rel) => rel.split("/").at(-1) === `${s.id}.jsonl`);
           const own = main && lstatSync(join(root, main)).isFile() ? transcriptTotal(readFileSync(join(root, main), "utf8")) : null;
@@ -421,7 +431,7 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       if (existsSync(events) && lstatSync(events).isFile()) seedSessionTotal(s.id, clampTotal(copilotSessionTotal(readFileSync(events, "utf8"), copilotCreditUsd()), recorded));
     }
     // Codex too (its thread's token totals): the prior total is the one Pendulum recorded for the stage.
-    if (harness === "codex" && typeof recorded.sessionTotal?.usd === "number") seedSessionTotal(s.id, recorded.sessionTotal);
+    if (harness === "codex" && (typeof recorded.sessionTotal?.usd === "number" || runningTokens(recorded.sessionTotal?.tokens))) seedSessionTotal(s.id, recorded.sessionTotal);
     // And each sub-agent thread the session had spawned, at the total that stage counted: a resumed parent's rollout
     // still names them, and they are never counted twice.
     if (harness === "codex" && recorded.sessionTotal?.children && typeof recorded.sessionTotal.children === "object") for (const [id, t] of Object.entries(recorded.sessionTotal.children)) if (plainThread(id) && t?.tokens) seedSessionTotal(id, t);
@@ -497,6 +507,8 @@ async function artifactSessionSources({ repo, issue, token, workDir }) {
     const src = {
       name: a.name,
       error: null,
+      // The run that uploaded it, as GitHub reads it (its workflow's path, its repository and head repository); null unread.
+      run: () => rest(`repos/${repo.full}/actions/runs/${a.workflow_run.id}`, { token }).catch(() => null),
       dir: async () => {
         const dir = join(workDir, `pendulum-restore-${a.id}`);
         const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: typeof token === "function" ? token() : token }, timeoutMs: 120_000 });
@@ -940,9 +952,10 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
-  // The dollars by billing: the passes' at the credential's, the relayed key's (`keyUsd`) as billed API spend.
+  // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
+  // relayed key's as `api`); a reading with no split books the passes' at the credential's.
   const interimOf = (live) => {
-    const byBilling = addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
+    const byBilling = live.byBilling ? addBilling(live.byBilling) : addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
     const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}) };
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
@@ -1015,9 +1028,13 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   /** The comment's key (its run id), which the stage's usage record names too (writeUsage `progressRun`). */
   progress.runId = runId;
-  /** The stage credential's billing (usage.mjs BILLING, credentialEnv's), which the spend line names from the next write. */
+  /**
+   * The stage credential's billing (usage.mjs BILLING, credentialEnv's): each pass is booked by its own from then on
+   * (harness.mjs setStageBilling), and the spend line and the status line name it.
+   */
   progress.billing = (kind) => {
-    billing = Object.hasOwn(BILLING, kind ?? "") ? kind : null;
+    billing = BILLING.includes(kind) ? kind : null;
+    setStageBilling(billing);
   };
   /** That billing, for the status line's dollars (liveActivity). */
   progress.billingOf = () => billing;
@@ -1913,14 +1930,15 @@ export async function reviewScope(mgit, { reviews, comments, issue, base, head, 
 }
 
 /**
- * The saved session's running total for result.json: the last one a run of it reported with dollars (a pass that ended
+ * The saved session's running total for result.json: the last one a run of it reported with dollars, or for Codex with its tokens (a pass that ended
  * without a total keeps the one before), with every Codex sub-agent thread any of its runs counted (`children`), so the
  * stage that restores it counts neither again. Null when there is neither.
  */
 function lineageTotal(id, records) {
   if (!id) return null;
   const runs = records.filter((r) => r?.sessionId === id && r.sessionTotal);
-  const total = runs.filter((r) => typeof r.sessionTotal.usd === "number").at(-1)?.sessionTotal ?? null;
+  // A Codex total is its tokens (usage.mjs sinceSession prices each pass's share), whether or not they were priced.
+  const total = runs.filter((r) => typeof r.sessionTotal.usd === "number" || (r.harness === "codex" && runningTokens(r.sessionTotal.tokens))).at(-1)?.sessionTotal ?? null;
   const children = Object.assign(Object.create(null), ...runs.map((r) => (r.sessionTotal.children && typeof r.sessionTotal.children === "object" ? r.sessionTotal.children : {})));
   if (!Object.keys(children).length) return total;
   return { ...(total ?? { usd: null, tokens: null }), children: { ...children } };
@@ -2045,9 +2063,12 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
-    // What the known dollars are (usage.mjs BILLING, from the credential `billing` that ran the passes, credentialEnv's):
-    // billed API spend, a subscription's API-equivalent figure or Copilot's included credits, each part's dollars.
+    // What the known dollars are (usage.mjs BILLING): each pass's at its own kind (stamped as it ended, else passBilling
+    // on the stage credential's `billing`), the relayed key's as `api`.
     usdByBilling: usdByBilling(records || [], billing, { extraKeyUsd: kb.extra }),
+    // The kind its harness passes share (usage.mjs stageBilling; `unknown` when they differ or none ran): what the
+    // scorer reads for the stage's harness dollars, the relayed key's being `api` in usdByBilling.
+    billing: stageBilling(records || [], billing),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

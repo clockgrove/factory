@@ -2,8 +2,8 @@
 //   {harness, model, usd, usdUnknown?, usdUnknownWhy?, tokens: {input, output, cached}, basis, started, ended,
 //    sessionId, subtype, ok, error, turns, apiKeySource?}
 // `basis` says where the dollars came from, so the scorecard shows it. A count a harness does not report is null, never
-// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate; what they are (billed or API-equivalent)
-// comes from the credential that ran them (BILLING, below).
+// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate; how they are billed
+// comes from the credential that ran them and the harness's own report (BILLING, below).
 
 
 import { existsSync, readFileSync } from "node:fs";
@@ -38,11 +38,16 @@ export const UNKNOWN_WHY = {
   // Claude Code's result was an error with total_cost_usd 0 after its stream reported tokens: a crashed session's final
   // result can carry zeroed totals.
   zeroed: "Claude Code's error result carried a zeroed cost after its stream reported tokens",
-  // A resumed Claude session on a Claude Code before 2.1.277 (or one that named no version): its totals may restart at
-  // zero on resume, so no running total can be taken off them.
-  "resumed-total": "a resumed Claude session on a Claude Code older than 2.1.277, whose totals may restart at zero",
+  // A resumed session whose reported total is no running total: Claude Code before 2.1.277 (or one that named no
+  // version), whose totals may restart at zero on resume, or any harness's total below the one already counted.
+  "resumed-total": "a resumed session's reported total is no running total (Claude Code before 2.1.277, or a total below the one already counted)",
   // A Codex model with no row in the price table, or no model named: its tokens have no published rate here.
   "no-price": "the Codex model has no row in the price table",
+  // A Codex model whose price-table row is a promotional rate that had ended when the run did (codexRow, `until`).
+  "price-ended": "the Codex model's promotional rate in the price table had ended",
+  // A Codex run whose input passed the long-context threshold and whose requests' sizes could not be read from its
+  // rollout: which of its tokens are at the long-context rate is not known (rolloutLong).
+  "long-context": "the Codex run passed the long-context threshold and its requests' sizes could not be read",
   // Codex reported a failed request (a stream `error` or `turn.failed`): the provider may have billed tokens Codex never reports.
   "failed-request": "Codex reported a failed request whose tokens it never reports",
   // Codex sub-agent threads that could not be read, or whose model has no price.
@@ -89,35 +94,74 @@ export function unknownOf(records) {
 export const unknownText = (n) => (Number.isInteger(n) && n > 0 ? ` plus ${n} run${n === 1 ? "" : "s"} of unknown cost` : "");
 
 /**
- * What a figure's dollars are (#481), from the credential that ran it (harness.mjs credentialEnv `billing`), never from
- * prose or a guess. One closed list, each code with the words that follow its dollars wherever they are shown:
- * - `api`: billed spend on an API key or the AI Gateway (Claude Code's total_cost_usd on an API key, Codex tokens on an
- *   API key or the gateway, the relayed worker key's calls); shown as the bare figure;
- * - `subscription`: an API-equivalent figure on a plan or login credential, not a charge (Claude Code's total_cost_usd
- *   on `credential: plan` or a local login, Codex on a ChatGPT login priced from the API table);
- * - `included-credits`: Copilot AI credits at copilot_credit_usd each, an API-equivalent figure, not a charge.
- * Caps compare the figure whatever its billing: max_usd and daily_usd stay in dollars. A total keeps its known dollars by
- * billing in `usdByBilling` ({api?, subscription?, "included-credits"?}: usdByBilling); dollars of a record that names
- * none (a sandbox vendor's, a record written before Pendulum named billing) are in `usd` and in no part of it.
+ * What a figure's dollars are (#481): one closed list, decided on a positive signal from the credential that ran them
+ * (harness.mjs credentialEnv `billing`, from the environment the harness child gets) and the harness's own report on the
+ * pass (passBilling), never from prose and never assumed:
+ * - `api`: billed per use on a known key: an Anthropic API key (`ANTHROPIC_API_KEY`, an `apiKeyHelper`, a Console
+ *   `/login managed key`), a bearer token to a gateway or proxy (`ANTHROPIC_AUTH_TOKEN`), Bedrock or Vertex, a Codex API
+ *   key or one of its API auth modes, the AI Gateway key, a relayed worker key's calls;
+ * - `subscription`: Claude Code's total_cost_usd on a Claude OAuth login (a `CLAUDE_CODE_OAUTH_TOKEN`, or a pass whose
+ *   Claude Code reported a subscription's rate-limit windows), or Codex tokens priced from the API table on a ChatGPT
+ *   auth mode: what the run would cost at API list prices, on the subscription;
+ * - `credits`: Copilot's AI credits at copilot_credit_usd each, billed to the Copilot seat;
+ * - `unknown`: none of those signals: shown as "billing not recorded".
+ * Caps compare the figure whatever its billing: max_usd and daily_usd stay in dollars. Every pass record carries its
+ * `billing`; a stage's record and spend line carry `billing` (its harness passes' kind) and `usdByBilling` (its known
+ * dollars by kind, a relayed key's share as `api`). Dollars that name no billing at all (a sandbox vendor's, a record from
+ * before the field) are in `usd` and in no part of `usdByBilling`.
  */
-export const BILLING = {
+export const BILLING = Object.freeze(["api", "subscription", "credits", "unknown"]);
+
+/** The words after a figure of each kind (billingText); `api` alone is the bare figure. */
+export const BILLING_WORDS = Object.freeze({
   api: "API",
-  subscription: "API-equivalent (subscription)",
-  "included-credits": "API-equivalent (included credits)",
-};
+  subscription: "API-equivalent at list prices, on the subscription",
+  credits: "Copilot AI credits, billed to the seat",
+  unknown: "billing not recorded",
+});
+
+/** Claude Code's init-line `apiKeySource` values that name a key it bills per use (any other value but "none" is unknown). */
+export const CLAUDE_KEY_SOURCES = new Set(["ANTHROPIC_API_KEY", "apiKeyHelper", "/login managed key"]);
+
+/** Claude Code's `provider` (modelUsage) values billed per use on a cloud account; another non-Anthropic provider is unknown. */
+const CLAUDE_CLOUD_PROVIDERS = new Set(["bedrock", "vertex"]);
+
+const isKind = (k) => typeof k === "string" && BILLING.includes(k);
 
 /**
- * One harness pass's billing (BILLING) on a credential of `billing`: the credential's, except a Claude pass on a plan or
- * login credential that Claude Code reports ran on an API key (its init line's `apiKeySource` other than "none") or on
- * a provider other than Anthropic's own (a model's `provider` other than "firstParty": Bedrock, Vertex, a gateway): that
- * pass is billed spend. Null when the credential's billing is not known.
+ * One harness pass's billing (BILLING) on a credential of `billing` (credentialEnv's), from what the harness reported:
+ * - Copilot: `credits`.
+ * - Claude: an `apiKeySource` in CLAUDE_KEY_SOURCES is `api`, any other but "none" (a legacy or unknown source) is
+ *   `unknown`; a model served by Bedrock or Vertex is `api`, by another provider than Anthropic's own `unknown`. Else the
+ *   credential's, and on a credential of unknown billing a pass whose Claude Code reported a subscription's rate-limit
+ *   windows (`planLimits`, parseClaude) is `subscription`: "none" alone proves nothing, a bearer token reports it too.
+ *   A pass that ran on paid extra usage (`overage`: a `rate_limit_event` with `isUsingOverage`) is `unknown`, whatever
+ *   the credential: it can straddle the plan's included use and the overage.
+ * - Codex: the credential's, and on one of unknown billing a pass whose rollout carried a ChatGPT plan's rate limits
+ *   (`planLimits`, codexPlanLimits) is `subscription`.
+ * A pass record that already names its billing keeps it. `unknown` when nothing positive is known.
  */
 export function passBilling(billing, rec) {
-  if (!Object.hasOwn(BILLING, billing ?? "")) return null;
-  if (billing !== "subscription" || rec?.harness !== "claude") return billing;
-  const keyed = typeof rec.apiKeySource === "string" && rec.apiKeySource !== "none";
-  const thirdParty = Object.values(rec.models ?? {}).some((m) => typeof m?.provider === "string" && m.provider !== "firstParty");
-  return keyed || thirdParty ? "api" : billing;
+  if (isKind(rec?.billing)) return rec.billing;
+  if (rec?.harness === "copilot") return "credits";
+  const cred = isKind(billing) ? billing : "unknown";
+  if (rec?.harness === "claude") {
+    // Paid extra usage past the plan's limit: some or all of the pass is billed beyond the subscription.
+    if (rec.overage === true) return "unknown";
+    const src = rec.apiKeySource;
+    if (typeof src === "string" && CLAUDE_KEY_SOURCES.has(src)) return "api";
+    if (typeof src === "string" && src !== "none") return "unknown";
+    const providers = Object.values(rec.models ?? {}).map((m) => m?.provider).filter((p) => typeof p === "string" && p !== "firstParty");
+    if (providers.length) return providers.every((p) => CLAUDE_CLOUD_PROVIDERS.has(p)) ? "api" : "unknown";
+  }
+  if (cred === "unknown" && rec?.planLimits === true && (rec.harness === "claude" || rec.harness === "codex")) return "subscription";
+  return cred;
+}
+
+/** The kind the stage's harness passes share (BILLING): one kind, or `unknown` when they differ, name none or none ran. */
+export function stageBilling(records, billing) {
+  const kinds = new Set((records || []).filter((r) => r && !r.noRun).map((r) => (isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : "unknown")));
+  return kinds.size === 1 ? [...kinds][0] : "unknown";
 }
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
@@ -125,9 +169,9 @@ const nonNeg = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0,
 
 /**
  * The known dollars of a stage's pass `records` by billing (BILLING), on a credential of `billing`: each pass's own
- * dollars at passBilling, its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the relay's spend
- * outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing. {} when
- * the credential's billing is not known and no key spend was booked.
+ * dollars at its kind (passBilling), its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the
+ * relay's spend outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing;
+ * a record that names no billing, on a credential of none (a record from before the field), is in no part.
  */
 export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
   const out = {};
@@ -137,7 +181,8 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
   for (const r of (records || []).filter((x) => x && !x.noRun)) {
     const key = nonNeg(r.workerKeyUsd);
     const usd = nonNeg(r.usd);
-    put(passBilling(billing, r), usd === null ? null : Math.max(0, usd - (key ?? 0)));
+    // A record that names no billing, on a credential of none, is in no part.
+    put(isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : null, usd === null ? null : Math.max(0, usd - (key ?? 0)));
     if (key) put("api", key);
   }
   if (extraKeyUsd > 0) put("api", extraKeyUsd);
@@ -147,8 +192,11 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
 /** A `usdByBilling` read back from a stored record or line: its BILLING codes at finite non-negative dollars; {} for none or a broken one. */
 export function billingRead(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
-  return Object.fromEntries(Object.entries(v).filter(([k, n]) => Object.hasOwn(BILLING, k) && typeof n === "number" && Number.isFinite(n) && n >= 0));
+  return Object.fromEntries(Object.entries(v).filter(([k, n]) => isKind(k) && typeof n === "number" && Number.isFinite(n) && n >= 0));
 }
+
+/** A stored `billing` code read back: one of BILLING, else null. */
+export const billingCode = (v) => (isKind(v) ? v : null);
 
 /** Several `usdByBilling` maps summed (each read through billingRead). */
 export function addBilling(...maps) {
@@ -158,92 +206,237 @@ export function addBilling(...maps) {
 }
 
 /**
- * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling), `fmt` writing a part's
- * dollars: "" for billed API spend alone, or when nothing names a billing; " API-equivalent (subscription)" or
- * " API-equivalent (included credits)" for that kind alone; for a mix, every part: " ($0.30 API + $1.20 API-equivalent
- * (subscription))", with dollars no record named a billing for (a sandbox vendor's) as a bare part.
+ * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling); `fmt` writes a part's
+ * dollars and `unit` is the smallest amount it shows (a part, or a remainder no kind names, under half of it is not shown):
+ * - "" for billed API spend alone, or when nothing names a billing;
+ * - " API-equivalent at list prices, on the subscription", " Copilot AI credits, billed to the seat" or " billing not
+ *   recorded" for that kind alone;
+ * - for a mix, every part: ": $1.20 API-equivalent at list prices, on the subscription + $0.30 API", with dollars no
+ *   record named a billing for (a sandbox vendor's) as a bare part.
  */
-export function billingText(usd, byBilling, fmt = (n) => `$${n.toFixed(2)}`) {
+export function billingText(usd, byBilling, { fmt = (n) => `$${n.toFixed(2)}`, unit = 0.01 } = {}) {
   const map = billingRead(byBilling);
   const kinds = Object.keys(map);
   if (!kinds.length) return "";
+  const shown = (n) => n >= unit / 2;
   const named = Object.values(map).reduce((s, n) => s + n, 0);
   const rest = typeof usd === "number" && Number.isFinite(usd) ? round6(usd - named) : 0;
-  const parts = Object.entries(map).filter(([, n]) => n > 0);
-  if (rest >= 0.00005) parts.push(["", rest]);
-  // Nothing above $0: the one kind named, if there is one.
-  if (!parts.length) return kinds.length === 1 && kinds[0] !== "api" ? ` ${BILLING[kinds[0]]}` : "";
-  if (parts.length === 1) return parts[0][0] && parts[0][0] !== "api" ? ` ${BILLING[parts[0][0]]}` : "";
+  const parts = Object.entries(map).filter(([, n]) => shown(n));
+  if (shown(rest)) parts.push(["", rest]);
+  const words = (k) => (k && k !== "api" ? ` ${BILLING_WORDS[k]}` : "");
+  // Nothing shown: the largest kind named.
+  if (!parts.length) return words(kinds.reduce((a, k) => (map[k] > map[a] ? k : a), kinds[0]));
+  if (parts.length === 1) return words(parts[0][0]);
   if (parts.every(([k]) => k === "api" || k === "")) return "";
-  return ` (${parts.map(([k, n]) => `${fmt(n)}${k ? ` ${BILLING[k]}` : ""}`).join(" + ")})`;
+  return `: ${parts.map(([k, n]) => `${fmt(n)}${k ? ` ${BILLING_WORDS[k]}` : ""}`).join(" + ")}`;
 }
 
 /** A model id without its provider prefix: `openai/gpt-6.1-sol` (the AI Gateway's form) is `gpt-6.1-sol`. */
 export const bareModel = (model) => String(model ?? "").replace(/^[A-Za-z0-9._-]+\//, "");
 
+const isRate = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const validRates = (r) => !!r && typeof r === "object" && [r.input, r.cached, r.output].every(isRate) && (r.write === undefined || isRate(r.write));
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The first moment a row's promotional rate no longer applies: the start (UTC) of its `until` day; null for a row with none. */
+export const rateEnds = (p) => (p && typeof p.until === "string" && DAY.test(p.until) ? Date.parse(`${p.until}T00:00:00Z`) : null);
+
 /**
- * The table's rates for `model`, or null: its exact id after any provider prefix, or that id plus a dated snapshot suffix
- * (`gpt-5.5-2026-04-23`). Nothing else matches, so `gpt-5-mini` never takes `gpt-5`'s rates: an unlisted model is
- * of unknown cost, not mispriced. Short-context rates (the table's `long` entry is recorded, not applied: Codex reports usage
- * per turn, so no request's context size is visible).
+ * The table's row for `model`: `{rate, id, why}`. `rate` is the row (null when there is none to price at), `id` the row's
+ * model, `why` the UNKNOWN_WHY code when `rate` is null. A model matches by its exact id after any provider prefix, that
+ * id plus a dated snapshot suffix (`gpt-5.5-2026-04-23`), or an alias the table records as OpenAI documents it (`aliases`:
+ * `gpt-5.6` routes to `gpt-5.6-sol`). Nothing else matches, so `gpt-5-mini` never takes `gpt-5`'s rates: an unlisted
+ * model is of unknown cost (`no-price`), not mispriced. A row with `until` is a promotional rate, which prices `at` (a
+ * Date, ISO time or epoch ms; now when omitted) only before that day; at or after it, or with `at` null (a record that
+ * names no time), the model is of unknown cost (`price-ended`).
  */
-export function codexRate(table, model) {
-  const id = bareModel(model);
-  if (!id || !table?.perMillion) return null;
+export function codexRow(table, model, { at } = {}) {
+  const asked = bareModel(model);
+  const none = { rate: null, id: asked || null, why: "no-price" };
+  if (!asked || !table?.perMillion) return none;
+  const aliases = table.aliases && typeof table.aliases === "object" ? table.aliases : {};
+  const id = Object.hasOwn(aliases, asked) && typeof aliases[asked] === "string" ? aliases[asked] : asked;
   const snapshot = id.match(/^(.+)-\d{4}-\d{2}-\d{2}$/)?.[1];
-  const p = (Object.hasOwn(table.perMillion, id) && table.perMillion[id]) || (snapshot && Object.hasOwn(table.perMillion, snapshot) && table.perMillion[snapshot]) || null;
-  const rate = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
-  return p && [p.input, p.cached, p.output].every(rate) && (p.write === undefined || rate(p.write)) ? p : null;
+  const key = Object.hasOwn(table.perMillion, id) ? id : snapshot && Object.hasOwn(table.perMillion, snapshot) ? snapshot : null;
+  const p = key ? table.perMillion[key] : null;
+  if (!validRates(p) || (p.long !== undefined && !validRates(p.long)) || (p.until !== undefined && rateEnds(p) === null)) return none;
+  const ends = rateEnds(p);
+  if (ends !== null) {
+    const when = at === undefined ? Date.now() : at === null ? NaN : new Date(at).getTime();
+    if (!(when < ends)) return { rate: null, id: key, why: "price-ended" };
+  }
+  return { rate: p, id: key, why: null };
+}
+
+/** The table's rates for `model` (codexRow), or null when it has none to price at. */
+export const codexRate = (table, model, opts = {}) => codexRow(table, model, opts).rate;
+
+const TOKEN_KEYS = ["input", "cached", "written", "output"];
+const ZERO = Object.freeze({ input: 0, cached: 0, written: 0, output: 0 });
+
+/**
+ * The part of `tokens` from requests over `above` input tokens (the long-context tier), or null when it is not known.
+ * `tokens.long` holds it when the run's input passed `above` (parseCodex reads it per request from the rollout; null
+ * when it could not); a figure whose input is at most `above` has none, since no one request in it can be larger.
+ */
+export function longShare(tokens, above) {
+  if (!Number.isFinite(above)) return null;
+  const l = tokens?.long;
+  if (l && typeof l === "object") return TOKEN_KEYS.every((k) => isRate(l[k]) && l[k] <= (tokens[k] ?? 0)) ? l : null;
+  return (tokens?.input ?? 0) <= above ? ZERO : null;
+}
+
+/** `tokens` with its long-context share `long` (longShare: an object or null), kept only when its input passes `above`. */
+export function withLong(tokens, long, above) {
+  const out = { ...tokens };
+  delete out.long;
+  if (Number.isFinite(above) && (out.input ?? 0) > above) out.long = long ? Object.fromEntries(TOKEN_KEYS.map((k) => [k, long[k]])) : null;
+  return out;
+}
+
+/** Whether `tokens` is a Codex running total a pass reported (a turn completed): its input and output are counts. */
+export const runningTokens = (tokens) => !!tokens && isRate(tokens.input) && isRate(tokens.output);
+
+/** Long-context shares added (`sign` 1) or taken away (-1, never below zero); null when any is unknown. */
+export function sumLong(shares, sign = 1) {
+  if (shares.some((s) => !s)) return null;
+  return Object.fromEntries(TOKEN_KEYS.map((k) => [k, Math.max(0, shares.slice(1).reduce((n, s) => n + sign * s[k], shares[0]?.[k] ?? 0))]));
 }
 
 /**
- * USD for Codex `tokens` at `table`'s rates, rounded to 1/100 cent; null when the model is unlisted or nothing was
- * reported. `input` includes the cached and the written tokens (Codex's input_tokens counts both): the cached part at the
- * cached rate, the written part (cache_write_input_tokens) at the write rate, or the input rate for a model with none.
+ * A Codex thread's requests from its rollout's `token_count` events, in order (`counts`, each `{total, last}` in Pendulum's
+ * token shape: the thread's running total and the request just answered). An event that repeats the total before it
+ * (a rate-limit update) is no request. `{base, end, long}`: the total before the first request read, the last total, and
+ * the part of the requests read that came from requests over `above` input tokens (every token of such a request is at
+ * the long-context rate). Null when a request names no `last_token_usage` or the requests do not add up to the totals.
  */
-export function priceTokens(table, model, tokens) {
-  if (!model || !tokens) return null;
-  if (tokens.input === null && tokens.output === null) return null; // nothing reported is unknown, not free
-  const p = codexRate(table, model);
-  if (!p) return null;
-  const cached = tokens.cached ?? 0;
-  const written = tokens.written ?? 0;
-  const uncached = Math.max(0, (tokens.input ?? 0) - cached - written);
-  const usd = uncached * p.input + cached * p.cached + written * (p.write ?? p.input) + (tokens.output ?? 0) * p.output;
-  return Math.round((usd / 1e6) * 10000) / 10000;
+export function rolloutRequests(counts, above) {
+  const seen = (counts || []).filter((c, i, all) => i === 0 || TOKEN_KEYS.some((k) => c.total[k] !== all[i - 1].total[k]));
+  if (!seen.length || !Number.isFinite(above) || seen.some((c) => !c.last)) return null;
+  const base = Object.fromEntries(TOKEN_KEYS.map((k) => [k, seen[0].total[k] - seen[0].last[k]]));
+  const end = seen.at(-1).total;
+  const sum = (list, k) => list.reduce((n, c) => n + c.last[k], 0);
+  if (TOKEN_KEYS.some((k) => base[k] < 0 || base[k] + sum(seen, k) !== end[k])) return null;
+  const over = seen.filter((c) => c.last.input > above);
+  return { base, end, long: Object.fromEntries(TOKEN_KEYS.map((k) => [k, sum(over, k)])) };
 }
+
+/** A rollout `token_count` usage in Pendulum's token shape; a missing or negative count is 0. */
+export const rolloutUsage = (u) => ({ input: isRate(u?.input_tokens) ? u.input_tokens : 0, cached: isRate(u?.cached_input_tokens) ? u.cached_input_tokens : 0, written: isRate(u?.cache_write_input_tokens) ? u.cache_write_input_tokens : 0, output: isRate(u?.output_tokens) ? u.output_tokens : 0 });
+
+/** The `{total, last}` of each `token_count` event in rollout text (any other line is skipped). */
+export function rolloutCounts(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n")) {
+    if (!line.includes('"token_count"')) continue;
+    const p = jsonLines(line)[0]?.payload;
+    if (p?.type === "token_count" && p.info?.total_token_usage) out.push({ total: rolloutUsage(p.info.total_token_usage), last: p.info.last_token_usage ? rolloutUsage(p.info.last_token_usage) : null });
+  }
+  return out;
+}
+
+/**
+ * A Codex run's long-context share (longShare's shape) from its thread's rollout `text`, for `tokens`, the running total
+ * its stream reported; null when it cannot be read exactly: no rollout, a request with no size, a last total other than
+ * the stream's, or requests before the rollout's first that together passed `above` (any one of them could have).
+ */
+export function rolloutLong(text, tokens, above) {
+  const r = rolloutRequests(rolloutCounts(text), above);
+  if (!r || TOKEN_KEYS.some((k) => r.end[k] !== (tokens?.[k] ?? 0)) || r.base.input > above) return null;
+  return r.long;
+}
+
+/**
+ * USD for Codex `tokens` at `table`'s rates, rounded to 1/100 cent, with why it is null (`{usd, why}`, `why` an
+ * UNKNOWN_WHY code, or null when nothing was reported). `input` includes the cached and the written tokens (Codex's
+ * input_tokens counts both): the cached part at the cached rate, the written part (cache_write_input_tokens, 30-minute
+ * writes) at the write rate, or the input rate for a model with none. For a model with a long-context tier (`long`), the
+ * tokens of requests over the table's `longContextAbove` (longShare) are at those rates; when that share is not known
+ * the dollars are unknown (`long-context`). `at` dates the spend for a promotional rate (codexRow).
+ */
+export function codexPrice(table, model, tokens, { at } = {}) {
+  if (!tokens || (tokens.input == null && tokens.output == null)) return { usd: null, why: null }; // nothing reported is unknown, not free
+  const { rate: p, why } = codexRow(table, model, { at });
+  if (!p) return { usd: null, why };
+  const long = p.long ? longShare(tokens, table.longContextAbove) : ZERO;
+  if (!long) return { usd: null, why: "long-context" };
+  const cost = (t, r) => {
+    const cached = t.cached ?? 0;
+    const written = t.written ?? 0;
+    const uncached = Math.max(0, (t.input ?? 0) - cached - written);
+    return uncached * r.input + cached * r.cached + written * (r.write ?? r.input) + (t.output ?? 0) * r.output;
+  };
+  const short = Object.fromEntries(TOKEN_KEYS.map((k) => [k, Math.max(0, (tokens[k] ?? 0) - long[k])]));
+  const usd = cost(short, p) + (p.long ? cost(long, p.long) : 0);
+  return { usd: Math.round((usd / 1e6) * 10000) / 10000, why: null };
+}
+
+/** USD for Codex `tokens` at `table`'s rates (codexPrice), or null when they cannot be priced. */
+export const priceTokens = (table, model, tokens, opts = {}) => codexPrice(table, model, tokens, opts).usd;
 
 /**
  * A Codex stage's dollars from its usage record at `table`'s rates: its sub-agent threads (`subAgents`, each run's own
- * share, codex-threads.mjs) each at its own model, the rest of `tokens` at `model`. `{usd, unknown}`: `usd` what could
- * be priced (null when nothing could), `unknown` whether any of it could not (an unlisted model's tokens, UNKNOWN_WHY).
+ * share, codex-threads.mjs) each at its own model, the rest of `tokens` at `model`. `{usd, unknown, why}`: `usd` what
+ * could be priced (null when nothing could), `unknown` whether any of it could not, `why` the UNKNOWN_WHY codes for that
+ * (an unlisted model's tokens, a lapsed promotional rate, a long-context share not read).
  */
-export function priceStage(table, model, tokens, subAgents = []) {
+export function priceStage(table, model, tokens, subAgents = [], { at } = {}) {
   const subs = (Array.isArray(subAgents) ? subAgents : []).filter((t) => t?.tokens && typeof t.tokens === "object");
+  const above = table?.longContextAbove;
+  const why = new Set();
+  const priced = (m, t) => {
+    const r = codexPrice(table, m, t, { at });
+    if (r.usd === null) why.add(r.why ?? "unreported");
+    return r.usd;
+  };
   if (!subs.length) {
-    const usd = priceTokens(table, model, tokens);
-    return { usd, unknown: usd === null };
+    const usd = priced(model, tokens);
+    return { usd, unknown: usd === null, why: [...why] };
   }
   const sum = (k) => subs.reduce((n, t) => n + (typeof t.tokens[k] === "number" ? t.tokens[k] : 0), 0);
-  const rest = Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, tokens?.[k] === null || tokens?.[k] === undefined ? null : Math.max(0, tokens[k] - sum(k))]));
-  let usd = priceTokens(table, model, rest);
+  const plain = Object.fromEntries(TOKEN_KEYS.map((k) => [k, tokens?.[k] === null || tokens?.[k] === undefined ? null : Math.max(0, tokens[k] - sum(k))]));
+  const rest = withLong(plain, sumLong([longShare(tokens, above), ...subs.map((t) => longShare(t.tokens, above))], -1), above);
+  let usd = priced(model, rest);
   let unknown = usd === null;
   for (const t of subs) {
-    const p = priceTokens(table, t.model || model, t.tokens);
+    const p = priced(t.model || model, t.tokens);
     if (p === null) unknown = true;
     else usd = (usd ?? 0) + p;
   }
-  return { usd: usd === null ? null : Math.round(usd * 10000) / 10000, unknown };
+  return { usd: usd === null ? null : Math.round(usd * 10000) / 10000, unknown, why: [...why] };
 }
 
 /**
- * The warning for a Codex model with no row in the price table, else null: its runs are of unknown cost (UNKNOWN_WHY
- * `no-price`), so neither `max_usd` nor `daily_usd` counts them (Codex has no in-run cap; Pendulum checks dollars after
- * each run); only a budget on the provider's key bounds them. Doctor and the stage's progress comment say it.
+ * The warning for a Codex model the price table cannot price, else null: no row (UNKNOWN_WHY `no-price`), or a
+ * promotional rate that has ended (`price-ended`). Its runs are of unknown cost, so neither `max_usd` nor `daily_usd`
+ * counts them (Codex has no in-run cap; Pendulum checks dollars after each run); only a budget on the provider's key
+ * bounds them. Doctor and the stage's progress comment say it.
  */
-export function unpricedCodex(harness, model, { gateway = false } = {}) {
-  if (harness !== "codex" || !model || codexRate(CODEX_PRICES, model)) return null;
-  return `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date}): its runs are of unknown cost, so neither max_usd nor daily_usd counts them; only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} bounds them`;
+export function unpricedCodex(harness, model, { gateway = false, at } = {}) {
+  if (harness !== "codex" || !model) return null;
+  const { rate, id, why } = codexRow(CODEX_PRICES, model, { at });
+  if (rate) return null;
+  const what = why === "price-ended" ? `${bareModel(model)}'s rate in the Codex price table (dated ${CODEX_PRICES.date}) is OpenAI's promotional rate for ${id}, which ended ${CODEX_PRICES.perMillion[id].until}` : `${bareModel(model)} has no row in the Codex price table (dated ${CODEX_PRICES.date})`;
+  return `${what}: its runs are of unknown cost, so neither max_usd nor daily_usd counts them; only ${gateway ? "the AI Gateway key's budget" : "the provider key's own limit"} bounds them`;
+}
+
+/** Doctor warns about a promotional rate this many days before it ends. */
+export const PROMO_WARN_DAYS = 7;
+
+/**
+ * Doctor's row for a Codex model priced at a promotional rate (a price-table row with `until`), else null:
+ * `{status, detail}`, WARN in the PROMO_WARN_DAYS days before the rate ends and FAIL from then on (its runs are then of
+ * unknown cost, UNKNOWN_WHY `price-ended`, until a Pendulum release dates the table again).
+ */
+export function promoCodex(harness, model, { at = Date.now() } = {}) {
+  if (harness !== "codex" || !model) return null;
+  const { id } = codexRow(CODEX_PRICES, model, { at: 0 });
+  const p = id && Object.hasOwn(CODEX_PRICES.perMillion, id) ? CODEX_PRICES.perMillion[id] : null;
+  const ends = rateEnds(p);
+  const now = new Date(at).getTime();
+  if (ends === null || !(now >= ends - PROMO_WARN_DAYS * 86400000)) return null;
+  if (now >= ends) return { status: "FAIL", detail: `${bareModel(model)} is priced at OpenAI's promotional rate for ${id}, which ended ${p.until}: its runs are of unknown cost until the Codex price table (dated ${CODEX_PRICES.date}) has OpenAI's current rate` };
+  return { status: "WARN", detail: `${bareModel(model)} is priced at OpenAI's promotional rate for ${id}, which ends ${p.until}: from that day its runs are of unknown cost until the Codex price table (dated ${CODEX_PRICES.date}) has OpenAI's current rate` };
 }
 
 /**
@@ -252,7 +445,7 @@ export function unpricedCodex(harness, model, { gateway = false } = {}) {
  * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.
  */
 export const CODEX_NO_TOKENS = "unknown: no Codex turn completed, so Codex reported no tokens";
-const priceBasis = () => `priced from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+const priceBasis = () => `priced at OpenAI's Standard rates from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
@@ -627,6 +820,24 @@ const QUOTA_WINDOW = /^[a-z0-9][a-z0-9_./-]{0,39}$/i;
 const QUOTA_WINDOWS_MAX = 8;
 
 /**
+ * Whether a Codex run's rollout (from `since`) carried a ChatGPT plan's rate limits: a `token_count` whose `rate_limits`
+ * names a `plan_type`, which Codex records on a ChatGPT login only (an API key or the AI Gateway gets no such headers).
+ * The positive sign of a subscription for a Codex login of unknown auth mode (passBilling).
+ */
+export function codexPlanLimits(rollout, since = null) {
+  if (typeof rollout !== "string") return false;
+  const from = Date.parse(since);
+  for (const line of rollout.split("\n")) {
+    if (!line.includes('"plan_type"')) continue;
+    const o = jsonLines(line)[0];
+    if (o?.type !== "event_msg" || o.payload?.type !== "token_count") continue;
+    if (Number.isFinite(from) && !(Date.parse(o.timestamp) >= from)) continue;
+    if (typeof o.payload.rate_limits?.plan_type === "string" && o.payload.rate_limits.plan_type) return true;
+  }
+  return false;
+}
+
+/**
  * How much of its subscription's usage limits a pass's account had used, as the harness reported it during the pass:
  * {harness, windows: {<window>: {used, resetsAt}}}, `used` the fraction of the window spent (1 is all of it) and
  * `resetsAt` (ms) when the window starts again; null when the harness reported none. Only a window with both numbers is
@@ -767,9 +978,17 @@ export function parseClaude(stdout, model) {
   if (failure) rec.providerError = failure;
   if (outageError(failure)) rec.providerOutage = failure;
   // The Claude Code that ran, as its stream's init line names it: whether a resumed total is a running total (sinceSession).
-  if (typeof init?.claude_code_version === "string") rec.harnessVersion = init.claude_code_version;
-  // Where its key came from ("none": an OAuth login or token, no API key): what the pass's dollars are (passBilling).
-  if (typeof init?.apiKeySource === "string" && init.apiKeySource.length <= 60) rec.apiKeySource = init.apiKeySource;
+  const version = lines.find((l) => l?.type === "system" && l.subtype === "init")?.claude_code_version ?? lines.find((l) => typeof l?.claude_code_version === "string")?.claude_code_version;
+  if (typeof version === "string") rec.harnessVersion = version;
+  // Where its key came from ("none": no API key, which an OAuth login and a bearer token both report): passBilling.
+  const keySource = lines.find((l) => l?.type === "system" && l.subtype === "init")?.apiKeySource;
+  if (typeof keySource === "string" && keySource.length <= 60) rec.apiKeySource = keySource;
+  // A subscription's rate-limit windows (`rate_limit_event`), which Claude Code reports on a claude.ai login only: the
+  // positive sign of a subscription (passBilling).
+  if (lines.some((l) => l?.type === "rate_limit_event")) rec.planLimits = true;
+  // Paid extra usage past the plan's limit (a `rate_limit_event` with `isUsingOverage`): billed beyond the subscription,
+  // and a pass can straddle both, so it is of unknown billing (passBilling).
+  if (lines.some((l) => l?.type === "rate_limit_event" && l.rate_limit_info?.isUsingOverage === true)) rec.overage = true;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -902,7 +1121,7 @@ export function cacheSummary(records) {
 }
 
 /** Price Codex tokens from the table (a provider prefix stripped); null when the model is not listed. */
-export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, tokens);
+export const priceCodex = (model, tokens, opts = {}) => priceTokens(CODEX_PRICES, model, tokens, opts);
 
 /**
  * Codex: `codex exec --json` prints JSONL ending in one `turn.completed` whose
@@ -915,9 +1134,12 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
  * `turn.failed` event (a dropped stream Codex reconnects, a failed request) may be a request the provider billed whose
  * tokens Codex never reports: the run then has unknown spend (UNKNOWN_WHY `failed-request`) beside what its turns
  * reported. No turn completed is `unreported`; a model with no price row, `no-price`. `rollout` (the thread's rollout text)
- * and `since` (the pass's start, ISO) let a failed run's usage limit be read (providerRefusal).
+ * and `since` (the pass's start, ISO) let a failed run's usage limit be read (providerRefusal). `requests` (the thread's
+ * rollout text, its `token_count` lines; `rollout` when not given) prices a run past the long-context threshold per
+ * request (rolloutLong, kept as `tokens.long`); without it such a run is of unknown cost (`long-context`). `at` dates
+ * the spend for a promotional rate (codexRow; now when omitted).
  */
-export function parseCodex(stdout, model, { rollout = null, since = null } = {}) {
+export function parseCodex(stdout, model, { rollout = null, since = null, requests = rollout, at } = {}) {
   const rec = empty("codex", model);
   const events = jsonLines(stdout);
   if (!events.length) {
@@ -972,9 +1194,15 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
   if (outageError(failure)) rec.providerOutage = failure;
   // A resume the provider refused because the thread was written through another credential: runHarness runs it fresh.
   if (!rec.ok && rotatedPin("codex", events)) rec.pinRotated = true;
-  rec.usd = priceCodex(rec.model, rec.tokens);
-  rec.basis = rec.usd === null ? (input === null && output === null ? CODEX_NO_TOKENS : rec.model ? `unknown: no price for ${rec.model}` : "unknown: Codex names no model in its output; set the model input so tokens are priced") : priceBasis();
-  if (rec.usd === null) markUnknown(rec, input === null && output === null ? "unreported" : "no-price");
+  // The part of the thread's running total from requests over the long-context threshold, per request from its rollout;
+  // a total at most that has none (no one request in it is larger).
+  const above = CODEX_PRICES.longContextAbove;
+  if ((input ?? 0) > above) rec.tokens.long = rolloutLong(requests, rec.tokens, above);
+  const priced = codexPrice(CODEX_PRICES, rec.model, rec.tokens, { at });
+  rec.usd = priced.usd;
+  const why = rec.usd !== null ? null : input === null && output === null ? "unreported" : priced.why ?? "no-price";
+  rec.basis = why === null ? priceBasis() : why === "unreported" ? CODEX_NO_TOKENS : !rec.model ? "unknown: Codex names no model in its output; set the model input so tokens are priced" : why === "no-price" ? `unknown: no price for ${rec.model}` : `unknown: ${UNKNOWN_WHY[why]} (${rec.model})`;
+  if (why) markUnknown(rec, why);
   return rec;
 }
 
@@ -1085,6 +1313,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   rec.subtype = rec.ok ? "success" : "error";
   if (!rec.ok) rec.error = `copilot exited ${exitCode}`;
   let turns = 0;
+  // Whether the run printed its result line: one killed before it reported its usage only up to its last checkpoint.
+  let ended = false;
   let streamNano = null;
   let streamRequests = null;
   let ttlSeconds = null;
@@ -1101,6 +1331,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
       for (const m of e.data?.modelCacheState || []) if (num(m?.cacheTtlSeconds) !== null) ttlSeconds = num(m.cacheTtlSeconds);
     }
     if (e.type === "result") {
+      ended = true;
       if (e.sessionId) rec.sessionId = String(e.sessionId);
       const r = nonNegative(e.usage?.premiumRequests);
       if (r !== null) streamRequests = Math.max(streamRequests ?? 0, r);
@@ -1137,6 +1368,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   // Credits not reported in full: the run's spend is unknown beyond what was (UNKNOWN_WHY), never $0 and never a bound.
   if (p.usd === null) markUnknown(rec, a.tokens.input === null && a.tokens.output === null && a.nano === null ? "unreported" : "credits");
   else if (p.partial) markUnknown(rec, "credits");
+  // Killed before its result line: the credits its last checkpoint reported are known, what it spent after is not.
+  if (p.usd !== null && !ended) markUnknown(rec, "unreported");
   rec.sessionStartTime = a.sessionStartTime;
   rec.turns = turns || null;
   rec.tokens = a.tokens;
@@ -1193,26 +1426,50 @@ export function claudeRunningTotals(version) {
   return at === -1 ? !m[4] : v[at] > CLAUDE_RUNNING_TOTALS[at];
 }
 
+/** The UNKNOWN_WHY codes a Codex price gives (codexPrice): a record's other reasons are its run's, not its price's. */
+const PRICE_WHY = new Set(["no-price", "price-ended", "long-context"]);
+
+/**
+ * A Codex pass's dollars from its own share `tokens` (sinceSession): `{usd, basis, usdUnknown?, usdUnknownWhy?}`, the
+ * record's reasons other than its price's kept, and the share's own price reason added when it cannot be priced. A run
+ * that reported no tokens keeps its record's dollars and reasons.
+ */
+function ownCodexPrice(rec, tokens, { at } = {}) {
+  if (!runningTokens(rec.tokens)) return { usd: rec.usd ?? null };
+  const p = codexPrice(CODEX_PRICES, rec.model, tokens, { at });
+  const why = [...(Array.isArray(rec.usdUnknownWhy) ? rec.usdUnknownWhy : []).filter((w) => !PRICE_WHY.has(w)), ...(p.usd === null ? [p.why ?? "no-price"] : [])];
+  const out = { usd: p.usd, basis: p.usd === null ? (rec.model ? (p.why === "no-price" || !p.why ? `unknown: no price for ${rec.model}` : `unknown: ${UNKNOWN_WHY[p.why]} (${rec.model})`) : rec.basis) : priceBasis() };
+  return why.length ? { ...out, usdUnknown: Math.max(1, Number.isInteger(rec.usdUnknown) ? rec.usdUnknown : 0), usdUnknownWhy: [...new Set(why)] } : { ...out, usdUnknown: undefined, usdUnknownWhy: undefined };
+}
+
 /**
  * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
  * reported (in this process, or in its restored transcript or Pendulum's record of it). Turns are per process and stay.
  * Codex's first-turn cache split is that running total too, so it is counted the same way. A Claude Code before 2.1.277
- * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, so its
- * pass's dollars and tokens are unknown (UNKNOWN_WHY `resumed-total`): neither its total nor a share of it is taken.
+ * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, and a
+ * total below the one already counted is no running total of it: either pass's dollars and tokens are unknown
+ * (UNKNOWN_WHY `resumed-total`), neither its total nor a share of it taken.
  */
-export function sinceSession(rec, prior) {
-  if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;
-  if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) {
-    const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, models: undefined, basis: `unknown: ${UNKNOWN_WHY["resumed-total"]} (${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "no version named"})` };
+export function sinceSession(rec, prior, { at } = {}) {
+  // Codex's running total is its tokens, priced here: a prior total whose dollars were unknown (a pass past the
+  // long-context threshold whose requests were not read, a promotional rate that had ended) is still subtracted. A
+  // prior with no token counts is taken by its dollars, as every other harness's.
+  const codex = rec?.harness === "codex" && runningTokens(prior?.tokens);
+  if (!rec || !prior || (!codex && (prior.usd === null || prior.usd === undefined))) return rec;
+  // No running total: the pass's dollars and tokens are unknown, neither its total nor a share of it taken.
+  const notRunning = (why) => {
+    const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: ${why}` };
     delete out.models;
     return markUnknown(out, "resumed-total");
-  }
+  };
+  if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) return notRunning(`a resumed Claude session on ${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "a Claude Code that named no version"}, whose totals may restart at zero before 2.1.277`);
   // Copilot: only a total from the same session start is a running total of the one subtracted (Copilot keeps the
   // start time across --resume); anything else is counted as reported.
   if (rec.harness === "copilot" && (!rec.sessionStartTime || rec.sessionStartTime !== prior.sessionStartTime)) return rec;
-  // A total below the one already seen is not a running total (the session's cost state was never written): as reported.
-  if (rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return rec;
+  // A total below the one already counted is no running total of it: unknown, neither it nor a share of it taken.
+  if (codex && runningTokens(rec.tokens) && TOKEN_KEYS.some((k) => (rec.tokens[k] ?? 0) < (prior.tokens[k] ?? 0))) return notRunning(`the resumed Codex thread reported ${rec.tokens.input} input tokens, below the ${prior.tokens.input} already counted for it`);
+  if (!codex && rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return notRunning(`the resumed session reported $${rec.usd}, below the $${prior.usd} already counted for it`);
   const models = rec.models
     ? Object.fromEntries(Object.entries(rec.models).map(([name, m]) => {
         const p = prior.models?.[name] ?? {};
@@ -1224,7 +1481,16 @@ export function sinceSession(rec, prior) {
   const counts = Object.fromEntries(["premiumRequests", "aiu"].filter((k) => typeof rec[k] === "number").map((k) => [k, Math.round(less(rec[k], prior[k]) * 1000) / 1000]));
   const first = rec.cache?.first;
   const cache = rec.harness === "codex" && first ? { cache: { ...rec.cache, first: { ...first, input: less(first.input, pt.input), cached: less(first.cached, pt.cached), written: less(first.written, pt.written) } } } : {};
-  return { ...rec, ...counts, ...cache, usd: less(rec.usd, prior.usd), tokens: { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) }, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
+  const own = { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) };
+  // A Codex pass's long-context share: its running share less the one before (unknown when either is).
+  const above = CODEX_PRICES.longContextAbove;
+  const tokens = codex ? withLong(own, sumLong([longShare(t, above), longShare(pt, above)], -1), above) : own;
+  // A Codex pass's own share is priced on its own (`at` dates it for a promotional rate), and its price's reasons for
+  // unknown cost are its share's, not the running total's.
+  const priced = codex ? ownCodexPrice(rec, tokens, { at }) : { usd: less(rec.usd, prior.usd) };
+  const out = { ...rec, ...counts, ...cache, ...priced, tokens, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
+  for (const k of ["usdUnknown", "usdUnknownWhy"]) if (out[k] === undefined) delete out[k];
+  return out;
 }
 
 /** Several records of one stage summed: the known dollars, tokens, turns and credits, and its runs of unknown cost (unknownOf). */
@@ -1253,7 +1519,15 @@ export function mergeUsage(records) {
     out.ok = out.ok && r.ok;
     out.error = out.error || r.error;
     out.budgetExceeded = out.budgetExceeded || r.budgetExceeded;
-    out.ended = r.ended ?? out.ended;
+    // The stage's end is its latest record's (a decision call is listed last but may have ended before a pass).
+    if (Number.isFinite(Date.parse(r.ended)) && !(Date.parse(r.ended) <= Date.parse(out.ended))) out.ended = r.ended;
+    // What says what the dollars are (passBilling): the first key source named, any plan's limits, one billing or unknown.
+    if (out.apiKeySource === undefined && typeof r.apiKeySource === "string") out.apiKeySource = r.apiKeySource;
+    if (r.planLimits === true) out.planLimits = true;
+    if (r.overage === true) out.overage = true;
+    if (out.billing !== undefined || r.billing !== undefined) out.billing = out.billing === r.billing ? out.billing : "unknown";
   }
+  // Codex's long-context shares, summed (unknown when any is: usage.mjs longShare).
+  if (first.harness === "codex") out.tokens = withLong(out.tokens, sumLong(live.map((r) => longShare(r.tokens, CODEX_PRICES.longContextAbove))), CODEX_PRICES.longContextAbove);
   return out;
 }

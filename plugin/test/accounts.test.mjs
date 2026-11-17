@@ -204,7 +204,7 @@ test("#263: the account's name is recorded in result.json, the progress comment'
   assert.equal(scrubbedEnv({ PENDULUM_STAGE_ACCOUNT: "alpha" }).PENDULUM_STAGE_ACCOUNT, undefined);
   for (const f of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(ROOT, "plugin", "scripts", f), "utf8");
-    assert.equal(src.split("ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT)").length - 1, 3, `${f}: its result.json (twice) and its harness line`);
+    assert.equal(src.split("ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT)").length - 1, 4, `${f}: its result.json (its end, a stop's and a cancel's) and its harness line`);
   }
 });
 

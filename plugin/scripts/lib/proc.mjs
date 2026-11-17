@@ -997,10 +997,17 @@ function trackGroup(pid, tag, recordDir) {
     }
   }
   // A process with a harness in its own process group stops it before it exits: a terminal's signal never reaches it.
-  if (!trapped) {
-    trapped = true;
-    for (const s of STOP_SIGNALS) process.on(s, () => stopGroups(s));
-  }
+  trapStops();
+}
+
+/**
+ * The stop signals (STOP_SIGNALS) end this process through stopGroups from now on, as they do once it has started a
+ * `group` run: its groups killed, then what atStop registered, then the exit. Once per process.
+ */
+export function trapStops() {
+  if (trapped) return;
+  trapped = true;
+  for (const s of STOP_SIGNALS) process.on(s, () => stopGroups(s));
 }
 
 function untrackGroup(pid) {

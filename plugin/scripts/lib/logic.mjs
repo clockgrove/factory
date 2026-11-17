@@ -2797,6 +2797,12 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
   return out;
 }
 /**
+ * The models a stage's harness line publishes (harnessMarker: its own model and the Objective's worker, sub-agent and
+ * reviewer models, as choice.mjs ranWith gives them and the usage record's `ran` keeps them); [] when it names none
+ * (Copilot at its default), null when the record has no `ran` to say.
+ */
+const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
+/**
  * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
  * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
@@ -2812,7 +2818,7 @@ export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2887,11 +2893,19 @@ const sameByBilling = (a, b) => Object.keys(a).length === Object.keys(b).length 
  * its runs of unknown cost and their codes (usage.mjs UNKNOWN_WHY), `y` its dollars by billing where they are not all at
  * its own kind, `k` a relayed key's share, `n` its tokens [input, output, cached, written], `r` 1 when it resumed a
  * session and `c` its first request's cache [read, written]. A string that is no label of its kind is left out. A line
- * over LEDGER_MAX characters is not written: a line in the comment says so, and the marker carries the pass count alone.
+ * over LEDGER_MAX characters is not written: a line in the comment says so, and the marker carries the pass count alone
+ * (ledgerCut).
+ * A model is written only when the stage's harness line already publishes it (`published`: the models it names, harnessMarker),
+ * so a resolved id the harness reports (a Bedrock inference profile ARN names an AWS account) never reaches the comment;
+ * a pass on another model reads as none (`m` null). A harness line that names no model at all (`published` empty: Copilot
+ * at its default, its model from GitHub's own catalog) lets the stage's `model` through, which the finish card names it
+ * by. With `published` null (not known) no model is written.
  */
-export function ledgerMarker(ledger, { model = null, version = null } = {}) {
+export function ledgerMarker(ledger, { model = null, version = null, published = null } = {}) {
   const passes = (Array.isArray(ledger) ? ledger : []).filter((e) => e && typeof e === "object");
-  const top = { ...(ledgerWord(LEDGER_VERSION, version) ? { v: version } : {}), ...(ledgerWord(LEDGER_MODEL, model) ? { m: model } : {}) };
+  const shown = (x) => (Array.isArray(published) && published.includes(x) ? x : null);
+  const stageModel = Array.isArray(published) && !published.length ? ledgerWord(LEDGER_MODEL, model) : shown(ledgerWord(LEDGER_MODEL, model));
+  const top = { ...(ledgerWord(LEDGER_VERSION, version) ? { v: version } : {}), ...(stageModel ? { m: stageModel } : {}) };
   const firstBilling = ledgerBilling(passes[0]?.billing);
   if (firstBilling) top.b = firstBilling;
   const p = passes.map((e) => {
@@ -2899,7 +2913,8 @@ export function ledgerMarker(ledger, { model = null, version = null } = {}) {
     const label = ledgerWord(LEDGER_LABEL, e.label);
     if (label) out.l = label;
     if (e.decision === true) out.d = ledgerCount(e.calls) || 1;
-    const m = ledgerWord(LEDGER_MODEL, e.model);
+    const own = ledgerWord(LEDGER_MODEL, e.model);
+    const m = own !== null && own === (top.m ?? null) ? own : shown(own);
     if (m !== (top.m ?? null)) out.m = m;
     const b = ledgerBilling(e.billing);
     if (b !== (top.b ?? null)) out.b = b;
@@ -2926,8 +2941,16 @@ export function ledgerMarker(ledger, { model = null, version = null } = {}) {
     return out;
   });
   const line = `<!-- pendulum:ledger ${JSON.stringify({ ...top, p })} -->`;
-  if (line.length <= LEDGER_MAX) return line;
-  return `Per-pass ledger: ${p.length} passes, over the ${LEDGER_MAX}-character bound of this comment; the stage's usage record holds it.\n<!-- pendulum:ledger ${JSON.stringify({ cut: p.length })} -->`;
+  return line.length <= LEDGER_MAX ? line : ledgerCut(p.length, `over the ${LEDGER_MAX}-character bound of its line`);
+}
+
+/**
+ * The ledger line's cut form: a line a person reads saying why the ledger is not in the comment, and the marker with
+ * the pass count alone (`{"cut": N}`). `passes`: a count, or a written ledger line (ledgerMarker) to count them from.
+ */
+export function ledgerCut(passes, why) {
+  const n = typeof passes === "string" ? (ledgerOfComment(passes)?.ledger?.length ?? ledgerOfComment(passes)?.cut ?? 0) : ledgerCount(passes) ?? 0;
+  return `Per-pass ledger: ${n} passes, ${why}; the stage's usage record holds it.\n<!-- pendulum:ledger ${JSON.stringify({ cut: n })} -->`;
 }
 
 /**

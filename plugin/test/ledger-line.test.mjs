@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { LEDGER_MAX, ledgerMarker, ledgerOfComment, setSelf, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
-import { progressReporter, writeUsage } from "../scripts/lib/session.mjs";
+import { PROGRESS_LEDGER_ROOM, progressReporter, writeUsage } from "../scripts/lib/session.mjs";
 import { BILLING, UNKNOWN_WHY } from "../scripts/lib/usage.mjs";
 
 RETRY.sleep = async () => {};
@@ -18,16 +18,17 @@ RETRY.sleep = async () => {};
 const pass = (label, usd, started, ended, extra = {}) => ({ harness: "claude", model: "claude-opus-5-5", label, effort: "high", usd, tokens: { input: 120_000, output: 5_000, cached: 90_000, written: 20_000 }, started, ended, resumed: false, ok: true, billing: "subscription", basis: "harness-reported: total_cost_usd", reason: "a reason no ledger carries", cache: { first: { unit: "request", input: 30_000, cached: 1_000, written: 28_000 } }, ...extra });
 
 /** A stage's usage record from its passes, by the real writer (session.mjs writeUsage). */
-function usageOf(records, { billing = "subscription", model = "claude-opus-5-5" } = {}) {
+function usageOf(records, { billing = "subscription", model = "claude-opus-5-5", ranOver = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ledger-usage-"));
-  return writeUsage(dir, { harness: "claude", model, records, passes: 1, exit: "delivered", reason: "a Block text no ledger carries", credentialBasis: "CLAUDE_CODE_OAUTH_TOKEN", billing, progressRun: "4501", ran: { worker: model, subagent: null, reviewer: null, labels: [], hosts: [], effort: "high", reviewerEffort: null } });
+  return writeUsage(dir, { harness: "claude", model, records, passes: 1, exit: "delivered", reason: "a Block text no ledger carries", credentialBasis: "CLAUDE_CODE_OAUTH_TOKEN", billing, progressRun: "4501", ran: { worker: model, subagent: null, reviewer: "claude-fable-5-2", labels: [], hosts: [], effort: "high", reviewerEffort: null, ...ranOver } });
 }
 
 /**
  * The stage's end as worker.mjs and review.mjs make it, through the real progress writer against a fake GitHub: the
- * spend line and its ledger line from the usage record (stageSpendLine), then the exit line. Returns the body written.
+ * `phases` lines first, then the spend line and its ledger line from the usage record (stageSpendLine) with the exit
+ * line. Returns the last body GitHub took.
  */
-async function endStage(usage) {
+async function endStage(usage, { phases = [] } = {}) {
   const written = [];
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
@@ -36,11 +37,14 @@ async function endStage(usage) {
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if ((init.method || "GET") === "GET") return json([]);
     const body = JSON.parse(init.body).body;
+    // GitHub refuses a comment body over 65,536 characters.
+    if (body.length > 65_536) return json({ message: "Validation Failed", errors: [{ field: "body", code: "custom", message: "body is too long (maximum is 65536 characters)" }] }, 422);
     written.push(body);
     return json({ id: 1, user: { login: "pendulum[bot]", type: "Bot" }, body }, 201);
   };
   try {
     const progress = progressReporter(repoOf("acme/app"), 7, { token: () => "t" }, { stage: "work", runId: "4501", harness: "claude", model: "claude-opus-5-5", soFar: null });
+    for (const p of phases) await progress(p);
     const line = stageSpendLine(usage);
     progress.spend(line.usd, line.parts, line.ledger);
     await progress("exit: delivered");
@@ -85,6 +89,8 @@ test("ledger line (#543): the stage's end writes its usage record's per-pass led
   }));
   want[0].started = "2026-11-17T08:00:00Z";
   want[0].ended = "2026-11-17T08:12:30Z";
+  // The decision record's model is not one the stage's harness line names: it reads as none.
+  want[4].model = null;
   assert.equal(read.ledger.length, 5);
   assert.deepEqual(read.ledger, want);
   // Numbers and labels only: no reason, basis, Block text, path or credential, in short keys.
@@ -112,12 +118,47 @@ test("ledger line (#543): bounded at LEDGER_MAX characters; a ledger that does n
   const usage = usageOf(many(200));
   const cut = await endStage(usage);
   assert.deepEqual(ledgerOfComment(cut), { cut: 200 });
-  assert.match(cut, new RegExp(`^Per-pass ledger: 200 passes, over the ${LEDGER_MAX}-character bound of this comment; the stage's usage record holds it\\.$`, "m"));
+  assert.match(cut, new RegExp(`^Per-pass ledger: 200 passes, over the ${LEDGER_MAX}-character bound of its line; the stage's usage record holds it\\.$`, "m"));
   assert.ok(cut.length < fits.length + 400, "the comment stays small");
   assert.equal(spendParts(cut).usd, usage.usd);
   // Every ledger line written is within the bound, whatever the pass count.
   for (const k of [1, 30, 45, 60, 80]) {
-    const text = ledgerMarker(usageOf(many(k)).ledger, { model: "claude-opus-5-5", version: PENDULUM_VERSION });
+    const text = ledgerMarker(usageOf(many(k)).ledger, { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] });
     assert.ok(text.split("\n").every((l) => l.length <= LEDGER_MAX), `${k} passes`);
   }
+});
+
+test("ledger line (#543): a ledger line that would take the comment past PROGRESS_LEDGER_ROOM is written in its cut form, and the final spend line lands", async () => {
+  // A long stage: 28 phase lines of about 2,000 characters each, some 56,000 characters before its end.
+  const phases = Array.from({ length: 28 }, (_, i) => `validation ${i + 1}: ${"x".repeat(1_980)}`);
+  const usage = usageOf(Array.from({ length: 40 }, (_, i) => pass(`validation-fix-${i + 1}`, 0.123456, "2026-11-17T08:00:00Z", "2026-11-17T08:01:00Z")));
+  assert.ok(stageSpendLine(usage).ledger.length > 4_000 && stageSpendLine(usage).ledger.length <= LEDGER_MAX, "the line fits its own bound");
+  const body = await endStage(usage, { phases });
+  assert.ok(body, "GitHub took the stage's last write");
+  assert.match(body, /- \d\d:\d\dZ exit: delivered$/m, "the exit line landed");
+  assert.equal(spendParts(body).usd, usage.usd, "with the final spend line");
+  assert.deepEqual(ledgerOfComment(body), { cut: 40 });
+  assert.match(body, new RegExp(`^Per-pass ledger: 40 passes, left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters; the stage's usage record holds it\\.$`, "m"));
+  assert.ok(body.length + "<!-- pendulum:7:progress:work:4501 -->\n".length <= PROGRESS_LEDGER_ROOM);
+  // The same stage with a short history keeps its whole ledger.
+  assert.equal(ledgerOfComment(await endStage(usage, { phases: phases.slice(0, 2) })).ledger.length, 40);
+});
+
+test("ledger line (#543): a model is written only when the stage's harness line names it; a resolved id such as a Bedrock ARN never is", async () => {
+  const arn = "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123";
+  // The worker's passes ran under the model its harness line names; a sub-agent's pass reported a resolved ARN.
+  const usage = usageOf([pass("work-1", 0.3, "2026-11-17T08:00:00Z", "2026-11-17T08:05:00Z"), pass("validation-fix-1", 0.1, "2026-11-17T08:06:00Z", "2026-11-17T08:07:00Z", { model: arn })]);
+  const body = await endStage(usage);
+  assert.ok(!body.includes("123456789012"), "no account id in the comment");
+  assert.deepEqual(ledgerOfComment(body).ledger.map((e) => e.model), ["claude-opus-5-5", null]);
+  // The stage's own model resolved to an ARN (none named on the harness line for it): no model at all.
+  const resolved = usageOf([pass("work-1", 0.3, "2026-11-17T08:00:00Z", "2026-11-17T08:05:00Z", { model: arn })], { model: null });
+  const plain = await endStage(resolved);
+  assert.ok(!plain.includes("123456789012"));
+  assert.deepEqual([ledgerOfComment(plain).model, ledgerOfComment(plain).ledger[0].model], [null, null]);
+  // A record with no `ran` to say what the harness line names: no model is written.
+  assert.deepEqual(ledgerOfComment(ledgerMarker(usage.ledger, { model: "claude-opus-5-5" })).ledger.map((e) => e.model), [null, null]);
+  // Copilot at its default: its harness line names no model, so the stage's own (GitHub's catalog name) is written.
+  const copilot = ledgerOfComment(ledgerMarker([{ label: "work-1", model: "claude-sonnet-5.5", usd: 0.4, tokens: {} }], { model: "claude-sonnet-5.5", published: [] }));
+  assert.deepEqual([copilot.model, copilot.ledger[0].model], ["claude-sonnet-5.5", "claude-sonnet-5.5"]);
 });

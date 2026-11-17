@@ -92,7 +92,7 @@ import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, fa
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, ledgerCut, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -975,6 +975,11 @@ export function stoppedRebase(progress, conflict, recs = []) {
 
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
+/**
+ * The size, in characters, a progress comment with its ledger line stays under (GitHub refuses a comment body over
+ * 65,536): past it the stage writes the ledger line's cut form (logic.mjs ledgerCut), so its spend line still lands.
+ */
+export const PROGRESS_LEDGER_ROOM = 60_000;
 
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
@@ -1028,10 +1033,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ran, ...interim, ledger: spend === null ? null : ledger, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}${carried}`;
+    const withLedger = (l) => `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked })}${carried}`;
+    const own = spend === null ? null : ledger;
+    const body = withLedger(own);
+    // A body the ledger line would take past PROGRESS_LEDGER_ROOM gets its cut form (logic.mjs ledgerCut): GitHub refuses
+    // a comment over its size limit, and the final spend line is never lost to the ledger beside it.
+    return own && key.length + 1 + body.length > PROGRESS_LEDGER_ROOM ? withLedger(ledgerCut(own, `left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters`)) : body;
   };
   /**
    * Stopped by a signal, the harness already killed: the spend so far once more, if it differs from what the line shows.

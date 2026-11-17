@@ -761,7 +761,7 @@ test("report (#543): the ledger lines fill the pass breakdown from the comments 
   assert.deepEqual(r.source.missing, []);
   // A ledger that did not fit its comment: the Objective's usage records are read for it, as before.
   const w = ledgeredWorld();
-  w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:ledger [^\n]*$/m, 'Per-pass ledger: 80 passes, over the 6000-character bound of this comment; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->') } : c));
+  w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:ledger [^\n]*$/m, 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->') } : c));
   const cut = await report(w, { issue: 3 });
   assert.equal(cut.calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2);
   assert.deepEqual(cut.json.breakdowns.pass, fromArtifacts.breakdowns.pass);

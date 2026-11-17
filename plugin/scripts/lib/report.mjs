@@ -712,9 +712,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
         if (!version && !rec.unattributed) missing.noVersion.add(n);
       }
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
-      // The stage's passes, from its per-pass ledger: its usage record's, its progress comment's ledger line, or local
-      // mode's own record of it.
-      const ledger = [rec, onComment, recordOf, localRec].map((x) => x?.ledger).find(Array.isArray) ?? null;
+      // The stage's passes, from its per-pass ledger: its usage record's or local mode's own record of it when one is at
+      // hand (their times to the millisecond), else its progress comment's ledger line (times to the second).
+      const ledger = [rec, recordOf, localRec, onComment].map((x) => x?.ledger).find(Array.isArray) ?? null;
       if (rec.source === "decisions" || rec.unattributed) return;
       if (!ledger) {
         unledgered += 1;

@@ -253,14 +253,14 @@ test("finish card, posted for real (#543): a Copilot stage whose ledger line nam
   // Each stage's end as worker.mjs writes it: its usage record (the real writer), and the ledger line beside its spend line.
   const lineOf = (key, usd) => {
     const dir = mkdtempSync(join(tmpdir(), "card-ledger-"));
-    const usage = writeUsage(dir, { harness: "copilot", model: null, records: [{ harness: "copilot", model: "claude-sonnet-5.5", label: key === "4401" ? "work-1" : "review", usd, tokens: { input: 1000, output: 100, cached: 0, written: null }, started: "2026-11-16T10:06:00Z", ended: "2026-11-16T10:19:00Z", billing: "credits", ok: true }], passes: 1, exit: "delivered", reason: "", credentialBasis: "COPILOT_GITHUB_TOKEN", billing: "credits", progressRun: key });
+    const usage = writeUsage(dir, { harness: "copilot", model: null, records: [{ harness: "copilot", model: "claude-sonnet-5.5", label: key === "4401" ? "work-1" : "review", usd, tokens: { input: 1000, output: 100, cached: 0, written: null }, started: "2026-11-16T10:06:00Z", ended: "2026-11-16T10:19:00Z", billing: "credits", ok: true }], passes: 1, exit: "delivered", reason: "", credentialBasis: "COPILOT_GITHUB_TOKEN", billing: "credits", progressRun: key, ran: { worker: null, subagent: null, reviewer: null, labels: [], hosts: [] } });
     return stageSpendLine(usage).ledger;
   };
   const ledgered = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: lineOf("4402", 0.2) } });
   assert.deepEqual([ledgered.artifactReads, ledgered.downloads], [[], []], "the ledger lines name the model: nothing more is read");
   assert.match(ledgered.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
   // A ledger line that did not fit names no model: that stage's own run's artifact is read for it, as before.
-  const cut = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: 'Per-pass ledger: 80 passes, over the 6000-character bound of this comment; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->' } });
+  const cut = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->' } });
   assert.deepEqual(cut.downloads.map((a) => [a[2], a[4]]), [["4402", "pendulum-usage-9-review"]]);
   assert.match(cut.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
 });

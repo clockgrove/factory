@@ -850,8 +850,7 @@ function objectivePasses(d) {
   const kinds = whole ? figures.flat() : [];
   const count = (keep) => kinds.filter((k) => keep(k.kind)).reduce((t, k) => t + k.passes, 0);
   const passes = whole ? { total: count(() => true), answer: count(isAnswer), fix: count(isFix) } : null;
-  const harness = kinds.filter((k) => k.kind !== "decision");
-  const modelMinutes = whole && !harness.some((k) => k.untimed) ? harness.reduce((t, k) => t + (k.minutes ?? 0), 0) : null;
+  const modelMinutes = whole && !kinds.some((k) => k.untimed) ? kinds.reduce((t, k) => t + (k.harnessMinutes ?? 0), 0) : null;
   const wall = d.labelled && ms(d.merged) >= ms(d.labelled) ? ms(d.merged) - ms(d.labelled) : null;
   return { passes, modelMinutes, tokens: d.stages.reduce((t, s) => addTokens(t, s.tokens), zeroTokens()), labelled: d.labelled ?? null, labelledWallMs: wall };
 }
@@ -898,7 +897,7 @@ export const SUMMARY_MAX = 30_000;
 // count none reports, a pass kind's empty `cache`, `priced` and `unpriced`, and its `minutes` when none has its times.
 const costOut = (c) => ({ usd: Object.fromEntries(Object.entries(c.usd).filter(([, v]) => v !== 0)), ...(c.unknownRuns ? { unknownRuns: c.unknownRuns } : {}), ...(c.unknownWhy.length ? { unknownWhy: c.unknownWhy } : {}) });
 const tokensOut = (t) => Object.fromEntries(Object.entries(t).filter(([, v]) => v !== null));
-const passesOut = (list) => list.map((k) => ({ kind: k.kind, passes: k.passes, cost: costOut(k.cost), tokens: tokensOut(k.tokens), ...(k.minutes !== null ? { minutes: k.minutes } : {}), ...(k.untimed ? { untimed: k.untimed } : {}), ...(k.cache ? { cache: k.cache } : {}), ...(k.priced.passes ? { priced: { minutes: k.priced.minutes, passes: k.priced.passes, cost: costOut(k.priced.cost) } } : {}), ...(k.unpriced ? { unpriced: k.unpriced } : {}) }));
+const passesOut = (list) => list.map((k) => ({ kind: k.kind, passes: k.passes, cost: costOut(k.cost), tokens: tokensOut(k.tokens), ...(k.minutes !== null ? { minutes: k.minutes } : {}), ...(k.harnessMinutes !== k.minutes ? { harnessMinutes: k.harnessMinutes } : {}), ...(k.untimed ? { untimed: k.untimed } : {}), ...(k.cache ? { cache: k.cache } : {}), ...(k.priced.passes ? { priced: { minutes: k.priced.minutes, passes: k.priced.passes, cost: costOut(k.priced.cost) } } : {}), ...(k.unpriced ? { unpriced: k.unpriced } : {}) }));
 const markerJson = (v) => JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 
 /**
@@ -939,11 +938,12 @@ const passesRead = (list) => {
     const priced = k?.priced ?? { minutes: 0, passes: 0, cost: { usd: {} } };
     const pricedCost = costRead(priced.cost);
     const minutes = k?.minutes ?? null;
+    const harnessMinutes = k && Object.hasOwn(k, "harnessMinutes") ? k.harnessMinutes : minutes;
     const unpriced = countOf(k?.unpriced ?? 0);
     const untimed = countOf(k?.untimed ?? 0);
     const cache = k?.cache === undefined ? null : ["passes", "written", "input"].every((f) => countOf(k.cache?.[f]) !== undefined) ? { passes: k.cache.passes, written: k.cache.written, input: k.cache.input } : undefined;
-    if (typeof k?.kind !== "string" || !KIND.test(k.kind) || countOf(k.passes) === undefined || !cost || !tokens || (minutes !== null && usdOf(minutes) === undefined) || cache === undefined || !pricedCost || usdOf(priced.minutes) === undefined || countOf(priced.passes) === undefined || unpriced === undefined || untimed === undefined) return null;
-    return { kind: k.kind, passes: k.passes, cost, tokens, minutes, cache, untimed, priced: { minutes: priced.minutes, passes: priced.passes, cost: pricedCost }, unpriced };
+    if (typeof k?.kind !== "string" || !KIND.test(k.kind) || countOf(k.passes) === undefined || !cost || !tokens || (minutes !== null && usdOf(minutes) === undefined) || cache === undefined || !pricedCost || usdOf(priced.minutes) === undefined || countOf(priced.passes) === undefined || unpriced === undefined || untimed === undefined || (harnessMinutes !== null && usdOf(harnessMinutes) === undefined)) return null;
+    return { kind: k.kind, passes: k.passes, cost, tokens, minutes, harnessMinutes, cache, untimed, priced: { minutes: priced.minutes, passes: priced.passes, cost: pricedCost }, unpriced };
   });
   return out.includes(null) ? undefined : out;
 };

@@ -57,7 +57,8 @@ function ledgerPass(e) {
 /**
  * A stage's passes from its per-pass `ledger`, one entry per pass kind (passLabel; `decision` for a decision record), in
  * the order of their first pass: `kind`, `passes` (how many), `cost` and `tokens` (theirs, summed), `minutes` (their
- * model minutes, null when none has its times), `cache` (`{passes, written, input}` over the passes whose input and
+ * model minutes, null when none has its times), `harnessMinutes` (the same over its harness passes alone, decision
+ * records left out; null when none has its times), `cache` (`{passes, written, input}` over the passes whose input and
  * cache writes are both reported, null for none), `untimed` (its harness passes with no start or end) and, over the
  * harness passes with their times, `priced` (`{minutes, passes, cost}` of those whose dollars were all reported) and
  * `unpriced` (the count of the rest).
@@ -65,7 +66,7 @@ function ledgerPass(e) {
 export function stagePassFigures(ledger) {
   const kinds = new Map();
   for (const p of (Array.isArray(ledger) ? ledger : []).map(ledgerPass).filter(Boolean)) {
-    const k = kinds.get(p.kind) ?? { kind: p.kind, passes: 0, cost: zeroCost(), tokens: zeroTokens(), minutes: null, cache: null, untimed: 0, priced: { minutes: 0, passes: 0, cost: zeroCost() }, unpriced: 0 };
+    const k = kinds.get(p.kind) ?? { kind: p.kind, passes: 0, cost: zeroCost(), tokens: zeroTokens(), minutes: null, harnessMinutes: null, cache: null, untimed: 0, priced: { minutes: 0, passes: 0, cost: zeroCost() }, unpriced: 0 };
     k.passes += 1;
     addCost(k.cost, p.cost);
     addTokens(k.tokens, p.tokens);
@@ -76,6 +77,7 @@ export function stagePassFigures(ledger) {
       k.cache.input += p.tokens.input;
     }
     if (p.minutes !== null) k.minutes = (k.minutes ?? 0) + p.minutes;
+    if (!p.decision && p.minutes !== null) k.harnessMinutes = (k.harnessMinutes ?? 0) + p.minutes;
     else if (!p.decision) k.untimed += 1;
     if (!p.decision && p.minutes !== null) {
       if (p.cost.unknownRuns || !p.priced) k.unpriced += 1;

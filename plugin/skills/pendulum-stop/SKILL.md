@@ -1,6 +1,6 @@
 ---
 name: pendulum-stop
-description: "Stop one Clockgrove Pendulum Objective on the user's yes: removes the issue's pendulum:objective label, which ends its running stage and keeps every tick and loop from picking it up; its branch and pull request stay. Use when the user asks to stop, halt or cancel one Clockgrove Pendulum Objective, or says one should not run. Not for starting one over from its issue's current text (pendulum-restart)."
+description: "Stop one Pendulum Objective on the user's yes: removes the issue's pendulum:objective label, which ends its running stage and keeps every tick and loop from picking it up; its branch and pull request stay. Use when the user asks to stop, halt or cancel one Pendulum Objective, or says one should not run. Not for starting one over from its issue's current text (pendulum-restart)."
 ---
 
 # /pendulum:pendulum-stop <issue>

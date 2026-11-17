@@ -5,6 +5,7 @@ What Pendulum adds to a repository, how to set it up and check it, the inputs th
 ## Requirements
 
 - A GitHub repository you administer (rulesets need admin), with a CI workflow that runs on `pull_request`.
+- A public repository, or a private one on GitHub Pro, Team or Enterprise Cloud: Pendulum needs at least one required check on the default branch, and GitHub Free offers branch rules on public repositories only.
 - The `gh` CLI, logged in, and Node 22 or newer on the machine you run setup from.
 - A model credential for the harness you choose: Claude Code, Codex or GitHub Copilot (the table below).
 - A merge queue is used where GitHub offers one: repositories an organization owns, public ones and private ones on Enterprise Cloud. Elsewhere Pendulum runs on strict required checks (the table below), and setup makes the ruleset without a queue.

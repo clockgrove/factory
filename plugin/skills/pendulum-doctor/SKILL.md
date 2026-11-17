@@ -1,6 +1,6 @@
 ---
 name: pendulum-doctor
-description: "Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Pendulum runs, and name the fix for each failure; changes nothing. Use when the user asks whether Clockgrove Pendulum is set up, why Objectives Block at the first step, or before enabling the workflow. Not for applying the fixes (pendulum-setup)."
+description: "Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Pendulum runs, and name the fix for each failure; changes nothing. Use when the user asks whether Pendulum is set up, why Objectives Block at the first step, or before enabling the workflow. Not for applying the fixes (pendulum-setup)."
 ---
 
 # /pendulum:pendulum-doctor

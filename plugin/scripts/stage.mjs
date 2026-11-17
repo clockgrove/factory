@@ -24,7 +24,7 @@ import { STAGE_GRACE_MS, dispatchLatency, sandboxMarkerLine, sandboxRecord, sess
 import { credentialEnv as gitCredentialEnv } from "./lib/outbox.mjs";
 import { reapNamespace } from "./lib/proc.mjs";
 import { SESSION_TOTALS_FILE } from "./lib/harness.mjs";
-import { applyExit, maskFile, writeUsage } from "./lib/session.mjs";
+import { applyExit, maskFile, stageProgressRun, writeUsage } from "./lib/session.mjs";
 import { UNKNOWN_WHY, markUnknown } from "./lib/usage.mjs";
 import { optedValues } from "./lib/worker-secrets.mjs";
 
@@ -407,20 +407,27 @@ export function lastSpendLine(usageDir) {
  */
 export const wallClockPr = (stage, prNumber, found) => (stage === "review" ? { number: prNumber, draft: false } : found?.number ? { number: found.number, draft: !!found.draft } : null);
 
+/**
+ * The child died before it wrote its usage: a result of Pendulum's own (a stand-in, `standIn`), so the stage's spend
+ * still counts. It carries the stage's progress comment key and account, so a scorer given it and the stage's comment
+ * counts the stage once, from the comment (bench withLines). Nothing when the child wrote its own.
+ */
+export function killedRecord({ why, stage, env, usageDir }) {
+  if (existsSync(join(usageDir, "result.json"))) return;
+  try {
+    const harness = env.PENDULUM_HARNESS || "claude";
+    const model = (stage === "review" ? env.PENDULUM_REVIEWER_MODEL : env.PENDULUM_MODEL) || null;
+    writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, soFar: lastSpendLine(usageDir) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null, progressRun: stageProgressRun(env), account: env.PENDULUM_STAGE_ACCOUNT ?? null, standIn: true });
+  } catch (e) {
+    log(`usage after the kill not written: ${String(e.message).slice(0, 120)}`);
+  }
+}
+
 async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDir, secrets }) {
   await reapNamespace(AGENT_USER).catch((e) => log(`reap: ${String(e.message).slice(0, 120)}`));
   const masked = maskFile(join(usageDir, "events.jsonl"), secrets);
   if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-  // The child died before it wrote its usage: a result of Pendulum's own, so the stage's spend still counts.
-  if (!existsSync(join(usageDir, "result.json"))) {
-    try {
-      const harness = env.PENDULUM_HARNESS || "claude";
-      const model = (stage === "review" ? env.PENDULUM_REVIEWER_MODEL : env.PENDULUM_MODEL) || null;
-      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, soFar: lastSpendLine(usageDir) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
-    } catch (e) {
-      log(`usage after the kill not written: ${String(e.message).slice(0, 120)}`);
-    }
-  }
+  killedRecord({ why, stage, env, usageDir });
   if (why !== "wall clock") return;
   const pr = wallClockPr(stage, prNumber, stage === "review" ? null : await findPr(repo, `pendulum/${issue}`, opts).catch(() => null));
   const minutes = Number(env.PENDULUM_TIMEOUT_MINUTES) || null;

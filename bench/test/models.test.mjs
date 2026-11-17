@@ -43,15 +43,17 @@ test("a local Objective's row reads what ran from its stages' harness lines", ()
 });
 
 test("#263: the row's accounts come from the usage artifacts and the local stages' harness lines, once each; the dollars from both", () => {
-  // Work on Actions (its usage artifact, account-less, or on an account), review run locally on account `alpha`.
+  // Work on Actions (its usage artifact from before `progressRun`, uploaded by the work's run; its progress comment has
+  // no spend line, as on Actions), review run locally on account `alpha`.
   const c = localMerge(62);
+  c.issueComments[0].body = c.issueComments[0].body.replace(/\n<!-- pendulum:spend [^\n]* -->/, "");
   c.issueComments[2].body += `\n${harnessMarker("codex", "gpt-6.1-sol", { ...ran("gpt-6.1-terra", null, "gpt-6.1-sol"), harness: "codex", account: "alpha" })}`;
-  c.usage = [{ artifact: "pendulum-usage-62", harness: "codex", model: "gpt-6.1-terra", usd: 2 }];
+  c.usage = [{ artifact: "pendulum-usage-62", workflowRun: 1700000001, harness: "codex", model: "gpt-6.1-terra", usd: 2 }];
   const row = score(c);
   assert.deepEqual(row.accounts, ["alpha"], "the local review's account");
-  // The artifact (from before `progressRun`, on no account) may be the account-less work line's stage, never the review's
-  // on alpha: the review's dollars are added, the work line's are not. The artifact's Codex run reported no tokens.
-  assert.deepEqual([row.cost.usd, row.cost.usdUnknown], [0.25, 1], "the local review's line beside the artifact, the work line not twice");
+  // The artifact stands for the work's comment (its run), never the review's: the review's dollars are added. The
+  // artifact's Codex run reported no tokens, so it is one run of unknown cost, and the work's comment adds none.
+  assert.deepEqual([row.cost.usd, row.cost.usdUnknown], [0.25, 1], "the local review's line beside the artifact, the work not twice");
   c.usage = [{ ...c.usage[0], account: "alpha" }, { ...c.usage[0], account: "beta" }];
   assert.deepEqual(score(c).accounts, ["alpha", "beta"], "deduplicated");
 });

@@ -1216,11 +1216,11 @@ test("cost: a Codex run killed before any turn completed stays a run of unknown 
  * #480: a mixed-route Objective, its work on GitHub Actions (a progress comment with no spend line, its usage artifact
  * naming the comment) and its review run locally (a spend line only). `review` is the local review's spend line.
  */
-function mixedRoute(number, { review = { usd: 3 }, work = null, workKey = "5551", artifact = {} } = {}) {
+function mixedRoute(number, { review = { usd: 3 }, work = null, workKey = "5551", reviewKey = "1700000002", artifact = {} } = {}) {
   const c = cleanMerge(number);
   const app = c.issueComments[0].user;
   const progress = (kind, key, spend, created) => ({ user: app, created_at: created, body: `<!-- pendulum:${number}:progress:${kind}:${key} -->\nPendulum ${kind} run ${key}\n- 01:02Z harness claude (claude-opus-5-5) attempt 1${spend ? `\n<!-- pendulum:spend ${JSON.stringify(spend)} -->` : ""}` });
-  c.issueComments.push(progress("work", workKey, work, "2031-03-02T01:02:00Z"), progress("review", "1700000002", review, "2031-03-02T02:20:00Z"));
+  c.issueComments.push(progress("work", workKey, work, "2031-03-02T01:02:00Z"), progress("review", reviewKey, review, "2031-03-02T02:20:00Z"));
   c.usage = [{ harness: "claude", model: "claude-opus-5-5", artifact: `pendulum-usage-${number}/result.json`, progressRun: workKey, usd: 8, runs: 1, tokens: { input: 1, output: 1, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)", ...artifact }];
   c.harness = "claude";
   return c;
@@ -1249,9 +1249,66 @@ test("#480: a local stage of unknown cost, and an Actions stage whose artifact e
   const row = scoreObjective(unknown, { prices, now: NOW });
   assert.deepEqual([row.cost.usd, row.cost.usdUnknown, row.cost.usdUnknownWhy], [8, 1, ["unreported"]]);
   assert.match(markdownTable([row]), /\| \$8\.00 plus 1 run of unknown cost \(/);
-  // The work artifact expired (not downloaded); a review artifact remains: the work stage's comment is a run of unknown cost.
-  const expired = mixedRoute(74, { artifact: { artifact: "pendulum-usage-74-review/result.json", progressRun: "9999" } });
+  // Work and review both on Actions; the work's artifact expired (not downloaded), the review's names its comment: the
+  // work stage's comment, with no spend line, is a run of unknown cost.
+  const expired = mixedRoute(74, { review: null, artifact: { artifact: "pendulum-usage-74-review/result.json", progressRun: "1700000002", usd: 3 } });
   const e = scoreObjective(expired, { prices, now: NOW });
-  assert.deepEqual([e.cost.usd, e.cost.usdUnknown], [11, 1]);
-  assert.match(markdownTable([e]), /\| \$11\.00 plus 1 run of unknown cost \(/);
+  assert.deepEqual([e.cost.usd, e.cost.usdUnknown], [3, 1]);
+  assert.match(markdownTable([e]), /\| \$3\.00 plus 1 run of unknown cost \(/);
+});
+
+test("#506 review: a record stands for the comments of its own stage it names exactly: an Actions re-run's key, an old sandbox claim, never a comment it does not name", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // An artifact from before `progressRun`, uploaded by run 5553, whose work comment is its second attempt's.
+  const rerun = mixedRoute(80, { workKey: "5553-2", artifact: { progressRun: undefined, workflowRun: 5553 } });
+  assert.deepEqual([score(rerun).cost.usd, score(rerun).cost.usdUnknown], [11, undefined], "the artifact is that comment's stage; the local review's $3 still counts");
+  // Another run's artifact names neither comment: both count (its comment is a run of unknown cost beside it).
+  const other = mixedRoute(81, { workKey: "5553-2", artifact: { progressRun: undefined, workflowRun: 6000 } });
+  assert.deepEqual([score(other).cost.usd, score(other).cost.usdUnknown], [11, 1]);
+  // An old sandbox artifact (no `progressRun`), matched to its comment `<run>-<claim>` by its claim: $8 and the vendor once.
+  const sandbox = mixedRoute(82, { workKey: "5552-abcdef012345", work: { usd: 8 }, artifact: { progressRun: undefined, vendor: { claim: "abcdef012345", usd: 0.6 } } });
+  const s = score(sandbox);
+  assert.deepEqual([s.cost.usd, s.cost.vendorUsd, s.cost.usdUnknown], [11, 0.6, undefined]);
+  // A review artifact keyed as the work's comment (one run for both jobs) stands for the review's comment only: the work's
+  // artifact expired, so its comment is a run of unknown cost.
+  const shared = mixedRoute(83, { review: null, reviewKey: "5551", artifact: { artifact: "pendulum-usage-83-review/result.json", progressRun: "5551", usd: 3 } });
+  assert.deepEqual([score(shared).cost.usd, score(shared).cost.usdUnknown], [3, 1]);
+  // An artifact with no result.json and no run to match (read from --usage): it stands for no comment, so the local
+  // review's line still counts beside it.
+  const unread = mixedRoute(84, { artifact: { progressRun: undefined, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  assert.equal(score(unread).cost.usd, 3);
+});
+
+test("#506 review: a stand-in record gives way to its stage's progress comment, which keeps the stand-in's sandbox cost when it has none", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // A sandbox stage its launcher ended: the stand-in carries the comment's last figure; the comment counts, once.
+  const killed = mixedRoute(85, { workKey: "5552-abcdef012345", work: { usd: 4.1, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, artifact: { progressRun: "5552-abcdef012345", standIn: true, usd: 4.1, usdUnknown: 1, usdUnknownWhy: ["unreported"], vendor: { claim: "abcdef012345", usd: 0.6 } } });
+  const k = score(killed);
+  assert.deepEqual([k.cost.usd, k.cost.usdUnknown, k.cost.vendorUsd], [7.1, 1, 0.6], "never $4.10 twice and 2 runs of unknown cost");
+  assert.deepEqual(k.cost.parts.map((p) => p.artifact), ["spend/work/5552-abcdef012345", "spend/review/1700000002"]);
+  // An Actions artifact with no result.json, uploaded by the stage's run: one run of unknown cost, not two.
+  const noResult = mixedRoute(86, { artifact: { progressRun: undefined, workflowRun: 5551, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  assert.deepEqual([score(noResult).cost.usd, score(noResult).cost.usdUnknown], [3, 1]);
+});
+
+test("#506 review: a mixed Codex row's basis names both sources, the price table for the artifacts and the worker's own pricing for the spend lines", () => {
+  const c = mixedRoute(87, { artifact: { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: { input: 150000, output: 10000, cached: 115000, written: null } } });
+  c.harness = "codex";
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.cost.usd, 3.1815);
+  assert.match(row.cost.basis, /^artifacts: tokens priced from codex-prices\.json dated [^;]+; spend lines: the worker's own pricing, in 1 progress comment\(s\); 1 artifact\(s\) and 1 spend line\(s\) summed$/);
+});
+
+test("#506 review F2: a stage's usage directory is read for its result.json and stream only, never its session totals", () => {
+  const dir = mkdtempSync(join(tmpdir(), "score-stage-dir-"));
+  try {
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ harness: "claude", model: "claude-opus-5-5", usd: 18, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 2 }));
+    writeFileSync(join(dir, "session-totals.json"), JSON.stringify({ harness: "claude", sessions: { s1: { usd: 18 } }, spend: { usd: 18, unknown: 1 } }));
+    const records = usageFromDir(dir, { readdir: (p) => readdirSync(p), read: (p) => readFileSync(p, "utf8"), isDir: (p) => statSync(p).isDirectory() });
+    assert.deepEqual(records.map((r) => r.artifact), ["result.json"]);
+    const cost = costOf(records, prices, { harness: "claude" });
+    assert.deepEqual([cost.usd, cost.usdUnknown], [18, 1], "$18 plus 1 run of unknown cost, never 2");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

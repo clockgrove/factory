@@ -84,8 +84,12 @@ test("#480: Codex's turn.completed totals are cumulative within one process, so 
   const rec = parseCodex(stream.join("\n"), "gpt-6.1-sol");
   assert.deepEqual([rec.tokens.input, rec.tokens.output, rec.turns], [1_500_000, 20_000, 2], "1.0M then 1.5M is 1.5M, not 2.5M");
   assert.equal(rec.usd, priceCodex("gpt-6.1-sol", { input: 1_500_000, cached: 0, output: 20_000 }));
-  // A turn.completed with no usage leaves the last total.
+  // A turn.completed with no usage, or one that reports no count, leaves the last total.
   assert.equal(parseCodex([...stream, ev({ type: "turn.completed" })].join("\n"), "gpt-6.1-sol").tokens.input, 1_500_000);
+  assert.deepEqual(parseCodex([...stream, ev({ type: "turn.completed", usage: {} })].join("\n"), "gpt-6.1-sol").tokens, { input: 1_500_000, output: 20_000, cached: 0, written: null });
+  const empty = harnessActivity(() => 0);
+  for (const line of [...stream.slice(0, 2), ev({ type: "turn.completed", usage: {} }), stream[2]]) empty.feed(line);
+  assert.deepEqual(empty.snapshot().tokens, { input: 1_500_000, output: 20_000, written: 0 }, "the live line counts from the last total, not from an empty one");
   // The progress comment's live status: the same reading, from the prior total of a resumed thread on.
   const live = harnessActivity(() => 0);
   live.since("t1", { tokens: { input: 400_000, output: 4_000 } });

@@ -39,7 +39,7 @@ import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
 import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
-import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
+import { CHOSEN_FIELDS, harnessVersionFor, stageAccountName } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { unknownOf } from "./lib/usage.mjs";
@@ -613,7 +613,11 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
-      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1, exit: "unknown", spendInProgress: true, basis: "unknown: the stage's usage did not come out of the sandbox" })}
+      // A stand-in for the stage's own record, keyed as its progress comment and on its account, so a scorer given both
+      // counts the stage once, from the comment (bench withLines).
+      const progressRun = typeof record.progress === "string" && /^[A-Za-z0-9-]{1,100}$/.test(record.progress) ? record.progress : /^[0-9a-f]{12}$/.test(String(record.claim)) ? stageProgressKey(record.run, record.claim) : null;
+      const account = stageAccountName(record.account);
+      writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1, exit: "unknown", spendInProgress: true, ...(progressRun ? { progressRun } : {}), ...(account ? { account } : {}), standIn: true, basis: "unknown: the stage's usage did not come out of the sandbox" })}
 `);
       usage = { dir, name: record.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
     }
@@ -1012,8 +1016,8 @@ function startCue(run, ctx, decision) {
  * The record the launcher writes once a stage started, over the record as it is now (`now`, still this start's claim):
  * the stage's own beat may already be in it (its lease, state and this start's entry, which `entry` replaces).
  */
-export function startedRecord(now, { base, result, claim, progress, latencyMs, at, leaseUntil, entry }) {
-  return { ...strip(now), ...base, quota: undefined, home: result.home, id: result.id, image: result.image ?? null, claim, progress, meter: result.meter, commandAt: result.commandAt, deadlineAt: result.deadlineAt, sessionEnd: result.sessionEnd, latencyMs, state: now.state === "running" ? "running" : now.state, at, leaseUntil: now.leaseUntil ?? leaseUntil, launches: withLaunch(now.launches, entry, { replace: true }) };
+export function startedRecord(now, { base, result, claim, progress, account = null, latencyMs, at, leaseUntil, entry }) {
+  return { ...strip(now), ...base, quota: undefined, home: result.home, id: result.id, image: result.image ?? null, claim, progress, account: stageAccountName(account) ?? undefined, meter: result.meter, commandAt: result.commandAt, deadlineAt: result.deadlineAt, sessionEnd: result.sessionEnd, latencyMs, state: now.state === "running" ? "running" : now.state, at, leaseUntil: now.leaseUntil ?? leaseUntil, launches: withLaunch(now.launches, entry, { replace: true }) };
 }
 
 /** A started stage's launch entry, as both the launcher and the stage write it (logic.mjs withLaunch); the rest is filled in at the start. */
@@ -1168,7 +1172,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   await dropDeferredNote(run);
   // The stage's own beats take the lease from here, in its own comment; this write folds them in (startedRecord).
   const entry = { ...startEntry({ stage, event: eventName, eventAt: ctx.eventAt, run: runId, cue }), latencyMs, found: result.found, at, ms: { ...watch.ms } };
-  const wrote = await write((cur) => (cur?.claim === claim ? startedRecord(cur, { base, result, claim, progress: stageProgressKey(runId, claim), latencyMs, at, leaseUntil: leaseUntil(), entry }) : null));
+  const wrote = await write((cur) => (cur?.claim === claim ? startedRecord(cur, { base, result, claim, progress: stageProgressKey(runId, claim), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null, latencyMs, at, leaseUntil: leaseUntil(), entry }) : null));
   if (!wrote.ok) log(`#${n}: the start was not recorded (${wrote.refused ? "the record carries another claim now" : "the record lock stayed held"}); the stage's part carries it`);
   watch.mark("record");
   log(`#${n}: stage ${stage} started in ${inputs.sandbox} sandbox ${result.id} (${result.found ? "the recorded one" : result.image ? `created from the image of ${String(result.image.sha).slice(0, 7)}` : "created from the base image"}${result.uploaded ? ", plugin uploaded" : ""})`);

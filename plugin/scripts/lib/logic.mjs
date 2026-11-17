@@ -1269,7 +1269,7 @@ export function harnessActivity(now = () => Date.now()) {
       base = priors.get(e.thread_id) ?? null;
       seen = null;
     } else if (e.type === "turn.started") s.turns += 1;
-    else if (e.type === "turn.completed" && e.usage) {
+    else if (e.type === "turn.completed" && e.usage && ["input_tokens", "output_tokens", "cache_write_input_tokens"].some((k) => typeof e.usage[k] === "number")) {
       const from = seen ?? base;
       const total = { input: e.usage.input_tokens || 0, output: e.usage.output_tokens || 0, written: e.usage.cache_write_input_tokens || 0 };
       for (const k of ["input", "output", "written"]) s.tokens[k] += Math.max(0, total[k] - (from?.[k] ?? 0));

@@ -844,8 +844,9 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
       const u = e.usage || {};
       // Codex reports usage per turn, not per request; cache writes where the provider bills them (the AI Gateway does).
       if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
-      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's.
-      if (e.usage && typeof e.usage === "object") [input, output, cached, written] = [num(u.input_tokens), num(u.output_tokens), num(u.cached_input_tokens), num(u.cache_write_input_tokens)];
+      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's. One
+      // that reports no count keeps the total before it.
+      if ([u.input_tokens, u.output_tokens, u.cached_input_tokens, u.cache_write_input_tokens].some((v) => num(v) !== null)) [input, output, cached, written] = [num(u.input_tokens), num(u.output_tokens), num(u.cached_input_tokens), num(u.cache_write_input_tokens)];
     }
     if (e.type === "turn.failed" || e.type === "error") {
       failed = e.error?.message || e.message || e.type;

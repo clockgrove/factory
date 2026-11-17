@@ -755,17 +755,39 @@ export function accountUse(usage) {
 }
 
 /**
- * The usage records given and the stages' progress-line records (spendRecords) together, each stage once: a line whose
- * progress comment a given record names (its `progressRun`, plugin session.mjs writeUsage) is left out for that record.
- * A given record that names no comment (one written before `progressRun`) cannot be matched to a line, so every line
- * on its account (or, for a record on none, every line on none: GitHub Actions and the cloud sandbox name no account)
- * is left out, and the records given count alone there.
+ * The usage records given and the stages' progress-line records (spendRecords) together, each stage once. A record
+ * stands for the progress comments of its own stage (work or review, stageOf) that it names exactly:
+ * - its `progressRun`, the comment's key (plugin session.mjs writeUsage);
+ * - else, a cloud sandbox stage's record (its `vendor.claim`): the comment keyed `<claim>` or `<run>-<claim>`
+ *   (plugin launch.mjs stageProgressKey);
+ * - else, a GitHub Actions artifact (its `workflowRun`, collect.mjs): the comments keyed `<run>` or `<run>-<attempt>`
+ *   (plugin session.mjs progressRunId);
+ * - else, a record on an account (a local result.json from before `progressRun`): every comment on that account.
+ * A record that names none of these stands for no comment, and both count. A stand-in (`standIn`: Pendulum's record for
+ * a stage whose own process wrote none) gives way to the comment it stands for, which takes the stand-in's sandbox cost
+ * when it carries none of its own.
  */
 export const withLines = (records = [], lines = []) => {
-  const accountOf = (r) => (typeof r?.account === "string" ? r.account : null);
-  const named = new Set(records.map((r) => r?.progressRun).filter((k) => typeof k === "string"));
-  const unmatched = new Set(records.filter((r) => r && typeof r.progressRun !== "string").map(accountOf));
-  return [...records, ...lines.filter((l) => !named.has(l.progressRun) && !unmatched.has(accountOf(l)))];
+  const claimOf = (r) => (typeof r?.vendor?.claim === "string" && /^[0-9a-f]{12}$/.test(r.vendor.claim) ? r.vendor.claim : null);
+  const covers = (r) => {
+    const stage = stageOf(r);
+    const key = (l) => (stageOf(l) === stage && typeof l.progressRun === "string" ? l.progressRun : null);
+    if (typeof r.progressRun === "string") return (l) => key(l) === r.progressRun;
+    const claim = claimOf(r);
+    if (claim) return (l) => key(l) === claim || !!key(l)?.endsWith(`-${claim}`);
+    if (Number.isInteger(r.workflowRun)) return (l) => key(l) === String(r.workflowRun) || new RegExp(`^${r.workflowRun}-\\d+$`).test(key(l) ?? "");
+    if (typeof r.account === "string") return (l) => l.account === r.account;
+    return () => false;
+  };
+  const taken = new Set();
+  const out = [];
+  for (const r of records.filter(Boolean)) {
+    const mine = lines.filter(covers(r));
+    if (r.standIn && mine.length) out.push(...mine.filter((l) => !taken.has(l)).map((l, i) => (i === 0 && r.vendor && !l.vendor ? { ...l, vendor: r.vendor } : l)));
+    else out.push(r);
+    for (const l of mine) taken.add(l);
+  }
+  return [...out, ...lines.filter((l) => !taken.has(l))];
 };
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20 plus 1 run of unknown cost, 1 limit pause)". */

@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
+import { findingsMarker, harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
@@ -283,7 +283,7 @@ test("report --compare: a stage Pendulum cannot attribute to itself leaves its O
   const [fast] = r.comparison.arms;
   assert.deepEqual(fast.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
   assert.deepEqual(fast.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null });
+  assert.deepEqual(fast.objectives.find((o) => o.issue === 11), { issue: 11, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null });
   // Its dollars are not known whole either: it is left out of every dollar measure.
   assert.deepEqual(fast.usdPerMerged.api, { median: 3.25, p25: 2.875, p75: 3.625, n: 2, leftOut: 1 });
 });
@@ -382,5 +382,23 @@ test("report --compare: a per-pass ledger read from the progress comment counts 
   const [after] = s.comparison.arms;
   assert.deepEqual(after.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
   assert.deepEqual(after.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
-  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null });
+  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null, findings: null });
+});
+
+test("report --compare (#546): each arm counts the review findings of its Objectives with a findings record, outcome by outcome", async () => {
+  const w = experiment();
+  const fastIssues = w.issues.filter((i) => i.labels.some((l) => (l.name ?? l) === FAST)).map((i) => i.number);
+  const stage = w.comments.find((c) => fastIssues.includes(Number(/^<!-- pendulum:(\d+):progress:review:/.exec(c.body)?.[1])));
+  stage.body += `\n${findingsMarker({ pr: 1, reviews: [9], items: [{ id: 1, outcome: "fixed-test", review: 9 }, { id: 2, outcome: "open", review: 9, listed: true }] })}`;
+  const n = Number(/^<!-- pendulum:(\d+):/.exec(stage.body)[1]);
+  const { code, json: r, err } = await report(w, ["--compare", "fast,slow", "--json"]);
+  assert.equal(code, 0, err);
+  const [fast, slow] = r.comparison.arms;
+  const outcomes = (o = {}) => ({ "fixed-test": 0, "fixed-verdict": 0, answered: 0, "not-fixed": 0, "not-checkable": 0, open: 0, ...o });
+  assert.deepEqual(fast.findings, { objectives: 1, findings: 2, outcomes: outcomes({ "fixed-test": 1, open: 1 }), reviewStages: 1, unnamed: 0 });
+  assert.deepEqual(slow.findings, { objectives: 0, findings: 0, outcomes: outcomes(), reviewStages: 0, unnamed: 0 });
+  assert.equal(fast.objectives.find((o) => o.issue === n).findings, 2);
+  assert.ok(fast.objectives.filter((o) => o.issue !== n).every((o) => o.findings === null));
+  const md = renderReport(r);
+  assert.match(md, /\| Review findings \(fixed-test, fixed-verdict, answered, not-fixed, not-checkable, open\), over Objectives recorded \| 2 \(1, 0, 0, 0, 0, 1\), 1 review stage\(s\), 1 Objective\(s\) \| 0 \(0, 0, 0, 0, 0, 0\), 0 review stage\(s\), 0 Objective\(s\) \|/);
 });

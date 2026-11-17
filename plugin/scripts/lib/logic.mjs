@@ -2865,6 +2865,82 @@ export function spendParts(body) {
 }
 
 /**
+ * How a review finding ended (#546), from exact fields only, never from prose: `fixed-test` (a test the answer named
+ * fails without the fix and passes with it), `fixed-verdict` (the finding check's `fixed` at the confidence floor),
+ * `answered` (its `rebutted` or `decided` there: resolved without a change), `not-fixed` (the named test failed on the
+ * head, or any other verdict), `not-checkable` (no verdict, or no decision model and no test that decides: the answer
+ * stands unjudged) and `open` (no answer of Pendulum's, or its resolution could not be posted).
+ */
+export const FINDING_OUTCOMES = Object.freeze(["fixed-test", "fixed-verdict", "answered", "not-fixed", "not-checkable", "open"]);
+/**
+ * The largest findings line a progress comment carries (findingsMarker), in characters: the findings that fit are
+ * named in order, the rest counted (`more`), never named.
+ */
+export const FINDINGS_MAX = 8_000;
+const FINDING_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+const findingId = (id) => (Number.isSafeInteger(id) && id > 0) || isBodyFindingId(id);
+const reviewId = (n) => Number.isSafeInteger(n) && n > 0;
+/** One finding of a record as kept: {id, outcome, review?, from?, listed?}; null when it is not one. */
+const findingItem = (x) => {
+  if (!x || typeof x !== "object" || !findingId(x.id) || !FINDING_OUTCOMES.includes(x.outcome)) return null;
+  return { id: x.id, outcome: x.outcome, ...(reviewId(x.review) ? { review: x.review } : {}), ...(typeof x.from === "string" && FINDING_LOGIN.test(x.from) ? { from: x.from } : {}), ...(x.listed === true && x.outcome === "open" ? { listed: true } : {}) };
+};
+/**
+ * A review stage's findings record (#546), `update` merged in: `pr`; `reviews`, the ids of the reviews its own reviewer
+ * posted; `items`, each finding it handled, {id, outcome (FINDING_OUTCOMES), review (the review that raised it, for
+ * Pendulum's reviewer's), from (the login of a reviewer outside Pendulum), listed (true: `open` only because the stage
+ * listed it, no check of its own judged it)}, by id. A later outcome replaces an earlier one; with `listed`, the update
+ * only adds findings the record does not name yet (the stage's list of open findings, before any check of its own),
+ * each marked `listed`.
+ */
+export function mergeFindings(rec, { pr = null, reviews = [], items = [], listed = false } = {}) {
+  const byId = new Map((rec?.items || []).map((x) => [String(x.id), x]));
+  for (const raw of items || []) {
+    const x = findingItem(listed && raw?.outcome === "open" ? { ...raw, listed: true } : raw);
+    if (!x) continue;
+    const had = byId.get(String(x.id));
+    if (had && listed) continue;
+    // A check's outcome is no longer only listed.
+    const kept = { ...had };
+    delete kept.listed;
+    byId.set(String(x.id), { ...kept, ...x });
+  }
+  return { pr: Number.isSafeInteger(pr) && pr > 0 ? pr : (rec?.pr ?? null), reviews: [...new Set([...(rec?.reviews || []), ...(reviews || []).filter(reviewId)])], items: [...byId.values()] };
+}
+/**
+ * The progress comment's findings line (mergeFindings' record), within FINDINGS_MAX characters: the findings that fit,
+ * in order, and the rest counted as `more`.
+ */
+export const findingsMarker = (rec) => {
+  const items = rec?.items || [];
+  const line = (n) => {
+    const json = JSON.stringify({ ...(rec?.pr ? { pr: rec.pr } : {}), reviews: rec?.reviews || [], items: items.slice(0, n), ...(items.length > n ? { more: items.length - n } : {}) });
+    return `<!-- pendulum:findings ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+  };
+  let n = items.length;
+  let text = line(n);
+  while (text.length > FINDINGS_MAX && n > 0) text = line((n -= 1));
+  return text;
+};
+const FINDINGS = /^<!-- pendulum:findings (\{[^\n]*\}) -->$/gm;
+/**
+ * A progress comment's findings record (findingsMarker), its last line: {pr, reviews, items, more}, each field checked as
+ * mergeFindings keeps it; null when it has none. The caller decides whose comment it trusts.
+ */
+export function findingsOf(body) {
+  const line = [...String(body || "").matchAll(FINDINGS)].at(-1);
+  if (!line) return null;
+  try {
+    const v = JSON.parse(line[1]);
+    if (!v || typeof v !== "object" || Array.isArray(v) || !Array.isArray(v.items)) return null;
+    const rec = mergeFindings(null, { pr: v.pr, reviews: Array.isArray(v.reviews) ? v.reviews : [], items: v.items });
+    return { ...rec, more: Number.isSafeInteger(v.more) && v.more > 0 ? v.more : 0 };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The largest per-pass ledger line a progress comment carries (ledgerMarker), in characters. A stage whose ledger does
  * not fit gets a line saying so and a marker with its pass count alone (`cut`): its usage record stays the ledger's source.
  */

@@ -33,6 +33,7 @@ import { allowAgentEnv } from "./lib/agent.mjs";
 import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { accountGate, authorGate, choiceGate, planGate } from "./lib/objective-trust.mjs";
+import { stageCapGate } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { credentialChecks } from "./doctor.mjs";
 import { exitFromOut, handoverChecker, handoverPosted, isSplitPart, noReviewReason, openHandoff, partsRecord, postNote, postReplies, publishPr, reviewAnswer, reviewCallEnd, reviewCallTimeout, reviewMissed, reviewPost, reviewRerun, reviewRetry, reviewsCover, splitPartOf } from "./lib/handoff.mjs";
@@ -1036,6 +1037,14 @@ async function main() {
     await dropLabel();
     await applyExit(repo, { issue, pr, exit: "blocked", ...block, notify: inputs.notify }, token);
     await finish("blocked", block.reason);
+    return;
+  }
+  // The Objective-wide dollar cap (lib/objective-cap.mjs, max_objective_usd): its known spend across every stage and part
+  // at or past it, the review starts nothing and the Objective Blocks naming the cap and the total.
+  const capped = await stageCapGate({ inputs, repo, issue, pr, opts: token, apply: applyExit, before: dropLabel, stage: "review", self: `review:${progress.runId}` });
+  if (!capped.ok) {
+    log(capped.reason);
+    await finish("blocked", capped.reason);
     return;
   }
   // The decision calls (lib/decider.mjs): with an AI Gateway key the gateway answers them, without one this stage's

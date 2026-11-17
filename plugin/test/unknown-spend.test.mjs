@@ -84,7 +84,7 @@ async function endToEnd(rec, why, { harness, model }) {
   for (const k of ["usdLowerBound", "usdUpperBound"]) assert.equal(stored[k], undefined, `${why}: ${k}`);
   // The spend line, and the exit line's dollars.
   const line = stageSpendLine(usage);
-  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why] } }, `${why}: spend line`);
+  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why], usdByPass: { work: { usd: knownUsd, usdUnknown: 1 } } } }, `${why}: spend line`);
   assert.match(usdText(usage), knownUsd ? /^2 plus 1 run of unknown cost \(/ : /^unknown \(/, `${why}: exit line`);
   assert.ok(usdText(usage).includes(UNKNOWN_WHY[why]), `${why}: the exit line says why`);
   // The cap compares the known dollars only: under it the stage goes on; the unknown run never fills it.

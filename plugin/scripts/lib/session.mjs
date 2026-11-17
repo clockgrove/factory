@@ -86,7 +86,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -2102,6 +2102,10 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The kind its harness passes share (usage.mjs stageBilling; `unknown` when they differ or none ran): what the
     // scorer reads for the stage's harness dollars, the relayed key's being `api` in usdByBilling.
     billing: stageBilling(records || [], billing),
+    // Its known dollars by pass kind (usage.mjs usdByPass: work, review, answer, fix and conflict passes, from their
+    // labels), each with its runs of unknown cost and billing: what the finish card breaks the stage down by (#517). The
+    // rest of `usd` (decision calls, the exit record, the relay's spend outside every pass) is the stage's own.
+    ...((byPass) => (Object.keys(byPass).length ? { usdByPass: byPass } : {}))(usdByPass(records || [], billing)),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

@@ -51,6 +51,7 @@ The issue gives the label time, the plan comment, the Blocked comment and any qu
 Each Blocked notice ends with a cause line, `<!-- pendulum:block {"cause":"<code>"} -->` (plugin `logic.mjs` `BLOCK_CAUSES`, the one list). External codes, outside Pendulum and the work:
 
 - `max-usd`: Pendulum's own `max_usd` cap reached.
+- `max-objective-usd`: Pendulum's own `max_objective_usd` cap reached, the Objective's known spend across its stages.
 - `gateway-budget`: the AI Gateway refused for its own budget or credits.
 - `provider-quota`: a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit included), GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan after the bounded wait.
 - `outage`: a provider or GitHub outage Pendulum handled by its rules (a required job GitHub never started, waited for in place, then Blocked as infrastructure; the same in the merge queue after one re-enqueue; the stage's machine unable to reach GitHub or the model provider past the outage's bound, its notice naming the host and since when).

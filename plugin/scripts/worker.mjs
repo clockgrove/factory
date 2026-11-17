@@ -31,6 +31,7 @@ import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { reviewHold, waitReason } from "./lib/overlap.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { stageCapGate } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
@@ -459,6 +460,14 @@ async function main() {
     const block = doctorBlock(failed);
     await applyExit(repo, { issue, pr: null, exit: "blocked", ...block, notify: inputs.notify }, token);
     await finish("blocked", block.reason);
+    return;
+  }
+  // The Objective-wide dollar cap (lib/objective-cap.mjs, max_objective_usd): its known spend across every stage and part
+  // at or past it, this stage starts nothing and the Objective Blocks naming the cap and the total.
+  const capped = await stageCapGate({ inputs, repo, issue, pr: prNow, opts: token, apply: applyExit, stage: "work", self: `work:${progress.runId}` });
+  if (!capped.ok) {
+    log(capped.reason);
+    await finish("blocked", capped.reason);
     return;
   }
 

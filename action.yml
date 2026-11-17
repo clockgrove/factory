@@ -83,6 +83,9 @@ inputs:
   max_usd:
     description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it, less the job's drift reserve (10% of it, at least $0.30, at most all of it), which only the drift advisory spends; Claude gets what is left as `--max-budget-usd` and Copilot as `--max-ai-credits` (Copilot takes no less than 30 credits, so with less than 30 credits' worth left no Copilot run starts); every harness is also checked after each run, and a Copilot run that reports no priced AI credits ends the job, since the cap cannot be enforced. The review job has the same cap of its own.
     required: false
+  max_objective_usd:
+    description: 'The dollar cap on one Objective across all its stages and parts (work, review, rebases, every split part), a number; empty or 0 is no cap. Every work and review stage checks it before any pass: once the Objective''s known spend (the dollars the finish card counts, from the spend lines and usage artifacts) reaches it, the stage starts nothing and the Objective Blocks, naming the cap and the total. Runs of unknown cost count nothing toward it, so they never stop a stage.'
+    required: false
   timeout_minutes:
     description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.
     required: false
@@ -201,7 +204,7 @@ inputs:
     description: The longest a hand-off to review, or a conflicting PR's rebase, waits for a sibling ahead of it that it conflicts with (sibling_hold), counted from its first wait; then it goes on beside the sibling. 6 when empty. A number above 0, at most 168 (7 days). Scheduling only.
     required: false
   max_parts:
-    description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend; each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top. 6 when empty. A whole number from 1 to 50.
+    description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend; each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top; `max_objective_usd` caps them all together. 6 when empty. A whole number from 1 to 50.
     required: false
   step_stall_factor:
     description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Pendulum then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.
@@ -455,6 +458,7 @@ runs:
         PENDULUM_INPUT_GUESS_HOURS: ${{ inputs.guess_hours }}
         PENDULUM_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
         PENDULUM_INPUT_MAX_USD: ${{ inputs.max_usd }}
+        PENDULUM_INPUT_MAX_OBJECTIVE_USD: ${{ inputs.max_objective_usd }}
         PENDULUM_INPUT_COPILOT_CREDIT_USD: ${{ inputs.copilot_credit_usd }}
         PENDULUM_INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         PENDULUM_INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}

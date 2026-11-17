@@ -36,6 +36,7 @@ import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit, doctorBlock, objectiveDecisions } from "./lib/session.mjs";
 import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 import { objectiveInputs, routeAccountCheck } from "./lib/objective-trust.mjs";
 import { chatgptLogin, routeInputs, routeSecretSuffix } from "./lib/accounts.mjs";
 import { waitOnAccounts } from "./lib/account-wait.mjs";
@@ -773,7 +774,9 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
     const pr = asked ? await findPr(repo, `pendulum/${n}`, opts).then((p) => ({ p: p ?? null }), () => null) : null;
     const decisions = pr ? await objectiveDecisions(repo, { issue: n, prNumber: pr.p?.number ?? null }, opts, { strict: true, quiet: true }).catch(() => null) : null;
     if (decisions) {
-      const screen = await screenAnswer({ check: openAnswerCheck({ inputs }), repo, issue: n, since: asked, comments: ctx.comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || null, opts });
+      // Whatever the screen wrote or failed to write, its call's spend is written before the launcher goes on (a notice
+      // that failed books it again): the launcher's decisions comment, as the dispatcher's job does on its way out.
+      const screen = await screenAnswer({ check: openAnswerCheck({ inputs }), repo, issue: n, since: asked, comments: ctx.comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || null, opts, role: "launcher" }).finally(() => flushDecisionSpend(repo, opts, { role: "launcher" }));
       if (!screen.requeue) return out({ exit: "skipped", reason: `#${n} (comment): the Question stays open: ${screen.why}` });
     }
   }

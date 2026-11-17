@@ -92,7 +92,8 @@ export function runError(rec) {
  * most HARNESS_CALLS run at once; the rest wait their turn, each slot handed straight to the next in line. A model that
  * refused the low reasoning effort is asked with its own from then on. `limited()`: the provider's refusal that stopped
  * the adapter (usage.mjs providerRefusal's), for a caller that ends its stage on it (review.mjs, the finding check).
- * `decide(input, question, {signal})`: `signal` ends the call early (no answer: `unavailable`).
+ * `decide(input, question, {signal, reserve})`: `signal` ends the call early (no answer: `unavailable`); `reserve`: the
+ * drift reserve pays it (harness.mjs carveDriftReserve).
  */
 export function harnessDecider({ harness, model = null, env = process.env, record = null }) {
   let quiet = null;
@@ -122,12 +123,12 @@ export function harnessDecider({ harness, model = null, env = process.env, recor
       record?.(kept);
     } else h.foldDecision(kept, one);
   };
-  const ask = async (input, question, signal) => {
+  const ask = async (input, question, signal, reserve) => {
     if (quiet) return no(quiet);
     let rec;
     try {
       const h = await import("../harness.mjs");
-      rec = await h.runDecision({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env, effort, signal });
+      rec = await h.runDecision({ harness, model, prompt: decisionPrompt(input, question), env: typeof env === "function" ? env() : env, effort, signal, reserve });
       if (rec?.effortRefused) effort = null;
       if (rec?.earlier) keep(h, rec.earlier);
       if (rec && !rec.noRun) keep(h, rec);
@@ -144,12 +145,12 @@ export function harnessDecider({ harness, model = null, env = process.env, recor
     name: "harness",
     model: `${harness}${model ? ` ${model}` : ""}`,
     limited: () => limit,
-    async decide(input, question, { signal = null } = {}) {
+    async decide(input, question, { signal = null, reserve = false } = {}) {
       if (quiet) return no(quiet);
       await slot();
       try {
         if (signal?.aborted) return no("unavailable");
-        return await ask(input, question, signal);
+        return await ask(input, question, signal, reserve);
       } finally {
         free();
       }

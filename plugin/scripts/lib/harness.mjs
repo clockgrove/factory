@@ -558,7 +558,7 @@ const RUNNING_TOTALS = new Set(["claude", "codex", "copilot"]);
 // cost (`unknown`, usage.mjs UNKNOWN_WHY), and the passes still running (`open`), each with the session it resumed. What
 // the progress comment's spend line carries until the stage records its final figure. `dir` and `harness`: the stage's
 // usage directory and harness, from its first pass.
-const STAGE_SPEND = { done: 0, unknown: 0, open: new Map(), dir: null, harness: null, decisions: 0, billing: null, doneBy: {} };
+const STAGE_SPEND = { done: 0, unknown: 0, open: new Map(), dir: null, harness: null, decisions: 0, billing: null, doneBy: {}, capped: false, reserve: 0, reserved: 0 };
 
 /**
  * The stage credential's billing (usage.mjs BILLING, credentialEnv's), set by the stage once it reads its credential:
@@ -612,12 +612,46 @@ export function stageSpendNow() {
   return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, keyUsd: Math.round(keyUsd * 1e6) / 1e6, byBilling, unknown, commit };
 }
 /**
+ * The drift reserve (#479): what of a stage's `max_usd` the drift advisory, which only advises, may spend, carved out
+ * before any pass runs so a pass never spends it. 10% of `max_usd`, never less than one decision call's own cap
+ * (DECISION_RUN `maxUsd`) and never more than `max_usd`; none with no cap, and none when `max_usd` is no more than one
+ * call's cap (the advisory is then never asked). Exact arithmetic on caps: no estimate of what a call costs.
+ */
+export function driftReserve(maxUsd) {
+  const max = Number(maxUsd);
+  if (!(max > DECISION_RUN.maxUsd)) return 0;
+  return Math.round(Math.min(max, Math.max(DECISION_RUN.maxUsd, max * 0.1)) * 1e6) / 1e6;
+}
+/**
+ * Carve the stage's drift reserve out of `maxUsd` (driftReserve), before any drift call: `on` false (no decider: the
+ * advisory never runs) carves none. With no cap there is nothing to carve. Returns the reserve.
+ */
+export function carveDriftReserve(maxUsd, { on = true } = {}) {
+  STAGE_SPEND.capped = Number(maxUsd) > 0;
+  STAGE_SPEND.reserve = on ? driftReserve(maxUsd) : 0;
+  STAGE_SPEND.reserved = 0;
+  return STAGE_SPEND.reserve;
+}
+/** What the drift advisory has spent in this stage (meterPass `reserve`). */
+export const reservedSpend = () => STAGE_SPEND.reserved;
+/** What is left of the drift reserve, or null with no cap (carveDriftReserve): the advisory is asked only while one call's cap fits in it. */
+export const reserveLeft = () => (STAGE_SPEND.capped ? Math.max(0, STAGE_SPEND.reserve - STAGE_SPEND.reserved) : null);
+/**
+ * The cap the stage's passes and essential decision calls share: `maxUsd` less what the drift reserve has not spent
+ * yet (the reserve's spent part is in the stage's spend already). With no cap, `maxUsd` as it is. A stage's pass caps,
+ * its budget checks and its validation loop all start from this, so a pass running beside the advisory can never spend
+ * the reserve: passes and drift together stay within `maxUsd`.
+ */
+export const passMaxUsd = (maxUsd) => (Number(maxUsd) > 0 ? Math.round((Number(maxUsd) - Math.max(0, STAGE_SPEND.reserve - STAGE_SPEND.reserved)) * 1e6) / 1e6 : maxUsd);
+
+/**
  * A pass counted as running from its start until `end(rec)` books its record: its known dollars, and its runs of unknown
  * cost (usage.mjs unknownRuns) when it reported none or not all. `more(rec)` books runs of unknown cost the record gained
  * after its end (a relayed key call the gateway did not price, gateway-relay.mjs addKeySpend). `session`: the session it
- * resumes, null for a fresh one.
+ * resumes, null for a fresh one. `decision`: a decision call, whose known dollars decisionSpend counts too; `reserve`:
+ * one the drift reserve pays (carveDriftReserve), whose known dollars reservedSpend counts too.
  */
-export function meterPass({ session = null, label = "run", harness = null, model = null, decision = false } = {}) {
+export function meterPass({ session = null, label = "run", harness = null, model = null, decision = false, reserve = false } = {}) {
   const token = {};
   let booked = 0;
   STAGE_SPEND.open.set(token, { session, label, harness, model, decision });
@@ -626,7 +660,11 @@ export function meterPass({ session = null, label = "run", harness = null, model
       if (!STAGE_SPEND.open.delete(token)) return;
       // Stamped with its billing once the stage has read its credential (setStageBilling); a record with none names none.
       if (rec && STAGE_SPEND.billing) rec.billing = passBilling(STAGE_SPEND.billing, rec);
-      if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.done += Math.max(0, rec.usd);
+      if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) {
+        STAGE_SPEND.done += Math.max(0, rec.usd);
+        if (decision) STAGE_SPEND.decisions += Math.max(0, rec.usd);
+        if (decision && reserve) STAGE_SPEND.reserved += Math.max(0, rec.usd);
+      }
       if (rec?.billing) STAGE_SPEND.doneBy = addBilling(STAGE_SPEND.doneBy, { [rec.billing]: typeof rec.usd === "number" && Number.isFinite(rec.usd) ? Math.max(0, rec.usd) : 0 });
       booked = unknownRuns(rec);
       STAGE_SPEND.unknown += booked;
@@ -1868,7 +1906,7 @@ export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reas
  * counts in the stage's spend so far (and decisionSpend); the adapter keeps its record (keepDecision). Returns the usage
  * record with `answer` (answerText).
  */
-export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null }) {
+export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null, reserve = false }) {
   const at = () => new Date().toISOString();
   const none = (error) => ({ ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
   if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
@@ -1878,7 +1916,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   if (!agent && !(await onPath(CLI[harness].bin, given))) return none(`${CLI[harness].bin} is not on PATH (npm install -g ${CLI[harness].pkg})`);
   const dir = agent ? null : local ? stageTemp("decision-") : mkdtempSync(join(tmpdir(), "pendulum-decision-"));
   const launch = decisionLaunch({ harness, model, prompt, env: given, maxUsd, creditUsd, effort, agent, outer: local && !agent ? backend(given).sandbox.outer(given) : null, dir });
-  const metered = meterPass({ label, harness, model: model || null, decision: true });
+  const metered = meterPass({ label, harness, model: model || null, decision: true, reserve });
   const started = at();
   let r;
   try {
@@ -1903,14 +1941,13 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout: r.code !== 0 ? rollout : null, requests: rollout, since: started });
   if (harness === "codex" && codexPlanLimits(rollout, started)) rec.planLimits = true;
   metered.end(rec);
-  if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
   else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Pendulum" });
   else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${CLI[harness].bin} exited ${r.code ?? r.signal}` });
   if (effort && effortRefused(rec.refusal)) {
     log(`${label}: ${harness} refused the ${effort} reasoning effort for ${model || "its default model"}; asking once more with the model's own`);
-    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null, signal });
+    const again = await runDecision({ harness, model, prompt, env: given, timeoutMs: Math.max(1_000, timeoutMs - (Date.now() - Date.parse(started))), maxUsd, label, effort: null, signal, reserve });
     // The refused run's own spend stays with it (`earlier`), for the adapter to keep beside the second's; `effortRefused`
     // tells the adapter to ask no later call with that effort.
     return { ...again, earlier: keepDecision(rec), effortRefused: true };

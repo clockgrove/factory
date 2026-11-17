@@ -214,7 +214,7 @@ export const recordText = ({ title = null, body = "", labels = [] } = {}) => ({ 
  * when no decider here could ask and another process may (the check's `elsewhere`); `said` the progress line of a kept
  * edit newly judged (edit-check.mjs keptLine).
  */
-export async function judgedEdit({ issue, record, now, check = null }) {
+export async function judgedEdit({ repo = null, issue, record, now, check = null }) {
   const none = { kept: false, record: null, unjudged: false, said: null };
   if (!record || record.sha256 === now.sha || !record.text) return none;
   const before = recordText(record.text);
@@ -227,7 +227,7 @@ export async function judgedEdit({ issue, record, now, check = null }) {
   const stored = record.verdicts?.[now.sha];
   if (stored) return { ...none, kept: stored === "wording" };
   if (!c.judge) return { ...none, unjudged: !!c.elsewhere };
-  const v = await c.judge(before, after);
+  const v = await c.judge(before, after, { issue, repo: repo?.full ?? null });
   if (!v?.verdict) {
     log(`#${issue}: edit check (${c.model}): no verdict on the edit since the plan (${v?.error || "no_answer"})`);
     return none;
@@ -260,7 +260,7 @@ export async function planGate({ repo, issue, sha, text = null, editedAt = null,
   const label = work ? (labeledAt !== undefined ? labeledAt : await (read.labeledAt ?? startedAt)(repo, issue, objectiveLabel, opts)) : null;
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
   const relabeled = work && !!posted?.record && after(label, posted.record.label);
-  const judged = text && !relabeled ? await judgedEdit({ issue, record: posted?.record, now: { sha, ...text }, check }) : { kept: false, record: null, said: null };
+  const judged = text && !relabeled ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, ...text }, check }) : { kept: false, record: null, said: null };
   const state = planTextState({ sha, plan: posted, labeledAt: label, editedAt: edited, work, kept: judged.kept });
   if (judged.said && progress) await progress(judged.said);
   // The plan's record as it stands now: with a verdict newly asked, written with the plan's text.
@@ -295,7 +295,7 @@ export async function planStateNow(repo, issue, { sha, editedAt = null, issueDat
   await knowSelf(opts);
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
-  const judged = issueData ? await judgedEdit({ issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check }) : { kept: false, record: null };
+  const judged = issueData ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check }) : { kept: false, record: null };
   return { posted, state: planTextState({ sha, plan: posted, editedAt: edited, kept: judged.kept }), record: judged.record ?? posted?.record ?? null };
 }
 
@@ -322,7 +322,7 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
     const t = await objectiveTrusted(repo, issue, opts, { gh: { graphql: gh.graphql, permission: gh.permission ?? collaboratorPermission } });
     if (t.ok) {
       sha = t.sha;
-      judged = await judgedEdit({ issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check });
+      judged = await judgedEdit({ repo, issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check });
     }
   }
   if (judged.record && posted.text !== null) await stampPlan(repo, issue, posted, judged.record, opts);

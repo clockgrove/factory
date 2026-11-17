@@ -137,7 +137,8 @@ export function stageOf(rec) {
 function partBilling(rec, part) {
   const map = billingRead(rec.usdByBilling);
   if (rec.harness !== "codex" || rec.source === "spend" || !Object.keys(map).length) return map;
-  const key = num(rec.workerKeyUsd) ?? 0;
+  // The relayed key's dollars and the AI Gateway decision calls' (`gatewayDecisionUsd`) are billed to a gateway key: `api`.
+  const key = (num(rec.workerKeyUsd) ?? 0) + (num(rec.gatewayDecisionUsd) ?? 0);
   const harnessUsd = part.usd === null ? 0 : Math.max(0, part.usd - key);
   return addBilling({ [billingCode(rec.billing) ?? "unknown"]: harnessUsd }, key > 0 ? { api: key } : {});
 }
@@ -184,12 +185,14 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     } else if (rec.harness === "codex") {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
       // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's. The spend
-      // through a relayed gateway key is no harness spend: kept as the worker priced it.
+      // through a relayed gateway key and the AI Gateway's decision calls (`gatewayDecisionUsd`) are no harness spend:
+      // kept as the gateway reported them.
       // A promotional rate prices only spend before its end (usage.mjs codexRow): the record's end dates it (a stage's
       // record ends with its latest pass or call, usage.mjs mergeUsage), and a record with none is of unknown cost there.
       const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents, { at: rec.ended ?? null });
       const key = num(rec.workerKeyUsd);
-      part.usd = priced.usd === null && key === null ? null : round4((priced.usd ?? 0) + (key ?? 0));
+      const decisions = num(rec.gatewayDecisionUsd);
+      part.usd = priced.usd === null && key === null && decisions === null ? null : round4((priced.usd ?? 0) + (key ?? 0) + (decisions ?? 0));
       // The record's own runs of unknown cost (a turn that failed, a sub-agent thread not read), or one for tokens this
       // table cannot price: never $0 for them.
       part.usdUnknown = Number.isInteger(rec.usdUnknown) && rec.usdUnknown > 0 ? rec.usdUnknown : priced.unknown ? 1 : 0;
@@ -270,16 +273,23 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       out.unit = "usd";
       out.basis = priced.length ? `${parts[0].basis ?? "unknown"}` : "unknown";
   }
-  if (parts.every((r) => r.source === "spend")) {
+  // The decision calls made outside any stage (plugin decision-spend.mjs): parts of their own, said apart in the basis.
+  const outside = parts.filter((r) => r.source === "decisions");
+  const stageParts = parts.filter((r) => r.source !== "decisions");
+  if (stageParts.length && stageParts.every((r) => r.source === "spend")) {
     // Read from the progress comments' spend lines: dollars as the worker priced them, no tokens, no table.
     out.unit = "usd";
     out.priceTableDate = null;
     out.note = null;
-    out.basis = priced.length ? `pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
-  } else if (out.parts.length > 1) {
+    out.basis = priced.length ? `pendulum:spend lines in ${stageParts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
+  } else if (stageParts.length > 1) {
     // A mixed-route Objective: its artifacts' stages and its local stages' spend lines, each stage once, each source's basis named.
-    const lines = parts.filter((r) => r.source === "spend").length;
-    out.basis = lines ? `artifacts: ${out.basis}; spend lines: the worker's own pricing, in ${lines} progress comment(s); ${out.parts.length - lines} artifact(s) and ${lines} spend line(s) summed` : `${out.basis}; ${out.parts.length} artifacts summed (worker + review)`;
+    const lines = stageParts.filter((r) => r.source === "spend").length;
+    out.basis = lines ? `artifacts: ${out.basis}; spend lines: the worker's own pricing, in ${lines} progress comment(s); ${stageParts.length - lines} artifact(s) and ${lines} spend line(s) summed` : `${out.basis}; ${stageParts.length} artifacts summed (worker + review)`;
+  }
+  if (outside.length) {
+    const usd = outside.reduce((s, r) => s + (num(r.usd) ?? 0), 0);
+    out.basis += `; includes ${round4(usd)} USD of decision calls outside a stage (the AI Gateway's cost, ${outside.length} comment(s))`;
   }
   out.basis += unknownNote;
   out.basis += billingNote(byBilling);

@@ -67,6 +67,7 @@ import { openCommentCheck } from "./lib/comment-check.mjs";
 import { DRAFT_LABEL, goTrust, isDraft, labelTrust, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
@@ -2009,7 +2010,9 @@ export class Local {
     const facts = lapseFacts({ result, failure, pressure });
     // Opened for each lapse, so a key file or decision route set since serve started is read (`lapseCheck`: a test's own).
     const check = this.lapseCheck ?? openLapseCheck({ inputs: resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }), env: this.baseEnv() });
-    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
+    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null), { issue, repo: this.repoFull }).catch(() => null);
+    // The call's cost, outside any stage: written now on the Objective's issue (decision-spend.mjs).
+    await flushDecisionSpend(this.repo, this.opts, { role: "serve" });
     const count = (before?.count ?? 0) + 1;
     const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
     const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("PENDULUM_LOCAL_LAPSE_MAX") : count < 2;
@@ -3175,6 +3178,8 @@ export class Local {
       if (inputs.autoMerge) {
         const report = {};
         const how = await mergeReadyOne(this.repo, { issue, prNumber, queue, checkNames: inputs.ciChecks, report, hungMs, queueTimeout, cache, stall: inputs.stall, objectiveLabel: inputs.objectiveLabel, thirdParty: inputs.thirdPartyReviewers, editCheck: () => openEditCheck({ inputs }), commentCheck: () => openCommentCheck({ inputs }) }, this.opts).catch((e) => log(`#${issue} merge: ${e.message.slice(0, 160)}`));
+        // Its edit and comment checks outside a stage that no record carried: this loop's decisions comment.
+        await flushDecisionSpend(this.repo, this.opts, { role: "serve" });
         const why = mergeBlockReason(how, report);
         if (why) {
           await applyExit(this.repo, { issue, pr: await getPr(this.repo, prNumber, this.opts).catch(() => null), exit: "blocked", reason: why, cause: mergeBlockCause(how, report), notify: inputs.notify, stage: "merge" }, this.opts);
@@ -3744,7 +3749,7 @@ export class Local {
       const marked = [];
       // No Action runs here (actionState): this loop picks the Objectives without pendulum:local too, labelling each first.
       const adopt = (await this.actionState().catch(() => null)) === "none";
-      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;
@@ -3755,6 +3760,8 @@ export class Local {
         log(`dispatch failed: ${e.message.slice(0, 200)}`);
         return { ready: [] };
       }).then(async (r) => {
+        // The tick's decision calls outside a stage that no record carried: this loop's decisions comment (decision-spend.mjs).
+        await flushDecisionSpend(this.repo, this.opts, { role: "serve" });
         // A stop that came while it ran: the picks it marked Running start nothing and go back to Queued, before the exit,
         // unless a claim is on the issue now (another loop picked it too and holds it) or cannot be read: those stay.
         if (!this.stopping) return r;
@@ -3934,6 +3941,8 @@ async function issueForSession(issue, flags) {
   if (planFile) rmSync(planFile, { force: true });
   // An edit since the plan is judged by the edit check on the AI Gateway alone (a session has no stage harness here).
   const { posted, state } = planFile ? await planStateNow(clone.repo, issue, t, clone.opts, {}, () => openEditCheck({ inputs })) : {};
+  // The edit check's call, outside any stage: the CLI's decisions comment (decision-spend.mjs).
+  await flushDecisionSpend(clone.repo, clone.opts, { role: "cli" });
   mkdirSync(resolve(file, ".."), { recursive: true });
   writeFileSync(file, inFiles({ issue, issueTitle: t.issueData.title, issueBody: t.issueData.body })["issue.md"]);
   log(`#${issue}: written by ${t.people.map(([role, login]) => `${role} ${login}`).join(", ")}; ${file}`);
@@ -3989,6 +3998,7 @@ async function deliver(issue, flags) {
   // An edit since the plan the edit check keeps (as `pendulum issue` judged it, on the gateway alone) keeps the plan's own
   // record, its text the baseline the next edit is judged against; else the text the session was given.
   const kept = given === null ? null : await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }));
+  await flushDecisionSpend(repo, opts, { role: "cli" });
   const planRecord = given === null ? null : kept.state === "same" && kept.record && kept.record.sha256 !== trusted.sha ? { ...kept.record, label: labeledAt } : { sha256: trusted.sha, label: labeledAt, text: recordText({ ...issueData, labels: trusted.labels }) };
   const out = resolve(flags.out || process.env.PENDULUM_OUT || resolve(dir, sh("git", ["-C", dir, "rev-parse", "--git-dir"]), "pendulum-out"));
   const { files, refused } = await readOut({ out }, process.env);
@@ -4277,7 +4287,9 @@ async function postFindings(prNumber, file, flags) {
   if (!trusted.ok) throw untrustedRefusal(trusted, "nothing posted");
   // The review job's second check: a review of code made from earlier text than the Objective's now is not posted. An
   // edit since the plan is judged by the edit check on the AI Gateway alone (a session has no stage harness here).
-  if ((await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }))).state === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
+  const textState = (await planStateNow(repo, issue, trusted, opts, {}, () => openEditCheck({ inputs }))).state;
+  await flushDecisionSpend(repo, opts, { role: "cli" });
+  if (textState === "changed") throw new Error(`nothing posted: ${EDITED_REASON}`);
   // The review job's third: a foundation label it would Block on is refused here; a trusted one asks for both passes.
   const found = await foundationTrusted(repo, issue, trusted.labels, opts);
   if (!found.ok) throw new Error(`nothing posted: ${found.reason}. ${found.fix}`);

@@ -7,7 +7,9 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { openVendor } from "./adapters/decider.mjs";
+import { bookDecisionSpend } from "./decision-spend.mjs";
 import { log, mask } from "./inputs.mjs";
 import { gatewayKeyFile, keyDirExposedBy } from "./local.mjs";
 
@@ -80,13 +82,122 @@ let harnessSaid = false;
  */
 const STAGES = new WeakMap();
 const shared = (stage) => {
-  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null });
+  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null, gatewayRecord: null, capSaid: false });
   return STAGES.get(stage);
 };
 const harnessOf = (stage) => {
   const s = shared(stage);
   s.harness ??= openVendor({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null }).then((a) => (s.opened = a));
   return s.harness;
+};
+
+/**
+ * The stage's one record of its gateway decision calls, as the stage's usage keeps it, as a harness decision call's is
+ * (harness.mjs keepDecision): labelled `decision`, `decider` "ai-gateway", billed `api` (to the gateway key), no tokens (the gateway's model is no
+ * harness's), `calls` the tries that reached the gateway, `usd` the known dollars and `usdUnknown` the calls of unknown
+ * cost (usage.mjs UNKNOWN_WHY `decision`). Its counts live beside it (GATEWAY_COUNTS), so nothing but usage fields is on
+ * it.
+ */
+const GATEWAY_COUNTS = new WeakMap();
+const gatewayRecord = (model) => {
+  const rec = { harness: null, decider: "ai-gateway", billing: "api", model: model ?? null, label: "decision", usd: null, tokens: { input: null, output: null, cached: null, written: null }, turns: null, basis: "the AI Gateway's cost of each decision call (the cost its answer reports, else its generation's total_cost)", started: new Date().toISOString(), ended: null, ok: true, decision: true, calls: 0 };
+  GATEWAY_COUNTS.set(rec, { known: null, unknown: 0, settling: 0 });
+  return rec;
+};
+// A call whose price is still settling is in neither figure: its meter is still open (harness.mjs openPasses counts it
+// as running, of unknown cost, for a stopped stage), so it is counted once. `usd` is null when no call was priced and
+// some is of unknown cost; $0 only while every call is still settling (a record with no figure would read as one more
+// run of unknown cost, usage.mjs unknownRuns, beside the open meters).
+const refresh = (rec) => {
+  const c = GATEWAY_COUNTS.get(rec);
+  rec.usd = c.known ?? (c.unknown ? null : 0);
+  const n = c.unknown;
+  if (n) Object.assign(rec, { usdUnknown: n, usdUnknownWhy: ["decision"] });
+  else {
+    delete rec.usdUnknown;
+    delete rec.usdUnknownWhy;
+  }
+  rec.ended = new Date().toISOString();
+};
+
+/** The stage gateway calls whose price is still settling in this process: each `{done, book}` until it comes. */
+const SETTLING = new Set();
+
+/**
+ * Wait, `timeoutMs` at most, for the prices of the stage's gateway decision calls still settling (each lookup ends
+ * within the relay's LOOKUP_MAX_MS of its call), as a pass's end waits for its relayed calls' lookups: a stage calls it
+ * before it writes its usage. A price not come by then is booked unknown, and a later one is never read, so the stage's
+ * totals are final when written.
+ */
+export async function settleDecisionCosts({ timeoutMs = 120_000 } = {}) {
+  if (!SETTLING.size) return;
+  const pending = [...SETTLING];
+  await Promise.race([Promise.all(pending.map((e) => e.done)), sleep(timeoutMs, null, { ref: false })]);
+  for (const e of pending) e.book(null);
+}
+
+/**
+ * One gateway decision call, its answer returned as soon as the gateway gives it and its cost booked where its spend is
+ * counted once its price settles (adapters/decider-ai-gateway.mjs `spend.settled`). In a stage (`stage`): counted as
+ * running (harness.mjs meterPass, so the spend line shows it as of unknown cost) from the call until its price comes,
+ * then in the stage's spend so far (max_usd, decisionSpend, the drift reserve for `reserve`) and in the stage's one
+ * gateway decision record, given to `stage.record` at its first call and kept with the stage's passes. Outside one: booked for the Objective and repository `opts.issue` and `opts.repo`
+ * name (decision-spend.mjs bookDecisionSpend), written with the record its check writes, or by the process's flush.
+ */
+async function gatewayCall(vendor, input, question, opts, stage, reserve = false) {
+  if (!stage) {
+    const a = await vendor.decide(input, question, opts);
+    bookDecisionSpend({ issue: opts?.issue ?? null, repo: opts?.repo ?? null }, a?.spend);
+    return answerOf(a);
+  }
+  const h = await import("./harness.mjs");
+  const metered = h.meterPass({ label: "decision", model: vendor.model ?? null, decision: true, reserve });
+  let a = null;
+  try {
+    a = await vendor.decide(input, question, opts);
+  } finally {
+    const spend = a?.spend;
+    if (!spend || !(spend.calls > 0)) metered.end({ usd: 0, noRun: true });
+    else {
+      const s = shared(stage);
+      if (!s.gatewayRecord) {
+        s.gatewayRecord = gatewayRecord(vendor.model);
+        h.keepDecisionPass(s.gatewayRecord);
+        stage.record?.(s.gatewayRecord);
+      }
+      const rec = s.gatewayRecord;
+      const c = GATEWAY_COUNTS.get(rec);
+      rec.calls += spend.calls;
+      c.settling += spend.calls;
+      refresh(rec);
+      let booked = false;
+      // `price` null: none came (settleDecisionCosts' bound passed): every try of the call is of unknown cost.
+      const book = (price) => {
+        if (booked) return;
+        booked = true;
+        SETTLING.delete(entry);
+        const usd = typeof price?.usd === "number" && Number.isFinite(price.usd) ? Math.max(0, price.usd) : null;
+        const unknown = price ? (Number.isInteger(price.usdUnknown) ? price.usdUnknown : usd === null ? spend.calls : 0) : spend.calls;
+        c.settling -= spend.calls;
+        c.unknown += unknown;
+        if (usd !== null) c.known = Math.round(((c.known ?? 0) + usd) * 1e6) / 1e6;
+        refresh(rec);
+        // Billed to the gateway key: `api` (usage.mjs BILLING), whatever the stage's own credential is.
+        metered.end({ usd, billing: "api", ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}) });
+      };
+      const entry = { book, done: null };
+      entry.done = Promise.resolve(spend.settled).then(book, () => book(null));
+      SETTLING.add(entry);
+    }
+  }
+  return answerOf(a);
+}
+
+/** The answer a caller gets: the vendor's, less its `spend`, which is booked here and nowhere else. */
+const answerOf = (a) => {
+  if (!a || typeof a !== "object" || !("spend" in a)) return a;
+  const { spend: _booked, ...answer } = a;
+  return answer;
 };
 
 /**
@@ -102,9 +213,14 @@ const harnessOf = (stage) => {
  *   a function returning it, and where the stage's decision record goes): that harness, on that env's login, through
  *   the stage's one shared adapter.
  * - Otherwise: `off` is why (the key's code, or `route-off`), and decide answers nothing.
+ * Each gateway call's cost is booked (gatewayCall): with `stage`, in the stage's spend; without, for the Objective that
+ * `decide`'s `issue` and `repo` options name. `essential` false marks a call nothing waits on (the drift advisory: advice
+ * only): the drift reserve pays it (harness.mjs carveDriftReserve), and once what is left of the reserve is under one
+ * decision call's own cap (harness.mjs DECISION_RUN `maxUsd`) it is not asked on either route: it answers `budget` at
+ * once, said once per stage. Every other call runs.
  * `decider` stands in for the vendor (tests). The vendor module opens at the first question.
  */
-export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null } = {}) {
+export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null, essential = true } = {}) {
   const fixed = (name, label) => () => ({ name, model: label });
   if (decider) return { name: decider.name ?? "given", model, off: null, asked: fixed(decider.name ?? "given", model), limited: () => null, decide: (input, question, opts) => decider.decide(input, question, opts) };
   const route = DECISION_ROUTES.includes(inputs?.decisionRoute) ? inputs.decisionRoute : "auto";
@@ -113,14 +229,32 @@ export function openDecider({ inputs = {}, env = process.env, home = homedir(), 
   const { key, code } = deciderKeyState({ inputs, env, home });
   const withHarness = route === "auto" && !!stage?.harness;
   const harnessLabel = withHarness ? `${stage.harness}${stage.model ? ` ${stage.model}` : ""}` : null;
-  const harnessDecide = async (input, question, opts) => (await harnessOf(stage)).decide(input, question, opts);
+  // A non-essential call (the drift advisory) is asked only while one call's own cap fits in what is left of the stage's
+  // drift reserve (harness.mjs carveDriftReserve), on either route; said once per stage when it no longer does.
+  const overReserve = async () => {
+    if (essential || !stage) return false;
+    const h = await import("./harness.mjs");
+    const left = h.reserveLeft();
+    if (left === null || left >= h.DECISION_RUN.maxUsd) return false;
+    const s = shared(stage);
+    if (!s.capSaid) {
+      s.capSaid = true;
+      log(`decision calls: the drift reserve has $${left.toFixed(2)} left, under one decision call's own cap ($${h.DECISION_RUN.maxUsd.toFixed(2)}); the drift advisory is not asked again in this stage`);
+    }
+    return true;
+  };
+  const budget = { verdict: null, confidence: null, error: "budget" };
+  const harnessDecide = async (input, question, opts) => {
+    if (await overReserve()) return budget;
+    return (await harnessOf(stage)).decide(input, question, { ...opts, reserve: !essential });
+  };
   // The stage's harness refusal that stopped its decision calls (a usage limit), once its adapter is open.
   const limited = () => (withHarness && shared(stage).opened ? shared(stage).opened.limited() : null);
   if (key) {
     mask(key);
     // One vendor per decider, opened at the first question: concurrent first questions share it.
     let opened = null;
-    const gateway = async (input, question, opts) => (await (opened ??= openVendor({ vendor: "ai-gateway", key, model }))).decide(input, question, opts);
+    const gateway = async (input, question, opts) => ((await overReserve()) ? budget : gatewayCall(await (opened ??= openVendor({ vendor: "ai-gateway", key, model })), input, question, opts, stage, !essential));
     if (!withHarness) return { name: "ai-gateway", model, off: null, asked: fixed("ai-gateway", model), limited: () => null, decide: gateway };
     const state = shared(stage);
     return {

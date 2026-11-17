@@ -17,7 +17,7 @@ Ask once for the template's flags: `--harness` (claude, codex, copilot), `--mode
 
 Walk it; never read, print or copy the key.
 
-1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Factory (<repo>)`, uncheck webhooks, grant exactly these Repository permissions: contents, pull requests, issues: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); and, for an organization's repository only, the Organization permission projects: write (a repository a user owns needs none: no App reaches a personal board). Nothing else, never workflows.
+1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Factory (<repo>)`, uncheck webhooks, grant exactly these permissions: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. Projects is under Organization permissions, and a repository a user owns needs none (no App reaches a personal board); the rest are Repository permissions.
 2. Create it, generate a private key, note the App ID.
 3. Install it on this repository only.
 4. The user saves the two secrets: `gh secret set FACTORY_APP_ID` and `gh secret set FACTORY_APP_PRIVATE_KEY < path.pem`, the path given as text.

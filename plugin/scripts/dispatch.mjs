@@ -1644,7 +1644,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("mark");
   // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
   const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
-  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, unknownToday: usageError ? 0 : unknownToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? null : spentToday, unknownToday: usageError ? 0 : unknownToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -1799,7 +1799,8 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   const summary = {
     ready: result.ready,
     running: result.running,
-    spent_today_usd: Math.round(result.spentToday * 100) / 100,
+    // Null when today's spend could not be read: shown as unknown, never $0.
+    spent_today_usd: Number.isFinite(result.spentToday) ? Math.round(result.spentToday * 100) / 100 : null,
     // Today's runs of unknown cost (usage.mjs UNKNOWN_WHY): beside the known dollars, never in them.
     spent_today_unknown_runs: result.unknownToday ?? 0,
     daily_usd: inputs.dailyUsd,

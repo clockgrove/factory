@@ -19,7 +19,7 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageBudgetLeft, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { unpricedCodex } from "./lib/usage.mjs";
+import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
@@ -280,6 +280,8 @@ async function main() {
     setOutput("reason", reason || "");
     setOutput("pr", pr ? String(pr.number) : "");
     setOutput("usd", usage.usd === null ? "" : String(usage.usd));
+    // The runs of unknown cost beside it (usage.mjs UNKNOWN_WHY), never in `usd`.
+    setOutput("usd_unknown", String(unknownRuns(usage)));
     if (process.env.GITHUB_STEP_SUMMARY) {
       const { appendFileSync } = await import("node:fs");
       appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usdText(usage)} (${usage.basis}) · passes: ${passes}\n`);

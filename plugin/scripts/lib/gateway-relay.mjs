@@ -428,14 +428,16 @@ const refusal = (res, status, message, { type = "pendulum_relay", gateway = null
 };
 
 /**
- * A server-sent event stream read as it passes: its first event, its dearest `finish` event (which carries the
- * gateway's cost and generation id) and whether it carried an `error` event (the AI SDK protocol's and Anthropic's
- * `type: "error"`: the provider failed after the answer's status was sent), never the whole stream.
+ * A server-sent event stream read as it passes: its first event, its last `finish` event (which carries the gateway's
+ * cost and generation id) and how many it carried (`finishes`), and whether it carried an `error` event (the AI SDK
+ * protocol's and Anthropic's `type: "error"`: the provider failed after the answer's status was sent), never the whole
+ * stream. A stream of several `finish` events names no one cost: the relay prices it from its generation's record.
  */
 function eventReader() {
   let pending = "";
   let first = null;
   let finish = null;
+  let finishes = 0;
   let errored = false;
   const take = (block) => {
     const line = block.split(/\r?\n/).find((l) => l.startsWith("data:"));
@@ -448,10 +450,10 @@ function eventReader() {
     }
     if (!e || typeof e !== "object") return;
     first ??= e;
-    // The gateway's cost rides on its `finish` event; no other event's metadata is read. Of several, the dearest counts.
+    // The gateway's cost rides on its `finish` event; no other event's metadata is read.
     if (e.type === "finish") {
-      const cost = (x) => num(x?.providerMetadata?.gateway?.cost) ?? -1;
-      if (!finish || cost(e) > cost(finish)) finish = e;
+      finish = e;
+      finishes += 1;
     }
     if (e.type === "error") errored = true;
   };
@@ -466,7 +468,7 @@ function eventReader() {
     },
     end() {
       if (pending) take(pending);
-      return { first, doc: finish, errored };
+      return { first, doc: finish, finishes, errored };
     },
   };
 }
@@ -489,7 +491,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     const c = keyCutter(key);
     return Buffer.concat([c.push(Buffer.from(String(t), "utf8")), c.end()]).toString("utf8");
   };
-  const s = { pings: 0, spent: 0, late: 0, calls: 0, failed: 0, refused: { cap: 0, token: 0, pass: 0, route: 0, gateway: 0, gone: 0 }, gatewayRefused: null, lookupsEndBy: null, lookupsEnd: new AbortController(), unknown: 0, lateUnknown: 0, logged: 0, unlogged: 0, busy: false, waiters: [], capped: false, pass: null, inflight: new Set(), pending: new Set(), checks: new Set(), reconciles: new Set(), said: new Set() };
+  const s = { pings: 0, spent: 0, late: 0, calls: 0, failed: 0, refused: { cap: 0, token: 0, pass: 0, route: 0, gateway: 0, gone: 0 }, gatewayRefused: null, lookupsEndBy: null, lookupsEnd: new AbortController(), lookupDown: false, unknown: 0, lateUnknown: 0, logged: 0, unlogged: 0, busy: false, waiters: [], capped: false, pass: null, inflight: new Set(), pending: new Set(), checks: new Set(), reconciles: new Set(), said: new Set() };
   const once = (what, line) => {
     if (s.said.has(what)) return;
     s.said.add(what);
@@ -568,6 +570,8 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
   // end stopped it: endPass gives the lookups ENDPASS_LOOKUP_MS, then none is tried again). `wait`: for a complete
   // answer, whose only price this is. When any try failed otherwise than "no record", the tries go on every
   // lookupRetryMs (or the Retry-After) until the lookup answers, a cost or "no record", or lookupOutageMs has passed.
+  // Once one such wait has run out (`s.lookupDown`), later answers get the usual tries only, holding the turn no
+  // longer, until a lookup finds a cost again: an endpoint that stays down never holds every call for the whole bound.
   const lookup = async (id, { wait = false } = {}) => {
     const started = Date.now();
     let last = null;
@@ -588,6 +592,7 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       }
       last = await lookupOnce(id, Math.min(60_000, left));
       if (last.failed) failed = true;
+      if (last.usd !== undefined && last.usd !== null) s.lookupDown = false;
       return true;
     };
     for (const ms of lookupDelaysMs) {
@@ -595,11 +600,17 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
       if (last.usd !== undefined) return { usd: last.usd, failed: false, cut: false };
     }
     cut ||= s.lookupsEndBy !== null && Date.now() >= s.lookupsEndBy;
-    if (wait && failed && !cut) {
+    if (wait && failed && !cut && !s.lookupDown) {
+      let answered = false;
       while (await attempt(Math.max(lookupRetryMs, last?.retryAfterMs || 0), started + lookupOutageMs)) {
         if (last.usd !== undefined) return { usd: last.usd, failed: false, cut: false };
-        if (last.none) break;
+        if (last.none) {
+          answered = true;
+          break;
+        }
       }
+      // The whole bound passed with the endpoint failing (not cut by the pass's end): it is down for now.
+      if (!answered && !(s.lookupsEndBy !== null && Date.now() >= s.lookupsEndBy)) s.lookupDown = true;
     }
     return { usd: null, failed: !!last?.failed, cut: cut || (s.lookupsEndBy !== null && Date.now() >= s.lookupsEndBy) };
   };
@@ -942,7 +953,10 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
         }
         return { ...(id ? unknownThenLookup(id, why, call) : unknown(`${why}; no generation id`)), ...(said ? { type: said } : {}) };
       }
-      const { usd, id } = costOf(o.doc, route.family, o.first, headerId);
+      const named = costOf(o.doc, route.family, o.first, headerId);
+      const id = named.id;
+      // Several `finish` events name no one cost: the generation's record (the lookup's total_cost) prices it, or nothing.
+      const usd = o.finishes > 1 ? null : named.usd;
       if (usd !== null) {
         // The gateway's own top-level cost: booked now, so the next call need not wait for the generation's record,
         // which the gateway writes seconds later. The lookup then runs aside, and a larger looked-up cost is booked on

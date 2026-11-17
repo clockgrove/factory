@@ -113,9 +113,9 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  * rows and the Objective's spend that max_objective_usd compares (objectiveSpend).
  *  comments   the issue's comments: each stage's progress comment (logic.mjs progress marker, its harness, spend and
  *             rebase lines) and each sandbox stage's vendor comment
- *  records    the stages' usage records (objectiveRecords: the Actions artifacts), read for a stage whose comment has no
- *             spend line: a record counts only for the comment of its own stage (artifactStage of its `artifact`) whose
- *             key is its `progressRun`
+ *  records    the stages' usage records (objectiveRecords: the Actions artifacts), read for the dollars of a stage whose
+ *             comment has no spend line and for the model of one whose harness line names none: a record counts only for
+ *             the comment of its own stage (artifactStage of its `artifact`) whose key is its `progressRun`
  *  mine       whose comments are Pendulum's (pendulumOwn; logic.mjs isSelf by default): only their markers count
  *  pushed     whose comments are by someone who can push or came through another App (finishData): a progress or vendor
  *             comment of theirs that is not Pendulum's is a stage of unknown cost
@@ -153,7 +153,10 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     keys.add(`${stage}:${key}`);
     // Its dollars: the spend line it carries (every route's), else its usage record; with neither, unknown.
     const line = spendParts(c.body);
-    const rec = line ? null : byRun.get(`${stage}:${key}`) || null;
+    // Its usage record: its dollars only when it has no spend line; its model whenever its harness line names none
+    // (Copilot's default model is known only from the run's record).
+    const record = byRun.get(`${stage}:${key}`) || null;
+    const rec = line ? null : record;
     let usd = line ? (line.modelUsd ?? line.usd) : rec ? num(rec.usd) : null;
     const unknown = line ? (line.usdUnknown ?? 0) : rec ? unknownRuns(rec) : 1;
     // A record with no run of unknown cost (no harness pass ran) is a known $0; one with unknown runs and no dollars is unknown.
@@ -161,7 +164,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (unknown && !usd) usd = null;
     const rebase = rebaseCostOf(c.body);
     const from = line ?? rec ?? {};
-    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(rec?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
+    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(record?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
   }
   // The sandbox stages' vendor comments, matched to their stage's progress comment by key whenever they were written.
   // One with no progress comment (a stage that never wrote one) is a stage of its own, with the model dollars the vendor

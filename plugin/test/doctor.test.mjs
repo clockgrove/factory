@@ -2,7 +2,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -103,7 +103,6 @@ test("setup files: a root setup file is protected at the root only, so a same-na
 test("app permissions: one list; a missing read FAILs, actions read is no extra, and README and the pendulum-setup skill carry the same text", async () => {
   const { APP_PERMISSIONS_TEXT, permissionGaps } = await import("../scripts/lib/app-token.mjs");
   const { appPermissionChecks } = await import("../scripts/doctor.mjs");
-  const { readFileSync } = await import("node:fs");
   const full = { contents: "write", pull_requests: "write", issues: "write", organization_projects: "write", checks: "read", statuses: "read", metadata: "read" };
   assert.deepEqual(permissionGaps(full), { missing: [], extra: [] });
   assert.deepEqual(permissionGaps({ ...full, actions: "read" }), { missing: [], extra: [] }, "actions read is optional (cloud-sandbox logs), never extra");
@@ -724,6 +723,32 @@ test("doctor's job token row reads pendulum.yml's parsed permissions, each job's
   assert.equal(unset.status, "FAIL");
   assert.match(unset.detail, /work \(no permissions here or at the top level, so the repository's default token\)/);
   assert.equal((await token(job("    permissions: { contents: admin }\n"))).status, "FAIL", "a value GitHub does not take is not read as read");
+});
+
+const REVIEW_GUARD = "github.event.label.name == 'pendulum:review'";
+const guardRow = async (flow) => (await rowsWith({ flow }))["workflow triggers"];
+const shippedWorkflow = async () => {
+  const { renderWorkflow } = await import("../scripts/setup.mjs");
+  return renderWorkflow(readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8"), { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" });
+};
+
+test("doctor's workflow triggers row: the shipped template's review job is guarded by the pendulum:review label (#488)", async () => {
+  const row = await guardRow(await shippedWorkflow());
+  assert.equal(row.status, "PASS");
+  assert.match(row.detail, /guards .*\breview\b/);
+});
+
+test("doctor's workflow triggers row: a workflow on pull_request (not its first trigger) whose jobs lack the guard WARNs, though comments name the label (#488)", async () => {
+  const unguarded = (await shippedWorkflow()).replaceAll(REVIEW_GUARD, "github.event.label.name != ''");
+  assert.match(unguarded, /pendulum:review/);
+  const row = await guardRow(unguarded);
+  assert.deepEqual([row.status, row.detail], ["WARN", "pull_request trigger without the pendulum:review label guard"]);
+});
+
+test("doctor's workflow triggers row: pull_request as the first trigger with the guard passes (#488)", async () => {
+  const flow = (cond) => `on:\n  pull_request:\n    types: [labeled]\n  issues:\njobs:\n  review:\n    if: ${cond}\n    runs-on: ubuntu-latest\n    permissions: { contents: read }\n    steps:\n      - run: echo\n`;
+  assert.equal((await guardRow(flow(`github.event.action == 'labeled' && ${REVIEW_GUARD}`))).status, "PASS");
+  assert.equal((await guardRow(flow("github.event.action == 'labeled'"))).status, "WARN");
 });
 
 test("doctor's CI workflow row decides per required check: a workflow on pull_request makes it, and with a queue one on merge_group (#418)", async () => {

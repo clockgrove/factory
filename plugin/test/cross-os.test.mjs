@@ -8,13 +8,15 @@ import { test } from "node:test";
 import { decideExit } from "../scripts/lib/logic.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { WORKFLOW_ONLY_SETTINGS, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { crossOs, crossOsChecks, legsLine } from "../scripts/lib/cross-os.mjs";
+import { crossOs, crossOsChecks, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
+import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
+import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { workValidation } from "../scripts/lib/session.mjs";
 import { crossOsRow } from "../scripts/doctor.mjs";
 
 // #518: opt-in cross-OS CI in the work stage. The repository names a CI workflow and the check names of its macOS and
-// Windows legs; the stage dispatches the workflow on the branch for each head it validates, waits for those legs within
-// a bound, and a red leg goes to the fix pass like any validation red.
+// Windows legs; the stage dispatches the workflow on the branch for each head it validates, waits for those legs in that
+// one run within a bound per head, and a red leg goes to the fix pass like any validation red.
 
 RETRY.sleep = async () => {};
 
@@ -23,53 +25,68 @@ const MAC = "test (macos-26, 1/1)";
 const WIN = "test (windows-2025, 1/1)";
 const LEGS = `${MAC}\n${WIN}`;
 const ON = { PENDULUM_CROSS_OS_WORKFLOW: "ci.yml", PENDULUM_CROSS_OS_CHECKS: LEGS };
+const CI = "name: CI\non:\n  pull_request:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ${{ matrix.os }}\n";
 
 /**
- * GitHub on fetch for the cross-OS legs. `legs(sha, n)` gives, once the workflow was dispatched on `sha` (the n-th
- * dispatch, from 1), each leg's {status, conclusion} by name; before its dispatch a head has no leg at all. `dispatch`:
- * the dispatch's answer (a status code, 204 by default). The head a dispatch runs on is the checkout's HEAD then.
+ * GitHub on fetch for the cross-OS legs, as one event log (`seen.log`) beside the stage's phases.
+ * - `legs(sha, n)`: once the workflow was dispatched on `sha` (the n-th dispatch, from 1), each check run of that run by
+ *   name, {status, conclusion}; a head has none of them before its dispatch.
+ * - `lag`: how many reads of the head's check runs, and of its runs list, pass after a dispatch before its run and its
+ *   check runs appear (GitHub creates a run after answering the dispatch).
+ * - `pr(sha)`: check runs of a `pull_request` run on the head (another check suite), present from the start.
+ * - `earlier(sha)`: workflow runs dispatched on the head before the stage ran (each with its legs, by `legs(sha, 0)`).
+ * - `dispatch`: the dispatch's answer, a status code (204, or 200 with the run's id).
+ * - `workflow`: the workflow file's text at any ref; `noRunner`: every job has no runner yet (GitHub has not started it).
+ * The head a dispatch runs on is the checkout's HEAD then.
  */
-async function withGitHub({ work, legs, dispatch = 204 }, fn) {
+async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = 204, workflow = CI, noRunner = false, log }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   const seen = { dispatches: [], heads: new Map() };
   let ids = 100;
   const json = (b, status = 200) => new Response(status === 204 ? null : JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-  // Each dispatched head's runs: one workflow run, one check run per leg (ids fixed per head).
-  const runsOf = (sha) => {
-    const h = seen.heads.get(sha);
-    if (!h) return { workflow: [], checks: [] };
-    const state = legs(sha, h.n);
-    const checks = Object.entries(state).map(([name, s], i) => ({ id: h.base + i, name, status: s.status, conclusion: s.conclusion ?? null, check_suite: { id: h.base }, app: { slug: "github-actions", id: 15368 }, started_at: new Date(h.at).toISOString(), completed_at: s.status === "completed" ? new Date().toISOString() : null }));
+  const runOf = (sha, h) => {
+    const checks = Object.entries(legs(sha, h.n)).map(([name, s], i) => ({ id: h.id * 10 + i, name, status: s.status, conclusion: s.conclusion ?? null, check_suite: { id: h.id }, app: { slug: "github-actions", id: 15368 }, started_at: new Date(h.at).toISOString(), completed_at: s.status === "completed" ? new Date().toISOString() : null }));
     const done = checks.every((c) => c.status === "completed");
-    const workflow = [{ id: h.base, name: "CI", event: "workflow_dispatch", path: ".github/workflows/ci.yml", head_sha: sha, status: done ? "completed" : "in_progress", conclusion: done ? (checks.every((c) => c.conclusion === "success") ? "success" : "failure") : null, check_suite_id: h.base, workflow_id: 5, created_at: new Date(h.at).toISOString(), updated_at: new Date().toISOString() }];
-    return { workflow, checks };
+    return { checks, run: { id: h.id, name: "CI", event: "workflow_dispatch", path: ".github/workflows/ci.yml", head_sha: sha, status: h.cancelled ? "completed" : done ? "completed" : "in_progress", conclusion: h.cancelled ? "cancelled" : done ? (checks.every((c) => c.conclusion === "success") ? "success" : "failure") : null, check_suite_id: h.id, workflow_id: 5, created_at: new Date(h.at).toISOString(), updated_at: new Date().toISOString() } };
   };
+  const headsOf = (sha) => [...(earlier(sha) || []).map((e) => ({ ...e, n: 0 })), ...(seen.heads.get(sha) || [])];
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname;
     if (p === `/repos/${REPO.full}/actions/workflows/ci.yml/dispatches` && init.method === "POST") {
       seen.dispatches.push(JSON.parse(String(init.body)));
-      if (dispatch !== 204) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
+      if (![200, 204].includes(dispatch)) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
       const sha = execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-      seen.heads.set(sha, { n: seen.dispatches.length, base: (ids += 10), at: Date.now() });
-      return json(null, 204);
+      log.push(`dispatch ${sha.slice(0, 7)}`);
+      const h = { n: seen.dispatches.length, id: (ids += 10), at: Date.now() + 1000, cr: 0, lr: 0 };
+      seen.heads.set(sha, [...(seen.heads.get(sha) || []), h]);
+      return dispatch === 200 ? json({ workflow_run_id: h.id, run_url: `https://github.test/runs/${h.id}`, html_url: "x" }) : json(null, 204);
     }
-    let m = /^\/repos\/acme\/app\/commits\/([0-9a-f]{40})\/check-runs$/.exec(p);
+    let m = /^\/repos\/acme\/app\/contents\/\.github\/workflows\/ci\.yml$/.exec(p);
+    if (m) return new Response(workflow, { status: 200 });
+    m = /^\/repos\/acme\/app\/commits\/([0-9a-f]{40})\/check-runs$/.exec(p);
     if (m) {
-      const { checks } = runsOf(m[1]);
+      const checks = [...pr(m[1]), ...headsOf(m[1]).filter((h) => h.n === 0 || ++h.cr > lag).flatMap((h) => runOf(m[1], h).checks)];
       return json({ total_count: checks.length, check_runs: checks });
     }
-    if (/^\/repos\/acme\/app\/commits\/[0-9a-f]{40}\/status$/.test(p)) return json({ statuses: [] });
+    if (/^\/repos\/acme\/app\/commits\/[0-9a-f]{40}\/status$/.test(p)) return json({ statuses: [{ context: WIN, state: "success" }] });
     if (p === `/repos/${REPO.full}/actions/runs` && u.searchParams.get("head_sha")) {
-      const { workflow } = runsOf(u.searchParams.get("head_sha"));
-      return json({ total_count: workflow.length, workflow_runs: workflow });
+      const sha = u.searchParams.get("head_sha");
+      const visible = headsOf(sha).filter((h) => h.n === 0 || ++h.lr > lag);
+      const runs = visible.map((h) => runOf(sha, h).run);
+      return json({ total_count: runs.length, workflow_runs: runs });
+    }
+    m = /^\/repos\/acme\/app\/actions\/runs\/(\d+)$/.exec(p);
+    if (m) {
+      for (const [sha] of seen.heads) for (const h of headsOf(sha)) if (h.id === Number(m[1])) return json(runOf(sha, h).run);
+      return json({ message: "Not Found" }, 404);
     }
     m = /^\/repos\/acme\/app\/actions\/jobs\/(\d+)\/logs$/.exec(p);
     if (m) return new Response("##[group]Run npm test\nnot ok 1 - paths join with a backslash on Windows\n##[error]Process completed with exit code 1.\n", { status: 200 });
     m = /^\/repos\/acme\/app\/actions\/jobs\/(\d+)$/.exec(p);
-    if (m) return json({ id: Number(m[1]), run_id: 1, name: WIN, status: "completed", conclusion: "failure", runner_id: 7, runner_name: "w7", steps: [{ name: "Run npm test", number: 4, status: "completed", conclusion: "failure" }] });
+    if (m) return json({ id: Number(m[1]), run_id: 1, name: WIN, status: "completed", conclusion: "failure", runner_id: noRunner ? 0 : 7, runner_name: noRunner ? "" : "w7", steps: [{ name: "Run npm test", number: 4, status: "completed", conclusion: "failure" }] });
     return json({ message: "Not Found" }, 404);
   };
   try {
@@ -82,11 +99,13 @@ async function withGitHub({ work, legs, dispatch = 204 }, fn) {
 }
 
 /**
- * The work stage's validation (session.mjs workValidation, as worker.mjs calls it) in a git checkout, with no validation
- * commands and no required checks, and cross-OS CI from `settings` (the workflow env block's names; none: off). A fake
- * Codex is the fix pass: each call commits `fix-<n>` and records its prompt. `checks`: the waits cut to milliseconds.
+ * The work stage's validation (session.mjs workValidation, as worker.mjs calls it) in a git checkout, with `commands` as
+ * its validation commands and no required checks, and cross-OS CI from `settings` (the workflow env block's names; none:
+ * off). A fake Codex is the fix pass: its call n commits `fix-<n>` and records its prompt. `checks`: the waits cut to
+ * milliseconds. `progress`: the stage's progress check (decision route off), shared by the loops as worker.mjs's is.
+ * Returns the result, the phases and GitHub's events in one log (`log`), the prompts, the dispatches and the final head.
  */
-async function stage({ settings = {}, legs = () => ({}), dispatch = 204, checks = {}, route = "actions" }) {
+async function stage({ settings = {}, commands = [], github = {}, checks = {}, route = "actions", progress = false }) {
   const root = mkdtempSync(join(tmpdir(), "cross-os-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -119,18 +138,18 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   const env = { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CODEX_HOME: join(root, "codex") };
   const path = process.env.PATH;
   process.env.PATH = env.PATH;
-  const phases = [];
+  const log = [];
   try {
-    const inputs = resolveInputs({ env: settings });
+    const inputs = resolveInputs({ env: { ...settings, PENDULUM_DECISION_ROUTE: "off" } });
     const set = crossOs(inputs);
-    const cross = set.setting || set.problem ? { problem: set.problem, checks: set.setting ? { ...crossOsChecks({ setting: set.setting, repo: REPO, issue: 4, prNumber: 5, branch: "pendulum/4", token: "t", route }), appearMs: 0, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks } : null } : null;
-    return await withGitHub({ work, legs, dispatch }, async (seen) => {
-      const result = await workValidation({ checkout: work, commands: inputs.validation, checks: null, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, spentUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), onPhase: async (l) => phases.push(l), handOff: false }, cross);
+    const cross = set.setting || set.problem ? { problem: set.problem, checks: set.setting ? { ...crossOsChecks({ setting: set.setting, repo: REPO, issue: 4, prNumber: 5, branch: "pendulum/4", token: "t", route }), appearMs: 60_000, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks } : null } : null;
+    return await withGitHub({ work, legs: () => ({}), ...github, log }, async (seen) => {
+      const result = await workValidation({ checkout: work, commands, checks: null, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, spentUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), onPhase: async (l) => log.push(l), handOff: false, ...(progress ? { progressCheck: openProgressCheck({ inputs, stage: null }) } : {}) }, cross);
       let made = [];
       try {
         made = readFileSync(prompts, "utf8").trim().split("\n").map((l) => JSON.parse(l));
       } catch {}
-      return { result, phases, prompts: made, dispatches: seen.dispatches, head: g("rev-parse", "HEAD").trim() };
+      return { result, log, phases: log, prompts: made, dispatches: seen.dispatches, head: g("rev-parse", "HEAD").trim() };
     });
   } finally {
     process.env.PATH = path;
@@ -141,66 +160,119 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
 const green = { status: "completed", conclusion: "success" };
 const red = { status: "completed", conclusion: "failure" };
 const running = { status: "in_progress", conclusion: null };
+const skipped = { status: "completed", conclusion: "skipped" };
+const legLine = (sha, mac, win) => `cross-OS CI (ci.yml) on ${sha.slice(0, 7)}: ${MAC}: ${mac}; ${WIN}: ${win}`;
+const anyHead = (l) => l.replace(/\b(on|dispatch) [0-9a-f]{7}\b/g, "$1 X");
 
-test("#518: cross-OS CI is off by default: no setting, no dispatch, and the stage's validation ends as before", async () => {
+test("#518: cross-OS CI is off by default: the stage's own validation runs as before, and nothing is dispatched", async () => {
   const inputs = resolveInputs({ env: {} });
   assert.deepEqual([inputs.crossOsWorkflow, inputs.crossOsChecks, inputs.crossOsWaitMs], ["", [], 60 * 60_000]);
   assert.deepEqual(crossOs(inputs), { setting: null, problem: null });
-  const r = await stage({ legs: () => ({ [MAC]: green, [WIN]: green }) });
+  const r = await stage({ commands: ["test -f README"], github: { legs: () => ({ [MAC]: green, [WIN]: green }) } });
   assert.equal(r.result.green, true);
-  assert.equal(r.result.passes, 0, "no validation pass: no commands, no checks");
-  assert.equal(r.result.skipped, "no validation commands");
-  assert.deepEqual(r.dispatches, [], "nothing dispatched");
-  assert.ok(!r.phases.some((l) => /cross-OS/.test(l)), r.phases.join("\n"));
+  assert.equal(r.result.passes, 1, "the command's pass");
+  assert.deepEqual(r.dispatches, []);
+  assert.deepEqual(r.log, ["validation pass 1 (1 commands)"]);
   assert.equal(crossOsRow(inputs), null, "doctor has no row for it");
+  // A red command: the fix pass and its green, the same as validationLoop's own.
+  const fixed = await stage({ commands: ["test -f fix-1"] });
+  assert.equal(fixed.result.green, true);
+  assert.equal(fixed.prompts.length, 1);
+  assert.deepEqual(fixed.dispatches, []);
 });
 
-test("#518: on, with macOS and Windows green: the workflow is dispatched on the branch once, the wait reads both legs, and the progress names each result", async () => {
-  const r = await stage({ settings: ON, legs: () => ({ [MAC]: green, [WIN]: green }) });
-  assert.equal(r.result.green, true, r.phases.join("\n"));
-  assert.equal(r.result.passes, 1, "the cross-OS pass is a validation pass");
+test("#518: on, with macOS and Windows green: the workflow is dispatched on the branch once, after the commands, and the progress names each leg's result", async () => {
+  const r = await stage({ settings: ON, commands: ["test -f README"], github: { legs: () => ({ [MAC]: green, [WIN]: green }) } });
+  assert.equal(r.result.green, true, r.log.join("\n"));
+  assert.equal(r.result.passes, 2, "the command's pass and the cross-OS pass");
   assert.deepEqual(r.dispatches, [{ ref: "pendulum/4" }]);
   assert.equal(r.prompts.length, 0, "no fix pass");
-  assert.ok(r.phases.includes(`cross-OS CI (ci.yml) on ${r.head.slice(0, 7)}: ${MAC}: success; ${WIN}: success`), r.phases.join("\n"));
-  assert.ok(r.phases.some((l) => l === `waiting for cross-OS legs (${MAC}; ${WIN}) on ${r.head.slice(0, 7)}`), r.phases.join("\n"));
+  assert.deepEqual(r.log.map(anyHead), ["validation pass 1 (1 commands)", "cross-OS validation pass 1 (cross-OS legs)", "dispatch X", `waiting for cross-OS legs (${MAC}; ${WIN}) on X`, anyHead(legLine(r.head, "success", "success"))]);
 });
 
-test("#518: a red Windows leg goes back to the worker: a fix pass with the leg's failure, then the new head is dispatched and validated green", async () => {
-  // The first head's Windows leg fails; the fix pass's head is green on both.
-  const r = await stage({ settings: ON, legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) });
-  assert.equal(r.result.green, true, r.phases.join("\n"));
+test("#518: a red Windows leg goes back to the worker; its fix commits, the commands run on the new head before it is dispatched, and it ends green", async () => {
+  const r = await stage({ settings: ON, commands: ["test -f README"], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  assert.equal(r.result.green, true, r.log.join("\n"));
   assert.equal(r.prompts.length, 1, "one fix pass");
   assert.match(r.prompts[0], /Pendulum's validation pass 1 failed on the branch you delivered/);
   assert.match(r.prompts[0], /test \(windows-2025, 1\/1\)/, "the fix pass is handed the red leg");
   assert.match(r.prompts[0], /paths join with a backslash on Windows/, "with its failure from the job's log");
   assert.deepEqual(r.dispatches, [{ ref: "pendulum/4" }, { ref: "pendulum/4" }], "each new head is dispatched once");
-  const first = r.phases.find((l) => /^cross-OS CI \(ci\.yml\) on [0-9a-f]{7}: .*failure$/.test(l));
-  assert.equal(first?.replace(/ on [0-9a-f]{7}:/, " on X:"), `cross-OS CI (ci.yml) on X: ${MAC}: success; ${WIN}: failure`, r.phases.join("\n"));
-  assert.ok(r.phases.includes(`cross-OS CI (ci.yml) on ${r.head.slice(0, 7)}: ${MAC}: success; ${WIN}: success`), r.phases.join("\n"));
-  assert.ok(r.phases.some((l) => /^cross-OS validation pass 1 red: .*fix run/.test(l)), r.phases.join("\n"));
+  const order = r.log.map(anyHead).filter((l) => /^(validation pass|dispatch|cross-OS CI \(ci\.yml\))/.test(l));
+  assert.deepEqual(order, ["validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "failure")), "validation pass 1 (1 commands)", "dispatch X", anyHead(legLine("0".repeat(7), "success", "success"))], r.log.join("\n"));
+  assert.equal(r.result.passes, 4, "two command passes, two cross-OS passes");
 });
 
-test("#518: the wait's bound reached with a leg still running: no fix pass, and the stage Blocks naming the bound", async () => {
+test("#518 B1: a same-name pull_request check that was skipped, and a dispatched run GitHub lists late, never stand for the dispatched Windows leg that failed", async () => {
+  const prSkipped = (sha) => [{ id: 9001, name: WIN, status: "completed", conclusion: "skipped", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }, { id: 9002, name: MAC, status: "completed", conclusion: "success", check_suite: { id: 1 }, app: { slug: "github-actions" }, started_at: new Date().toISOString() }].map((c) => ({ ...c, head_sha: sha }));
+  const r = await stage({ settings: ON, github: { pr: prSkipped, lag: 3, legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  assert.equal(r.prompts.length, 1, "the dispatched leg's red went to the fix pass");
+  assert.match(r.prompts[0], /test \(windows-2025, 1\/1\)/);
+  assert.equal(anyHead(r.log.find((l) => /^cross-OS CI \(ci\.yml\)/.test(l))), anyHead(legLine("0".repeat(7), "success", "failure")), r.log.join("\n"));
+  assert.equal(r.result.green, true, "green only on the fix's own dispatched run");
+  // GitHub naming the run in its answer: that run, on the head Pendulum pushed, is the one read.
+  const named = await stage({ settings: ON, github: { dispatch: 200, pr: prSkipped, legs: () => ({ [MAC]: green, [WIN]: red }) }, checks: { boundMs: 50 } });
+  assert.notEqual(named.result.green, true);
+  assert.equal(named.prompts.length >= 1, true, "a red, not the pull_request run's skip");
+});
+
+test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks naming the skip and the job that caused it", async () => {
+  const r = await stage({ settings: ON, github: { legs: () => ({ build: red, [MAC]: green, [WIN]: skipped }) } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.prompts.length, 0, "no fix pass");
+  assert.equal(r.result.stuck.cause, "work");
+  assert.match(r.result.stuck.reason, /^cross-OS CI: test \(windows-2025, 1\/1\) skipped on [0-9a-f]{7}, so it did not run: the run's job build ended failure first/);
+  const alone = await stage({ settings: ON, github: { legs: () => ({ [MAC]: green, [WIN]: { status: "completed", conclusion: "neutral" } }) } });
+  assert.equal(alone.result.stuck.cause, "setup");
+  assert.match(alone.result.stuck.reason, /test \(windows-2025, 1\/1\) neutral on [0-9a-f]{7}, so it did not run; run the leg on workflow_dispatch in ci\.yml/);
+});
+
+test("#518 S5: a dispatched run already on the head is waited for, not dispatched again; a cancelled one is not reused", async () => {
+  const at = Date.now() - 60_000;
+  const r = await stage({ settings: ON, github: { earlier: () => [{ id: 7, at }], legs: () => ({ [MAC]: green, [WIN]: green }) } });
+  assert.equal(r.result.green, true, r.log.join("\n"));
+  assert.deepEqual(r.dispatches, []);
+  const c = await stage({ settings: ON, github: { earlier: () => [{ id: 7, at, cancelled: true }], legs: (sha, n) => (n === 0 ? { [MAC]: green, [WIN]: { status: "completed", conclusion: "cancelled" } } : { [MAC]: green, [WIN]: green }) } });
+  assert.equal(c.result.green, true, c.log.join("\n"));
+  assert.deepEqual(c.dispatches, [{ ref: "pendulum/4" }]);
+});
+
+test("#518 S2: a Windows fix that breaks Linux is judged by the progress check against the red it was given, not fixed again unjudged", async () => {
+  // The commands fail once fix-1 (the Windows fix) is there; the Windows leg is red on the first dispatch only.
+  const linux = "test ! -f fix-1 || { echo 'not ok 1 - linux path'; exit 1; }";
+  const r = await stage({ settings: ON, progress: true, commands: [linux], github: { legs: (sha, n) => ({ [MAC]: green, [WIN]: n === 1 ? red : green }) } });
+  assert.equal(r.result.green, false);
+  assert.equal(r.prompts.length, 1, "no fix pass for the Linux red: the decision route is off, and the exact checks cannot call it progress");
+  assert.match(r.result.stalled || "", /^the fix pass before it made no progress: .*failing: test ! -f fix-1/);
+});
+
+test("#518 S3: the bound is the head's, from its first wait: a leg still running then Blocks naming it, with no fix pass", async () => {
   const t0 = Date.now();
-  const r = await stage({ settings: ON, legs: () => ({ [MAC]: green, [WIN]: running }), checks: { boundMs: 60, boundText: "the cross-OS wait reached its bound, 1 min (cross_os_wait_minutes)" } });
+  const r = await stage({ settings: ON, github: { legs: () => ({ [MAC]: green, [WIN]: running }) }, checks: { boundMs: 60, boundText: "the cross-OS wait on this head reached its bound, 1 min (cross_os_wait_minutes)" } });
   assert.equal(r.result.green, false);
   assert.equal(r.prompts.length, 0, "no fix pass: nothing failed");
   assert.equal(r.result.passes, 0, "the wait is no counted pass");
-  assert.match(r.result.stuck?.reason || "", /not finished on [0-9a-f]{7} .*; the cross-OS wait reached its bound, 1 min \(cross_os_wait_minutes\)$/);
+  assert.match(r.result.stuck?.reason || "", /not finished on [0-9a-f]{7} .*; the cross-OS wait on this head reached its bound, 1 min \(cross_os_wait_minutes\)$/);
   assert.ok(Date.now() - t0 < 30_000, "it ended at the bound, not the stage's wall clock");
-  assert.ok(r.phases.includes(`cross-OS CI (ci.yml) on ${r.head.slice(0, 7)}: ${MAC}: success; ${WIN}: in_progress`), r.phases.join("\n"));
+  assert.ok(r.log.includes(legLine(r.head, "success", "in_progress")), r.log.join("\n"));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: r.result.passes, green: false, stuck: r.result.stuck.reason, stuckCause: r.result.stuck.cause } });
-  assert.equal(exit.exit, "blocked");
-  assert.equal(exit.reason, r.result.stuck.reason);
+  assert.deepEqual([exit.exit, exit.reason], ["blocked", r.result.stuck.reason]);
+  // A leg GitHub has not started: the first wait ends on the not-started bound (40 ms), the next one waits what is left of
+  // the head's bound (60 ms from its first wait), never a bound of its own, and the Block names the head's bound.
+  const queued = await stage({ settings: ON, github: { noRunner: true, legs: () => ({ [MAC]: green, [WIN]: { status: "queued", conclusion: null } }) }, checks: { boundMs: 60, stuckWaitMs: 40, boundText: "the head's bound" } });
+  assert.match(queued.result.stuck?.reason || "", /^GitHub has not started .*; the head's bound$/, queued.log.join("\n"));
 });
 
-test("#518: a refused dispatch Blocks as a setup gap naming the fix for the route (the cloud sandbox's App token has no Actions write)", async () => {
-  const r = await stage({ settings: ON, legs: () => ({ [MAC]: green, [WIN]: green }), dispatch: 403, route: "sandbox" });
-  assert.equal(r.result.green, false);
+test("#518: a refused dispatch, or a workflow that grants write, Blocks as a setup gap naming the fix", async () => {
+  const r = await stage({ settings: ON, github: { dispatch: 403 }, route: "sandbox" });
   assert.equal(r.result.stuck.cause, "setup");
   assert.match(r.result.stuck.reason, /^cross-OS CI: GitHub refused to run ci\.yml on pendulum\/4 \(403\): the token cannot dispatch a workflow \(Actions write\); a cloud sandbox stage holds the App's token, which has no Actions write, and Pendulum's App does not ask for one/);
-  const no = await stage({ settings: ON, dispatch: 422 });
-  assert.match(no.result.stuck.reason, /Workflow does not have 'workflow_dispatch' trigger; give the workflow a `workflow_dispatch:` trigger/);
+  const no = await stage({ settings: ON, github: { workflow: "on: [pull_request]\njobs: {}\n" } });
+  assert.match(no.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml has no workflow_dispatch trigger/);
+  assert.deepEqual(no.dispatches, []);
+  const writes = await stage({ settings: ON, github: { workflow: `${CI}    permissions:\n      contents: write\n` } });
+  assert.match(writes.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml grants write \(job test\), and a dispatched run would run the branch's code with that token/);
+  assert.deepEqual(writes.dispatches, [], "refused before any dispatch");
 });
 
 test("#518: half a setting Blocks once the other validation is green; the legs are one per line, never split on commas; the settings are workflow-file only", async () => {
@@ -215,13 +287,16 @@ test("#518: half a setting Blocks once the other validation is green; the legs a
   assert.equal(legsLine({ workflow: "ci.yml", names: [MAC, WIN], sha: "a".repeat(40), runs: [] }), `cross-OS CI (ci.yml) on aaaaaaa: ${MAC}: not reported; ${WIN}: not reported`);
 });
 
-test("#518: doctor's row: the cost while on, a missing dispatch trigger or a cloud sandbox FAILs", () => {
+test("#518 S1: doctor's row: the cost while on; no dispatch trigger, write permissions at the top or on a job, or a cloud sandbox FAIL", () => {
   const inputs = resolveInputs({ env: ON });
-  const on = crossOsRow(inputs, { events: ["pull_request", "merge_group", "workflow_dispatch"], route: "actions" });
+  const on = crossOsRow(inputs, { doc: parseYaml(CI), route: "actions" });
   assert.equal(on.status, "PASS");
   assert.match(on.detail, /macOS and Windows runner minutes bill at a higher rate than Linux minutes$/);
-  assert.match(on.detail, /waits up to 60 min for test \(macos-26, 1\/1\); test \(windows-2025, 1\/1\)/);
-  assert.equal(crossOsRow(inputs, { events: ["pull_request"], route: "actions" }).status, "FAIL");
-  assert.equal(crossOsRow(inputs, { events: ["workflow_dispatch"], route: "sandbox" }).status, "FAIL");
+  assert.match(on.detail, /waits up to 60 min per head for test \(macos-26, 1\/1\); test \(windows-2025, 1\/1\)/);
+  assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [pull_request]\njobs: {}\n") }).status, "FAIL");
+  assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [workflow_dispatch]\npermissions: write-all\njobs: {}\n") }).status, "FAIL");
+  assert.match(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      actions: write\n`) }).detail, /grants write \(job test\)/);
+  assert.equal(workflowProblem(parseYaml("on: workflow_dispatch\njobs:\n  t:\n    permissions:\n      contents: read\n"), "ci.yml"), null);
+  assert.equal(crossOsRow(inputs, { doc: parseYaml(CI), route: "sandbox" }).status, "FAIL");
   assert.equal(crossOsRow(resolveInputs({ env: { PENDULUM_CROSS_OS_CHECKS: LEGS } }), {}).status, "FAIL");
 });

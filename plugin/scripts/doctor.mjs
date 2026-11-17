@@ -23,7 +23,7 @@ import { PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSe
 import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
-import { crossOs } from "./lib/cross-os.mjs";
+import { crossOs, workflowProblem } from "./lib/cross-os.mjs";
 import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
@@ -807,22 +807,23 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
 }
 
 /**
- * Doctor's row for the setting, from the resolved inputs, the named workflow's `on:` events as the default branch has
- * them (`events`: null when it could not be read, with `readError`) and the route: off, nothing; a problem, FAIL; a
- * workflow with no `workflow_dispatch` trigger, FAIL; the cloud sandbox, FAIL (its App token cannot dispatch); a workflow
- * it could not read, WARN; else a PASS that names the legs, the bound and the cost, since macOS and Windows runner
- * minutes bill at a higher rate.
+ * Doctor's row for the setting, from the resolved inputs, the named workflow as the default branch has it (`doc`, parsed:
+ * null when it could not be read, with `readError`) and the route: off, nothing; a problem, FAIL; the cloud sandbox,
+ * FAIL (its App token cannot dispatch); a workflow that cannot be dispatched for the legs (cross-os.mjs workflowProblem:
+ * no `workflow_dispatch` trigger, or `permissions:` granting write at the top or on any job), FAIL; one it could not read,
+ * WARN; else a PASS that names the legs, the bound and the cost, since macOS and Windows runner minutes bill at a higher
+ * rate.
  */
-export function crossOsRow(inputs, { events = null, readError = "", route = "actions" } = {}) {
+export function crossOsRow(inputs, { doc = null, readError = "", route = "actions" } = {}) {
   const { setting, problem } = crossOs(inputs);
   if (!setting && !problem) return null;
   if (problem) return FAIL("cross-OS CI", problem, "set cross_os_workflow and cross_os_checks together in the workflow's env block (docs/INSTALL.md, Cross-OS CI)");
-  const min = Math.round(setting.waitMs / 60_000);
   if (route === "sandbox") return FAIL("cross-OS CI", `${setting.workflow} cannot be dispatched from a cloud sandbox stage: its App token has no Actions write, and Pendulum's App does not ask for one`, "run Objectives on Actions or locally, or empty cross_os_workflow");
-  if (events === null) return WARN("cross-OS CI", `could not read .github/workflows/${setting.workflow}${readError ? ` (${readError})` : ""}`, "check cross_os_workflow names a workflow file on the default branch");
-  if (!events.includes("workflow_dispatch")) return FAIL("cross-OS CI", `.github/workflows/${setting.workflow} has no workflow_dispatch trigger, so Pendulum cannot run it on a branch`, "add `workflow_dispatch:` to its `on:`, with its macOS and Windows legs running on that event");
+  if (doc === null) return WARN("cross-OS CI", `could not read .github/workflows/${setting.workflow}${readError ? ` (${readError})` : ""}`, "check cross_os_workflow names a workflow file on the default branch");
+  const bad = workflowProblem(doc, setting.workflow);
+  if (bad) return FAIL("cross-OS CI", bad, "give the workflow a `workflow_dispatch:` trigger running its macOS and Windows legs, and read-only permissions (contents: read, no pull-requests, issues or actions write) at the top and on every job");
   const token = route === "local" ? "the repository token's Actions read and write" : "the work job's `actions: write`";
-  return PASS("cross-OS CI", `on: the work stage runs ${setting.workflow} on each head it validates (with ${token}) and waits up to ${min} min for ${setting.checks.join("; ")}; macOS and Windows runner minutes bill at a higher rate than Linux minutes`);
+  return PASS("cross-OS CI", `on: the work stage runs ${setting.workflow} on each head it validates (with ${token}) and waits up to ${Math.round(setting.waitMs / 60_000)} min per head for ${setting.checks.join("; ")}; macOS and Windows runner minutes bill at a higher rate than Linux minutes`);
 }
 
 /**
@@ -836,14 +837,14 @@ export async function crossOsRows({ inputs, repo, branch, token, local = backend
     const row = crossOsRow(inputs, { route });
     return row ? [row] : [];
   }
-  let events = null;
+  let doc = null;
   let readError = "";
   try {
-    events = workflowEvents(parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(setting.workflow)}?ref=${encodeURIComponent(branch)}`, { token, raw: "Accept: application/vnd.github.raw+json" }))));
+    doc = parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(setting.workflow)}?ref=${encodeURIComponent(branch)}`, { token, raw: "Accept: application/vnd.github.raw+json" }))) ?? {};
   } catch (e) {
     readError = e.status ? `HTTP ${e.status}` : String(e.message || e).slice(0, 80);
   }
-  return [crossOsRow(inputs, { events, readError, route })];
+  return [crossOsRow(inputs, { doc, readError, route })];
 }
 
 /**

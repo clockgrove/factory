@@ -7,7 +7,8 @@
 // a leg from a job's name: only the names the repository lists count. Off by default, since macOS and Windows runner
 // minutes bill at a higher rate than Linux ones.
 import { backend } from "./backend.mjs";
-import { rest } from "./github.mjs";
+import { githubNow, rest } from "./github.mjs";
+import { grantsWrite, parseYaml, workflowEvents } from "./yaml.mjs";
 
 /** A workflow file in .github/workflows, by its file name: what GitHub's workflow dispatch takes. */
 const WORKFLOW_FILE = /^[A-Za-z0-9._-]+\.ya?ml$/;
@@ -64,13 +65,68 @@ export function legsLine({ workflow, names, sha, runs = [] }) {
 }
 
 /**
- * The checks the cross-OS loop waits for (session.mjs validationLoop's `checks`): the legs, read with `token` (the
- * check runs) and `actionsToken` (the jobs, a rerun, the dispatch), and three hooks. `request(sha)` dispatches
- * `workflow` on `branch` once per head (the head Pendulum just pushed): {ok}, or {refused: {reason, cause}}.
- * `resultLine(sha, runs)` is legsLine. `boundMs` bounds each wait on a head, and `boundText` says it in the Block.
+ * Why `doc` (the named workflow, parsed) cannot be dispatched for the legs, or null: no `workflow_dispatch` trigger, or a
+ * token that can write. A dispatched run runs the branch tip's copy of the workflow on the branch's code, so a
+ * `permissions:` that grants write (contents, pull-requests, issues or actions; yaml.mjs grantsWrite), at the top or on a
+ * job, would hand the branch's code a token that writes. Unset permissions take the repository's default workflow token,
+ * which doctor's own row requires to be read-only.
  */
-export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, actionsToken = token, stall, route = crossOsRoute() }) {
-  const asked = new Set();
+export function workflowProblem(doc, workflow) {
+  if (!workflowEvents(doc).includes("workflow_dispatch")) return `.github/workflows/${workflow} has no workflow_dispatch trigger, so Pendulum cannot run it on a branch`;
+  const writes = [...(grantsWrite(doc?.permissions) === true ? ["its top-level permissions"] : []), ...Object.entries(doc?.jobs || {}).filter(([, job]) => grantsWrite(job?.permissions) === true).map(([name]) => `job ${name}`)];
+  if (writes.length) return `.github/workflows/${workflow} grants write (${writes.join(", ")}), and a dispatched run would run the branch's code with that token`;
+  return null;
+}
+
+/** Whether `w` (a workflow run) is a dispatched run of `workflow` on `sha` that was not cancelled. */
+const dispatchedRun = (w, workflow, sha) => w?.event === "workflow_dispatch" && String(w.path || "").replace(/@.*$/, "") === `.github/workflows/${workflow}` && w.head_sha === sha && !(w.status === "completed" && w.conclusion === "cancelled");
+/** A check run's suite, as GitHub returns it or as awaitChecks shapes it. */
+const suiteOf = (r) => r?.check_suite?.id ?? r?.suite ?? null;
+/** Conclusions a required check counts as passing that a cross-OS leg does not: the leg did not run. */
+const NOT_RUN = ["skipped", "neutral"];
+
+/**
+ * The checks the cross-OS loop waits for (session.mjs validationLoop's `checks`): the legs, read with `token` (the
+ * check runs) and `actionsToken` (the workflow file, its runs, the jobs, a rerun, the dispatch), and these hooks:
+ * - `request(sha)`, before the wait on a head: the named workflow as `sha` has it must pass workflowProblem; a dispatched,
+ *   not cancelled run of it on `sha` is reused; else the workflow is dispatched on `branch` (GitHub answers with the
+ *   run's id, which must be on `sha`; without an id, the run is found on `sha` created at or after the dispatch). {ok},
+ *   or {refused: {reason, cause}}.
+ * - `select(sha, checkRuns)`: only the check runs of that workflow run's check suites count (a rerun's suite included),
+ *   so a check of the same name from another workflow or event on the head never stands for a leg.
+ * - `runOf(sha)`: that run as last read, or null.
+ * - `verdict(sha, runs)`: on a head whose legs all finished passing as a required check would, a leg that was skipped or
+ *   neutral did not run: {reason, cause} for a Block (the work's when another job of the run failed, as a `needs:`
+ *   failure skips a leg; else setup), or null.
+ * - `resultLine(sha, runs)` (legsLine), `boundMs` (the wait on one head) and `boundText`.
+ */
+export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, actionsToken = token, stall, route = crossOsRoute(), now = githubNow }) {
+  const { workflow } = setting;
+  const actions = { token: actionsToken };
+  // Per head: the run ({id, suites, since, run}), once requested.
+  const heads = new Map();
+  const etags = new Map();
+  const listRuns = async (sha) => ((await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&event=workflow_dispatch&per_page=100`, { ...actions, cache: etags })) || {}).workflow_runs || [];
+  const newest = (runs) => runs.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || b.id - a.id)[0] || null;
+  const track = (h, run) => {
+    h.id = run.id;
+    h.run = run;
+    if (run.check_suite_id) h.suites.add(run.check_suite_id);
+  };
+  // The head's run as GitHub has it now: found by id, else among the head's dispatched runs made since the dispatch.
+  const locate = async (sha) => {
+    const h = heads.get(sha);
+    if (!h) return null;
+    if (h.id) {
+      const run = await rest(`repos/${repo.full}/actions/runs/${h.id}`, { ...actions, cache: etags }).catch(() => null);
+      if (run?.id === h.id) track(h, run);
+    } else {
+      const run = newest((await listRuns(sha).catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha) && Date.parse(w.created_at) >= h.since));
+      if (run) track(h, run);
+    }
+    return h;
+  };
+  const refused = (reason, cause = "setup") => ({ refused: { reason: `cross-OS CI: ${reason}`, cause } });
   return {
     repo,
     issue,
@@ -80,19 +136,64 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
     actionsToken,
     stall,
     what: "cross-OS legs",
-    workflow: setting.workflow,
+    workflow,
     boundMs: setting.waitMs,
-    boundText: `the cross-OS wait reached its bound, ${Math.round(setting.waitMs / 60_000)} min (cross_os_wait_minutes)`,
+    boundText: `the cross-OS wait on this head reached its bound, ${Math.round(setting.waitMs / 60_000)} min (cross_os_wait_minutes)`,
     request: async (sha) => {
-      if (asked.has(sha)) return { ok: true, again: true };
+      if (heads.has(sha)) return { ok: true, again: true };
+      // The copy of the workflow a dispatched run on this head runs.
+      let doc;
       try {
-        await rest(`repos/${repo.full}/actions/workflows/${encodeURIComponent(setting.workflow)}/dispatches`, { token: actionsToken, method: "POST", body: { ref: branch } });
+        doc = parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(workflow)}?ref=${sha}`, { token: actionsToken, raw: "Accept: application/vnd.github.raw+json" })));
       } catch (e) {
-        return { refused: dispatchRefusal(e, { workflow: setting.workflow, branch, route }) };
+        return e.status === 404 ? refused(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then re-apply the label`) : refused(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)}: ${String(e.message || e).slice(0, 160)}`, e.status === 403 ? "setup" : "outage");
       }
-      asked.add(sha);
-      return { ok: true };
+      const problem = workflowProblem(doc, workflow);
+      if (problem) return refused(`${problem}; fix the workflow, then re-apply the label`);
+      const h = { id: null, run: null, suites: new Set(), since: 0 };
+      // A run dispatched on this head already (a stage that ended while it waited, a second loop on the head), reused.
+      const before = newest((await listRuns(sha).catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha)));
+      if (before) {
+        track(h, before);
+        heads.set(sha, h);
+        return { ok: true, reused: before.id };
+      }
+      h.since = Math.floor(now() / 1000) * 1000;
+      let made;
+      try {
+        made = await rest(`repos/${repo.full}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { ...actions, method: "POST", body: { ref: branch } });
+      } catch (e) {
+        return { refused: dispatchRefusal(e, { workflow, branch, route }) };
+      }
+      heads.set(sha, h);
+      const id = Number(made?.workflow_run_id);
+      if (Number.isSafeInteger(id) && id > 0) {
+        h.id = id;
+        // The run GitHub made must be on the head Pendulum pushed: the branch moved meanwhile, it is not.
+        const run = await rest(`repos/${repo.full}/actions/runs/${id}`, actions).catch(() => null);
+        if (run?.head_sha && run.head_sha !== sha) {
+          heads.delete(sha);
+          return refused(`the run GitHub made (${id}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; re-apply the label`, "pendulum");
+        }
+        if (run?.id === id) track(h, run);
+      }
+      return { ok: true, dispatched: h.id };
     },
-    resultLine: (sha, runs) => legsLine({ workflow: setting.workflow, names: setting.checks, sha, runs }),
+    select: async (sha, runs) => {
+      const h = await locate(sha);
+      return h?.suites.size ? runs.filter((r) => h.suites.has(suiteOf(r))) : [];
+    },
+    runOf: (sha) => heads.get(sha)?.run ?? null,
+    verdict: (sha, runs) => {
+      const legs = setting.checks.map((n) => ({ n, r: runs.filter((r) => r.name === n).sort((a, b) => String(b.started_at || "").localeCompare(String(a.started_at || "")) || (b.id ?? 0) - (a.id ?? 0))[0] }));
+      const skipped = legs.filter((l) => NOT_RUN.includes(l.r?.conclusion));
+      if (!skipped.length) return null;
+      const failed = runs.filter((r) => r.status === "completed" && !["success", ...NOT_RUN].includes(r.conclusion) && !setting.checks.includes(r.name));
+      const what = skipped.map((l) => `${l.n} ${l.r.conclusion}`).join("; ");
+      return failed.length
+        ? { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run: the run's job ${failed.map((r) => `${r.name} ended ${r.conclusion}`).join(", ")} first; read that job on GitHub, fix the branch, then re-apply the label`, cause: "work" }
+        : { reason: `cross-OS CI: ${what} on ${sha.slice(0, 7)}, so ${skipped.length > 1 ? "they" : "it"} did not run; run the leg on workflow_dispatch in ${workflow}, then re-apply the label`, cause: "setup" };
+    },
+    resultLine: (sha, runs) => legsLine({ workflow, names: setting.checks, sha, runs }),
   };
 }

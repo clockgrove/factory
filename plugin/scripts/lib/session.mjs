@@ -605,11 +605,12 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
       failed.push(`${what} (${e.status || e.message?.slice(0, 60)})`);
       return [];
     });
-  const all = [...(await read(`issue #${issue} comments`, listComments(repo, issue, opts)))];
+  // `on`: where each was said, the Objective's issue or its PR (a reader may put the issue's first).
+  const all = (await read(`issue #${issue} comments`, listComments(repo, issue, opts))).map((c) => ({ ...c, on: "issue" }));
   if (prNumber) {
-    all.push(...(await read(`PR #${prNumber} comments`, listComments(repo, prNumber, opts))));
-    for (const r of (await read(`PR #${prNumber} reviews`, rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at });
-    for (const c of await read(`PR #${prNumber} review comments`, listReviewComments(repo, prNumber, opts))) all.push({ ...c, kind: "line", body: `${c.path}:${c.line ?? c.original_line ?? "?"}: ${c.body || ""}` });
+    all.push(...(await read(`PR #${prNumber} comments`, listComments(repo, prNumber, opts))).map((c) => ({ ...c, on: "pr" })));
+    for (const r of (await read(`PR #${prNumber} reviews`, rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { ...opts, paginate: true }))) || []) all.push({ ...r, kind: "review", created_at: r.submitted_at, on: "pr" });
+    for (const c of await read(`PR #${prNumber} review comments`, listReviewComments(repo, prNumber, opts))) all.push({ ...c, kind: "line", body: `${c.path}:${c.line ?? c.original_line ?? "?"}: ${c.body || ""}`, on: "pr" });
   }
   const candidates = maintainerDecisions(all);
   const can = new Map();
@@ -689,7 +690,7 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
  * is answered once a comment under Factory's resolved marker for it (finding-check.mjs) is on the PR. Factory's own
  * reviews and markers are those by Factory or someone who can push (trustedAuthor). An open finding Factory answered
  * before carries `earlier`, that answer's text, for the next answer pass, and each carries `raisedOn`, the commit it was
- * raised on, when GitHub gives it.
+ * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
@@ -707,12 +708,13 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.
   const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
   // `raisedOn`: the commit the finding was raised on, from which the finding check reads what changed since.
-  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
+  // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
+  const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
   // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
-  const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true, ...(r.commit_id ? { raisedOn: r.commit_id } : {}) })));
+  const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true, ...(r.commit_id ? { raisedOn: r.commit_id } : {}), ...(r.submitted_at ? { raisedAt: r.submitted_at } : {}) })));
   if (!inBody.length) return open;
   const trusted = (await listComments(repo, prNumber, { token })).filter(trustedAuthor);
   const done = new Set(trusted.map((c) => BODY_RESOLVED.exec(c.body || "")?.[1]).filter(Boolean));

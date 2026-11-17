@@ -2445,7 +2445,7 @@ export function maintainerDecisions(comments) {
   return all
     .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
-    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at) }));
+    .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at), ...(c.on ? { on: c.on } : {}) }));
 }
 const REVIEW_BODY = /<!-- factory:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
@@ -2543,17 +2543,22 @@ export function answerDuring({ unread = [], writers = new Set(), events = [], re
 const decisionText = (d) => `### ${d.author}, ${String(d.at).slice(0, 16).replace("T", " ")}Z\n\n${d.body}`;
 /**
  * The decisions that fit a prompt section: the newest whole ones within `cap` characters (the newest always), oldest
- * first. Only these reach the model, so only these are recorded as read; the cut ones stay unread.
+ * first. Only these reach the model, so only these are recorded as read; the cut ones stay unread. Each is sized as
+ * `render` writes it (the caller's own rendering, so what is measured is what is shown), joined by a blank line;
+ * `rank(d)`, when given, picks lower ranks first (the newest first within a rank).
  */
-export function decisionsShown(decisions, cap = 12_000) {
-  const shown = [];
+export function decisionsShown(decisions, cap = 12_000, { render = decisionText, rank = null } = {}) {
+  const all = [...(decisions || [])];
+  const order = all.map((d, i) => ({ d, i })).reverse();
+  if (rank) order.sort((a, b) => rank(a.d) - rank(b.d));
+  const kept = [];
   let size = 0;
-  for (const d of [...(decisions || [])].reverse()) {
-    size += decisionText(d).length + 2;
-    if (shown.length && size > cap) break;
-    shown.unshift(d);
+  for (const { d, i } of order) {
+    size += render(d).length + 2;
+    if (kept.length && size > cap) break;
+    kept.push(i);
   }
-  return shown;
+  return kept.sort((a, b) => a - b).map((i) => all[i]);
 }
 /** The decisions as a prompt section ("" when none), capped so a long thread cannot crowd out the task. */
 export function decisionsSection(decisions, cap = 12_000) {

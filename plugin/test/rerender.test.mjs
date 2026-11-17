@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
-import { keptArgs, keptNotify, pickRunner, settingsReport, workflowSettings, workflowText } from "../scripts/setup.mjs";
+import { keptArgs, keptNotify, pickRunner, settingsReport, usesOf, workflowSettings, workflowText } from "../scripts/setup.mjs";
 
 const PLUGIN = join(import.meta.dirname, "..");
 const template = readFileSync(join(PLUGIN, "workflow-template.yml"), "utf8");
@@ -82,7 +82,7 @@ test("the real case: the scratch repository's workflow at 96ce800 keeps its vali
   assert.match(r.text, /types: \[labeled, ready_for_review, closed, dequeued\]/);
   assert.deepEqual(r.report, [
     `kept ${Object.keys(r.before.env).join(", ")}, launch gate maintainer ids, CI workflow`,
-    `changed action "clockgrove/pendulum@v0.7.106" -> "clockgrove/pendulum@${LATEST}" (the newest release: the template is that release's)`,
+    `changed action "clockgrove/pendulum@v0.7.106" -> "clockgrove/pendulum@${LATEST}" (the newest release: the template is that release's); third-party actions actions/checkout v7 -> 3d3c42e5aac5 (v7.0.1), actions/upload-artifact v7 -> cf430e030ddb (v7.0.2) (the release's pins: the template is that release's)`,
     'new in this template PENDULUM_IMAGE_MAX_AGE_DAYS="7"',
   ]);
 });
@@ -406,9 +406,6 @@ test("#465: setup never pins a latest release from before the first Pendulum rel
   }
 });
 
-/** Every `uses:` value in a parsed workflow or action manifest, wherever it sits (a step's, a reusable workflow job's). */
-const usesOf = (node) => (Array.isArray(node) ? node.flatMap(usesOf) : node && typeof node === "object" ? Object.entries(node).flatMap(([k, v]) => (k === "uses" && typeof v === "string" ? [v.trim()] : usesOf(v))) : []);
-
 test("every action the rendered workflow (both routes), the Action and this repository's workflows call is pinned: Pendulum to a release tag, any other to a full commit SHA with its version beside it, in a file Dependabot updates", () => {
   const ROOT = join(PLUGIN, "..");
   const workflows = readdirSync(join(ROOT, ".github", "workflows")).filter((f) => /\.ya?ml$/.test(f)).map((f) => [`.github/workflows/${f}`, readFileSync(join(ROOT, ".github", "workflows", f), "utf8")]);
@@ -431,4 +428,15 @@ test("every action the rendered workflow (both routes), the Action and this repo
   const actions = parseYaml(readFileSync(join(ROOT, ".github", "dependabot.yml"), "utf8")).updates.filter((u) => u["package-ecosystem"] === "github-actions");
   const dirs = new Set(actions.flatMap((u) => u.directories || [u.directory]));
   assert.ok(dirs.has("/") && dirs.has("/plugin"), JSON.stringify([...dirs]));
+});
+
+test("a re-render takes the release's pins for the other actions, and the report names each pin it moves back or keeps", () => {
+  const first = render({});
+  assert.ok(render({}, { text: first.text }).report.find((l) => l.startsWith("kept ")).endsWith(", third-party actions"));
+  // The repository's Dependabot moved checkout to a newer commit; the re-render puts the release's back and says so.
+  const bumped = first.text.replaceAll("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", "actions/checkout@0123456789abcdef0123456789abcdef01234567 # v7.0.2");
+  assert.notEqual(bumped, first.text);
+  const again = render({}, { text: bumped });
+  assert.equal(again.text, first.text);
+  assert.deepEqual(again.report.filter((l) => l.startsWith("changed ")), ["changed third-party actions actions/checkout 0123456789ab (v7.0.2) -> 3d3c42e5aac5 (v7.0.1) (the release's pins: the template is that release's)"]);
 });

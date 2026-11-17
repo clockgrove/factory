@@ -113,9 +113,9 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  * rows and the Objective's spend that max_objective_usd compares (objectiveSpend).
  *  comments   the issue's comments: each stage's progress comment (logic.mjs progress marker, its harness, spend and
  *             rebase lines) and each sandbox stage's vendor comment
- *  records    the stages' usage records (objectiveRecords: the Actions artifacts), read for a stage whose comment has no
- *             spend line: a record counts only for the comment of its own stage (artifactStage of its `artifact`) whose
- *             key is its `progressRun`
+ *  records    the stages' usage records (objectiveRecords: the Actions artifacts), read for the dollars of a stage whose
+ *             comment has no spend line and for the model of one whose harness line names none: a record counts only for
+ *             the comment of its own stage (artifactStage of its `artifact`) whose key is its `progressRun`
  *  mine       whose comments are Pendulum's (pendulumOwn; logic.mjs isSelf by default): only their markers count
  *  pushed     whose comments are by someone who can push or came through another App (finishData): a progress or vendor
  *             comment of theirs that is not Pendulum's is a stage of unknown cost
@@ -153,7 +153,10 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     keys.add(`${stage}:${key}`);
     // Its dollars: the spend line it carries (every route's), else its usage record; with neither, unknown.
     const line = spendParts(c.body);
-    const rec = line ? null : byRun.get(`${stage}:${key}`) || null;
+    // Its usage record: its dollars only when it has no spend line; its model whenever its harness line names none
+    // (Copilot's default model is known only from the run's record).
+    const record = byRun.get(`${stage}:${key}`) || null;
+    const rec = line ? null : record;
     let usd = line ? (line.modelUsd ?? line.usd) : rec ? num(rec.usd) : null;
     const unknown = line ? (line.usdUnknown ?? 0) : rec ? unknownRuns(rec) : 1;
     // A record with no run of unknown cost (no harness pass ran) is a known $0; one with unknown runs and no dollars is unknown.
@@ -161,7 +164,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (unknown && !usd) usd = null;
     const rebase = rebaseCostOf(c.body);
     const from = line ?? rec ?? {};
-    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(rec?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
+    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(record?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
   }
   // The sandbox stages' vendor comments, matched to their stage's progress comment by key whenever they were written.
   // One with no progress comment (a stage that never wrote one) is a stage of its own, with the model dollars the vendor
@@ -202,6 +205,15 @@ export function objectiveWindow(comments = [], timeline = []) {
 export function unlinedStages(comments, n, mine = isSelf) {
   const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
   return comments.filter((c) => mine(c) && !spendParts(c.body)).map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => ({ stage: m[1], key: m[2] }));
+}
+
+/**
+ * The progress comment keys of Pendulum's stages whose harness line names no model (Copilot at its default model), by
+ * stage: the usage artifacts the finish card reads for their model alone. A stage with no harness line is none.
+ */
+export function modellessStages(comments, n, mine = isSelf) {
+  const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
+  return comments.filter((c) => mine(c) && HARNESS_LINE.test(c.body || "") && stageModel(c.body) === null).map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => ({ stage: m[1], key: m[2] }));
 }
 
 /**
@@ -787,8 +799,8 @@ export const FINISH_RETRY_MS = 24 * 3600_000;
 export const finishMarker = (n) => marker(n, "finish");
 
 /**
- * The usage records of an Objective's stages that wrote no spend line (`want`, unlinedStages: each {stage, key}): of
- * its `pendulum-usage-<n>` (work) and `pendulum-usage-<n>-review` artifacts (the job token's actions: read; a token that
+ * The usage records of an Objective's stages asked for (`want`, each {stage, key}: unlinedStages, and on the finish card
+ * modellessStages too): of its `pendulum-usage-<n>` (work) and `pendulum-usage-<n>-review` artifacts (the job token's actions: read; a token that
  * may not read them reads none), only those of a stage asked for whose workflow run is the stage's own, its id the
  * progress key's run (`<run id>` or `<run id>-<attempt>`), and only a run of this repository on this repository's own
  * code: a run whose head repository is another (a fork's pull request, which can upload any artifact under any name) or
@@ -826,8 +838,9 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
  * under a person's login), the merged PR's body gets the headline and badges at its top first, read just before it is
  * written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still posted.
  * Returns "posted", "had" (posted before), or why none is due: "not merged", "blocked", "no self" (Pendulum's own login
- * unknown, so no marker can be trusted). `records(n, want)`: the usage records of its stages with no spend line (objectiveRecords), read
- * only when a stage has no spend line. A failed read or write throws.
+ * unknown, so no marker can be trusted). `records(n, want)`: the usage records (objectiveRecords) of its stages with no spend line, for their
+ * dollars, and of its stages whose harness line names no model, for their model; read only when there is such a stage.
+ * A failed read or write throws.
  */
 export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
   const n = issue.number;
@@ -863,9 +876,12 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
     if (transientError(e)) throw e;
     return [];
   });
-  // The usage artifacts of the stages with no spend line of their own to read, and only theirs.
-  const unlined = unlinedStages(comments.filter((c) => ms(c.created_at) >= ms(started)), n, mine);
-  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: unlined.length ? await records(n, unlined) : [], label, mine });
+  // The usage artifacts of the stages with no spend line of their own (their dollars) or whose harness line names no
+  // model (their model), and only theirs.
+  const since = comments.filter((c) => ms(c.created_at) >= ms(started));
+  const unlined = unlinedStages(since, n, mine);
+  const want = [...unlined, ...modellessStages(since, n, mine).filter((w) => !unlined.some((u) => u.stage === w.stage && u.key === w.key))];
+  const d = finishData({ repo: repo.full, issue, timeline, comments, pulls, checks, required, records: want.length ? await records(n, want) : [], label, mine });
   if (!d) return "not merged";
   if (prBody) {
     const now = await getPr(repo, last.pr.number, opts);

@@ -10,11 +10,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { RETRY } from "../scripts/lib/github.mjs";
-import { finishData, finishMarker, postFinishCard, renderFinishCard, spendBreakdown } from "../scripts/lib/finish-card.mjs";
+import { RETRY, downloadArtifactResult } from "../scripts/lib/github.mjs";
+import { finishData, finishMarker, objectiveRecords, postFinishCard, renderFinishCard, spendBreakdown } from "../scripts/lib/finish-card.mjs";
 import { capGate, stageStart } from "../scripts/lib/objective-cap.mjs";
 import { resolveInputs, valueProblem } from "../scripts/lib/inputs.mjs";
-import { decisionSpendMarker, setSelf, spendMarker, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
+import { decisionSpendMarker, harnessMarker, setSelf, spendMarker, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
 import { PASS_KINDS, passKind } from "../scripts/lib/usage.mjs";
 
@@ -181,6 +181,72 @@ test("finish card, posted for real: a split Objective's spend per part and per k
   assert.match(card, /\| Churn Pendulum caused \| Stages \| Cost \|\n\| --- \| ---: \| ---: \|\n\| Conflict rebases after other PRs merged \| 1 \| \$1\.20 \|\n\| Catch-up passes after the default branch changed a workflow \| 1 \| \$0\.20 \|\n\| Reviews run again only to judge answers already made \| 1 \| \$0\.25 \|\n\| Passes run again after a Block \| 1 \| \$0\.50 \+ unknown \|\n/);
   assert.doesNotMatch(card, /100\.00/, "a stranger's paste counts nothing");
   assert.match(card, /\| Rebase \| 8 min \| \$1\.20 \|/, "the stage table still shows each stage");
+});
+
+/**
+ * Objective #9 on GitHub Actions, posted for real through the dispatcher's wiring (objectiveRecords, downloadArtifactResult
+ * through a `gh` on PATH): its work and review stages each wrote a spend line and a harness line on `harness` at `model`
+ * (none: Copilot's default); each run's usage artifact names the model it ran. Returns the card, the GitHub reads and the
+ * `gh` downloads.
+ */
+async function actionsCard(harness, model) {
+  const n = 9;
+  const root = mkdtempSync(join(tmpdir(), "card-model-"));
+  mkdirSync(join(root, "bin"));
+  const downloads = join(root, "gh.jsonl");
+  writeFileSync(downloads, "");
+  writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst a = process.argv.slice(2);\nconst fs = require("node:fs");\nfs.appendFileSync(${JSON.stringify(downloads)}, JSON.stringify(a) + "\\n");\nconst dir = a[a.indexOf("-D") + 1];\nfs.writeFileSync(require("node:path").join(dir, "result.json"), JSON.stringify({ harness: "copilot", model: "claude-sonnet-5.5", progressRun: a[2], usd: 7, runs: 1 }));\n`, { mode: 0o755 });
+  const ran = { worker: model, subagent: null, reviewer: model, labels: [] };
+  const stage = (stageName, key, at, end, usd) => ({ id: Number(key), user: bot, created_at: at, updated_at: end, body: `<!-- pendulum:${n}:progress:${stageName}:${key} -->\nPendulum ${stageName}: started.\n- ${at.slice(11, 16)}Z harness ${harness}${model ? ` (${model})` : ""} attempt 1\n${harnessMarker(harness, model, ran)}${spend({ usd, usdByBilling: { credits: usd }, billing: "credits" })}` });
+  const comments = [stage("work", "4401", "2026-11-16T10:05:00Z", "2026-11-16T10:20:00Z", 0.4), stage("review", "4402", "2026-11-16T10:25:00Z", "2026-11-16T10:30:00Z", 0.2)];
+  const pr = { number: 20, state: "closed", user: bot, created_at: "2026-11-16T10:20:00Z", merged_at: "2026-11-16T10:40:00Z", html_url: "https://github.com/acme/app/pull/20", head: { sha: "c".repeat(40), ref: `pendulum/${n}` }, base: { ref: "main" }, merge_commit_sha: null, commits: 1, additions: 1, deletions: 0, changed_files: 1, body: `Refs #${n}` };
+  const issue = { number: n, state: "closed", labels: [{ name: "pendulum:objective" }, { name: "pendulum:in-review" }], user: { login: "kirk", type: "User" } };
+  const artifact = (id, name, run) => ({ id, name, expired: false, workflow_run: { id: run, repository_id: 10, head_repository_id: 10 } });
+  const reads = [];
+  const writes = [];
+  const fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    const p = u.pathname.replace("/repos/acme/app", "");
+    const method = init.method || "GET";
+    if (method !== "GET") writes.push({ method, p, body: init.body ? JSON.parse(init.body).body : null });
+    else reads.push(`${p}${u.search}`);
+    if (method === "GET" && p === "/pulls" && u.searchParams.get("head") === `acme:pendulum/${n}`) return json([pr]);
+    if (method === "GET" && p === "/pulls/20") return json(pr);
+    if (method === "GET" && /^\/(issues\/20\/timeline|pulls\/20\/(reviews|comments))$/.test(p)) return json([]);
+    if (method === "GET" && p === `/commits/${"c".repeat(40)}/check-runs`) return json({ total_count: 1, check_runs: [{ id: 1, name: "ci", status: "completed", conclusion: "success", completed_at: "2026-11-16T10:35:00Z", app: { id: 15368 } }] });
+    if (method === "GET" && p === "/rulesets") return json([]);
+    if (method === "GET" && p === `/issues/${n}/comments`) return json(comments);
+    if (method === "GET" && p === `/issues/${n}/timeline`) return json([{ event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "kirk" }, created_at: "2026-11-16T10:00:00Z" }]);
+    if (method === "GET" && p === "/actions/artifacts") {
+      const name = u.searchParams.get("name");
+      const list = name === `pendulum-usage-${n}` ? [artifact(1, name, 4401)] : name === `pendulum-usage-${n}-review` ? [artifact(2, name, 4402)] : [];
+      return json({ total_count: list.length, artifacts: list });
+    }
+    if (method === "GET") return json({ message: "Not Found" }, 404);
+    return json({ id: 900, user: bot, body: "" }, method === "POST" ? 201 : 200);
+  };
+  const path = process.env.PATH;
+  process.env.PATH = `${join(root, "bin")}:${path}`;
+  try {
+    const records = (k, want) => objectiveRecords(REPO, k, { token: "job-token", want, download: (a) => downloadArtifactResult(REPO, a, "job-token") });
+    assert.equal(await withFetch(fetch, () => postFinishCard(REPO, issue, { token: "t" }, { records })), "posted");
+  } finally {
+    process.env.PATH = path;
+  }
+  const card = writes.find((w) => w.method === "POST" && w.p === `/issues/${n}/comments` && w.body.startsWith(finishMarker(n)))?.body;
+  assert.ok(card, "the card is posted");
+  return { card, artifactReads: reads.filter((r) => r.startsWith("/actions/artifacts")), downloads: readFileSync(downloads, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) };
+}
+
+test("finish card, posted for real (#539): a Copilot stage with a spend line takes its model from its own run's downloaded usage artifact; a Claude stage reads none", async () => {
+  const copilot = await actionsCard("copilot", null);
+  assert.deepEqual(copilot.downloads.map((a) => [a[2], a[4]]), [["4401", "pendulum-usage-9"], ["4402", "pendulum-usage-9-review"]], "each stage's own run's artifact, once");
+  assert.equal(copilot.artifactReads.length, 2);
+  assert.match(copilot.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/, "the model from the record, the dollars from the spend lines");
+  assert.doesNotMatch(copilot.card, /\$7/, "the record's dollars are never counted beside the line's");
+  const claude = await actionsCard("claude", "claude-opus-5-5");
+  assert.deepEqual([claude.artifactReads, claude.downloads], [[], []], "a harness line that names its model: nothing more is read");
+  assert.match(claude.card, /\| Build · Opus 5\.5 \| 15 min \| \$0\.40 \|\n\| Review · Opus 5\.5 \| 5 min \| \$0\.20 \|/);
 });
 
 test("finish card: a stage whose kinds do not fit inside its own figure stays whole in its stage; a Blocked notice or an answer-rounds record names no churn, only a stage's own record does; a plain run shows no breakdown", () => {

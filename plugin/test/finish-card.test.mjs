@@ -170,6 +170,19 @@ test("finish card: after a route switch, the other route's App stages are runs o
   }
 });
 
+test("finish card: a Copilot stage with a spend line takes its model from its usage record, its dollars from the line (#539)", () => {
+  // Copilot's default model: its harness line and progress line name none; the run's record names it.
+  const copilot = withSpend({ work: { usd: 0.4 }, review: { usd: 0.2 } }).map((c) => ({ ...c, body: c.body.replace(/^<!-- pendulum:harness \{[^\n]*\} -->$/m, '<!-- pendulum:harness {"harness":"copilot","model":null,"models":{"worker":null,"subagent":null,"reviewer":null},"labels":[]} -->').replace("harness claude (claude-opus-5-5) attempt 1", "harness copilot attempt 1") }));
+  const records = real.records.map((r) => ({ ...r, harness: "copilot", model: "claude-sonnet-5.5" }));
+  const d = withSelf(() => data({ comments: copilot, records }));
+  assert.deepEqual(d.stages.map((s) => [s.kind, s.model, s.usd, s.unknown]), [["build", "claude-sonnet-5.5", 0.4, 0], ["review", "claude-sonnet-5.5", 0.2, 0]]);
+  const md = renderFinishCard(d);
+  assert.match(md, /\| Plan \+ build · claude-sonnet-5\.5 \| 1 min 21 s \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 35 s \| \$0\.20 \|/);
+  // A Claude stage with a spend line: its harness line's model, as before, whatever its record says.
+  const claude = withSelf(() => data({ comments: withSpend({ work: { usd: 0.4 }, review: { usd: 0.2 } }), records: real.records.map((r) => ({ ...r, model: "claude-sonnet-5.5" })) }));
+  assert.deepEqual(claude.stages.map((s) => [s.kind, s.model, s.usd]), [["build", "claude-opus-5-5", 0.4], ["review", "claude-fable-5-2", 0.2]]);
+});
+
 test("finish card: a run with unreported spend shows it as unknown, never as a number, and draws no cost chart", () => {
   // The work stage was killed before its harness reported (a run of unknown cost, $0 known); the review reported $0.10.
   const comments = withSpend({ work: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, review: { usd: 0.1 } });

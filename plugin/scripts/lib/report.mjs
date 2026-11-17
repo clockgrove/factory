@@ -220,8 +220,8 @@ const noResult = (artifact, workflowRun) => ({ artifact, workflowRun, standIn: t
 
 /**
  * Local mode's own usage records of Objective `n` in the clone `checkout` (`<checkout>/.pendulum/<n>/usage-*`
- * `/result.json`, local.mjs), by the progress comment they name (`progressRun`): read for the per-pass ledger and the
- * Pendulum version only; a local stage's dollars are in its spend line.
+ * `/result.json`, local.mjs), by the progress comment they name (`progressRun`): read for the per-pass ledger, the
+ * Pendulum version and the model its harness line names none of only; a local stage's dollars are in its spend line.
  */
 export function localRecords(checkout, n) {
   const out = new Map();
@@ -617,8 +617,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     if (!issue) missing.unreadIssue.add(n);
 
     // Every stage once (cost-join.mjs withLines): a stage with no spend line by its usage record when one was read, else
-    // as unknown; a stage with a spend line by its line, its usage record giving only its per-pass ledger and version
-    // (`ledgerOf`), so no dollar is counted twice. A record of a stage outside the period is left out; one that names no
+    // as unknown; a stage with a spend line by its line, its usage record giving only its per-pass ledger, version and
+    // model (`ledgerOf`), so no dollar is counted twice. A record of a stage outside the period is left out; one that names no
     // stage counts when it ended in the period.
     const allLines = stageSpendRecords(n, allStages, allVendors, { all: true });
     const lines = stageSpendRecords(n, stages, vendors, { all: true });
@@ -682,7 +682,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       // A lined stage's tokens are its record's: a spend line carries none, so none is counted twice.
       const tokens = recordOf?.tokens && typeof recordOf.tokens === "object" ? recordOf.tokens : part.tokens;
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
-      const model = rec.source === "decisions" ? "decisions" : modelKey(rec.model) ?? modelKey(line?.model);
+      // A lined stage's model: its own harness line's, else its usage record's or local record's (Copilot's default model
+      // is known only from the run's record), else the one its line carries from an earlier stage. A record's, its own.
+      const model = rec.source === "decisions" ? "decisions" : rec.source === "spend" ? (modelKey(line?.model) ?? modelKey(recordOf?.model) ?? modelKey(localRec?.model) ?? modelKey(rec.model)) : (modelKey(rec.model) ?? modelKey(line?.model));
       // The Pendulum release from the first record that names one (a spend line's harness line names none).
       const version = [rec.ran, recordOf?.ran, localRec?.ran].map((x) => x?.pendulum).find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;

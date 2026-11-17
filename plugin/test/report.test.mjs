@@ -655,6 +655,35 @@ test("report (#533): an Actions stage with a spend line gets its per-pass ledger
   assert.ok(!fake.calls.some((c) => c.includes("/actions/artifacts")), "the local records hold every ledger: no artifact list read");
 });
 
+/** linedWorld on the Copilot harness at its default model: the harness lines name none; the usage records name it. */
+function copilotLinedWorld() {
+  const w = linedWorld();
+  w.comments = w.comments.map((c) => (/^<!-- pendulum:3:progress:/.test(c.body || "") ? { ...c, body: c.body.replace(/^<!-- pendulum:harness \{[^\n]*\} -->$/m, harness("copilot", null)).replace("harness claude (claude-opus-5-5) attempt 1", "harness copilot attempt 1") } : c));
+  for (const list of Object.values(w.artifacts)) for (const a of list) a.record = { ...a.record, harness: "copilot", model: "claude-sonnet-5.5" };
+  return w;
+}
+
+test("report (#539): a Copilot stage with a spend line is under its usage record's model; its dollars stay the line's; a Claude stage's model is its harness line's", async () => {
+  const { json: r } = await report(copilotLinedWorld(), { issue: 3 });
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5.5", 2, 0.519812]]);
+  assert.deepEqual(usd(byIssue(r, 3)), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "the spend lines' dollars, once");
+  // A local stage's record in the clone names it the same way.
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  const w = copilotLinedWorld();
+  for (const [name, a] of [["usage-work-1", w.artifacts["pendulum-usage-3"][0]], ["usage-review-1", w.artifacts["pendulum-usage-3-review"][0]]]) {
+    mkdirSync(join(clone, ".pendulum", "3", name), { recursive: true });
+    writeFileSync(join(clone, ".pendulum", "3", name, "result.json"), JSON.stringify(a.record));
+  }
+  const fake = fakeGitHub(w);
+  const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => [x.key, x.stages]), [["claude-sonnet-5.5", 2]]);
+  // Claude, unchanged: each stage under its harness line's model, whatever its record names.
+  const claude = linedWorld();
+  for (const list of Object.values(claude.artifacts)) for (const a of list) a.record = { ...a.record, model: "claude-sonnet-5.5" };
+  const { json: c } = await report(claude, { issue: 3 });
+  assert.deepEqual(c.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]).sort(), [["claude-fable-5-2", 1, 0.163442], ["claude-opus-5-5", 1, 0.35637]]);
+});
+
 test("report (#533): the call budget stopped before the usage records: the stages whose ledger is unread are named, their dollars still the spend lines'", async () => {
   // The login, the issue, its comments and its PRs; then the budget ends before the artifact lists.
   const { code, json: r } = await report(linedWorld(), { issue: 3, "max-calls": 4 });

@@ -143,6 +143,11 @@ test("the default-token step: its dry run names the workflows the change reaches
     assert.match(r.out, /default-token: the default workflow token is read-only now \(it was write\); .*release\.yml \(jobs publish\)/);
     assert.equal((await doctorRow(gh)).status, "PASS");
 
+    // A plain setup (every step `all` runs) never reads or changes the default token.
+    const plain = await setup(gh, []);
+    assert.equal(plain.status, 0, plain.out);
+    assert.doesNotMatch(plain.out, /default-token/);
+
     // Already read-only: nothing is sent.
     const again = await setup(gh, ["--apply", "default-token", "--yes"]);
     assert.equal(again.status, 0, again.out);

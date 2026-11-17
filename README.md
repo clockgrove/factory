@@ -97,7 +97,8 @@ The session follows Pendulum's `pendulum-setup` skill. It asks three questions f
 - writes Pendulum's workflow file, `.github/workflows/pendulum.yml`, which holds the jobs that run your Objectives, and opens a pull request that adds it;
 - creates a GitHub App for this one repository from a pre-filled definition, a few clicks in your browser, and saves its two secrets (or walks you through GitHub's settings by hand): on GitHub Actions, Pendulum writes to your repository as that App rather than as you;
 - has you save your model credential;
-- creates the labels and, on a repository an organization owns, a GitHub Project board that shows each Objective's state, requires your CI's checks on the default branch, adds a merge queue where GitHub offers one, sets squash merges to use each PR's title and body, and makes your repository's default workflow token read-only (it first names your workflows that rely on that default).
+- creates the labels and, on a repository an organization owns, a GitHub Project board that shows each Objective's state, requires your CI's checks on the default branch, adds a merge queue where GitHub offers one, and sets squash merges to use each PR's title and body;
+- offers, as a step of its own, to make your repository's default workflow token read-only, after naming your workflows that rely on that default.
 
 Merge that pull request when you are ready. Pendulum starts once the workflow file is on your default branch.
 

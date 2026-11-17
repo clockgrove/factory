@@ -31,7 +31,7 @@ Never read, print or copy the key. Offer `--apply app`, in the background where 
 
 - **Labels** (`--apply labels`) and **Project board** (`--apply project`): as the App when its credentials are exported ([reference.md](reference.md), Labels and board), else as the user's `gh` login.
 - **Merge queue and branch protection** (`--apply protection`): the `pendulum` ruleset on the default branch (a merge queue where GitHub offers one, required checks from `--ci-checks`), as the user's `gh` login (admin). If the CI workflow lacks `merge_group:` under `on:`, offer to add it.
-- **A read-only default workflow token** (`--apply default-token`): doctor fails while the repository's default `GITHUB_TOKEN` can write. Show the preview: it names each workflow that sets no `permissions:` of its own, which then gets a read-only token, and leaves alone those that set their own. One that writes with `GITHUB_TOKEN` (pushes, comments, releases) needs `permissions:` first: ask. It changes no file and runs as the user's `gh` login.
+- **A read-only default workflow token** (`--apply default-token`, never part of `all`): doctor fails while the default `GITHUB_TOKEN` can write. Show the preview: it names each workflow that sets no `permissions:` of its own, which then gets a read-only token, and leaves alone those that set their own. One that writes with `GITHUB_TOKEN` (pushes, comments, releases) needs `permissions:` first: ask. It changes no file and runs as the user's `gh` login.
 
 ## 4. Skills in the repository
 

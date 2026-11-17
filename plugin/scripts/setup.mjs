@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Pendulum setup: apply the GitHub fixes doctor names, on consent.
-//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|default-token|workflow|all]  (several: repeat --apply, or a,b)
+//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|default-token|workflow|all]  (several: repeat --apply, or a,b;
+//                          all, the default, is every step but app and default-token, which run only when named)
 //                          [--preset first-run]   the workflow's settings for a first run (PRESETS); a flag beside it wins
 //                          [--secret-scope repo|org] [--replace]   where the app step saves the App's secrets (default: the
 //                                                                    repository); --replace overwrites ones already there
@@ -27,6 +28,7 @@
 //   default-token  the repository's default GITHUB_TOKEN set to read-only (PUT actions/permissions/workflow), which
 //               doctor requires; the dry run names the workflows that run on that default and get a read-only token,
 //               and those that set their own permissions:, which it leaves alone. No workflow file changes. gh login.
+//               Only when named: `all` leaves it out, so a repin's `setup --yes` never changes a repository-wide setting.
 //   workflow    .github/workflows/pendulum.yml from workflow-template.yml with the inputs given: the work and review
 //               jobs, or with --sandbox the launch jobs and their triggers (a comment, a finished CI run). Over an
 //               existing file it keeps every setting that file states (env values, the launch gate's maintainer ids,
@@ -722,15 +724,23 @@ export async function defaultTokenPlan(repo, opts) {
   return `set the repository's default workflow token (now ${state.current}) to read-only, which doctor requires; workflow files are not changed: ${defaultTokenReach(state)}; runs as your gh login (needs admin)`;
 }
 
-/** setup's steps, in the order it runs them: `all` (or no `--apply`) is these. */
-export const SETUP_STEPS = ["labels", "project", "protection", "default-token", "workflow"];
+/** setup's steps that `all` (or no `--apply`) runs, in the order it runs them. */
+export const SETUP_STEPS = ["labels", "project", "protection", "workflow"];
 /** The App step: it creates a new GitHub App each time, so it runs only when asked for by name, before the others. */
 export const APP_STEP = "app";
+/**
+ * The default-token step: it changes a repository-wide setting every other workflow runs on, so a plain `setup --yes`
+ * (a repin, a migration) never runs it; it runs only when named, after the protection step.
+ */
+export const DEFAULT_TOKEN_STEP = "default-token";
+/** Every step in the order setup runs them: the named-only ones in their place. */
+const STEP_ORDER = [APP_STEP, "labels", "project", "protection", DEFAULT_TOKEN_STEP, "workflow"];
+const NAMED_ONLY = [APP_STEP, DEFAULT_TOKEN_STEP];
 
 /**
  * The steps `argv` asks for: every `--apply` given (`--apply a --apply b`, `--apply=a`, `--apply a,b`), in setup's own
- * order, `all` (or no `--apply`) for every step but `app`, which runs only when named. parseArgs keeps one value per
- * flag, so the flags are read here. Throws on a step setup does not have.
+ * order, `all` (or no `--apply`) for every step but `app` and `default-token`, which run only when named. parseArgs keeps
+ * one value per flag, so the flags are read here. Throws on a step setup does not have.
  */
 export function setupSteps(argv) {
   const asked = [];
@@ -739,11 +749,10 @@ export function setupSteps(argv) {
     else if (argv[i].startsWith("--apply=")) asked.push(argv[i].slice("--apply=".length));
   }
   const names = asked.flatMap((a) => a.split(",")).map((n) => n.trim()).filter(Boolean);
-  const unknown = names.filter((n) => n !== "all" && n !== APP_STEP && !SETUP_STEPS.includes(n));
-  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${[APP_STEP, ...SETUP_STEPS].join(", ")} or all (every step but ${APP_STEP})`);
-  const app = names.includes(APP_STEP) ? [APP_STEP] : [];
-  if (!names.length || names.includes("all")) return [...app, ...SETUP_STEPS];
-  return [...app, ...SETUP_STEPS.filter((n) => names.includes(n))];
+  const unknown = names.filter((n) => n !== "all" && !STEP_ORDER.includes(n));
+  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${STEP_ORDER.join(", ")} or all (every step but ${NAMED_ONLY.join(" and ")})`);
+  const all = !names.length || names.includes("all");
+  return STEP_ORDER.filter((n) => names.includes(n) || (all && SETUP_STEPS.includes(n)));
 }
 
 async function main() {
@@ -796,7 +805,7 @@ async function main() {
   };
   if (!yes) {
     // The default token's line reads which workflows the change reaches, as the user's own gh login (it needs admin).
-    if (steps.includes("default-token")) plan["default-token"] = await defaultTokenPlan(repo, { token: null });
+    if (steps.includes(DEFAULT_TOKEN_STEP)) plan["default-token"] = await defaultTokenPlan(repo, { token: null });
     process.stdout.write(`Dry run for ${repo.full}. Pass --yes to apply:\n`);
     for (const s of steps) process.stdout.write(`  ${s}: ${plan[s] || "unknown step"}\n`);
     return;
@@ -808,7 +817,7 @@ async function main() {
     else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });
     // Repository Actions settings need administration, which the App does not have: the user's own gh login.
-    else if (s === "default-token") note = await applyDefaultToken(repo, { token: null });
+    else if (s === DEFAULT_TOKEN_STEP) note = await applyDefaultToken(repo, { token: null });
     else if (s === "workflow") note = await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts });
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);

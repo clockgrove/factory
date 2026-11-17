@@ -50,9 +50,9 @@ on:
     workflows:
       - {{ci_workflow}}
     types: [completed]
-# Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below:
-#   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets; re-render after any change,
-#     since setup writes each declared account's secrets into the jobs by name
+# Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below; set them with setup's
+# --add-account, --remove-account or --accounts and --auto-account, which also name each account's secrets in the jobs:
+#   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets
 #   PENDULUM_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
 env:
   PENDULUM_HARNESS: {{harness}} # claude | codex | copilot

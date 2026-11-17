@@ -42,7 +42,7 @@ import { deciderKind, openDecider, settleDecisionCosts } from "./lib/decider.mjs
 import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 import { openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
-import { CALL_LOG, RELAYED_NAME, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
+import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openFenceCheck } from "./lib/fence-check.mjs";
 import { hunksOf } from "./lib/kept.mjs";
@@ -1403,11 +1403,7 @@ async function main() {
   // continue the worker's session, so they get them as the work stage's passes do (passEnv). The reviewer never does: it
   // runs on harnessEnv, and its calls are marked `reviewer` (runHarness strips them there too).
   // An opted-in AI Gateway key stays in this process behind the relay; the passes get its token (lib/worker-relay.mjs).
-  const workerShell = openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) });
-  // On Copilot, the opted-in AI Gateway key answers the stage's decision calls from here on when Pendulum has none of its
-  // own, so none costs a premium request (decider.mjs openDecider, #565).
-  decisionStage.gatewayKey = workerShell?.[RELAYED_NAME] || null;
-  const opened = await openWorkerRelay({ inputs: { ...inputs, maxUsd: passCap() }, shell: workerShell, usageDir });
+  const opened = await openWorkerRelay({ inputs: { ...inputs, maxUsd: passCap() }, shell: openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) }), usageDir });
   relay = opened.relay;
   const shellSecrets = opened.shell;
   // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.

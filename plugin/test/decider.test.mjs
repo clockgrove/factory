@@ -835,35 +835,19 @@ test("#479: the drift reserve: 10% of max_usd, at least one call's cap, at most 
   }
 });
 
-test("#565 W2: on Copilot a stage's decision calls go through the AI Gateway key opted in to the worker once the stage holds it, so none costs a premium request; before it, and on any other harness, the harness answers; doctor says what each costs", async () => {
-  const says = jsonl([{ type: "assistant.message", data: { content: '{"choice":"kept","confidence":0.9}', model: "m-1" } }, { type: "result", sessionId: "s", exitCode: 0, usage: { premiumRequests: 1 } }]);
-  const copilot = fakeHarness("copilot", says);
-  const gw = fakeGateway({ reported: 0.0001 });
-  await withFetch(gw.fetch, async () => {
-    const { stage } = stageOf(copilot.bin, "copilot", { COPILOT_ALLOW_ALL: "true" });
-    const d = openDecider({ inputs: {}, env: {}, stage, model: "perplexity/pplx-decider-v1.2" });
-    await d.decide(INPUT, KEPT_QUESTION);
-    assert.equal(copilot.calls().length, 1, "no key held yet: the harness answers");
-    assert.equal(gw.seen.decisions, 0);
-    // worker.mjs and review.mjs hand the stage the worker's opted-in key once its secrets are read.
-    stage.gatewayKey = "vck_worker_key_456";
-    assert.deepEqual(d.asked(), { name: "ai-gateway", model: "perplexity/pplx-decider-v1.2" });
-    const a = await d.decide(INPUT, KEPT_QUESTION);
-    assert.equal(a.verdict, "kept");
-    assert.equal(copilot.calls().length, 1, "no premium request");
-    assert.equal(gw.seen.decisions, 1);
-    assert.equal(gw.seen.posts[0].headers.Authorization, "Bearer vck_worker_key_456");
-    await settleDecisionCosts();
-  });
-  const claude = fakeHarness("claude", claudeSays('{"choice":"kept","confidence":0.9}'));
-  await withFetch(gw.fetch, async () => {
-    const { stage } = stageOf(claude.bin, "claude");
-    stage.gatewayKey = "vck_worker_key_456";
-    await openDecider({ inputs: {}, env: {}, stage, model: "perplexity/pplx-decider-v1.2" }).decide(INPUT, KEPT_QUESTION);
-    assert.equal(claude.calls().length, 1, "another harness bills no premium request per call: it keeps answering");
-    assert.equal(gw.seen.decisions, 1);
-  });
+test("#565 W2: doctor warns that each harness decision call on Copilot costs a premium request, with Pendulum's own gateway key or decision_route off as the fix; other harnesses pass as before", () => {
   const actions = { GITHUB_ACTIONS: "true" };
-  assert.match(deciderCheck({ inputs: { harness: "copilot" }, env: actions }).detail, /on Copilot each call costs one premium request \(billed to the seat as AI credits\); an AI_GATEWAY_API_KEY in worker_secrets moves them to the AI Gateway/);
-  assert.doesNotMatch(deciderCheck({ inputs: { harness: "codex" }, env: actions }).detail, /premium request/);
+  const onActions = deciderCheck({ inputs: { harness: "copilot" }, env: actions });
+  assert.equal(onActions.status, "WARN");
+  assert.match(onActions.detail, /the stage's own harness \(copilot\) on its login.*no AI Gateway key \(no-key\); on Copilot each call costs one premium request, billed to the seat as AI credits$/);
+  assert.match(onActions.fix, /^give Pendulum its own AI Gateway key \(the workflow's `ai_gateway_api_key` input \(the repository secret AI_GATEWAY_API_KEY\)\) so the gateway's decision models answer them, or set decision_route off to make none$/);
+  assert.doesNotMatch(onActions.fix, /worker_secrets/, "never the worker's key");
+  const home = mkdtempSync(join(tmpdir(), "pendulum-decider-home-"));
+  const local = deciderCheck({ inputs: { harness: "copilot" }, env: {}, home });
+  assert.equal(local.status, "WARN");
+  assert.match(local.fix, /~\/\.config\/pendulum\/ai-gateway-key as docs\/LOCAL\.md says/);
+  const codex = deciderCheck({ inputs: { harness: "codex" }, env: actions });
+  assert.equal(codex.status, "PASS");
+  assert.doesNotMatch(codex.detail, /premium request/);
+  assert.equal(deciderCheck({ inputs: { harness: "copilot", aiGatewayApiKey: "k" }, env: actions }).status, "PASS", "with Pendulum's own key the gateway answers");
 });

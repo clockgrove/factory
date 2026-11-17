@@ -83,7 +83,7 @@ let harnessSaid = false;
  */
 const STAGES = new WeakMap();
 const shared = (stage) => {
-  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null, gatewayRecord: null, capSaid: false, keySaid: false });
+  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null, gatewayRecord: null, capSaid: false });
   return STAGES.get(stage);
 };
 const harnessOf = (stage) => {
@@ -283,26 +283,5 @@ export function openDecider({ inputs = {}, env = process.env, home = homedir(), 
     harnessSaid = true;
     log(`decision calls: no AI Gateway key (${code}); the stage's own harness (${stage.harness}) answers them on its login`);
   }
-  // On Copilot each harness decision call costs a premium request: once the stage holds an AI Gateway key opted in to
-  // the worker (`stage.gatewayKey`, worker.mjs and review.mjs set it from the worker secrets' AI_GATEWAY_API_KEY), the
-  // gateway answers, asked `model`, priced and booked as any gateway call; a gateway that refuses that key or its
-  // credits hands this question and the rest of the stage back to the harness.
-  const viaKey = () => (stage.harness === "copilot" && !shared(stage).gatewayRefused && typeof stage.gatewayKey === "string" && stage.gatewayKey ? stage.gatewayKey : null);
-  const vendors = new Map();
-  const decide = async (input, question, opts) => {
-    const k = viaKey();
-    if (!k) return harnessDecide(input, question, opts);
-    if (!shared(stage).keySaid) {
-      shared(stage).keySaid = true;
-      log(`decision calls: the AI Gateway key opted in to the worker answers them on Copilot from here on (no premium request per call)`);
-    }
-    if (!vendors.has(k)) vendors.set(k, openVendor({ vendor: "ai-gateway", key: k, model }));
-    const a = (await overReserve()) ? budget : await gatewayCall(await vendors.get(k), input, question, opts, stage, !essential);
-    if (!GATEWAY_REFUSED.has(a.error)) return a;
-    log(`decision calls: the AI Gateway refused the worker's key (${a.error}); the stage's own harness (${stage.harness}) answers them for the rest of this stage`);
-    shared(stage).gatewayRefused = a.error;
-    return harnessDecide(input, question, opts);
-  };
-  const asked = () => (viaKey() ? { name: "ai-gateway", model } : { name: "harness", model: harnessLabel });
-  return { name: "harness", model: harnessLabel, off: null, keyCode: code, asked, limited, decide };
+  return { name: "harness", model: harnessLabel, off: null, keyCode: code, asked: fixed("harness", harnessLabel), limited, decide: harnessDecide };
 }

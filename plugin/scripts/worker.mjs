@@ -42,7 +42,7 @@ import { plannedWorkflows, workflowPathsNamed } from "./lib/handover.mjs";
 import { openTriage, triageKey } from "./lib/triage.mjs";
 import { missingSecretsFix, openWorkerSecrets, packShellSecrets } from "./lib/worker-secrets.mjs";
 import { closeWorkerRelay, openWorkerRelay } from "./lib/worker-relay.mjs";
-import { CALL_LOG, RELAYED_NAME, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
+import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay.mjs";
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
@@ -766,11 +766,7 @@ async function main() {
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
   // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
-  const workerShell = openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) });
-  // On Copilot, the opted-in AI Gateway key answers the stage's decision calls from here on when Pendulum has none of its
-  // own, so none costs a premium request (decider.mjs openDecider, #565).
-  decisionStage.gatewayKey = workerShell?.[RELAYED_NAME] || null;
-  const opened = await openWorkerRelay({ inputs: { ...inputs, maxUsd: passCap() }, shell: workerShell, usageDir });
+  const opened = await openWorkerRelay({ inputs: { ...inputs, maxUsd: passCap() }, shell: openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) }), usageDir });
   relay = opened.relay;
   const shellSecrets = opened.shell;
   // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.

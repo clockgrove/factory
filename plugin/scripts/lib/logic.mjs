@@ -2809,7 +2809,8 @@ const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, 
  * `workerKeyUsd`: the relayed key's share, already in `usd`. `usdByBilling`: the known dollars by what they are (usage.mjs
  * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed.
  * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by;
- * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `limitPaused`: the stage ended paused on its harness's
+ * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `noPass`: it ran
+ * no pass of a kind (writeUsage's), so no round. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
  * the scorecard counts per account (#266). `ledger`: the per-pass ledger line written beside it (ledgerMarker), from
  * the record's `ledger`; absent for a record with none.
@@ -2818,7 +2819,7 @@ export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2848,7 +2849,10 @@ export function spendOf(body) {
  * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none) and its known dollars by billing
  * (`usdByBilling`, usage.mjs BILLING; absent when the line names none) and by pass kind (`usdByPass`, usage.mjs passRead;
  * absent when it names none), and what the stage ran again (`rerun`, usage.mjs rerunRead; `judgeOnly`, a review stage
- * started only to judge answers already made). Null when the body has no spend line.
+ * started only to judge answers already made). `running`: a line written while its stage ran (not its final figure),
+ * with `usdRunning` of its unknown runs still open then (in flight, not unreported). `noPass`: the stage ran no pass of
+ * a kind (usage.mjs PASS_KINDS): no work, review, answer, fix or conflict pass, so it is no round of any. Null when the
+ * body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2858,7 +2862,9 @@ export function spendParts(body) {
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
     const byPass = passRead(r?.usdByPass);
     const rerun = rerunRead(r?.rerun);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}) };
+    const unknown = unknownRead(r);
+    const open = unknown.usdUnknown && Number.isInteger(r?.usdRunning) && r.usdRunning > 0 ? Math.min(r.usdRunning, unknown.usdUnknown) : 0;
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknown, ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}), ...(r?.running === true ? { running: true, ...(open ? { usdRunning: open } : {}) } : {}), ...(r?.noPass === true ? { noPass: true } : {}) };
   } catch {
     return null;
   }

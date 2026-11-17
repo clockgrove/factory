@@ -16,7 +16,7 @@ import { capGate, stageStart } from "../scripts/lib/objective-cap.mjs";
 import { resolveInputs, valueProblem } from "../scripts/lib/inputs.mjs";
 import { decisionSpendMarker, harnessMarker, setSelf, spendMarker, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
-import { PASS_KINDS, passKind } from "../scripts/lib/usage.mjs";
+import { PASS_KINDS, passKind, passRead } from "../scripts/lib/usage.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -53,12 +53,14 @@ test("a stage's spend record carries its dollars by pass kind, from the pass lab
     { harness: "claude", model: "m", label: "validation-fix-1", usd: 0.5, billing: "subscription", tokens: {}, ok: true },
     { harness: "claude", model: "m", label: "validation-fix-2", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], billing: "subscription", tokens: {}, ok: false },
     { harness: "claude", model: "m", label: "decision", decision: true, usd: 0.1, billing: "subscription", tokens: {}, ok: true },
+    { harness: null, decider: "ai-gateway", model: "baseten/elephant-1", label: "decision", decision: true, calls: 3, usd: 0.002, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"], billing: "api", tokens: {}, ok: true },
     { harness: "claude", model: "m", label: "exit", usd: 0.05, billing: "subscription", tokens: {}, ok: true },
     { harness: "claude", model: "m", label: "work-2", noRun: true, usd: null, tokens: {}, ok: true },
   ];
   const rerun = { afterBlock: "2026-11-16T12:20:00.000Z", repeated: ["work", "bogus"] };
   const usage = writeUsage(dir, { harness: "claude", model: "m", records, passes: 2, exit: "delivered", reason: "", credentialBasis: "test", billing: "subscription", rerun, judgeOnly: true });
-  assert.deepEqual(usage.usdByPass, { work: { usd: 2, usdByBilling: { subscription: 2 } }, fix: { usd: 0.5, usdUnknown: 1, usdByBilling: { subscription: 0.5 } } }, "the decision call and the exit record stay the stage's own; a pass that never ran is in none");
+  // #565 W7: the stage's decision calls, on either route, under their own key; the exit record stays the stage's own.
+  assert.deepEqual(usage.usdByPass, { work: { usd: 2, usdByBilling: { subscription: 2 } }, fix: { usd: 0.5, usdUnknown: 1, usdByBilling: { subscription: 0.5 } }, decision: { usd: 0.102, usdUnknown: 1, usdByBilling: { subscription: 0.1, api: 0.002 } } }, "the decision calls under `decision`; the exit record stays the stage's own; a pass that never ran is in none");
   assert.deepEqual([usage.rerun, usage.judgeOnly], [{ afterBlock: rerun.afterBlock, repeated: ["work"] }, true], "only a pass kind is named as run again");
   const stored = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
   assert.deepEqual([stored.usdByPass, stored.rerun, stored.judgeOnly], [usage.usdByPass, usage.rerun, true], "in result.json, the Actions artifact");
@@ -503,4 +505,26 @@ test("max_objective_usd: unset or 0 is no cap and reads nothing; a variable's va
   assert.equal(valueProblem("PENDULUM_MAX_OBJECTIVE_USD", "lots"), "not a number, 0 or more");
   assert.equal(valueProblem("PENDULUM_MAX_OBJECTIVE_USD", "40"), null);
   for (const cap of [null, 0, undefined]) assert.deepEqual(await capGate({ repo: REPO, issue: 7, cap, opts: {}, apply: () => assert.fail("no Block"), stage: "work", records: () => assert.fail("nothing read") }), { ok: true, spent: null });
+});
+
+test("#565 W7: a stage's decision dollars are a row of their own in the card's breakdown, out of its work", () => {
+  const stage = { kind: "work", part: 1, usd: 1.25, unknown: 1, byBilling: { subscription: 1.2, api: 0.05 }, byPass: passRead({ work: { usd: 1.2, usdByBilling: { subscription: 1.2 } }, decision: { usd: 0.05, usdUnknown: 1, usdByBilling: { api: 0.05 } } }), churn: [] };
+  const b = spendBreakdown({ stages: [stage], prs: [{ number: 1 }], sandbox: null });
+  assert.deepEqual(b.asked.map((r) => [r.name, r.usd, r.unknown]), [["Work", 1.2, 0], ["Decision calls", 0.05, 1]]);
+});
+
+test("#565 W5: a stage that ran no pass of a kind records it, in result.json and its spend line, so it is no review round; one that ran one does not", () => {
+  const write = (records) => writeUsage(mkdtempSync(join(tmpdir(), "no-pass-")), { harness: "claude", model: "m", records, passes: 0, exit: "delivered", reason: "", credentialBasis: "test", billing: "subscription" });
+  const line = (usage) => spendParts((({ usd, parts }) => spendMarker(usd, parts))(stageSpendLine(usage)));
+  // The review stage of a real run that did nothing for 33 s: {"usd":0}.
+  const idle = write([]);
+  assert.equal(idle.noPass, true);
+  assert.deepEqual(line(idle), { usd: 0, modelUsd: null, vendorUsd: null, noPass: true });
+  // Only decision calls (a finding check) and a pass that never ran: no round either.
+  const judged = write([{ harness: null, decider: "ai-gateway", model: "perplexity/pplx-decider-v1.2", label: "decision", decision: true, calls: 2, usd: 0.0001, billing: "api", tokens: {}, ok: true }, { harness: "claude", model: "m", label: "review", noRun: true, usd: null, tokens: {}, ok: true }]);
+  assert.equal(judged.noPass, true);
+  assert.equal(line(judged).noPass, true);
+  const reviewed = write([{ harness: "claude", model: "m", label: "review", usd: 0.4, billing: "subscription", tokens: {}, ok: true }]);
+  assert.equal(reviewed.noPass, undefined);
+  assert.equal(line(reviewed).noPass, undefined);
 });

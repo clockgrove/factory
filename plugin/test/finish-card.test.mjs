@@ -400,7 +400,7 @@ test("finish card: an Actions stage's dollars come from its usage artifact, its 
  * comments; `labels3` its labels), #7 Blocked with a PR a person merged, #8 closed with its PR still open. Comments posted
  * are there on the next read. `failCard`: the status the card's POST answers with; `failBody`: the PR body PATCH's.
  */
-function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"] } = {}) {
+function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false } = {}) {
   const issue = (number, labels) => ({ number, state: "closed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
   const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, ["pendulum:objective", "pendulum:in-review"])];
   const comments = { 3: withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), 7: [], 8: [] };
@@ -432,6 +432,13 @@ function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective",
     if (method === "PATCH" && p === "/pulls/4" && failBody) return json({ message: "failed" }, failBody);
     const c = /^\/issues\/(\d+)\/comments$/.exec(p);
     if (c && method === "GET") return json(comments[c[1]] ?? []);
+    // `dropLabels`: a label's removal holds, so the next tick reads the issue without it.
+    const dl = /^\/issues\/(\d+)\/labels\/(.+)$/.exec(p);
+    if (dl && method === "DELETE" && dropLabels) {
+      const i = closed.find((x) => x.number === Number(dl[1]));
+      if (i) i.labels = i.labels.filter((l) => l.name !== decodeURIComponent(dl[2]));
+      return json({}, 200);
+    }
     if (c && method === "POST" && failCard && JSON.parse(init.body).body?.startsWith(finishMarker(3))) return json({ message: "failed" }, failCard);
     if (c && method === "POST") {
       const posted = { id: (nextId += 1), user: bot, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), body: JSON.parse(init.body).body };
@@ -508,12 +515,12 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   const notOurs = fakeRepo();
   assert.deepEqual((await tickOver(notOurs, { env: { PENDULUM_LOCAL: "1" } })).finished, []);
   assert.ok(!notOurs.writes.some((w) => w.includes(finishMarker(3))));
-  // The Action does not post for a pendulum:local Objective, though its Done pass tidies it.
+  // The Action does not post for a pendulum:local Objective, and leaves its label for the loop's Done pass (#565).
   const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
   const action = fakeRepo({ labels3: local });
   const tick = await tickOver(action);
   assert.deepEqual(tick.finished, []);
-  assert.ok(tick.done.includes(3));
+  assert.ok(!tick.done.includes(3));
   // The local loop posts it for its own, with no PR body block.
   const loop = fakeRepo({ labels3: local });
   assert.deepEqual((await tickOver(loop, { env: { PENDULUM_LOCAL: "1" } })).finished, [3]);
@@ -523,9 +530,28 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   const all = fakeRepo();
   const allTick = await tickOver(all, { env: { PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" } });
   assert.deepEqual(allTick.finished, []);
-  assert.ok(allTick.done.includes(3), "tidied all the same");
+  assert.ok(!allTick.done.includes(3), "its label left for the Action's Done pass, which posts the card");
   assert.ok(!all.writes.some((w) => w.includes(finishMarker(3))));
   assert.deepEqual((await tickOver(fakeRepo())).finished, [3], "the Action posts it");
+});
+
+test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's close, before the loop's, leaves its label, so the loop's Done pass still posts its card; a day after the close the Action tidies it alone", async () => {
+  const local = ["pendulum:objective", "pendulum:local", "pendulum:in-review"];
+  // assetgrove #402 and #408: the Action's run on the close came first and took the label, so the loop had none to act on.
+  const fake = fakeRepo({ labels3: local, dropLabels: true });
+  const action = await tickOver(fake);
+  assert.deepEqual(action.finished, []);
+  assert.ok(!fake.writes.some((w) => w.startsWith("DELETE /issues/3/labels/")), "the label stays for the loop");
+  assert.ok(action.done.includes(7) && action.done.includes(8), "an Objective with no card to wait for is tidied as before");
+  const loop = await tickOver(fake, { env: { PENDULUM_LOCAL: "1" } });
+  assert.deepEqual(loop.finished, [3], "the loop's later tick posts the card");
+  assert.ok(fake.writes.some((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}`)));
+  assert.ok(fake.writes.some((w) => w.startsWith("POST /issues/3/comments <!-- pendulum:3:done -->")), "and its Done record");
+  // Its loop not running: a day after the close the Action tidies it, with no card.
+  const late = fakeRepo({ labels3: local, dropLabels: true });
+  const lateTick = await tickOver(late, { now: new Date(Date.parse(real.issue.closed_at) + 25 * 3600_000) });
+  assert.ok(lateTick.done.includes(3));
+  assert.deepEqual(lateTick.finished, []);
 });
 
 test("finish card (#544): the summary marker carries the card's own figures, from the same finishData, and reads back as written", async () => {

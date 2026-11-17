@@ -609,7 +609,8 @@ export function stageSpendNow() {
   };
   // The known dollars by billing: each ended pass's at its own (meterPass), the relayed key's as `api`.
   const byBilling = addBilling(STAGE_SPEND.doneBy, keyUsd > 0 ? { api: keyUsd } : {});
-  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, keyUsd: Math.round(keyUsd * 1e6) / 1e6, byBilling, unknown, commit };
+  // `running`: the passes and gateway decision calls still open, already counted in `unknown` (in flight, not unreported).
+  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, keyUsd: Math.round(keyUsd * 1e6) / 1e6, byBilling, unknown, running: STAGE_SPEND.open.size, commit };
 }
 /**
  * The drift reserve (#479): what of a stage's `max_usd` the drift advisory, which only advises, may spend, carved out

@@ -652,11 +652,54 @@ test("#479: the gateway decider answers at once and prices aside: the reported c
   assert.equal(settled, null);
   release();
   assert.deepEqual(await b.spend.settled, { usd: 0.004 });
-  // A record that never comes: two 404s end the lookup, and the call is of unknown cost.
+  // A record that never comes: two 404s end the lookup, and the call is of unknown cost: the gateway gave no cost.
   const none = fakeGateway({ id: GEN });
   const c = await fast(none).decide(INPUT, KEPT_QUESTION);
-  assert.deepEqual(await c.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision"] });
+  assert.deepEqual(await c.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"] });
   assert.equal(none.seen.lookups.length, 2);
+  // Lookups that keep failing (a 5xx each) until the tries run out: of unknown cost, the lookup's fault.
+  const down = async (url) => (new URL(url).pathname === "/v1/generation" ? new Response("{}", { status: 503 }) : fakeGateway({ id: GEN }).fetch(url));
+  const d = await gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: down, lookupDelaysMs: [1, 1], lookupMaxMs: 5_000 }).decide(INPUT, KEPT_QUESTION);
+  assert.deepEqual(await d.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-lookup"] });
+});
+
+/**
+ * #565 W1: the answer `/v1/decisions` gives, as Vercel's reference for the endpoint shows it (the OpenAI Decisions API's
+ * shape, its gateway metadata at `provider_metadata.gateway`), for the two models every local stage asked on
+ * clockgrove/assetgrove. Pendulum read only `providerMetadata.gateway`, found no cost and no generation, and booked every
+ * call as of unknown cost (44 in one day).
+ */
+const documentedAnswer = (model, cost, generationId) => ({
+  model,
+  answers: [{ type: "choice", name: "kept", choice: "kept", confidence: 0.81, probabilities: [{ value: "kept", probability: 0.81 }, { value: "lost", probability: 0.19 }] }],
+  usage: { input_tokens: 96, output_tokens: 0, total_tokens: 96 },
+  provider_metadata: { gateway: { routing: { originalModelId: model, resolvedProvider: model.split("/")[0], canonicalSlug: model, finalProvider: model.split("/")[0] }, cost, generationId } },
+});
+test("#565 W1: a decision answer in the endpoint's documented shape is priced from its own cost, with no lookup, for the models the local stages ask", async () => {
+  for (const model of ["baseten/elephant-1", "perplexity/pplx-decider-v1.2"]) {
+    const doc = documentedAnswer(model, "0.0000096", GEN);
+    assert.deepEqual(answerCost(200, doc), { usd: 0.0000096, id: GEN, reported: true });
+    const seen = { lookups: 0 };
+    const fetchImpl = async (url) => {
+      if (new URL(url).pathname === "/v1/generation") {
+        seen.lookups += 1;
+        return new Response("{}", { status: 404 });
+      }
+      return new Response(JSON.stringify(doc), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const a = await gatewayDecider({ key: "vck_dummy_key_123", model, fetchImpl, lookupDelaysMs: [1, 1], lookupMaxMs: 5_000 }).decide(INPUT, KEPT_QUESTION);
+    assert.equal(a.verdict, "kept");
+    assert.deepEqual(await a.spend.settled, { usd: 0.0000096 }, `${model}: a known cost, not a run of unknown cost`);
+    assert.equal(seen.lookups, 0);
+  }
+  // Its generation alone (no cost in the answer): looked up by the id at `provider_metadata.gateway.generationId`.
+  const noCost = documentedAnswer("baseten/elephant-1", undefined, GEN);
+  assert.deepEqual(answerCost(200, noCost), { usd: null, id: GEN, reported: false });
+  // An answer that gives neither: unknown, and why says the gateway gave no cost.
+  const bare = fakeGateway();
+  const b = await gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: bare.fetch, lookupDelaysMs: [1], lookupMaxMs: 5_000 }).decide(INPUT, KEPT_QUESTION);
+  assert.deepEqual(await b.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"] });
+  assert.equal(bare.seen.lookups.length, 0, "nothing named to look up");
 });
 
 test("#479: a 429 naming a generation is looked up from $0; a request that never left the machine is no call; one cut after it was sent is of unknown cost", async () => {
@@ -724,7 +767,7 @@ test("#479: a stage's gateway call the gateway gives no cost for is of unknown c
     assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" }, "the verdict stands");
     await settleDecisionCosts();
     assert.equal(records[0].usdUnknown, 1);
-    assert.deepEqual(records[0].usdUnknownWhy, ["decision"]);
+    assert.deepEqual(records[0].usdUnknownWhy, ["decision-no-cost"]);
     assert.equal(stageSpendNow().unknown, before.unknown + 1);
     assert.equal(stageSpendNow().usd, before.usd);
     assert.deepEqual(sumSpend(records), { usd: 0, unknown: 1 });
@@ -738,6 +781,7 @@ test("#479: a stage's gateway call the gateway gives no cost for is of unknown c
     await until(() => slow.seen.lookups.length === 1);
     await settleDecisionCosts({ timeoutMs: 20 });
     assert.equal(records[0].usdUnknown, 1, "not come by the bound: unknown");
+    assert.deepEqual(records[0].usdUnknownWhy, ["decision-unsettled"], "the stage's end came first");
     release();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(records[0].usd, null, "a price that comes later is never read: nothing priced, one unknown");
@@ -789,4 +833,37 @@ test("#479: the drift reserve: 10% of max_usd, at least one call's cap, at most 
     pass.end({ usd: 0 });
     carveDriftReserve(0);
   }
+});
+
+test("#565 W2: on Copilot a stage's decision calls go through the AI Gateway key opted in to the worker once the stage holds it, so none costs a premium request; before it, and on any other harness, the harness answers; doctor says what each costs", async () => {
+  const says = jsonl([{ type: "assistant.message", data: { content: '{"choice":"kept","confidence":0.9}', model: "m-1" } }, { type: "result", sessionId: "s", exitCode: 0, usage: { premiumRequests: 1 } }]);
+  const copilot = fakeHarness("copilot", says);
+  const gw = fakeGateway({ reported: 0.0001 });
+  await withFetch(gw.fetch, async () => {
+    const { stage } = stageOf(copilot.bin, "copilot", { COPILOT_ALLOW_ALL: "true" });
+    const d = openDecider({ inputs: {}, env: {}, stage, model: "perplexity/pplx-decider-v1.2" });
+    await d.decide(INPUT, KEPT_QUESTION);
+    assert.equal(copilot.calls().length, 1, "no key held yet: the harness answers");
+    assert.equal(gw.seen.decisions, 0);
+    // worker.mjs and review.mjs hand the stage the worker's opted-in key once its secrets are read.
+    stage.gatewayKey = "vck_worker_key_456";
+    assert.deepEqual(d.asked(), { name: "ai-gateway", model: "perplexity/pplx-decider-v1.2" });
+    const a = await d.decide(INPUT, KEPT_QUESTION);
+    assert.equal(a.verdict, "kept");
+    assert.equal(copilot.calls().length, 1, "no premium request");
+    assert.equal(gw.seen.decisions, 1);
+    assert.equal(gw.seen.posts[0].headers.Authorization, "Bearer vck_worker_key_456");
+    await settleDecisionCosts();
+  });
+  const claude = fakeHarness("claude", claudeSays('{"choice":"kept","confidence":0.9}'));
+  await withFetch(gw.fetch, async () => {
+    const { stage } = stageOf(claude.bin, "claude");
+    stage.gatewayKey = "vck_worker_key_456";
+    await openDecider({ inputs: {}, env: {}, stage, model: "perplexity/pplx-decider-v1.2" }).decide(INPUT, KEPT_QUESTION);
+    assert.equal(claude.calls().length, 1, "another harness bills no premium request per call: it keeps answering");
+    assert.equal(gw.seen.decisions, 1);
+  });
+  const actions = { GITHUB_ACTIONS: "true" };
+  assert.match(deciderCheck({ inputs: { harness: "copilot" }, env: actions }).detail, /on Copilot each call costs one premium request \(billed to the seat as AI credits\); an AI_GATEWAY_API_KEY in worker_secrets moves them to the AI Gateway/);
+  assert.doesNotMatch(deciderCheck({ inputs: { harness: "codex" }, env: actions }).detail, /premium request/);
 });

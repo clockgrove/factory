@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { budgetHome, fakeProc } from "./fixtures/machine.mjs";
 import { Local, deadHereHolder, holderId, machineIdentity, settingsChanges } from "../scripts/local.mjs";
 import { committedWorkflowNow, workflowPins } from "../scripts/lib/local.mjs";
-import { DOWNGRADE_LINE, checkoutProblem, markInUse, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
+import { DOWNGRADE_LINE, checkoutProblem, markInUse, pendulumBuild, pinDecision, pruneReleases, releaseCheckout, releasesDir, runningPendulum, startProblem } from "../scripts/lib/release.mjs";
 import { claudeLocalSettings, codexLocalConfig, copilotLocalSettings, harnessOuterSettings, srtSettings, versionSettings } from "../scripts/lib/local.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 
@@ -279,6 +279,30 @@ test("runningPendulum: a release is a checkout at its own release tag and unchan
   const fetched = await releaseCheckout(fx.release("9.9.9"), { home, url: fx.url, running: { commit: before } });
   assert.equal(runningPendulum(fetched.dir, "9.9.9", home).release, true, "a checkout serve fetched, by SHA");
   assert.equal(runningPendulum(mkdtempSync(join(tmpdir(), "nogit-")), "9.9.9", home).release, false, "no git checkout");
+});
+
+test("#565 W6: a build records the Pendulum it really is: its release at its tag, else the version with its commit or ref as build metadata, never the last tag alone", async () => {
+  const fx = pendulumRepo();
+  fx.release("9.9.8");
+  const home = mkdtempSync(join(tmpdir(), "home-"));
+  const at = (v) => runningPendulum(fx.work, v, home);
+  assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: at("9.9.8") }), "9.9.8", "the release itself");
+  git(fx.work, "commit", "-q", "--allow-empty", "-m", "a candidate between releases");
+  const head = git(fx.work, "rev-parse", "HEAD").trim();
+  assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: at("9.9.8") }), `9.9.8+${head.slice(0, 12)}`, "a candidate: its commit");
+  writeFileSync(join(fx.work, "plugin", "scripts", "local.mjs"), "// a change of my own\n");
+  assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: at("9.9.8") }), `9.9.8+${head.slice(0, 12)}.dirty`);
+  assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: { commit: null, release: false } }), "9.9.8", "an installed copy with no checkout of its own: its manifest's");
+  // On Actions: the ref the workflow's uses: names.
+  const actions = (ref, path = null) => pendulumBuild({ env: { GITHUB_ACTIONS: "true", ...(ref ? { GITHUB_ACTION_REF: ref } : {}), ...(path ? { GITHUB_ACTION_PATH: path } : {}) }, version: "0.10.2" });
+  assert.equal(actions("v0.10.2"), "0.10.2");
+  assert.equal(actions("v0.10"), "0.10.2", "a moving tag of its line is the release");
+  assert.equal(actions("v0"), "0.10.2");
+  assert.equal(actions("8a783bda3cca1d2e3f4a5b6c7d8e9f0a1b2c3d4e"), "0.10.2+8a783bda3cca", "a commit pin");
+  assert.equal(actions("main"), "0.10.2+main", "a branch pin: the candidate build");
+  assert.equal(actions(null, "/home/runner/work/_actions/clockgrove/pendulum/fix/565"), "0.10.2+565", "the runner's checkout path when the ref is not in the environment");
+  assert.equal(actions(null, "/home/runner/work/_actions/clockgrove/pendulum/v0.10.2"), "0.10.2");
+  for (const v of [actions("main"), `9.9.8+${head.slice(0, 12)}.dirty`]) assert.match(v, /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/, "a version the report and the card read");
 });
 
 test("deadHereHolder: a holder with this process's pid that is not its own loop's is the loop it was before it started again, so dead", () => {

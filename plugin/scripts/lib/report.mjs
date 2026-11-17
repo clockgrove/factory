@@ -17,12 +17,13 @@
 // unknown cost; anyone else's counts nothing. An artifact a fork's run uploaded is never read (github.mjs ownRunArtifact).
 // No reason, Block text, task card, transcript or credential reaches the report, and no account unless asked for.
 
+import { pendulumBuild } from "./release.mjs";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
-import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
+import { APP_ID_VARIABLE, DEFAULTS } from "./inputs.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, codexRow, longShare, sumLong } from "./usage.mjs";
@@ -1034,7 +1035,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
     schema: REPORT_SCHEMA,
     repository: repo.full,
     generatedAt: now,
-    pendulum: PENDULUM_VERSION,
+    pendulum: pendulumBuild(),
     scope: { since: scope.since ?? null, until: scope.until ?? null, defaultPeriod: !!scope.defaultPeriod, issues: scope.issues, label: scope.label ?? null, parent: scope.parent ?? null, compare: scope.compare ?? null, by },
     words: { ...KIND_WORDS },
     totals: { objectives: objectives.length, stages: stagesSeen, passes: passesSeen, cost: totals, tokens: totalTokens },

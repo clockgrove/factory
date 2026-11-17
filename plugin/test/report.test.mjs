@@ -19,7 +19,7 @@ import { appIdVariableCheck } from "../scripts/doctor.mjs";
 import { variableSettings } from "../scripts/lib/inputs.mjs";
 import { collectObjective } from "../../bench/lib/collect.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 
 /** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
@@ -120,7 +120,8 @@ function world() {
 
 /**
  * A fake GitHub over `w`, answering the reads a report makes as GitHub does: page by page, with a Link header naming the
- * next and last pages; `w.appVariable` the PENDULUM_APP_ID repository variable (404 without one). `calls` lists every request.
+ * next and last pages; `w.appVariable` the PENDULUM_APP_ID repository variable (404 without one; a function of the token
+ * gives it per token, {status} a refusal). `calls` lists every request.
  */
 function fakeGitHub(w) {
   const calls = [];
@@ -144,7 +145,12 @@ function fakeGitHub(w) {
     calls.push(`${init.method || "GET"} ${p}${u.search}`);
     if ((init.method || "GET") !== "GET") return json({ message: "a report writes nothing" }, 405);
     if (u.pathname === "/user") return json(ME);
-    if (p === "/actions/variables/PENDULUM_APP_ID") return w.appVariable ? json({ name: "PENDULUM_APP_ID", value: String(w.appVariable) }) : json({ message: "Not Found" }, 404);
+    if (p === "/actions/variables/PENDULUM_APP_ID") {
+      // Per token when a function (the token without "Bearer "): a value, {status} for GitHub's refusal, or none (404).
+      const v = typeof w.appVariable === "function" ? w.appVariable(String(init.headers?.Authorization ?? "").replace(/^Bearer /, "")) : w.appVariable;
+      if (v && typeof v === "object") return json({ message: v.message ?? "Resource not accessible by personal access token" }, v.status);
+      return v ? json({ name: "PENDULUM_APP_ID", value: String(v) }) : json({ message: "Not Found" }, 404);
+    }
     if (p === "/issues/comments") {
       const since = u.searchParams.get("since");
       return page(w.comments.filter((c) => !since || Date.parse(c.updated_at) >= Date.parse(since)), u);
@@ -194,11 +200,11 @@ async function over(fake, fn) {
 
 const NOW = Date.parse("2026-11-18T00:00:00Z");
 /** `pendulum report` through its real command, on the fake: {code, json, err, calls}. */
-async function report(w, flags = {}, { cacheHome = null } = {}) {
+async function report(w, flags = {}, { cacheHome = null, app = APP.id } = {}) {
   const fake = fakeGitHub(w);
   let out = "";
   let err = "";
-  const parsed = parseArgs(["report", "--repo", REPO.full, "--checkout", tmpdir(), "--json", "--app", String(APP.id), ...Object.entries(flags).flatMap(([k, v]) => (v === true ? [`--${k}`] : [].concat(v).flatMap((x) => [`--${k}`, String(x)])))]);
+  const parsed = parseArgs(["report", "--repo", REPO.full, "--checkout", tmpdir(), "--json", ...(app === null ? [] : ["--app", String(app)]), ...Object.entries(flags).flatMap(([k, v]) => (v === true ? [`--${k}`] : [].concat(v).flatMap((x) => [`--${k}`, String(x)])))]);
   const saved = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = cacheHome ?? mkdtempSync(join(tmpdir(), "cache-"));
   try {
@@ -405,7 +411,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
   assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt", "trusted"]);
-  assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "logins"]);
+  assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "appWhy", "logins"]);
   assert.deepEqual(keys(r.source.calls), ["byKind", "made", "planned", "plannedAtLeast"]);
   assert.deepEqual(keys(r.source.read), ["artifacts", "comments", "ignoredComments", "issues", "localRecords", "pendulumComments", "pulls", "summaries", "unattributedComments"]);
   assert.deepEqual(keys(r.source.missing[0]), ["code", "count", "issues", "text"]);
@@ -514,7 +520,7 @@ test("report (S1): Pendulum's App id comes from the repository variable PENDULUM
   const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
   const r = buildReport(read, { now: new Date(NOW).toISOString() });
   assert.equal(usd(byIssue(r, 3)).api, 0.519812);
-  assert.deepEqual(r.source.trusted, { logins: ["kirkmarple-clockgrove"], app: APP.id, appFrom: "variable" });
+  assert.deepEqual(r.source.trusted, { logins: ["kirkmarple-clockgrove"], app: APP.id, appFrom: "variable", appWhy: null });
   assert.ok(fake.calls.includes("GET /actions/variables/PENDULUM_APP_ID"));
   const flagged = await report(w, { issue: 3 });
   assert.ok(!flagged.calls.some((c) => c.includes("/actions/variables/")), "--app: no variable read");
@@ -528,6 +534,146 @@ test("report (S1): Pendulum's App id comes from the repository variable PENDULUM
   assert.equal(appIdVariableCheck({ variable: "2271", appId: "", repo }), null);
   // The variable is no setting: no run reads it, and it is not named as an unknown one.
   assert.deepEqual(variableSettings({ PENDULUM_APP_ID: "2271" }).unknown, []);
+});
+
+/** Run `fn` with a fake `gh` first on PATH whose `gh auth token` prints `token`, or fails (no login) when it is null. */
+async function withGh(token, fn) {
+  const bin = mkdtempSync(join(tmpdir(), "gh-"));
+  writeFileSync(join(bin, "gh"), token === null ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\n[ "$1 $2" = "auth token" ] && { echo ${token}; exit 0; }\nexit 1\n`, { mode: 0o755 });
+  const saved = process.env.PATH;
+  process.env.PATH = `${bin}:${saved}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+/** The local copy of acme/app's App id as setup, serve and doctor save it (lib/app-id.mjs), in the test's fake home. */
+const appIdCopy = () => join(process.env.HOME, ".config", "pendulum", "repos", REPO.owner, `${REPO.name}.json`);
+const appMissing = (r) => r.source.missing.filter((m) => m.code.startsWith("app-")).map((m) => [m.code, m.count]);
+
+const SECONDARY = { status: 403, message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." };
+const who = { logins: ["kirkmarple-clockgrove"] };
+
+test("report (#564): the local token gets 403 or 404 on PENDULUM_APP_ID: that one read is made again with the gh login's token, which reads it; the token is never printed", async () => {
+  const w = world();
+  w.appVariable = (t) => (t === "gho_login" ? APP.id : { status: 403 });
+  const r = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
+  assert.deepEqual(r.json.source.trusted, { ...who, app: APP.id, appFrom: "variable-gh", appWhy: null });
+  assert.equal(usd(byIssue(r.json, 3)).api, 0.519812, "the App's stages are Pendulum's");
+  assert.deepEqual(r.calls.filter((c) => c.includes("/actions/variables/")), ["GET /actions/variables/PENDULUM_APP_ID", "GET /actions/variables/PENDULUM_APP_ID"]);
+  assert.equal(r.json.source.calls.byKind["app id"], 2);
+  assert.equal(r.json.source.calls.made, r.json.source.calls.planned, "the second read is planned");
+  assert.deepEqual(appMissing(r.json), []);
+  assert.ok(!r.err.includes("gho_login") && !JSON.stringify(r.json).includes("gho_login"), "the gh token is never printed");
+  // A 404 to a token that may not read variables is read again the same way.
+  w.appVariable = (t) => (t === "gho_login" ? APP.id : null);
+  assert.equal((await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }))).json.source.trusted.appFrom, "variable-gh");
+  // The gh login reads it and it is not set: not set, never unreadable.
+  w.appVariable = (t) => (t === "gho_login" ? null : { status: 403 });
+  const unset = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
+  assert.equal(unset.json.source.trusted.appFrom, "unset");
+  assert.deepEqual(appMissing(unset.json), [["app-not-given", 3]], "#3's three comments through the App");
+  // A value that is no App id is read, so not read again, and said as such.
+  w.appVariable = "pendulum-app";
+  const bad = await withGh("gho_login", () => report(w, { issue: 9 }, { app: null }));
+  assert.equal(bad.calls.filter((c) => c.includes("/actions/variables/")).length, 1);
+  assert.match(bad.json.source.missing.find((m) => m.code === "app-not-given").text, /^the repository variable PENDULUM_APP_ID is no App id \(a number\)/);
+});
+
+test("report (#564): no App id says why: a variable no token may read (403) is app-unreadable, one not set (404) is app-not-given, with or without an App comment in the period", async () => {
+  const w = world();
+  w.appVariable = () => ({ status: 403 });
+  const forbidden = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
+  assert.deepEqual(forbidden.json.source.trusted, { ...who, app: null, appFrom: "forbidden", appWhy: "forbidden" });
+  assert.deepEqual(appMissing(forbidden.json), [["app-unreadable", 3]], "#3's three comments through the App, not attributed");
+  assert.equal(forbidden.calls.filter((c) => c.includes("/actions/variables/")).length, 1, "no gh login: no second read");
+  // #9 has no comment at all: the App id is still said to be missing, and why.
+  const quiet = await withGh(null, () => report(w, { issue: 9 }, { app: null }));
+  assert.deepEqual(appMissing(quiet.json), [["app-unreadable", 0]]);
+  // The gh login is refused too: still unreadable.
+  const both = await withGh("gho_login", () => report(w, { issue: 9 }, { app: null }));
+  assert.equal(both.json.source.trusted.appFrom, "forbidden");
+  assert.equal(both.calls.filter((c) => c.includes("/actions/variables/")).length, 2);
+  assert.deepEqual(appMissing(both.json), [["app-unreadable", 0]]);
+  // Not set: app-not-given, whose text names the line that sets it; the gh login's 404 decides it.
+  w.appVariable = null;
+  const unset = await withGh("gho_login", () => report(w, { issue: 9 }, { app: null }));
+  assert.deepEqual([unset.json.source.trusted.appFrom, unset.json.source.trusted.appWhy], ["unset", "unset"]);
+  assert.deepEqual(appMissing(unset.json), [["app-not-given", 0]]);
+  assert.match(unset.json.source.missing.find((m) => m.code === "app-not-given").text, /gh variable set PENDULUM_APP_ID --repo acme\/app --body /);
+  assert.equal(unset.calls.filter((c) => c.includes("/actions/variables/")).length, 2, "the 404 is read again with the gh login");
+  // A rate-limited 403 to the report's token is no refusal: never app-unreadable, never read with another token.
+  w.appVariable = () => SECONDARY;
+  await assert.rejects(withGh("gho_login", () => report(w, { issue: 9 }, { app: null })), /secondary rate limit/);
+});
+
+test("report (#564): the gh login's read never ends the report: refused (401) or rate limited, the first read's reason stands and the local copy applies; a budget stop on it keeps both", async () => {
+  const file = appIdCopy();
+  mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+  writeFileSync(file, `${JSON.stringify({ appId: APP.id })}\n`, { mode: 0o644 });
+  try {
+    const w = world();
+    w.appVariable = (t) => (t === "gho_login" ? { status: 401, message: "Bad credentials" } : { status: 403 });
+    const refused = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
+    assert.equal(refused.code, 0);
+    assert.deepEqual(refused.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    assert.match(refused.err, /the gh login's read of the repository variable PENDULUM_APP_ID failed \(HTTP 401\); the first read's answer stands/);
+    assert.match(refused.err, /the App id is the local copy's, 2271 \(\S+app\.json\), unverified: the repository variable PENDULUM_APP_ID could not be read/);
+    assert.ok(!refused.err.includes("gho_login"));
+    w.appVariable = (t) => (t === "gho_login" ? SECONDARY : { status: 403 });
+    const limited = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
+    assert.deepEqual([limited.json.source.trusted.appFrom, limited.json.source.trusted.appWhy], ["local-copy", "forbidden"]);
+    assert.match(limited.err, /failed \(HTTP 403, rate limited\)/);
+    // --max-calls 2: the login and the first read; the stop on the second keeps the reason, and the copy applies.
+    w.appVariable = () => ({ status: 403 });
+    const stopped = await withGh("gho_login", () => report(w, { issue: 3, "max-calls": 2 }, { app: null }));
+    assert.equal(stopped.code, STOPPED_EXIT);
+    assert.equal(stopped.json.source.stoppedAt, "app id");
+    assert.deepEqual(stopped.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    rmSync(file);
+    const bare = await withGh("gho_login", () => report(w, { issue: 3, "max-calls": 2 }, { app: null }));
+    assert.deepEqual([bare.json.source.trusted.appFrom, bare.json.source.trusted.appWhy], ["forbidden", "forbidden"]);
+    assert.deepEqual(appMissing(bare.json), [["app-unreadable", 0]]);
+  } finally {
+    rmSync(join(process.env.HOME, ".config", "pendulum", "repos"), { recursive: true, force: true });
+  }
+});
+
+test("report (#564): the local copy beside the local token gives the App id when the variable cannot be read or is not set; a copy others may write, or in a folder others may write, is not taken; the variable wins over a copy", async () => {
+  const file = appIdCopy();
+  mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+  writeFileSync(file, `${JSON.stringify({ appId: APP.id })}\n`, { mode: 0o644 });
+  try {
+    const w = world();
+    w.appVariable = () => ({ status: 403 });
+    const r = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
+    assert.deepEqual(r.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "forbidden" });
+    assert.equal(usd(byIssue(r.json, 3)).api, 0.519812);
+    assert.deepEqual(appMissing(r.json), []);
+    // Not set (404 to every token): the copy, and why it stands in.
+    w.appVariable = null;
+    const unset = await withGh("gho_login", () => report(w, { issue: 3 }, { app: null }));
+    assert.deepEqual(unset.json.source.trusted, { ...who, app: APP.id, appFrom: "local-copy", appWhy: "unset" });
+    assert.match(unset.err, /unverified: the repository variable PENDULUM_APP_ID is not set/);
+    // The variable, when it can be read, is the App id: a stale copy is not.
+    w.appVariable = 17;
+    assert.deepEqual((await withGh(null, () => report(w, { issue: 3 }, { app: null }))).json.source.trusted, { ...who, app: 17, appFrom: "variable", appWhy: null });
+    // A copy any user may write decides nothing: it is named on stderr and the id stays unreadable.
+    chmodSync(file, 0o666);
+    w.appVariable = () => ({ status: 403 });
+    const loose = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
+    assert.equal(loose.json.source.trusted.appFrom, "forbidden");
+    assert.match(loose.err, /the local copy of the App id is not taken: .*app\.json is writable by others \(mode 666\)/);
+    // Nor one in a folder others may write, where it could be swapped.
+    chmodSync(file, 0o644);
+    chmodSync(join(file, ".."), 0o777);
+    const folder = await withGh(null, () => report(w, { issue: 3 }, { app: null }));
+    assert.equal(folder.json.source.trusted.appFrom, "forbidden");
+    assert.match(folder.err, /repos\/acme is writable by others \(mode 777\)/);
+  } finally {
+    rmSync(join(process.env.HOME, ".config", "pendulum", "repos"), { recursive: true, force: true });
+  }
 });
 
 test("report (S2): --self trusts an exact login only on a comment by someone who can push, and source lists the trusted logins", async () => {

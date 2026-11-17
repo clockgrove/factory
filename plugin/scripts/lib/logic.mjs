@@ -851,7 +851,9 @@ export function selectReady({ issues, statuses = {}, openIssues = new Set(), hel
   if (Number.isFinite(repoRunning)) running = repoRunning;
 
   if (dailyUsd !== undefined && dailyUsd !== null && Number(dailyUsd) > 0 && spentToday >= Number(dailyUsd)) {
-    for (const c of candidates) skipped.push({ number: c.number, reason: `daily_usd reached (${spendText({ usd: spentToday, unknown: unknownToday })} of $${Number(dailyUsd)})` });
+    // A spend that could not be read is no figure: the gate holds, and says why.
+    const said = Number.isFinite(spentToday) ? `${spendText({ usd: spentToday, unknown: unknownToday })} of $${Number(dailyUsd)}` : "today's spend could not be read";
+    for (const c of candidates) skipped.push({ number: c.number, reason: `daily_usd reached (${said})` });
     return { ready: [], skipped, running, reason: "daily_usd reached" };
   }
   const slots = Math.max(0, Number(maxConcurrent) - running);
@@ -877,18 +879,19 @@ export function sumSpend(records) {
   return { usd, unknown };
 }
 
-/** "$1.20", "$1.20 plus 2 runs of unknown cost", "unknown (1 run)": a total (sumSpend's `{usd, unknown}`) as it is shown. */
+/**
+ * "$1.20", "$1.20 plus 2 runs of unknown cost", "unknown", "unknown, 2 runs": a total (sumSpend's `{usd, unknown}`) as
+ * it is shown, worded as usdText words a stage's. Nothing known beside runs of unknown cost, or a total that is no
+ * number (one that could not be read), is "unknown", never $0.
+ */
 export function spendText({ usd, unknown = 0 }) {
-  const known = typeof usd === "number" && Number.isFinite(usd);
-  if (!known || (usd === 0 && unknown > 0)) return unknown > 0 ? `unknown (${unknown} run${unknown === 1 ? "" : "s"})` : "$0.00";
+  if (typeof usd !== "number" || !Number.isFinite(usd) || (usd === 0 && unknown > 0)) return unknownAlone(unknown);
   return `$${usd.toFixed(2)}${unknownText(unknown)}`;
 }
 
-/**
- * Whether a run left max_usd unenforceable: a Copilot run that did work (turns) but reported no priced AI credits.
- * Its caller stops further passes rather than spend blind (logic.mjs decideExit names it).
- */
-export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === null || rec.usd === undefined) && (rec.turns ?? 0) > 0;
+/** "unknown", or "unknown, 3 runs": a figure with nothing known, as spendText and usdText both word it. */
+const unknownAlone = (n) => `unknown${n > 1 ? `, ${n} runs` : ""}`;
+
 
 // --------------------------------------------------------------- exit logic
 
@@ -1085,7 +1088,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "pendulum" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
-  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "pendulum" : "max-usd" };
+  if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached", cause: "max-usd" };
   if (unresolved) return { exit: "blocked", reason: unresolved, cause: "work" };
   if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
   // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
@@ -1152,12 +1155,6 @@ export const EXITS = ["delivered", "question", "blocked"];
  */
 export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records).usd >= maxUsd;
 
-/**
- * Whether Pendulum's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
- * shut, gateway-relay.mjs): the spend at the cap, the relay's refusal at it (`relayTotals.capped`), or a harness's own cap
- * (Claude Code's error_max_budget_usd, Copilot's start refused under its credit floor).
- */
-export const maxUsdReached = (maxUsd, records, relayTotals = null) => capReached(maxUsd, records) || !!relayTotals?.capped || records.some((r) => r?.subtype === "error_max_budget_usd" || r?.error === "dollar cap reached");
 
 /**
  * The exit line's dollars: the known figure, with "plus N runs of unknown cost" and why (usage.mjs UNKNOWN_WHY) when the
@@ -1166,7 +1163,7 @@ export const maxUsdReached = (maxUsd, records, relayTotals = null) => capReached
 export const usdText = (usage) => {
   const n = unknownRuns(usage);
   const why = n ? ` (${(unknownOf([usage]).usdUnknownWhy || []).map((w) => UNKNOWN_WHY[w]).join("; ")})` : "";
-  if (typeof usage?.usd !== "number") return `unknown${n > 1 ? `, ${n} runs` : ""}${why}`;
+  if (typeof usage?.usd !== "number") return `${unknownAlone(n)}${why}`;
   return `${usage.usd}${usage.workerKeyUsd > 0 ? ` (harness ${usage.harnessUsd ?? "unknown"}, worker key ${usage.workerKeyUsd})` : ""}${unknownText(n)}${why}`;
 };
 
@@ -1180,11 +1177,18 @@ export function copilotCount(usage) {
 }
 
 /**
- * " (work-1 7.90, validation-fix-1 0.54)": each harness pass's cost by its label, for the exit line; empty with one or no
- * priced pass. The stage's decision record (harness.mjs keepDecision) is no pass: its spend is in the total only.
+ * " (work-1 7.90, validation-fix-1 unknown, fix-2 0.30 plus unknown)": each harness pass's cost by its label, for the
+ * exit line: its known dollars, "unknown" for a pass that reported none, "plus unknown" for one that reported part
+ * (usage.mjs UNKNOWN_WHY); empty with one pass or none. A pass that never ran (`noRun`) and the stage's decision record
+ * (harness.mjs keepDecision) are no pass here: the decisions' spend is in the total only.
  */
 export function costByPhase(records) {
-  const parts = (records || []).filter((r) => r && !r.decision && typeof r.usd === "number" && r.label).map((r) => `${r.label} ${r.usd.toFixed(2)}`);
+  const one = (r) => {
+    const known = typeof r.usd === "number" && Number.isFinite(r.usd);
+    if (!unknownRuns(r)) return known ? r.usd.toFixed(2) : null;
+    return known ? `${r.usd.toFixed(2)} plus unknown` : "unknown";
+  };
+  const parts = (records || []).filter((r) => r && !r.decision && !r.noRun && r.label && one(r) !== null).map((r) => `${r.label} ${one(r)}`);
   return parts.length > 1 ? ` (${parts.join(", ")})` : "";
 }
 
@@ -2698,7 +2702,7 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
     if (r.conflict) out.conflicts += 1;
     out.unknown += r.usdUnknown ?? (r.usd === null ? 1 : 0);
     const sandbox = vendor.get(keyOf(c.body, "progress"));
-    if (sandbox && sandbox.vendorUsd === null) out.unknown += 1;
+    if (sandbox && (sandbox.vendorUsd === null || sandbox.usdUnknownWhy?.includes("sandbox"))) out.unknown += 1;
     const sum = (r.usd ?? 0) + (sandbox?.vendorUsd ?? 0);
     out.usd = Math.round((out.usd + sum) * 1e4) / 1e4;
   }
@@ -2767,10 +2771,11 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
   const size = Number.isFinite(cost.vcpus) || Number.isFinite(cost.memoryMb) ? `${cost.vcpus ?? "?"} vCPU / ${Number.isFinite(cost.memoryMb) ? Math.round(cost.memoryMb / 1024) : "?"} GB` : "size unknown";
   const r = rates || {};
   const rate = `${word(r.vendor)} ${word(r.plan)} list rates (${word(r.region)}, read ${word(r.date)}): ${money(r.activeCpuHour)}/CPU-hour, ${money(r.memoryGbHour)}/GB-hour, ${money(r.snapshotGbMonth)}/GB-month stored`;
-  const use = cost.usd === null ? `usage not reported${error ? ` (${word(error)})` : ""}` : `${secs(cost.activeCpuMs)} active CPU in ${secs(cost.wallMs)}`;
+  const unreported = cost.usd === null || cost.usageUnknown;
+  const use = unreported ? `usage not reported${error ? ` (${word(error)})` : ""}` : `${secs(cost.activeCpuMs)} active CPU in ${secs(cost.wallMs)}`;
   const stored = cost.storedMs > 0 ? `; stopped ${(cost.storedMs / 3_600_000).toFixed(1)} h before it with ${Number.isFinite(cost.storedBytes) ? `${(cost.storedBytes / 1e9).toFixed(2)} GB` : "? GB"} saved: ${money(cost.storedUsd)}` : "";
   const id_ = typeof id === "string" && /^pendulum-[A-Za-z0-9_-]{1,60}$/.test(id) ? id : "?";
-  return `- ${clock} sandbox \`${id_}\` ${word(state)}: ${use}, ${size}; ${rate}; vendor ${cost.usd === null ? "unknown" : money(cost.usd)} this stage${stored}`;
+  return `- ${clock} sandbox \`${id_}\` ${word(state)}: ${use}, ${size}; ${rate}; vendor ${cost.usd === null ? "unknown" : `${money(cost.usd)}${cost.usageUnknown ? " plus its unknown usage" : ""}`} this stage${stored}`;
 }
 
 /**
@@ -2778,13 +2783,14 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
  * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
  * model dollars. `modelUsd`: the harness's known dollars from the usage record, for a stage that left no progress
  * comment, with `modelUnknown` (usage.mjs unknownOf: `{usdUnknown, usdUnknownWhy}`) its runs of unknown cost. A usage
- * the vendor did not report is `vendorUsd: null`: one run of unknown cost (UNKNOWN_WHY `sandbox`), never $0 or a bound.
+ * the vendor did not report (`vendorUnknown`, or no figure at all: `vendorUsd: null`) is one run of unknown cost
+ * (UNKNOWN_WHY `sandbox`) beside the vendor's known dollars, never $0 or a bound.
  */
-export function vendorBody({ line, vendorUsd, modelUsd = null, modelUnknown = null }) {
+export function vendorBody({ line, vendorUsd, vendorUnknown = false, modelUsd = null, modelUnknown = null }) {
   const round = (n) => Math.round(n * 1e6) / 1e6;
   const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
-  const unknown = unknownOf([...(modelUnknown?.usdUnknown ? [{ usd: 0, ...modelUnknown }] : []), ...(vendor === null ? [{ usd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }] : [])]);
+  const unknown = unknownOf([...(modelUnknown?.usdUnknown ? [{ usd: 0, ...modelUnknown }] : []), ...(vendor === null || vendorUnknown ? [{ usd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }] : [])]);
   return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...unknown })}`;
 }
 

@@ -22,6 +22,8 @@ export const VENDORED = {
   // as its package.json says (no `type`), where the ES module build would be reparsed with a warning on every start.
   // And the list's rules as it publishes them (dist/cjs/src/data/trie.js, data only): its API answers for one name, never
   // whether a rule lies below one, which a host label's wildcard needs (lib/local.mjs suffixRuleUnder).
+  // RFC 8785 JSON canonicalization (JCS), by one of the RFC's authors: the canonical form of the usage record a sealed session binds (lib/seal.mjs).
+  canonicalize: (p) => p === "LICENSE" || p === "package.json" || p === "lib/canonicalize.js",
   tldts: (p) => p === "LICENSE" || p === "package.json" || p === "dist/index.cjs.min.js" || p === "dist/cjs/src/data/trie.js",
 };
 

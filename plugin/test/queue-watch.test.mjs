@@ -1083,7 +1083,7 @@ test("queueTryEnd: committed when the HEAD moved and went up; idle for any pass 
   assert.equal(queueTryEnd({ before: "a", after: "b", pushed: true, rec: ok }), "committed");
   assert.equal(queueTryEnd({ before: "a", after: "b", pushed: true, rec: { ok: false, stopped: true } }), "committed", "a stopped pass's commit went up");
   assert.equal(queueTryEnd({ before: "a", after: "b", pushed: false, rec: ok }), null, "a refused push");
-  for (const rec of [ok, { ok: false, signal: "SIGKILL" }, { ok: false, subtype: "error_max_turns" }, { ok: true, timedOut: true }, { ok: true, budgetExceeded: true }, { ok: true, unmetered: true }, { ok: false, refusal: { status: 400 } }]) {
+  for (const rec of [ok, { ok: false, signal: "SIGKILL" }, { ok: false, subtype: "error_max_turns" }, { ok: true, timedOut: true }, { ok: true, budgetExceeded: true }, { ok: false, refusal: { status: 400 } }]) {
     assert.equal(queueTryEnd({ before: "a", after: "a", pushed: true, rec }), "idle", JSON.stringify(rec));
   }
   assert.equal(queueTryEnd({ before: "a", after: "a", pushed: true, rec: null }), null, "no pass ran");

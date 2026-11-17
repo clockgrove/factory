@@ -142,9 +142,9 @@
       }
     },
     "pendulum-score": {
-      "sha256": "557742e1356e6b885b471d56e4dd2bd51e12d2d5e7276cf26ce19058ce0f6efc",
+      "sha256": "35172dc929a0a49062768ff41c324124f42035e9deddabe807241769d7b5f06a",
       "lines": 30,
-      "words": 635,
+      "words": 644,
       "files": {
         "reference.md": {
           "sha256": "a293c825edd99f46c3e2e0dad85e8335fe2463437a59a5300263852ee96a85aa",
@@ -176,9 +176,9 @@
           "words": 669
         },
         "reference.md": {
-          "sha256": "b56d99e1bab76bc1126f36a0373229f9db592da4bd6f6d2afd1d8f0c07a9cf49",
-          "lines": 99,
-          "words": 1808
+          "sha256": "e0473fa090170bd21bc1f58912915c9b0e9dc7d67ba6ad6566a86392427e7f2f",
+          "lines": 100,
+          "words": 1876
         }
       }
     },

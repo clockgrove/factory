@@ -3,7 +3,7 @@
 import "../../plugin/test/temp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -265,14 +265,28 @@ test("question answered: merged, but the owner's answer and ready-for-review are
   assert.equal(row.wallMinutes, 33 * 60); // Mar 2 01:00 to Mar 3 10:00
 });
 
-test("cost: a raw Codex stream counts a resumed pass's own share", () => {
-  // Real Codex 0.167.0 streams as the worker tees them: `codex exec`, then `codex exec resume` on the same thread, whose
-  // turn.completed is the thread's running total. Together they cost what the thread reported last.
+test("cost: a raw stream is never priced; an artifact with no result.json is one run of unknown cost (#483)", () => {
+  // Real Codex 0.167.0 streams as the worker tees them, and a raw Claude result: neither is a stage's record.
   const fixtures = join(BENCH, "..", "plugin", "test", "fixtures");
   const pass = (label, f) => `{"type":"pendulum.run","label":"${label}","harness":"codex"}\n${read(join(fixtures, f))}`;
-  const raw = parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl"), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
-  assert.equal(raw.turns, 2);
+  assert.equal(parseUsageText(pass("work-1", "codex-0.167-thread.jsonl") + pass("validation-fix-1", "codex-0.167-thread-resumed.jsonl")), null);
+  assert.equal(parseUsageText(read(join(USAGE, "claude-result.json"))), null);
+  // A stage killed before its result.json: its artifact holds only the raw stream (a Claude stream of two passes, each
+  // with a result line, the second a resumed session's running total). It scores as one run of unknown cost.
+  const dir = mkdtempSync(join(tmpdir(), "score-noresult-"));
+  try {
+    mkdirSync(join(dir, "pendulum-usage-61"));
+    const result = (usd) => JSON.stringify({ type: "result", subtype: "success", session_id: "s1", total_cost_usd: usd });
+    writeFileSync(join(dir, "pendulum-usage-61", "events.jsonl"), `${result(1)}\n${result(3)}\n`);
+    const records = usageFromDir(dir, { readdir: (p) => readdirSync(p), read: (p) => readFileSync(p, "utf8"), isDir: (p) => statSync(p).isDirectory() });
+    assert.equal(records.length, 1);
+    assert.deepEqual([records[0].usd, records[0].usdUnknown, records[0].usdUnknownWhy], [null, 1, ["unreported"]]);
+    const cost = costOf(records, prices, { harness: "claude" });
+    assert.deepEqual([cost.usd, cost.usdUnknown], [null, 1], "never $4 (both totals summed) and never $0");
+    assert.match(cost.basis, /plus 1 run of unknown cost/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("cost: Codex tokens are priced from the Codex price table, with its date in the basis", () => {
@@ -287,11 +301,9 @@ test("cost: Codex tokens are priced from the Codex price table, with its date in
   assert.equal(row.cost.note, null);
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);
-  const raw = parseUsageText(read(join(USAGE, "codex", "events.jsonl")), { model: "gpt-6.1-sol" });
-  assert.deepEqual(raw.tokens, { input: 150000, output: 10000, cached: 115000, written: null });
-  assert.equal(costOf([raw], prices).usd, 0.1815);
-  assert.equal(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).usd, null);
-  assert.match(costOf([{ ...raw, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
+  const rec = usage("codex")[0];
+  assert.equal(costOf([{ ...rec, model: "gpt-unknown-9" }], prices).usd, null);
+  assert.match(costOf([{ ...rec, model: "gpt-unknown-9" }], prices).basis, /no price for gpt-unknown-9/);
 });
 
 test("cost: a Codex stage with no completed turn says so, in the worker's record, its exit line and the scorecard alike; never a missing price", () => {
@@ -302,9 +314,9 @@ test("cost: a Codex stage with no completed turn says so, in the worker's record
   assert.equal(worker.basis, CODEX_NO_TOKENS);
   assert.equal(worker.usdUnknown, 3, "three runs of unknown cost");
   assert.match(usdText(worker), /^unknown, 3 runs \(.*the run ended before its harness reported its cost/);
-  // The scorecard, from the uploaded result.json (as session.mjs writes it) or from the raw events: unknown, never $0.
+  // The scorecard, from the uploaded result.json (as session.mjs writes it): unknown, never $0.
   const result = { harness: "codex", model: "gpt-6.1-sol", usd: null, usdUnknown: worker.usdUnknown, usdUnknownWhy: worker.usdUnknownWhy, tokens: worker.tokens, basis: worker.basis, turns: 0, runs: 3, artifact: "pendulum-usage-498/result.json" };
-  for (const [rec, n] of [[result, 3], [parseUsageText(events, { model: "gpt-6.1-sol" }), 1]]) {
+  for (const [rec, n] of [[result, 3]]) {
     const cost = costOf([rec], prices);
     assert.equal(cost.usd, null);
     assert.equal(cost.usdUnknown, n);
@@ -335,21 +347,14 @@ test("cost: Copilot dollars are the AI credits the worker priced, premium reques
   assert.match(old.cost.note, /no AI credits/);
 });
 
-test("cost: the reviewer's artifact is summed with the worker's; a raw Claude result is read too", () => {
+test("cost: the reviewer's artifact is summed with the worker's, cache writes and the per-model split kept", () => {
   const both = [...usage("claude"), ...usage("review")];
   const row = scoreObjective(cleanMerge(48, both), { prices, now: NOW });
   assert.equal(row.cost.usd, 8.2312);
   assert.match(row.cost.basis, /2 artifacts summed/);
-  const raw = parseUsageText(read(join(USAGE, "claude-result.json")));
-  assert.equal(raw.harness, "claude");
-  assert.equal(raw.usd, 7.4312);
-  assert.equal(raw.model, "claude-fable-5-1");
-  assert.equal(raw.tokens.output, 50000);
   // Cache writes and the per-model split are kept: cost by component without re-reading the artifact.
-  assert.equal(typeof raw.tokens.written, "number");
-  assert.ok(raw.models && raw.models["claude-fable-5-1"]);
-  assert.equal(Object.values(raw.models).reduce((s, m) => s + m.output, 0), raw.tokens.output);
-  assert.equal(costOf([raw], prices).tokens.written, raw.tokens.written);
+  const [work] = usage("claude");
+  assert.equal(costOf([work], prices).tokens.written, work.tokens.written ?? null);
   assert.match(markdownTable([row]), /\$8\.23 \(\d+k in \/ \d+k cached \/ \d+k written \/ \d+k out\)/);
 });
 
@@ -714,9 +719,11 @@ test("cost: a sandbox stage's vendor cost is summed beside the model's, with a t
   assert.doesNotMatch(table, /≤|at most|at least|upper bound/);
   assert.match(table, /- #50: sandbox 2 sandbox stage\(s\)/);
   const { baselineOf } = await import("../lib/baseline.mjs");
+  // A row with a run of unknown cost is left out of the dollar medians, and counted beside them.
   const line = baselineOf([row], {});
-  assert.equal(line.measures.vendorUsd.median, 0.0063);
-  assert.equal(line.measures.totalUsd.median, 0.77);
+  assert.deepEqual([line.measures.vendorUsd.median, line.measures.vendorUsd.leftOut, line.measures.totalUsd.leftOut], [null, 1, 1]);
+  const known = baselineOf([scoreObjective(cleanMerge(50, [work]), { prices, now: NOW })], {});
+  assert.deepEqual([known.measures.vendorUsd.median, known.measures.totalUsd.median], [0.0063, 0.27]);
   // One booking per stage: the same stage's booking carried by two artifacts (a retried launch) counts once.
   const once = { ...work, vendor: { ...work.vendor, claim: "0123456789ab" } };
   const twice = scoreObjective(cleanMerge(52, [once, { ...once, artifact: "pendulum-usage-52/result.json", usd: null }]), { prices, now: NOW });
@@ -1247,16 +1254,4 @@ test("#480: a local stage of unknown cost, and an Actions stage whose artifact e
   const e = scoreObjective(expired, { prices, now: NOW });
   assert.deepEqual([e.cost.usd, e.cost.usdUnknown], [11, 1]);
   assert.match(markdownTable([e]), /\| \$11\.00 plus 1 run of unknown cost \(/);
-});
-
-test("#480: Codex's turn.completed carries the thread's running total, so a stream's events are never summed", () => {
-  const ev = (o) => JSON.stringify(o);
-  const turn = (input, cached, output) => ev({ type: "turn.completed", usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } });
-  // Two cumulative events in one process: 1.0M then 1.5M is 1.5M, not 2.5M.
-  const one = [ev({ type: "thread.started", thread_id: "t1" }), turn(1_000_000, 0, 10_000), turn(1_500_000, 0, 20_000)].join("\n");
-  assert.deepEqual(parseUsageText(one, { model: "gpt-6.1-sol" }).tokens, { input: 1_500_000, output: 20_000, cached: 0, written: null });
-  assert.equal(costOf([parseUsageText(one, { model: "gpt-6.1-sol" })], prices).usd, priceTokens(prices, "gpt-6.1-sol", { input: 1_500_000, cached: 0, output: 20_000 }));
-  // A later pass that resumes the thread counts its own share of the running total: 1.5M, then 1.8M, is 1.8M in all.
-  const resumed = [one, ev({ type: "thread.started", thread_id: "t1" }), turn(1_600_000, 0, 25_000), turn(1_800_000, 0, 30_000)].join("\n");
-  assert.deepEqual(parseUsageText(resumed, { model: "gpt-6.1-sol" }).tokens, { input: 1_800_000, output: 30_000, cached: 0, written: null });
 });

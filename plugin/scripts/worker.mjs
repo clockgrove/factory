@@ -19,9 +19,10 @@ import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
-import { unpricedCodex } from "./lib/usage.mjs";
-import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
+import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
+import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -159,6 +160,9 @@ async function main() {
   if (!inputs.issue) throw new Error("--issue N is required");
   const repo = repoOf(inputs.repo);
   const issue = inputs.issue;
+  // The key that opens an earlier stage's sealed session (lib/seal.mjs): the one a sandbox stage's launcher handed over,
+  // else derived from the App's private key.
+  const sealKey = stageSealKey({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full });
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const usageDir = resolve(args.usage_dir || process.env.PENDULUM_USAGE_DIR || join(checkout, "..", `pendulum-usage-${issue}`));
   mkdirSync(usageDir, { recursive: true });
@@ -276,6 +280,8 @@ async function main() {
     setOutput("reason", reason || "");
     setOutput("pr", pr ? String(pr.number) : "");
     setOutput("usd", usage.usd === null ? "" : String(usage.usd));
+    // The runs of unknown cost beside it (usage.mjs UNKNOWN_WHY), never in `usd`.
+    setOutput("usd_unknown", String(unknownRuns(usage)));
     if (process.env.GITHUB_STEP_SUMMARY) {
       const { appendFileSync } = await import("node:fs");
       appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum #${issue}: ${exit}\n\n${redactSecrets(reason || "")}\n\nPR: ${pr ? `#${pr.number}` : "none"} · USD: ${usdText(usage)} (${usage.basis}) · passes: ${passes}\n`);
@@ -767,7 +773,7 @@ async function main() {
   let restored = null;
   // A continued pause resumes its own session when it carries over (enterStage restored it), whatever the policy.
   if (continued) restored = continued.session ?? { id: null, from: continued.from, reason: continued.carry };
-  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, seal: usageSeal({ key: sealKey, publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token: inputs.githubToken || token.token, noRateWait: true }) }) });
   if (restored?.id) session.id = restored.id;
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json: a continued pause
   // (`continued`), or a pause not continued, naming the guards that changed (`changed`).
@@ -865,12 +871,10 @@ async function main() {
       restored = { ...restored, id: null, reason: "resume refused by the provider" };
       reentry = { ...reentry, resumed: false, from: restored.from ?? null, reason: restored.reason };
     }
-    // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it. A Copilot run that reported
-    // no priced credits leaves the cap unenforceable, so nothing more runs.
+    // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it, on the known dollars: a run
+    // of unknown cost (a Copilot run with no priced credits among them, usage.mjs UNKNOWN_WHY) adds none, and the stage
+    // goes on.
     if (inputs.maxUsd > 0 && sumSpend(records).usd >= inputs.maxUsd) rec.budgetExceeded = true;
-    // A Copilot run Pendulum stopped at its plan writes no usage file: unmetered, but nothing more runs after it (the plan-time
-    // Question skips every later pass), so it is no cap reached and the exit stays the Question.
-    if (inputs.maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, rec.stopped ? { unmetered: true } : { budgetExceeded: true, unmetered: true });
     if (rec.refusal) log(`harness ${inputs.harness} was refused by the provider (${rec.error}); not retried`);
     if (rec.budgetExceeded || !crashed(rec)) break;
     // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
@@ -933,7 +937,6 @@ async function main() {
     // merge it left in progress Blocks unpushed (the checkout's HEAD is then part of the work, not the branch).
     if (pass.timedOut) rec.timedOut = true;
     if (pass.budgetExceeded || (inputs.maxUsd > 0 && sumSpend(records).usd >= inputs.maxUsd)) rec.budgetExceeded = true;
-    if (inputs.maxUsd > 0 && unmeteredRun(pass)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
     await io.collect();
     // A provider's refusal of the pass Blocks the stage with it (decideExit), unpushed.
     if (pass.refusal) rec.refusal = pass.refusal;
@@ -979,7 +982,7 @@ async function main() {
   // 7. Pendulum's own validation passes, failures back to the harness while its fix passes make progress (validationLoop).
   let validation = null;
   // Hard stops only; a harness that errored but left commits still gets Pendulum's validation pass.
-  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, unmetered: rec.unmetered, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.PENDULUM_STAGE_SESSION_CAP) });
+  const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.PENDULUM_STAGE_SESSION_CAP) });
   if (early.exit !== "blocked" && !planNeeds) {
     validation = await validationLoop({
       onPhase: progress,
@@ -1025,7 +1028,7 @@ async function main() {
   // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
   // a run that had no harness (clean rebase) delivered by construction. A provider's refusal is not asked again.
   const refusal = rec?.refusal || validation?.harness?.refusal || null;
-  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd, unmetered: !!(rec?.unmetered || validation?.harness?.unmetered) });
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd });
   records.push(...asked.usage);
   if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // The question check may have turned QUESTION: items into assumptions: the PR body and plan comment follow pr.md and plan.md.
@@ -1043,7 +1046,7 @@ async function main() {
   // With nothing pushed there is no PR to carry the hand-over: it goes on the issue (handoff.mjs handoverOnIssue).
   const handoverLeft = !pr && !delta.count ? await handoverNow() : undefined;
   const decision = decideExit({
-    harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded, unmetered: rec.unmetered || validation?.harness?.unmetered },
+    harness: { ...rec, ok: rec.ok || evidenceOk, died, refusal, timedOut: rec.timedOut || validation?.harness?.timedOut, budgetExceeded: rec.budgetExceeded || validation?.harness?.budgetExceeded },
     pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null,
     commits: delta.count,
     validation: validation?.handedOff ? { passes: validation.passes, green: true } : validation && !validation.died && !validation.harness && !validation.question && !conflict ? { passes: validation.passes, green: validation.green, lastOutput: validation.lastOutput, command: validation.command, baseFailure: validation.baseFailure, notStarted: validation.notStarted, stuck: validation.stuck?.reason, stuckCause: validation.stuck?.cause, triageRefused: validation.triageRefused, scope: validation.scope, unchanged: validation.unchanged, freshPass: validation.freshPass, stalled: validation.stalled, stalledCause: validation.stalledCause } : undefined,
@@ -1143,12 +1146,10 @@ async function main() {
       else await exitStep(decision, "the review label could not be applied, so no review job would run", () => addLabels(repo, pr.number, [REVIEW_LABEL], token));
     }
   }
-  // The AI Gateway refused a relayed call for its own budget or credits, or the relay shut the gateway for calls it could
-  // not price: a Block names it first, and reads "dollar cap reached" only when max_usd was in fact reached.
+  // The AI Gateway refused a relayed call for its own budget or credits: a Block names it first.
   if (decision.exit === "blocked" && relay) {
-    const capped = maxUsdReached(inputs.maxUsd, records, relay.totals());
-    decision.reason = stageBlockReason(decision.reason, relay.totals(), capped);
-    decision.cause = stageBlockCause(decision.cause, relay.totals(), capped);
+    decision.reason = stageBlockReason(decision.reason, relay.totals());
+    decision.cause = stageBlockCause(decision.cause, relay.totals());
   }
   const askedAtPlan = decision.exit === "question" && !!planNeeds;
   // Recorded with the ask, so the rerun knows which answer is to it (one-repo.mjs answeredRepos).

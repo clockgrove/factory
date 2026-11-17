@@ -263,9 +263,9 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
   assert.match(r.stderr, /user-slash: a user skill's description starts with what it does/);
 });
 
-// A newcomer meets one skill per verb: the twelve user skills are pinned, the stage skills stay hidden, and a skill added,
+// A newcomer meets one skill per verb: the thirteen user skills are pinned, the stage skills stay hidden, and a skill added,
 // removed or renamed changes the pin in the same PR.
-test("the plugin holds exactly the pinned skills: the twelve user skills and the internal ones", () => {
+test("the plugin holds exactly the pinned skills: the thirteen user skills and the internal ones", () => {
   assert.deepEqual(skillSet(join(CHECKOUT, "plugin")), []);
   assert.deepEqual(USER_SKILLS, [
     "pendulum-file",
@@ -278,6 +278,7 @@ test("the plugin holds exactly the pinned skills: the twelve user skills and the
     "pendulum-kick",
     "pendulum-handover",
     "pendulum-score",
+    "pendulum-report",
     "pendulum-doctor",
     "pendulum-setup",
   ]);

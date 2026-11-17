@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -173,7 +173,8 @@ async function markSpent(err, quota, url, token, headers, signal = null) {
   if (resetAt === null) {
     const resource = headers.get("x-ratelimit-resource") || quotaResource(url);
     const count = await call(`${API()}/rate_limit`, { token, signal }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), resource, r.headers.get("date")) : null)).catch(() => null);
-    resetAt = spentResetOf(headers, count, now);
+    // The count's reset goes through the count's own Date, so this machine's time is read once that answer is here.
+    resetAt = spentResetOf(headers, count, count ? RETRY.now() : now);
   }
   if (resetAt === null) return;
   err.code = RATE_LIMIT_SPENT;
@@ -458,9 +459,10 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
- * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
+ * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it. `onLink(link)` is
+ * given each page's Link header (null without one), for a caller that pages itself.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, onLink = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
@@ -507,6 +509,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
+    onLink?.(link ?? null);
     if (raw) return text;
     const data = text.trim() ? JSON.parse(text) : null;
     if (!paginate) return data;
@@ -862,8 +865,8 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
  * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * reply by someone who can push (trustedAuthor) other than Pendulum's own answer exists (logic.mjs pendulumReply) or the
- * root is Pendulum's placeholder; named once a
+ * person's answer exists (logic.mjs personAnswer: by someone who can push, and none of Pendulum's marked comments, its
+ * answer or the finding check's evidence) or the root is Pendulum's placeholder; named once a
  * person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
@@ -895,7 +898,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => trustedAuthor(r) && !pendulumReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
+    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs ? replies.some((r) => answersComment(author, r)) : false;
     return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
   });
 }
@@ -1646,6 +1649,14 @@ export async function createProject(repo, opts) {
 
 // --------------------------------------------------------------- artifacts
 
+/**
+ * Whether an Actions artifact came from a run of this repository's own code, not a fork's: its workflow run's head
+ * repository is the run's repository (GitHub's `workflow_run.head_repository_id` and `repository_id` on the artifact). A
+ * fork's pull request run can upload an artifact of any name, so its usage records are never Pendulum's; an artifact that
+ * names no repository id is not read either.
+ */
+export const ownRunArtifact = (a) => Number.isSafeInteger(a?.workflow_run?.repository_id) && a.workflow_run.head_repository_id === a.workflow_run.repository_id;
+
 /** An artifact never changes once uploaded: a long-lived dispatcher (pendulum serve) reads each one once. */
 const usageCache = new Map();
 const USAGE_DOWNLOADS = 8;
@@ -1657,8 +1668,8 @@ const USAGE_DOWNLOADS = 8;
  * Pendulum or someone who can push, as `{usd, unknown, byBilling}` (logic.mjs spendOf and decisionSpendOf: the known
  * dollars, the runs of unknown cost, the dollars by billing; a decision call's are `api`, billed to the gateway key).
  * The comments read are those updated since the start of the day before, so a line written just after midnight still
- * counts on the day it names. Actions stages write no progress spend line, so nothing here is counted twice with the
- * artifacts.
+ * counts on the day it names. Every stage writes its spend line here and marks its usage artifact `spendInProgress`, so
+ * nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
   const since = new Date(Date.parse(`${dateIso}T00:00:00Z`) - 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -1692,7 +1703,7 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
   // Names and run ids go to `gh` as arguments: only Pendulum's own artifact names and numeric ids.
-  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && !a.expired && String(a.created_at || "").startsWith(dateIso));
+  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && ownRunArtifact(a) && !a.expired && String(a.created_at || "").startsWith(dateIso));
   // One download is about a second and a busy day has a hundred artifacts, so eight at a time. With a cloud sandbox
   // the dispatcher reads none of them (dispatch.mjs todaysSpend): each stage's dollars are in its spend line.
   const one = async (a) => {
@@ -1737,12 +1748,20 @@ export async function activeWorkIssues(repo, opts) {
 }
 
 /**
+ * The work job's last step, which ticks the dispatcher as the job ends (workflow-template.yml): its name as the
+ * workflow file gives it, the part every rendered workflow carries.
+ */
+const FINAL_TICK_STEP = /^Dispatch tick \(this worker finished\b/;
+
+/**
  * The Objectives with a live Pendulum job, by kind: `work (N)` and `review (pendulum/N)` jobs not yet completed, and the
  * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
- * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
+ * `finishing`: the live work jobs whose final tick step (FINAL_TICK_STEP) has started or ended, so the tick it fires may
+ * read the job before GitHub marks it completed. `strict` throws on a failed read instead of treating it as "none
+ * running" (a caller that must fail safe).
  */
 export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
-  const out = { work: new Set(), review: new Set(), wakes: [] };
+  const out = { work: new Set(), review: new Set(), wakes: [], finishing: new Set() };
   const read = (path) => rest(path, opts).catch((e) => {
     if (strict) throw e;
     return null;
@@ -1755,6 +1774,7 @@ export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
         if (j.status === "completed") continue;
         const w = /^work \((\d+)\)$/.exec(j.name || "");
         if (w) out.work.add(Number(w[1]));
+        if (w && (j.steps || []).some((st) => FINAL_TICK_STEP.test(String(st?.name ?? "")) && (st.status === "in_progress" || st.status === "completed"))) out.finishing.add(Number(w[1]));
         const r = /^review \(pendulum\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
         const wake = parseWake(j.name);

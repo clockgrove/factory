@@ -114,13 +114,16 @@ if (a[0] === "secret" && a[1] === "set") {
   fs.appendFileSync(${JSON.stringify(ghLog)}, JSON.stringify({ args: a, stdin }) + "\\n");
   process.exit(0);
 }
+if (a[0] === "variable" && a[1] === "set") { fs.appendFileSync(${JSON.stringify(ghLog)}.replace(/gh\\.jsonl$/, "vars.jsonl"), JSON.stringify({ args: a }) + "\\n"); process.exit(0); }
 process.exit(1);
 `,
     { mode: 0o755 },
   );
   writeFileSync(join(bin, "browser"), `#!/bin/sh\nprintf '%s\\n' "$1" >> ${JSON.stringify(opened)}\n`, { mode: 0o755 });
   const secrets = () => (existsSync(ghLog) ? readFileSync(ghLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { dir, bin, ghLog, opened, secrets };
+  const varLog = join(dir, "vars.jsonl");
+  const variables = () => (existsSync(varLog) ? readFileSync(varLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l).args) : []);
+  return { dir, bin, ghLog, opened, secrets, variables };
 }
 
 /** setup --apply app as a person runs it, with the stubs on PATH. */
@@ -252,11 +255,13 @@ test("setup --apply app: GitHub's redirect becomes the two secrets through gh's 
     ]);
     assert.equal(set[0].stdin, "123456");
     assert.equal(set[1].stdin, PEM, "the key reaches gh on its stdin, whole");
+    // The id beside the secret, as the repository variable `pendulum report` reads (#512).
+    assert.deepEqual(run.variables(), [["variable", "set", "PENDULUM_APP_ID", "--repo", "acme/widgets", "--body", "123456"]]);
     const out = run.output();
     assert.deepEqual(leaks(out), [], "no secret in setup's output");
     assert.ok(!out.includes("code1abcdefghij"), "nor the code");
     assert.equal(out.match(/refused a redirect/g).length, 1, "refusals close together are one line");
-    assert.match(out, /created the App pendulum-widgets \(id 123456\) for acme and saved PENDULUM_APP_ID and PENDULUM_APP_PRIVATE_KEY as repository secrets; .*\/apps\/pendulum-widgets\/installations\/new/);
+    assert.match(out, /created the App pendulum-widgets \(id 123456\) for acme and saved PENDULUM_APP_ID and PENDULUM_APP_PRIVATE_KEY as repository secrets and its id as the repository variable PENDULUM_APP_ID; .*\/apps\/pendulum-widgets\/installations\/new/);
     assert.deepEqual(filesWithKey(process.env.TMPDIR, run.ghLog), [], "the key is in no file but the stub gh's own log");
   } finally {
     run.child.kill();

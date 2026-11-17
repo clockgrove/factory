@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -926,6 +926,7 @@ export function clip(text, max = REASON_MAX) {
  */
 export const BLOCK_CAUSES = Object.freeze({
   "max-usd": Object.freeze({ external: true, what: "Pendulum's max_usd cap reached" }),
+  "max-objective-usd": Object.freeze({ external: true, what: "Pendulum's max_objective_usd cap reached: the Objective's known spend across its stages" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
   "provider-quota": Object.freeze({ external: true, what: "a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit included), GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan" }),
   outage: Object.freeze({ external: true, what: "a provider or GitHub outage Pendulum waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
@@ -2395,7 +2396,7 @@ export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
  */
 let WRITERS = { repo: null, logins: new Set(), maintainers: new Set(), unpinned: [] };
 // GitHub logins are unique ignoring case, so they are compared lowercased; a leading @ is dropped.
-const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
+export const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
 const loginSet = (logins) => new Set((logins || []).map(loginKey).filter(Boolean));
 export const setWriters = (repoFull, logins) => {
   WRITERS = { repo: repoFull, logins: loginSet(logins), maintainers: WRITERS.repo === repoFull ? WRITERS.maintainers : new Set(), unpinned: WRITERS.repo === repoFull ? WRITERS.unpinned : [] };
@@ -2462,13 +2463,22 @@ const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
  */
 export const pendulumReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
 
+// Any of Pendulum's marked comments: a marker of an Objective's at the start.
+const MARKED_AT_START = /^<!-- pendulum:\d+:/;
+/**
+ * Whether `reply` is a person's answer in a review thread: by someone who can push (trustedAuthor), and not one of
+ * Pendulum's marked comments (its answer, or the evidence the finding check posts before it resolves a thread,
+ * finding-check.mjs), which never answers a finding. A thread a person reopens after Pendulum resolved it is open again.
+ */
+export const personAnswer = (reply) => trustedAuthor(reply) && !MARKED_AT_START.test(String(reply?.body ?? ""));
+
 /**
  * Whether a person's `reply` answers the line comment that a named reviewer or code scanning (`rootLogin`) opened, the
  * same on every side (the answer pass's list, the threads Pendulum resolves, the merge pass): a reply by someone who can
  * push (trustedAuthor) that is not Pendulum's own answer (pendulumReply). Never on code scanning's comment: a person's
  * "looking into it" leaves a security finding to the answer pass, and never lets Pendulum resolve it.
  */
-export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !pendulumReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
+export const answersComment = (rootLogin, reply) => personAnswer(reply) && loginKey(rootLogin) !== CODE_SCANNING;
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Pendulum marker
@@ -2791,13 +2801,17 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
  * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
  * `workerKeyUsd`: the relayed key's share, already in `usd`. `usdByBilling`: the known dollars by what they are (usage.mjs
- * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed. `limitPaused`: the stage ended paused on its harness's
+ * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed.
+ * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by;
+ * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
  * the scorecard counts per account (#266).
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  const byPass = passRead(usage?.usdByPass);
+  const rerun = rerunRead(usage?.rerun);
+  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2825,7 +2839,9 @@ export function spendOf(body) {
  * The spend line's parts: `usd` (the known total the daily sum counts), for a sandbox stage `modelUsd` (the harness's)
  * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null when the vendor reported none), and
  * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none) and its known dollars by billing
- * (`usdByBilling`, usage.mjs BILLING; absent when the line names none). Null when the body has no spend line.
+ * (`usdByBilling`, usage.mjs BILLING; absent when the line names none) and by pass kind (`usdByPass`, usage.mjs passRead;
+ * absent when it names none), and what the stage ran again (`rerun`, usage.mjs rerunRead; `judgeOnly`, a review stage
+ * started only to judge answers already made). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2833,7 +2849,9 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r) };
+    const byPass = passRead(r?.usdByPass);
+    const rerun = rerunRead(r?.rerun);
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}) };
   } catch {
     return null;
   }
@@ -3482,7 +3500,9 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started;
  * - `third-party`: a review stage's wait for a third-party reviewer reaching its bound (third-party-review.mjs);
- * - `sibling-wait`: a hand-off to review waiting for a sibling on the same files reaching its bound (overlap.mjs).
+ * - `sibling-wait`: a hand-off to review waiting for a sibling on the same files reaching its bound (overlap.mjs);
+ * - `job-grace`: the end of a Running stint's grace on the runners (relaunch.mjs JOB_GRACE_MS) with no work job alive:
+ *   a job that never started, or ended with no tick of its own, is judged then.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
  * On the sandbox route the sweep and the image job arm wakes of their own, whose tick runs the sweep:
@@ -3490,16 +3510,16 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  *   the rest of a run that reached a cap), on every repository.
  * Every wake's tick is a `workflow_dispatch`, so it also ticks the dispatcher.
  */
-export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait"]);
+export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait", "job-grace"]);
 /** Every kind a wake job is named for and its tick carries (parseWake reads only these). */
 export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep"]);
 /**
  * The kinds a repository's dispatcher arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
- * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end,
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`, `job-grace`); a stage's lease end,
  * the UTC day's turn, which can keep a sleeper up for hours, and a third-party or sibling wait's bound, whose sleeper would bill the
  * minutes the wait frees, wait for an event or GitHub's cron backstop there. An unknown visibility counts as private.
  */
-export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
+export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry", "job-grace"]));
 /** The kinds the sweep and the image job arm: `sweep` only, minutes each, so on every repository. */
 export const SWEEP_WAKE_KINDS = Object.freeze(["sweep"]);
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */

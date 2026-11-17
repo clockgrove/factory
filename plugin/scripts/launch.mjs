@@ -616,7 +616,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       mkdirSync(dir, { recursive: true });
       // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
       // A stand-in for the stage's own record, keyed as its progress comment and on its account, so a scorer given both
-      // counts the stage once, from the comment (bench withLines).
+      // counts the stage once, from the comment (cost-join.mjs withLines).
       const progressRun = typeof record.progress === "string" && /^[A-Za-z0-9-]{1,100}$/.test(record.progress) ? record.progress : /^[0-9a-f]{12}$/.test(String(record.claim)) ? stageProgressKey(record.run, record.claim) : null;
       const account = stageAccountName(record.account);
       writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1, exit: "unknown", spendInProgress: true, ...(progressRun ? { progressRun } : {}), ...(account ? { account } : {}), standIn: true, basis: "unknown: the stage's usage did not come out of the sandbox" })}

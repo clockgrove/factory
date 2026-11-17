@@ -153,7 +153,8 @@ test("a work stage cancelled on Actions while its harness runs writes its own re
     progressRun: "4242",
     account: "alpha",
     runs: 0,
-    spendInProgress: undefined,
+    // Every route's stage writes a spend line (#527): daily_usd counts the stage from that line, never this record too.
+    spendInProgress: true,
   });
   assert.equal(record.reason, "the job was cancelled (SIGTERM)");
   // Written by the stage itself: no stand-in, which a scorer would set aside for the comment.
@@ -167,16 +168,16 @@ test("a work stage cancelled on Actions while its harness runs writes its own re
 test("the cancelled stage's record joins its stage once in the scorecard, beside its progress comment", async () => {
   const { record } = await cancelled();
   assert.ok(record, "the stage wrote no result.json");
-  // The stage's progress comment as an Actions stage leaves it: keyed by its run, with no spend line (the artifact's
-  // record carries its dollars).
+  // The stage's progress comment as the stopped stage leaves it: keyed by its run, with the spend line its stop's write
+  // set (session.mjs progressReporter), the pass it stopped as a run of unknown cost.
   const c = cleanMerge(7);
   const app = c.issueComments[0].user;
-  c.issueComments.push({ user: app, created_at: "2031-03-02T01:02:00Z", body: "<!-- pendulum:7:progress:work:4242 -->\nPendulum work run 4242: started 01:02Z, 3 min at the last line.\n- 01:02Z harness claude (claude-opus-5-5) attempt 1" });
+  c.issueComments.push({ user: app, created_at: "2031-03-02T01:02:00Z", body: '<!-- pendulum:7:progress:work:4242 -->\nPendulum work run 4242: started 01:02Z, 3 min at the last line.\n- 01:02Z harness claude (claude-opus-5-5) attempt 1\n<!-- pendulum:spend {"usd":0,"usdUnknown":1,"usdUnknownWhy":["unreported"]} -->' });
   c.usage = [{ ...record, artifact: "pendulum-usage-7/result.json", workflowRun: 4242 }];
   c.harness = "claude";
   const row = scoreObjective(c, { prices: loadPrices(), now: Date.parse("2031-04-01T00:00:00Z") });
   assert.equal(row.cost.parts.length, 1, JSON.stringify(row.cost.parts));
-  assert.equal(row.cost.parts[0].artifact, "pendulum-usage-7/result.json", "the stage's own record, not its comment");
+  assert.equal(row.cost.parts[0].artifact, "pendulum-usage-7/result.json", "the stage's own record, which names its comment, not the comment's line beside it");
   assert.deepEqual([row.cost.usd, row.cost.usdUnknown, row.cost.usdUnknownWhy], [null, 1, ["unreported"]]);
 });
 

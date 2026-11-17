@@ -49,8 +49,8 @@ function rateLimitModel() {
 /**
  * Both clocks faked (the client's retries, the network waits). A sleep is held until `release()` moves `now` past it, so
  * a test can send more requests while one waits. `fetch` is `answer(req)` with req {method, path, at}; every request is
- * in `seen`. Log lines are in `lines`. GET /rate_limit is answered by rateLimitModel, or by `count(auth)` ({body,
- * headers}) when given, and is not in `seen`; `counts` lists its reads.
+ * in `seen`. Log lines are in `lines`. GET /rate_limit is answered by rateLimitModel, or by `count(auth, advance)` ({body,
+ * headers}; `advance(ms)` moves the clock while the read is out) when given, and is not in `seen`; `counts` lists its reads.
  */
 async function faked(answer, fn, { token = false, count = null } = {}) {
   const saved = { fetch: globalThis.fetch, api: process.env.GITHUB_API_URL, graphqlUrl: process.env.GITHUB_GRAPHQL_URL, retry: { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random }, outage: { sleep: OUTAGE.sleep, now: OUTAGE.now, random: OUTAGE.random } };
@@ -79,7 +79,7 @@ async function faked(answer, fn, { token = false, count = null } = {}) {
     const auth = init.headers?.Authorization;
     if (u.pathname === "/rate_limit") {
       counts.push({ auth, at: t, signal: init.signal ?? null });
-      const c = (count ?? model.answer)(auth);
+      const c = (count ?? model.answer)(auth, (ms) => (t += ms));
       return json(c.body, 200, c.headers);
     }
     const req = { method: init.method || "GET", path: u.pathname, at: t, ...(token ? { token: auth } : {}) };
@@ -465,6 +465,31 @@ test("a clock ahead of GitHub's: the reset is read through the answer's Date, so
       waitOutages();
       const slept = await settle(rest("repos/o/r/issues/7", { token: "t" }), release);
       assert.deepEqual(slept, [5_000, 10_000, 20_000, 40_000].map((ms) => ms + 5_500));
+    },
+  );
+});
+
+test("#534: a count read that crosses a second puts the reset no earlier than GitHub's, read through the count's own Date", async () => {
+  // The refusal at 08:47:00.000; GitHub's count answers 1.2 s later, its Date (whole seconds) 08:47:01. Read through
+  // that Date against the time the refusal came, the reset would land a second before GitHub's.
+  const start = Date.parse("2026-11-14T08:47:00Z");
+  const reset = Math.ceil((start + 20 * 60_000) / 1000);
+  const core = quotaKey("https://api.github.test/repos", "t");
+  await faked(
+    (req, t) => json({ message: "API rate limit exceeded for user ID 1." }, 403, { ...spentHeaders(reset * 1000), date: new Date(t).toUTCString() }),
+    async ({ now }) => {
+      assert.equal(now(), start);
+      const e = await rest("repos/o/r/issues/7", { token: "t" }).then(() => null, (x) => x);
+      assert.equal(e?.code, RATE_LIMIT_SPENT, String(e));
+      assert.equal(now(), start + 1200, "the clock moved while the count was read");
+      assert.ok(e.resetAt >= reset * 1000 && e.resetAt < reset * 1000 + 1000, new Date(e.resetAt).toISOString());
+      assert.equal(spentUntil(core), e.resetAt);
+    },
+    {
+      count: (auth, advance) => {
+        const date = new Date(advance(1200)).toUTCString();
+        return { body: { resources: { core: { limit: 5000, remaining: 0, reset } } }, headers: { date } };
+      },
     },
   );
 });

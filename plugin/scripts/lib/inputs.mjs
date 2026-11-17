@@ -57,6 +57,7 @@ export const DEFAULTS = {
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
+  max_objective_usd: "", // empty or 0: no cap on an Objective's known spend across its stages (objective-cap.mjs capGate)
   timeout_minutes: "240",
   auto_merge: "true",
   notify: "",
@@ -236,6 +237,12 @@ const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("PENDUL
  * the VARIABLE_SETTINGS they set (an empty value sets nothing); `excluded`, the WORKFLOW_ONLY_SETTINGS names they set,
  * which are ignored; `unknown`, any other PENDULUM_* name, no setting. Names without the PENDULUM_ prefix are not Pendulum's.
  */
+/**
+ * The repository variable that records Pendulum's App id (`pendulum setup` writes it beside the PENDULUM_APP_ID secret):
+ * no setting, so no run reads it; `pendulum report` and doctor do (report.mjs, doctor.mjs appIdVariableCheck).
+ */
+export const APP_ID_VARIABLE = "PENDULUM_APP_ID";
+
 export function variableSettings(vars = {}) {
   const kept = {};
   const excluded = [];
@@ -243,7 +250,7 @@ export function variableSettings(vars = {}) {
   const invalid = [];
   for (const [k, v] of Object.entries(vars && typeof vars === "object" ? vars : {})) {
     const name = String(k).toUpperCase();
-    if (!name.startsWith("PENDULUM_")) continue;
+    if (!name.startsWith("PENDULUM_") || name === APP_ID_VARIABLE) continue;
     if (VARIABLE_SETTINGS.has(name)) {
       if (v === null || v === undefined || String(v) === "") continue;
       const why = valueProblem(name, String(v));
@@ -333,6 +340,7 @@ const VALUE_RULES = (() => {
     PENDULUM_COMPACTION_WINDOW: whole,
     PENDULUM_DAILY_USD: atLeast0,
     PENDULUM_MAX_USD: atLeast0,
+    PENDULUM_MAX_OBJECTIVE_USD: atLeast0,
     PENDULUM_IMAGE_DAILY_MINUTES: atLeast0,
     PENDULUM_IMAGE_MAX_AGE_DAYS: [(v) => /^\s*\d+\s*$/.test(v) && Number(v) >= 1 && Number(v) <= IMAGE_MAX_AGE_MAX, `a whole number of days, 1 to ${IMAGE_MAX_AGE_MAX}`],
     PENDULUM_SANDBOX_IDLE_DAYS: atLeast0,
@@ -483,6 +491,7 @@ export function applyVariables(env = process.env, { say = log } = {}) {
   }
   const workflow = {};
   for (const k of WORKFLOW_SETTINGS) if (env[k] !== undefined) workflow[k] = env[k];
+  APP_ID_VAR = vars && typeof vars === "object" && Object.hasOwn(vars, APP_ID_VARIABLE) ? String(vars[APP_ID_VARIABLE]) : null;
   const layers = settingLayers({ workflow, variables: vars });
   layers.workflowHarness = harnessName(workflow.PENDULUM_HARNESS);
   const ceiling = Number(workflow.PENDULUM_TIMEOUT_MINUTES || DEFAULTS.timeout_minutes);
@@ -531,7 +540,8 @@ export const FLAG_ALIASES = { dir: "checkout" };
 
 /**
  * A command line checked against its flags (`spec`: name → `bool`, which takes no value, or {value, number?}, which
- * takes one, a positive number where `number` is set), FLAG_ALIASES read as their names: {_: arguments, flag: value}.
+ * takes one, a positive number where `number` is set, every value given in a list where `many` is set), FLAG_ALIASES
+ * read as their names: {_: arguments, flag: value}.
  * Throws `fail(why)` for an unknown flag, a value given to a bool, or a missing or non-numeric value.
  */
 export function readFlags(argv, spec, fail) {
@@ -561,7 +571,8 @@ export function readFlags(argv, spec, fail) {
       const n = Number(value);
       if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${m[1]} needs a positive number, not ${JSON.stringify(value)}`);
       flags[key] = n;
-    } else flags[key] = value;
+    } else if (kind.many) (flags[key] ??= []).push(value);
+    else flags[key] = value;
   }
   return flags;
 }
@@ -647,6 +658,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     decisionRoute: ((v) => (["auto", "gateway", "off"].includes(v) ? v : "auto"))((get("decision_route") || "auto").trim().toLowerCase()),
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
+    // The Objective-wide dollar cap (objective-cap.mjs capGate): a number above 0, else none.
+    maxObjectiveUsd: ((n) => (n > 0 ? n : null))(num(String(get("max_objective_usd")).trim() || "x", 0)),
     timeoutMinutes: num(get("timeout_minutes"), 240),
     autoMerge: bool(get("auto_merge")),
     // The handle Blocked comments @mention; `login#id` pins it (below), and the mention uses the login.
@@ -908,10 +921,13 @@ export function eventAction(env = process.env) {
 }
 
 // On Actions, before any script reads a setting (applyVariables); what it laid over, for doctor's report.
+let APP_ID_VAR = null;
 let APPLIED = null;
 if (process.env.PENDULUM_INPUT_VARS !== undefined) APPLIED = applyVariables(process.env);
 /** On Actions, the layers applyVariables laid over this process's env when this module loaded; null without the input. */
 export const appliedLayers = () => APPLIED;
+/** On Actions, the PENDULUM_APP_ID repository variable's value as the `vars` input held it (APP_ID_VARIABLE), else null. */
+export const appIdVariable = () => APP_ID_VAR;
 /** A harness setting's value as Pendulum reads it: trimmed, lower case, claude when empty. */
 export function harnessName(v) {
   return String(v || "").trim().toLowerCase() || DEFAULTS.harness;

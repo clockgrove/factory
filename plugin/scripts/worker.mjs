@@ -31,6 +31,7 @@ import { routeInputs, stageMoves } from "./lib/accounts.mjs";
 import { routeLimits } from "./lib/route-holds.mjs";
 import { reviewHold, waitReason } from "./lib/overlap.mjs";
 import { accountGate, authorGate, choiceGate, planGate, startedAt } from "./lib/objective-trust.mjs";
+import { stageStart } from "./lib/objective-cap.mjs";
 import { ranWith } from "./lib/choice.mjs";
 import { agentUser, exec } from "./lib/proc.mjs";
 import { backend, spendInProgress } from "./lib/backend.mjs";
@@ -196,6 +197,12 @@ async function main() {
   // The stage's progress comment (its key names the usage record), set once the App's token is read.
   let progress = null;
   let reentry = null;
+  // What this stage runs again after a Block (#517): the Blocked notice it is the first stage after, read at its start
+  // (objective-cap.mjs rerunAfter), and whether the Objective's PR existed then. Its record (usage.mjs rerunRead) names
+  // the worker's prompt as run again when it ran in a fresh session over that PR; resumed or continued, nothing is.
+  let afterBlock = null;
+  let prBefore = false;
+  const rerunRecord = () => (afterBlock ? { afterBlock, repeated: prBefore && !reentry?.resumed && !reentry?.continued ? ["work"] : [] } : null);
   // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
   let chosenLabels = [];
   let access;
@@ -207,7 +214,7 @@ async function main() {
       usageDir,
       mask: [eventsFile, join(usageDir, CALL_LOG)],
       secrets: heldSecrets(),
-      fields: () => ({ progressRun: progress?.runId ?? stageProgressRun(), ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null, spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, passes, credentialBasis, billing: credentialBilling, reentry, workerKey: relay ? relay.totals() : null }),
+      fields: () => ({ progressRun: progress?.runId ?? stageProgressRun(), ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null, spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, passes, credentialBasis, billing: credentialBilling, reentry, rerun: rerunRecord(), workerKey: relay ? relay.totals() : null }),
       sessionOf: (recs) => ({ harness: inputs.harness, sessionId: recs.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(recs), checkout }),
     }),
   );
@@ -268,7 +275,7 @@ async function main() {
     await flushDecisionSpend(repo, token, { role: "worker" });
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, billing: credentialBilling, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, billing: credentialBilling, reentry, rerun: rerunRecord(), workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Pendulum's temp directory (its TMPDIR).
       dropOwned(tmp.pendulum);
@@ -278,7 +285,7 @@ async function main() {
     if (limits && exit === "blocked" && usage.limitRefused) await limits.spent(usage.limitRefused).catch((e) => log(`the account's guess could not be written (${String(e?.message || e).slice(0, 120)})`));
     // The provider's quota reading for the account, kept on the holds issue for automatic account choice (#391).
     if (limits && (usage.quota || servedSilent(usage))) await limits.reading(usage.quota ?? { harness: inputs.harness, silent: true }, { warmUntil: usage.cacheWarmUntil ?? null }).catch((e) => log(`the account's quota reading could not be written (${String(e?.message || e).slice(0, 120)})`));
-    // Local runs upload no usage artifact: the spend line in the progress comment is what the daily cap counts.
+    // Every stage, on every route, writes its spend line: what daily_usd, the finish card and max_objective_usd count.
     // Every stage records one, $0 when no harness ran (logic.mjs stageSpendLine).
     if (spendInProgress()) {
       const line = stageSpendLine(usage);
@@ -390,7 +397,7 @@ async function main() {
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
     if (rebaseStage) stoppedRebase(progress, rebaseStage.conflict, recs);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, billing: credentialBilling, reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records: recs, passes, exit: "stopped", reason: why, credentialBasis: credentialBasis, billing: credentialBilling, reentry, rerun: rerunRecord(), workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -473,6 +480,17 @@ async function main() {
     const block = doctorBlock(failed);
     await applyExit(repo, { issue, pr: null, exit: "blocked", ...block, notify: inputs.notify }, token);
     await finish("blocked", block.reason);
+    return;
+  }
+  // The stage's start read (lib/objective-cap.mjs stageStart): whether it is the first stage after a Block, and the
+  // Objective-wide dollar cap (max_objective_usd): its known spend at or past it, this stage starts nothing and the
+  // Objective Blocks naming the cap and the total.
+  const capped = await stageStart({ inputs, repo, issue, pr: prNow, opts: token, apply: applyExit, stage: "work", self: `work:${progress.runId}` });
+  afterBlock = capped.afterBlock;
+  prBefore = !!prNow;
+  if (!capped.ok) {
+    log(capped.reason);
+    await finish("blocked", capped.reason);
     return;
   }
 

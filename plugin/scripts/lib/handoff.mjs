@@ -223,9 +223,27 @@ export function parsePrText(text, issue) {
 /** The PR body's last lines, Pendulum's own: `Closes #N`, or `Refs #N` for a split part that leaves work for the next. */
 export const prFooter = (issue, splitPart) => `${splitPart ? "Refs" : "Closes"} #${issue}`;
 
+/** The most arguments, and characters in each, of the test a reply names (namedTest). */
+export const TEST_ARGS = Object.freeze({ count: 20, chars: 500, command: 2000 });
+
+/**
+ * The test a reply that says `fixed` names, as replies.json gives it: `{command, args}`, `command` the validation command
+ * that runs it as the task card lists it, `args` what that command is given to run only it. Null when there is none or it
+ * is not that shape (a string, a list of strings, each within TEST_ARGS and with no NUL).
+ */
+export function namedTest(test) {
+  if (!test || typeof test !== "object" || Array.isArray(test)) return null;
+  const { command, args = [] } = test;
+  const ok = (s, max) => typeof s === "string" && s.length <= max && !s.includes("\0");
+  if (!ok(command, TEST_ARGS.command) || !command.trim() || !Array.isArray(args) || args.length > TEST_ARGS.count || !args.every((a) => ok(a, TEST_ARGS.chars))) return null;
+  return { command: command.trim(), args: [...args] };
+}
+
 /**
  * replies.json as the replies Pendulum posts: one per comment id in `allowed`, the first for each id, bodies sanitised.
- * An id is a line comment's number, or the string id of a finding in a review body (logic.mjs bodyFindingId).
+ * An id is a line comment's number, or the string id of a finding in a review body (logic.mjs bodyFindingId). A reply
+ * with `"fixed": true` says the finding is fixed in the code, and carries the test it names (`test`, namedTest), if any,
+ * for the finding check (finding-check.mjs).
  */
 export function parseReplies(text, allowed) {
   let list;
@@ -242,7 +260,8 @@ export function parseReplies(text, allowed) {
     const id = ok.get(String(r?.id ?? ""));
     if (id === undefined || seen.has(id) || typeof r.body !== "string" || !r.body.trim()) continue;
     seen.add(id);
-    out.push({ id, body: sanitize(r.body.trim()) });
+    const test = r.fixed === true ? namedTest(r.test) : null;
+    out.push({ id, body: sanitize(r.body.trim()), ...(r.fixed === true ? { fixed: true } : {}), ...(test ? { test } : {}) });
   }
   return out;
 }

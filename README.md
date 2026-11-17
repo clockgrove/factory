@@ -221,6 +221,7 @@ Pendulum has no paid tier or hosted service, and no bill comes from Clockgrove. 
 | --- | --- | --- |
 | `max_usd` | $25 | Each worker or reviewer job. Every job gets its own limit, so one Objective with several PRs, re-reviews or restarts can spend several times this. |
 | `daily_usd` | $100 | Starting new work: once the UTC day's counted spend reaches it, no new worker job starts that day. Jobs already running, reviews and their answers go on, so a day can end above it. |
+| `max_objective_usd` | none | One Objective across all its jobs and PRs: once its counted spend reaches it, its next job starts nothing and the Objective is Blocked, naming the limit and the total. The job that crosses it finishes, and a restart starts the count over. |
 | `max_concurrent` | 3 | Objectives running at once. |
 | `timeout_minutes` | 240 | Each job's wall-clock time. |
 

@@ -150,7 +150,7 @@ export const INTERNAL_SKILLS = ["pendulum-objective-plan", "pendulum-implement-s
 /**
  * The skills a user sees, one verb each: write, refine and start an Objective (file), see where they stand and what a
  * Blocked one or a Question needs (status), stop, restart, run one here, serve the queue here, review a PR here, kick the
- * Action's dispatcher, apply a workflow hand-over, score, check the setup (doctor) and install (setup). Every other skill
+ * Action's dispatcher, apply a workflow hand-over, score, report cost and tokens, check the setup (doctor) and install (setup). Every other skill
  * is internal (INTERNAL_SKILLS); skillSet holds the plugin to exactly these.
  */
 export const USER_SKILLS = [
@@ -164,6 +164,7 @@ export const USER_SKILLS = [
   "pendulum-kick",
   "pendulum-handover",
   "pendulum-score",
+  "pendulum-report",
   "pendulum-doctor",
   "pendulum-setup",
 ];

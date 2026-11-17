@@ -261,6 +261,7 @@ test("a sealed session binds the whole usage record it resumes from: an altered 
   const record = JSON.parse(readFileSync(join(uploaded, "result.json"), "utf8"));
   assert.equal(record.session.id, THREAD);
   assert.deepEqual(record.session.files, [rel]);
+  assert.equal(typeof record.usd, "number");
   /** The uploaded artifact with its record changed by `change`, the sealed file untouched. */
   const altered = (change) => {
     const dir = mkdtempSync(join(tmpdir(), "altered-"));
@@ -274,11 +275,13 @@ test("a sealed session binds the whole usage record it resumes from: an altered 
   assert.match(readFileSync(join(same.home, "sessions", rel), "utf8"), new RegExp(READ));
   const reordered = altered((r) => Object.fromEntries(Object.entries(r).reverse().map(([k, v]) => [k, k === "session" ? Object.fromEntries(Object.entries(v).reverse()) : v])));
   assert.equal((await restore(key, "sealed", reordered)).id, THREAD, "the canonical form, not the bytes, is bound");
-  // A cost seed raised or lowered, or one put where there was none; the session's files listed otherwise, its checkout
-  // changed: each refuses the resume, saying why.
+  // A cost seed raised or lowered, or one put where there was none; the stage's own total changed; the session's files
+  // listed otherwise: each refuses the resume, saying why.
   const changes = {
     "a sessionTotal changed": (r) => ({ ...r, sessionTotal: { ...(r.sessionTotal ?? {}), usd: 0, tokens: { input: 0, output: 0 } } }),
     "a sessionTotal removed": (r) => ({ ...r, sessionTotal: r.sessionTotal ? undefined : { usd: 999 } }),
+    // The stage's own totals: a Copilot seed falls back to them when there is no sessionTotal (usage.mjs clampTotal).
+    "the record's top-level usd changed": (r) => ({ ...r, usd: r.usd + 1 }),
     "session.files listing another name": (r) => ({ ...r, session: { ...r.session, files: [rel.split("/").slice(0, 2).join("/")] } }),
     "session.files with a name added": (r) => ({ ...r, session: { ...r.session, files: [...r.session.files, "2026"] } }),
   };

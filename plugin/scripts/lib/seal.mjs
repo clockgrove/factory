@@ -6,8 +6,8 @@
 // (`publish_transcripts`) or the repository is private, they go into the artifact sealed: one gzipped tar of them,
 // encrypted with AES-256-GCM (Node's crypto) under a key derived with HKDF-SHA256 from the Pendulum App's private key
 // and the repository's name, its additional data naming the Objective and the stage and holding a hash of the usage
-// record's session (recordDigest: the session, its files and checkout, and its total, which seeds the resumed
-// session's cost), so a record altered beside an untouched sealed file refuses the resume. Every job that
+// record's session (recordDigest: the session, its files and checkout, its total, which seeds the resumed session's
+// cost, and the stage's totals that bound a Copilot seed), so a record altered beside an untouched sealed file refuses the resume. Every job that
 // uploads or resumes holds that key already (the work, review, launch and sweep jobs), and a cloud sandbox stage gets
 // the derived key alone (PENDULUM_SEAL_KEY), never the App's key. The usage record (`result.json`) stays readable: the
 // scorer and daily_usd read it, and it carries the stream's call and session counts (`sessions`) the scorer would
@@ -131,11 +131,16 @@ export function artifactRunProblem(run, { repoFull, workflowPath }) {
 /** A usage artifact's stage, by its name: `pendulum-usage-<n>-review` is the review stage's, any other the work stage's. */
 export const artifactStage = (name) => (/-review$/.test(String(name || "")) ? "review" : "work");
 
+/** What recordDigest binds of a usage record, by its top-level name. */
+const RECORD_BOUND = ["session", "sessionTotal", "usd", "tokens", "aiCredits", "premiumRequests"];
+
 /**
  * The SHA-256 (hex) of what a resume takes from a usage directory's record (`result.json`): its `session` (the id,
- * harness, files and checkout) and its `sessionTotal` (the resumed session's cost seed), in RFC 8785 canonical JSON, so
- * the same record hashes the same however it was written out. A missing or unreadable record hashes as both null; a
- * record no canonical form exists for (a lone surrogate) throws.
+ * harness, files and checkout), its `sessionTotal` (the resumed session's cost seed) and the stage's own totals a
+ * Copilot seed is bounded by when there is no sessionTotal (`usd`, `tokens`, `aiCredits`, `premiumRequests`; usage.mjs
+ * clampTotal), in RFC 8785 canonical JSON, so the same record hashes the same however it was written out. A field
+ * missing, or the whole record unreadable, hashes as null; a record no canonical form exists for (a lone surrogate)
+ * throws.
  */
 export function recordDigest(dir) {
   let rec = null;
@@ -145,7 +150,8 @@ export function recordDigest(dir) {
     rec = null;
   }
   const take = rec && typeof rec === "object" && !Array.isArray(rec) ? rec : {};
-  return createHash("sha256").update(canonicalize({ session: take.session ?? null, sessionTotal: take.sessionTotal ?? null })).digest("hex");
+  const bound = Object.fromEntries(RECORD_BOUND.map((k) => [k, take[k] ?? null]));
+  return createHash("sha256").update(canonicalize(bound)).digest("hex");
 }
 
 /** The additional data: MAGIC and what the sealed file is for (the Objective, the stage, the record's digest). */

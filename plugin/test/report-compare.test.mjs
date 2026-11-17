@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { harnessMarker, setSelf } from "../scripts/lib/logic.mjs";
+import { harnessMarker, ledgerMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
@@ -34,7 +34,7 @@ let nextId = 5000;
  * with no spend line, its dollars and per-pass ledger in the stage's usage artifact. `work` and each of `reviews` are
  * passes ([label, usd, minutes]); `kind` their billing; `wall` the minutes from its `pendulum:objective` label to the merge.
  */
-function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["work-1", 1, 10]], reviews = [], wall = 60, outcome = "merged", unknown = false }) {
+function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["work-1", 1, 10]], reviews = [], wall = 60, outcome = "merged", unknown = false, route = "actions" }) {
   const labels = ["pendulum:objective", ...arms, ...(outcome === "blocked" ? ["pendulum:blocked"] : [])];
   w.issues.push({ number: n, title: `Objective ${n}`, state: outcome === "blocked" ? "open" : "closed", labels: labels.map((name) => ({ name })), created_at: at(-30), user: ME });
   w.timelines[n] = [{ event: "labeled", label: { name: "pendulum:objective" }, actor: ME, created_at: at(0) }, ...arms.map((name) => ({ event: "labeled", label: { name }, actor: labeller, created_at: at(1) }))];
@@ -42,8 +42,8 @@ function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["wor
   let run = n * 100;
   const stage = (stageName, passes) => {
     run += 1;
-    const key = String(run);
-    w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: at(clock), updated_at: at(clock), body: [`<!-- pendulum:${n}:progress:${stageName}:${key} -->`, `Pendulum ${stageName}: started.`, harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] })].join("\n") });
+    const key = route === "comment" ? `local-${run}` : String(run);
+    const opened = clock;
     const ledger = passes.map(([label, usd, minutes]) => {
       const e = { label, model: "claude-opus-5-5", effort: "medium", started: at(clock), ended: at(clock + minutes), usd: unknown ? null : usd, usdUnknown: unknown ? 1 : 0, usdUnknownWhy: unknown ? ["unreported"] : [], billing: kind, usdByBilling: unknown ? {} : { [kind]: usd }, tokens: { input: 10, output: 1, cached: 0, written: 0 } };
       clock += minutes;
@@ -51,6 +51,14 @@ function objective(w, n, { arms = [], labeller = ME, kind = "api", work = [["wor
     });
     const usd = Math.round(passes.reduce((s, p) => s + p[1], 0) * 1e6) / 1e6;
     const record = { harness: "claude", model: "claude-opus-5-5", usd: unknown ? null : usd, usdUnknown: unknown ? 1 : 0, usdUnknownWhy: unknown ? ["unreported"] : [], usdByBilling: unknown ? {} : { [kind]: usd }, billing: kind, runs: 1, exit: "delivered", progressRun: key, tokens: { input: 10, output: 1, cached: 0, written: 0 }, ledger, ran: { pendulum: PENDULUM_VERSION } };
+    const head = [`<!-- pendulum:${n}:progress:${stageName}:${key} -->`, `Pendulum ${stageName}: started.`, harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] })];
+    // route "comment": a local stage by Pendulum's own login, its spend line and per-pass ledger line in its progress
+    // comment (#543) and no artifact; else an Actions stage of the App's, its dollars and ledger in its usage artifact.
+    if (route === "comment") {
+      w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: ME, author_association: "OWNER", created_at: at(opened), updated_at: at(opened), body: [...head, spendMarker(record.usd ?? 0, unknown ? { usdUnknown: 1, usdUnknownWhy: ["unreported"] } : { usdByBilling: { [kind]: usd }, billing: kind }), ledgerMarker(ledger, { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] })].join("\n") });
+      return;
+    }
+    w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: at(opened), updated_at: at(opened), body: head.join("\n") });
     const name = `pendulum-usage-${n}${stageName === "review" ? "-review" : ""}`;
     (w.artifacts[name] ||= []).push({ id: run, name, expired: false, created_at: at(clock), workflow_run: { id: run, repository_id: 1, head_repository_id: 1 }, record });
   };
@@ -353,4 +361,26 @@ test("report --compare: with no billing kind holding dollars, one dollar row sti
   objective(w, 41, { arms: [SLOW], work: [["work-1", 0, 5]], wall: 20 });
   const { json: r } = await report(w, ["--compare", "fast,slow", "--json"]);
   assert.match(renderReport(r), /\| \$ per merged Objective \(no kind has dollars\) \| none \(1 left out\) \| \$0\.00 \(\$0\.00\.\.\$0\.00, n=1\) \|/);
+});
+
+test("report --compare: a per-pass ledger read from the progress comment counts for the model minutes and fix passes; an unattributed stage still leaves its Objective out", async () => {
+  // Arm fast on local stages whose ledger rides on the progress comment (#543); arm slow on Actions, as before.
+  const w = { issues: [], comments: [], pulls: [], artifacts: {}, timelines: {}, permissions: { [ME.login]: "admin" } };
+  objective(w, 51, { arms: [FAST], route: "comment", work: [["work-1", 1, 10]], wall: 60 });
+  objective(w, 52, { arms: [FAST], route: "comment", work: [["work-1", 1.5, 15], ["validation-fix-1", 0.5, 5]], reviews: [[["review", 0.5, 5]]], wall: 90 });
+  objective(w, 53, { arms: [FAST], route: "comment", work: [["work-1", 4, 30]], reviews: [[["review", 0, 1]], [["review", 0, 1]]], wall: 180 });
+  objective(w, 61, { arms: [SLOW], work: [["work-1", 2, 30]], wall: 120 });
+  const { json: r, calls } = await report(w, ["--compare", "fast,slow", "--json"]);
+  assert.ok(!calls.some((c) => /name=pendulum-usage-5\d/.test(c)), "no artifact read for a stage whose comment holds its ledger");
+  const [fast] = r.comparison.arms;
+  assert.deepEqual(fast.usdPerMerged.api, { median: 2.5, p25: 1.75, p75: 3.25, n: 3, leftOut: 0 });
+  assert.deepEqual(fast.modelMinutes, { median: 25, p25: 17.5, p75: 28.5, n: 3, leftOut: 0 });
+  assert.deepEqual(fast.fixPasses, { median: 0, p25: 0, p75: 0.5, n: 3, leftOut: 0 });
+  // A teammate who can push pastes a stage on #51: no ledger of it is read, so #51 leaves the minutes and fix passes.
+  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(51), user: { login: "teammate", type: "User" }, author_association: "MEMBER", created_at: at(40), updated_at: at(40), body: [`<!-- pendulum:51:progress:work:local-9951 -->`, "Pendulum work: started.", harnessMarker("claude", "claude-opus-5-5", { worker: "claude-opus-5-5", subagent: null, reviewer: null, labels: [] }), spendMarker(9, { usdByBilling: { api: 9 }, billing: "api" }), ledgerMarker([{ label: "validation-fix-1", model: "claude-opus-5-5", started: at(40), ended: at(140), usd: 9, billing: "api", usdByBilling: { api: 9 }, tokens: {} }], { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] })].join("\n") });
+  const { json: s } = await report(w, ["--compare", "fast,slow", "--json"]);
+  const [after] = s.comparison.arms;
+  assert.deepEqual(after.modelMinutes, { median: 28.5, p25: 26.75, p75: 30.25, n: 2, leftOut: 1 });
+  assert.deepEqual(after.fixPasses, { median: 0.5, p25: 0.25, p75: 0.75, n: 2, leftOut: 1 });
+  assert.deepEqual(after.objectives.find((o) => o.issue === 51), { issue: 51, outcome: "merged", usd: { api: 1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 1, modelMinutes: null, wallMinutes: 60, reviewRounds: 0, fixPasses: null });
 });

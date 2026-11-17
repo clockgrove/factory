@@ -22,7 +22,7 @@ The Pendulum terms used across the README, this page and [LOCAL.md](LOCAL.md):
 
 ## Write an Objective
 
-An Objective is a GitHub issue with the `pendulum:objective` label. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Pendulum Objective: ...", the pendulum-file skill), which starts it or saves it as a draft to refine and start later (An Objective's lifecycle, below), or write the issue yourself:
+An Objective is a GitHub issue with the `pendulum:objective` label: a feature or an epic, which the worker plans, splits across implementer sub-agents and delivers as one or more pull requests. A quick fix is better as a direct pull request. The issue is the whole specification: write everything the work needs into it. The worker asks you something only when the work depends on a decision that should be yours (a Question, below). Ask a session to file one for you ("File a Pendulum Objective: ...", the pendulum-file skill), which starts it or saves it as a draft to refine and start later (An Objective's lifecycle, below), or write the issue yourself:
 
 - **State the goal and what must be true when it is done.** Put the acceptance entries in a list under a heading that is exactly `Acceptance` (any level; lists under its sub-headings count too, so out-of-scope notes go in another section). The reviewer judges each entry, met or not, with the line that shows it. Without that heading, the reviewer names the entries from the issue text itself.
 - **Order it after another Objective** by adding a GitHub issue dependency (blocked by) before the issue carries `pendulum:objective`, which starts it at once: the dispatcher then starts it once that issue is closed. A `Blocked by #N` line in the body is read only where GitHub's issue dependencies are unavailable.
@@ -34,12 +34,18 @@ An Objective is a GitHub issue with the `pendulum:objective` label. The issue is
 ```markdown
 ## Goal
 
-`mytool --version` prints the version.
+`mytool list` can print its records as JSON, so scripts can use them without parsing the table.
 
 ## Acceptance
 
-- `mytool --version` prints the version from package.json and exits 0.
-- A test covers it.
+- `mytool list --format json` prints a JSON array with one object per record, holding the fields the table shows, and exits 0.
+- `mytool list` and `mytool list --format table` print the table as before.
+- An unknown format exits 2 with an error that names the accepted values.
+- Tests cover each case, and the README documents the option.
+
+## Context
+
+- No new dependencies.
 ```
 
 Ready Objectives start in priority order (`P0` to `P2`, then the lowest issue number), up to `max_concurrent` at once; one started by hand with `gh workflow run pendulum.yml -f issue=<number>` runs even when that limit is reached. An Objective too large for one session is delivered as up to six pull requests in sequence, one open at a time.

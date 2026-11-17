@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parse } from "../vendor/yaml/browser/index.js";
-import { grantsWrite, parseYaml, workflowEvents } from "../scripts/lib/yaml.mjs";
+import { parseYaml, workflowEvents, writeGrants } from "../scripts/lib/yaml.mjs";
 
 test("workflow YAML: events and permissions read from the parsed file; anything doctor cannot read for sure throws", () => {
   const doc = parseYaml(`name: CI
@@ -26,13 +26,13 @@ jobs:
           npm test # not a comment inside a block scalar
 `);
   assert.deepEqual(workflowEvents(doc), ["pull_request", "merge_group"]);
-  assert.equal(grantsWrite(doc.permissions), true);
-  assert.equal(grantsWrite(doc.jobs.test.permissions), true);
+  assert.deepEqual(writeGrants(doc.permissions), ["pull-requests: write"]);
+  assert.deepEqual(writeGrants(doc.jobs.test.permissions), ["issues: write"]);
   assert.equal(doc.jobs.test.steps[1].run, "npm ci\nnpm test # not a comment inside a block scalar\n");
   assert.deepEqual(workflowEvents(parseYaml("on: [push, pull_request]")), ["push", "pull_request"]);
-  assert.equal(grantsWrite(parseYaml("permissions: read-all").permissions), false);
-  assert.equal(grantsWrite(parseYaml("permissions: write-all").permissions), true);
-  assert.equal(grantsWrite(undefined), null, "unset: the repository default applies");
+  assert.deepEqual(writeGrants(parseYaml("permissions: read-all").permissions), []);
+  assert.deepEqual(writeGrants(parseYaml("permissions: write-all").permissions), ["write-all"]);
+  assert.equal(writeGrants(undefined), null, "unset: the repository default applies");
   assert.deepEqual(workflowEvents(parseYaml("on:\n- pull_request\n- merge_group\npermissions:\n  contents: read")), ["pull_request", "merge_group"], "a list at its key's indent");
   assert.deepEqual(parseYaml("steps:\n- uses: a\n  with:\n  - x\n- run: b").steps, [{ uses: "a", with: ["x"] }, { run: "b" }]);
   for (const bad of ["permissions: read-all\njobs: {}\npermissions: write-all", "permissions:\n  contents: read\n  contents: write", "permissions: {contents: read, contents: write}", 'on: push\n"on": pull_request', "permissions: !!map {}", "permissions: !custom write-all", "a: 1\n---\nb: 2", "<<: {a: 1}", "base: &b {contents: write}\npermissions:\n  <<: *b", "a: [1, 2", "permissions: !!str write-all", "t: &t !!str write\npermissions:\n  contents: *t", "permissions: {!!str contents: write}", "permissions: ! write-all", "%YAML 1.1\n---\nb: &b {contents: write}\npermissions:\n  <<: *b", "b: &b {contents: write}\npermissions:\n  !!merge \"<<\": *b", "b: &b {contents: write}\npermissions:\n  \"<<\": *b", "x: &k permissions\npermissions: read-all\n*k : write-all", "true: a\n\"true\": b", "jobs:\n  1: {}\n  \"1\": {}", "[contents]: write", "? {a: 1}\n: b", "a: *nowhere", "on: pull_request\nenv: &a {A: &a write-all}\npermissions: *a", "p: &p read\npermissions: &p {contents: *p}", "a: &x 1\nb: &x 2", "a: &a [x, x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a, *a]\nc: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b, *b]\nd: &d [*c, *c, *c, *c, *c, *c, *c, *c, *c, *c]\ne: [*d, *d, *d, *d, *d, *d, *d, *d, *d, *d]"]) {
@@ -40,11 +40,28 @@ jobs:
   }
 });
 
+test("#556: writeGrants reads a permissions block exactly: every scope at write, write-all and any value that is no read-only level is a grant, named; read, none, read-all and {} grant nothing", () => {
+  const scopes = ["id-token", "packages", "checks", "statuses", "deployments", "security-events", "pages", "attestations", "discussions", "repository-projects", "a-scope-github-adds-later"];
+  for (const scope of scopes) {
+    assert.deepEqual(writeGrants(parseYaml(`permissions:\n  contents: read\n  ${scope}: write\n`).permissions), [`${scope}: write`], scope);
+  }
+  assert.deepEqual(writeGrants(parseYaml(`permissions: {${scopes.map((s) => `${s}: write`).join(", ")}}`).permissions), scopes.map((s) => `${s}: write`), "every grant named");
+  assert.deepEqual(writeGrants(parseYaml("jobs:\n  t:\n    permissions: write-all\n").jobs.t.permissions), ["write-all"], "a job's write-all");
+  // Not a permission level: GitHub would refuse the file, so none of these is read as read-only.
+  assert.deepEqual(writeGrants(parseYaml("permissions:\n  contents: Write\n  issues: admin\n  pages:\n  checks: [read]\n").permissions), ["contents: Write", "issues: admin", "pages: null", 'checks: ["read"]']);
+  assert.deepEqual(writeGrants(parseYaml("permissions: read").permissions), ["read"], "read is a scope's level, not the whole block's");
+  assert.deepEqual(writeGrants(parseYaml('permissions: ""').permissions), ['""']);
+  // Read-only: each scope read or none, read-all, or {}.
+  assert.deepEqual(writeGrants(parseYaml(`permissions:\n${scopes.map((s, i) => `  ${s}: ${i % 2 ? "read" : "none"}\n`).join("")}`).permissions), []);
+  assert.deepEqual(writeGrants(parseYaml("permissions: {}").permissions), []);
+  assert.deepEqual(writeGrants(parseYaml("permissions: read-all").permissions), []);
+});
+
 test("workflow YAML: what GitHub Actions reads, read the same way (anchors, folded and indented block text, quoted text over several lines); plain values stay text", () => {
   // Anchors and aliases: GitHub Actions has read them since 2025-09-18.
   const anchored = parseYaml("on: push\nbase: &perms\n  contents: write\njobs:\n  a:\n    permissions: *perms\n");
   assert.deepEqual(anchored.jobs.a.permissions, { contents: "write" });
-  assert.equal(grantsWrite(anchored.jobs.a.permissions), true);
+  assert.deepEqual(writeGrants(anchored.jobs.a.permissions), ["contents: write"]);
   // A folded condition joins its lines with spaces, as GitHub evaluates it.
   assert.equal(parseYaml("if: >\n  github.event.action == 'closed' ||\n  github.event_name == 'push'\n").if, "github.event.action == 'closed' || github.event_name == 'push'\n");
   // A literal block keeps the extra indentation of its deeper lines.

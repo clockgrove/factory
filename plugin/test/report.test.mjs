@@ -5,9 +5,9 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessMarker, rebaseCostMarker, setSelf, spendMarker, stageSpendLine } from "../scripts/lib/logic.mjs";
+import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessMarker, ledgerMarker, ledgerOfComment, rebaseCostMarker, setSelf, spendMarker, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
-import { writeUsage } from "../scripts/lib/session.mjs";
+import { progressTail, writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
 import { BILLING_WORDS } from "../scripts/lib/usage.mjs";
 import { REPORT_SCHEMA, STOPPED_EXIT, buildReport, outcomeOf, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
@@ -894,4 +894,12 @@ test("report (#546): a period reads only the records written before its end; a l
   const big = progress(11, "review", "local-f4", { user: ME, at: "2026-11-17T10:00:00Z", model: "claude-fable-5-2", spend: { usd: 0.2, parts: { usdByBilling: { api: 0.2 }, billing: "api" } }, findings: { pr: 110, reviews: [1101], items: many } });
   const { json: wide } = await report({ ...reviewed(), comments: [big] }, { issue: 11 });
   assert.deepEqual(wide.findings.totals, { findings: kept.items.length, outcomes: outcomes({ "not-fixed": kept.items.length }), reviewStages: 1, cost: api(0.2), unnamed: kept.more });
+});
+
+test("report (#546, #543): a review stage's progress comment carries its ledger line and its findings line, each read back", () => {
+  const ledger = ledgerMarker([{ label: "review", model: "claude-fable-5-2", usd: 0.2, usdByBilling: { api: 0.2 }, billing: "api", tokens: { input: 10, output: 2, cached: 0, written: 0 }, started: "2026-11-17T06:00:00Z", ended: "2026-11-17T06:01:00Z" }], { model: "claude-fable-5-2" });
+  const findings = { pr: 110, reviews: [1101], items: [{ id: 1, outcome: "fixed-test", review: 1101 }] };
+  const tail = progressTail({ harness: "claude", model: "claude-fable-5-2", spend: 0.2, spendParts: { usdByBilling: { api: 0.2 }, billing: "api" }, ledger, findings });
+  assert.equal(ledgerOfComment(tail).ledger.length, 1);
+  assert.deepEqual(findingsOf(tail), { ...findings, more: 0 });
 });

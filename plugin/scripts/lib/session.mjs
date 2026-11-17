@@ -83,7 +83,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -924,6 +924,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let triage = null;
   let asked = null;
   let rebase = null;
+  // What the stage's dollars are (usage.mjs BILLING), from its credential once read (progress.billing).
+  let billing = null;
   // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
   let ran = null;
   let lastWrite = 0;
@@ -938,7 +940,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const clock = (t) => `${new Date(t).toISOString().slice(11, 16)}Z`;
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
-  const interimOf = (live) => ({ spend: live.usd, spendParts: live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : null });
+  // The dollars by billing: the passes' at the credential's, the relayed key's (`keyUsd`) as billed API spend.
+  const interimOf = (live) => {
+    const byBilling = addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
+    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}) };
+    return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
+  };
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
@@ -1008,6 +1015,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
    */
   /** The comment's key (its run id), which the stage's usage record names too (writeUsage `progressRun`). */
   progress.runId = runId;
+  /** The stage credential's billing (usage.mjs BILLING, credentialEnv's), which the spend line names from the next write. */
+  progress.billing = (kind) => {
+    billing = Object.hasOwn(BILLING, kind ?? "") ? kind : null;
+  };
+  /** That billing, for the status line's dollars (liveActivity). */
+  progress.billingOf = () => billing;
   progress.ran = (r) => {
     ran = r;
     harness = r.harness;
@@ -1106,11 +1119,11 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     tracker.feed(line);
     // The drift advisory's watcher (drift.mjs), when on: its own checkpoint clock, never in the run's way.
     drift?.feed(line);
-    progress?.live(activityLine(tracker.snapshot(), { harness, model }));
+    progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }));
     // The hand-off's own throttle (at most every two minutes): the plan comment follows plan.md while the harness works.
     tick?.();
   };
-  progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
+  progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true });
   return {
     onLine,
     onResume: tracker.since,
@@ -1118,7 +1131,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
     // The drift check in flight lands first, so its decision record is in the stage's usage before it is written.
     finish: async () => {
       await drift?.stop();
-      progress?.live(activityLine(tracker.snapshot(), { harness, model }), { force: true });
+      progress?.live(activityLine(tracker.snapshot(), { harness, model, billing: progress?.billingOf?.() ?? null }), { force: true });
     },
   };
 }
@@ -1974,7 +1987,7 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2032,6 +2045,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
+    // What the known dollars are (usage.mjs BILLING, from the credential `billing` that ran the passes, credentialEnv's):
+    // billed API spend, a subscription's API-equivalent figure or Copilot's included credits, each part's dollars.
+    usdByBilling: usdByBilling(records || [], billing, { extraKeyUsd: kb.extra }),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

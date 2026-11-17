@@ -26,7 +26,7 @@
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
-import { UNKNOWN_WHY, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { UNKNOWN_WHY, addBilling, billingRead, billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
@@ -730,6 +730,9 @@ export function accountUse(usage) {
     const a = by.get(r.account) ?? { account: r.account, stages: 0, usd: null, limitPauses: 0 };
     a.stages += 1;
     if (typeof r.usd === "number" && Number.isFinite(r.usd)) a.usd = Math.round(((a.usd ?? 0) + r.usd) * 1e4) / 1e4;
+    // What its dollars are (plugin usage.mjs BILLING), when the records name it.
+    const billed = addBilling(a.usdByBilling, r.usdByBilling);
+    if (Object.keys(billed).length) a.usdByBilling = billed;
     if (r.limitPaused === true || ((r.exit === "paused" || r.exit === "waiting") && r.usageLimit && typeof r.usageLimit === "object")) a.limitPauses += 1;
     by.set(r.account, a);
   }
@@ -749,7 +752,7 @@ export const withLines = (records = [], lines = []) => {
 };
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20, 1 limit pause)". */
-const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${u.usd === null ? "unknown" : `$${u.usd.toFixed(2)}`}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
+const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${u.usd === null ? "unknown" : `$${u.usd.toFixed(2)}${billingText(u.usd, u.usdByBilling)}`}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
 
 /** The scorecard's Harness cell: the harness, the worker model, the sub-agent and reviewer models, the local accounts (each with its share, accountUse), and the labels that chose them. */
 export function harnessCell(r) {
@@ -821,7 +824,7 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
     const modelUnknown = own && lineUnknown.usdUnknown && sandbox?.usd === null ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
+    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
   }
   // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
   if (!all && !out.some((r) => r.usd !== null || r.vendor)) return [];
@@ -833,7 +836,7 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
  * The Objective's send-back rebases (#277): `sentBack`, Pendulum's send-back notices on its PRs (each names the head it
  * saw, `<!-- pendulum:<n>:rebase:<sha> -->`), and from its own work stages' rebase lines (plugin logic.mjs
  * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their known dollars with their
- * sandboxes', also in the row's cost), `unknown` (the runs of unknown cost in them) and `conflicts` (the ones a harness
+ * sandboxes', also in the row's cost), `unknown` (the runs of unknown cost in them), `byBilling` (their known dollars by billing, when the lines name it) and `conflicts` (the ones a harness
  * resolved). A stage from before the rebase line is in `sentBack` only.
  */
 export function rebasesOf(collected, { app = null } = {}) {
@@ -846,7 +849,7 @@ export function rebasesOf(collected, { app = null } = {}) {
   const notice = `<!-- pendulum:${n}:rebase:`;
   let sentBack = 0;
   for (const pr of branchPulls(collected)) sentBack += (collected.pullDetails?.[pr.number]?.comments || []).filter((c) => mine(c) && (c.body || "").startsWith(notice)).length;
-  return { sentBack, stages: tally.count, usd: tally.usd, unknown: tally.unknown, conflicts: tally.conflicts };
+  return { sentBack, stages: tally.count, usd: tally.usd, unknown: tally.unknown, conflicts: tally.conflicts, ...(tally.byBilling ? { byBilling: tally.byBilling } : {}) };
 }
 
 /**
@@ -1105,7 +1108,7 @@ const cell = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|")
  * The Rebases cell: the send-backs, and the rebase stages' known dollars when any recorded them ("3, $4.10"), with
  * their runs of unknown cost ("3, $4.10 plus 1 run of unknown cost"); "?" for an old row.
  */
-export const rebaseCell = (r) => (!r ? "?" : `${r.sentBack}${r.stages ? `, ${spendText({ usd: r.usd, unknown: r.unknown ?? 0 })}` : ""}`);
+export const rebaseCell = (r) => (!r ? "?" : `${r.sentBack}${r.stages ? `, ${spendText({ usd: r.usd, unknown: r.unknown ?? 0, byBilling: r.byBilling })}` : ""}`);
 
 /** The Markdown table: one row per Objective, oldest issue first. */
 /** An External row's stops, by cause: "Blocked: max-usd, provider-quota". */
@@ -1118,7 +1121,8 @@ export function markdownTable(rows) {
     const walk = r.walkAway.value ? (r.ownerStep ? "yes, owner step: workflow hand-over" : "yes") : r.walkAway.bucket === "external" ? `external: ${externalWhy(r)}` : `no: ${r.walkAway.reason}`;
     const q = r.quality.read && r.quality.read !== "unread" ? `read: ${r.quality.read}` : r.quality.status === "pending" ? (r.quality.baseline ? "pending (judge)" : "pending") : r.quality.status;
     // The known dollars, and the runs of unknown cost beside them: never a figure for what was not reported.
-    const known = r.cost.usd === null && r.cost.usdUnknown ? spendText({ usd: null, unknown: r.cost.usdUnknown }) : `${fmtUsd(r.cost.usd)}${unknownText(r.cost.usdUnknown)}`;
+    // What the dollars are (plugin usage.mjs BILLING): billed API spend bare, an API-equivalent figure said, each part of a mix.
+    const known = r.cost.usd === null && r.cost.usdUnknown ? spendText({ usd: null, unknown: r.cost.usdUnknown }) : `${fmtUsd(r.cost.usd)}${r.cost.usd === null ? "" : billingText(r.cost.usd, r.cost.usdByBilling)}${unknownText(r.cost.usdUnknown)}`;
     const model = r.cost.usd !== null && r.cost.tokens.input !== null ? `${known} (${fmtTokens(r.cost.tokens)})` : known;
     // The spend through a relayed gateway key (#97) is in the dollars: named beside them.
     const keyNote = r.cost.workerKeyUsd > 0 ? ` incl. ${fmtUsd(r.cost.workerKeyUsd)} worker key` : "";

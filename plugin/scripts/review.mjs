@@ -787,6 +787,8 @@ async function main() {
   let cred = { env: {} };
   // The edit check's own credential read (readyDecisionEnv in worker.mjs; here the edit check's), masked like `cred` in everything the stage saves.
   let decisionCred = {};
+  // What the stage's dollars are (usage.mjs BILLING), from its credential (credentialEnv): null until one is read.
+  let credentialBilling = null;
   // The worker secrets' values, once the fix and answer passes have them: masked in the saved stream and transcript.
   let shellSecretValues = [];
   // The gateway relay for the fix and answer passes (lib/worker-relay.mjs), closed and booked when the stage ends.
@@ -825,7 +827,7 @@ async function main() {
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
     let usage;
     try {
-      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
+      usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records, passes, exit, reason, outage, usageLimit, reentry, workerKey, credentialBasis: "see worker", billing: credentialBilling, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: session.id, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
     } finally {
       // Only now, and whatever happened: the transcript's archive above is made in Pendulum's temp directory (its TMPDIR).
       dropOwned(tmp.pendulum);
@@ -950,7 +952,7 @@ async function main() {
     const secrets = [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey];
     maskFile(eventsFile, secrets);
     maskFile(join(usageDir, CALL_LOG), secrets);
-    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", reentry, workerKey: relay ? relay.totals() : null });
+    if (!existsSync(join(usageDir, "result.json"))) writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.reviewerModel, records: recs, passes, exit: "stopped", reason: why, credentialBasis: "see worker", billing: credentialBilling, reentry, workerKey: relay ? relay.totals() : null });
     progress.flushNow();
   };
   const stopNow = async (cause) => {
@@ -1040,7 +1042,10 @@ async function main() {
       // A read of its own, never the passes': federate() returns a key with no expiry, so the passes read theirs as they
       // start (below), never one minted before setup and install.
       if (!decisionEnv) {
-        decisionCred = (await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs })).env;
+        const early = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs });
+        decisionCred = early.env;
+        credentialBilling ??= early.billing;
+        progress.billing(credentialBilling);
         for (const v of Object.values(decisionCred)) mask(v);
         decisionEnv = { ...scrubbedEnv(process.env, { CI: "true", TMPDIR: access.agent ? access.agent.tmp : tmp.agent }), ...decisionCred };
       }
@@ -1171,6 +1176,8 @@ async function main() {
   // Codex through the AI Gateway: the stint's session id, the one the worker's passes sent (harness.mjs gatewaySession).
   const gatewayId = inputs.harness === "codex" && inputs.codexGatewayKey ? gatewaySession({ repo: repo.full, issue, since: await runningSince(repo, issue, token).catch(() => null) }) : null;
   cred = await credentialEnv({ harness: inputs.harness, credential: inputs.credential, inputs, session: gatewayId });
+  credentialBilling = cred.billing;
+  progress.billing(credentialBilling);
   // $PENDULUM_IN and $PENDULUM_OUT: fresh for this stage; the harness writes nothing to GitHub (lib/handoff.mjs).
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   io.set({ decisions, prNumber: pr.number });

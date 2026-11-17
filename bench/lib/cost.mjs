@@ -13,14 +13,16 @@
 //
 // A count a harness does not report is null, never zero. Dollars are real or unknown (plugin usage.mjs UNKNOWN_WHY):
 // `usd` sums the known dollars and `usdUnknown` counts the runs of unknown cost, shown as "plus N runs of unknown
-// cost", never as $0, an estimate or a bound.
+// cost", never as $0, an estimate or a bound. What the known dollars are (billed API spend, a subscription's
+// API-equivalent figure, Copilot's included credits: plugin usage.mjs BILLING) comes from each record's `usdByBilling`,
+// which the worker writes from its credential; the row keeps it as `usdByBilling` and its basis says it.
 //
 // A stage that ran in a cloud sandbox also carries the vendor's cost in its record (`vendor`, booked by the launcher
 // from the vendor's usage totals at list rates: plugin/scripts/launch.mjs bookVendor). It is summed beside the model's
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CODEX_NO_TOKENS, UNKNOWN_WHY, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { BILLING, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 
 /** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
 export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
@@ -230,6 +232,30 @@ export function stageOf(rec) {
  * usdUnknown?, basis}, null when no part ran in a sandbox); `totalUsd` is the known model plus vendor dollars and
  * `totalUnknown` the runs of unknown cost in both.
  */
+/**
+ * A part's known dollars by billing (plugin usage.mjs BILLING) from its record's `usdByBilling`: as recorded, except a
+ * Codex part the bench re-priced, whose harness dollars (the part's less the relayed key's) take the record's harness
+ * kind (its one kind besides the key's `api`, else `api`) and the key's stay `api`. {} when the record names none.
+ */
+function partBilling(rec, part) {
+  const map = billingRead(rec.usdByBilling);
+  if (rec.harness !== "codex" || rec.source === "spend" || !Object.keys(map).length) return map;
+  const key = num(rec.workerKeyUsd) ?? 0;
+  const kinds = Object.keys(map);
+  const kind = kinds.find((k) => k !== "api") ?? (kinds.includes("api") && (map.api > key || !key) ? "api" : null);
+  const harnessUsd = part.usd === null ? 0 : Math.max(0, part.usd - key);
+  return addBilling(kind ? { [kind]: harnessUsd } : {}, key > 0 ? { api: key } : {});
+}
+
+/** The basis's words on what the dollars are: "; all billed API spend", "; $1.20 of it API-equivalent (subscription), not a charge". */
+function billingNote(byBilling) {
+  const kinds = Object.entries(byBilling);
+  if (!kinds.length) return "";
+  const equivalent = kinds.filter(([k]) => k !== "api");
+  if (!equivalent.length) return "; billed API spend";
+  return `; ${equivalent.map(([k, n]) => `${round4(n)} USD ${BILLING[k]}`).join(", ")}, not a charge${byBilling.api > 0 ? `; ${round4(byBilling.api)} USD billed API spend` : ""}`;
+}
+
 export function costOf(records, prices, { harness: declared = null } = {}) {
   const parts = records.filter(Boolean);
   const harness = declared ?? parts[0]?.harness ?? null;
@@ -286,6 +312,9 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       part.basis = rec.basis ?? "unknown harness";
     }
     if (part.usdUnknown) part.usdUnknownWhy = unknownOf([{ ...rec, usdUnknown: part.usdUnknown }]).usdUnknownWhy;
+    // What the part's dollars are (plugin usage.mjs BILLING), as the worker recorded them from its credential.
+    const billed = partBilling(rec, part);
+    if (Object.keys(billed).length) part.usdByBilling = billed;
     // The spend through a relayed AI Gateway key (#97), already in the part's dollars: broken out on the row.
     const key = num(rec.workerKeyUsd);
     if (key !== null) {
@@ -311,6 +340,9 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
   out.usd = priced.length ? round4(priced.reduce((s, p) => s + p.usd, 0)) : null;
   const unknown = unknownOf(out.parts.map((p) => ({ usd: p.usd, usdUnknown: p.usdUnknown, usdUnknownWhy: p.usdUnknownWhy, runs: p.usdUnknown ? 1 : 0 })));
   if (unknown.usdUnknown) Object.assign(out, unknown);
+  // The known dollars by what they are (plugin usage.mjs BILLING), from each part's: said in the basis.
+  const byBilling = addBilling(...out.parts.map((p) => p.usdByBilling));
+  if (Object.keys(byBilling).length) out.usdByBilling = byBilling;
   // Said after the known figure's basis: "plus 2 runs of unknown cost (why; why)".
   const unknownNote = unknown.usdUnknown ? `;${unknownText(unknown.usdUnknown)} (${unknown.usdUnknownWhy.map((w) => UNKNOWN_WHY[w]).join("; ")})` : "";
   switch (harness) {
@@ -342,6 +374,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.basis = priced.length ? `pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
   } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
   out.basis += unknownNote;
+  out.basis += billingNote(byBilling);
   // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.
   if (out.workerKeyUsd > 0 && out.usd !== null) out.basis += `; includes ${out.workerKeyUsd} USD through a relayed worker key`;
   out.vendor = vendorOf(parts);

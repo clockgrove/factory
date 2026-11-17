@@ -1,8 +1,9 @@
 // Normalize each harness's headless output into one usage record:
 //   {harness, model, usd, usdUnknown?, usdUnknownWhy?, tokens: {input, output, cached}, basis, started, ended,
-//    sessionId, subtype, ok, error, turns}
+//    sessionId, subtype, ok, error, turns, apiKeySource?}
 // `basis` says where the dollars came from, so the scorecard shows it. A count a harness does not report is null, never
-// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate.
+// zero. Dollars are real or unknown (UNKNOWN_WHY, below), never an estimate; what they are (billed or API-equivalent)
+// comes from the credential that ran them (BILLING, below).
 
 
 import { existsSync, readFileSync } from "node:fs";
@@ -54,13 +55,6 @@ export const UNKNOWN_WHY = {
   sandbox: "the sandbox vendor did not report the stage's usage",
 };
 
-/**
- * How a record's dollars are billed, as its `billing` field says (#481): billed to an API key, a subscription's
- * API-equivalent figure (what the usage would cost at API prices; not billed), or a plan's included credits at their
- * list price. A record without the field says nothing about it, and the finish card says so (finish-card.mjs).
- */
-export const BILLING = Object.freeze(["api", "subscription", "credits"]);
-
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
 export function markUnknown(rec, why) {
   if (!rec) return rec;
@@ -93,6 +87,96 @@ export function unknownOf(records) {
 
 /** " plus 2 runs of unknown cost" for `n` runs (unknownRuns), "" for none: what follows a known figure wherever it is shown. */
 export const unknownText = (n) => (Number.isInteger(n) && n > 0 ? ` plus ${n} run${n === 1 ? "" : "s"} of unknown cost` : "");
+
+/**
+ * What a figure's dollars are (#481), from the credential that ran it (harness.mjs credentialEnv `billing`), never from
+ * prose or a guess. One closed list, each code with the words that follow its dollars wherever they are shown:
+ * - `api`: billed spend on an API key or the AI Gateway (Claude Code's total_cost_usd on an API key, Codex tokens on an
+ *   API key or the gateway, the relayed worker key's calls); shown as the bare figure;
+ * - `subscription`: an API-equivalent figure on a plan or login credential, not a charge (Claude Code's total_cost_usd
+ *   on `credential: plan` or a local login, Codex on a ChatGPT login priced from the API table);
+ * - `included-credits`: Copilot AI credits at copilot_credit_usd each, an API-equivalent figure, not a charge.
+ * Caps compare the figure whatever its billing: max_usd and daily_usd stay in dollars. A total keeps its known dollars by
+ * billing in `usdByBilling` ({api?, subscription?, "included-credits"?}: usdByBilling); dollars of a record that names
+ * none (a sandbox vendor's, a record written before Pendulum named billing) are in `usd` and in no part of it.
+ */
+export const BILLING = {
+  api: "API",
+  subscription: "API-equivalent (subscription)",
+  "included-credits": "API-equivalent (included credits)",
+};
+
+/**
+ * One harness pass's billing (BILLING) on a credential of `billing`: the credential's, except a Claude pass on a plan or
+ * login credential that Claude Code reports ran on an API key (its init line's `apiKeySource` other than "none") or on
+ * a provider other than Anthropic's own (a model's `provider` other than "firstParty": Bedrock, Vertex, a gateway): that
+ * pass is billed spend. Null when the credential's billing is not known.
+ */
+export function passBilling(billing, rec) {
+  if (!Object.hasOwn(BILLING, billing ?? "")) return null;
+  if (billing !== "subscription" || rec?.harness !== "claude") return billing;
+  const keyed = typeof rec.apiKeySource === "string" && rec.apiKeySource !== "none";
+  const thirdParty = Object.values(rec.models ?? {}).some((m) => typeof m?.provider === "string" && m.provider !== "firstParty");
+  return keyed || thirdParty ? "api" : billing;
+}
+
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+const nonNeg = (v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : null);
+
+/**
+ * The known dollars of a stage's pass `records` by billing (BILLING), on a credential of `billing`: each pass's own
+ * dollars at passBilling, its relayed worker key's share (`workerKeyUsd`) as `api`, and `extraKeyUsd` (the relay's spend
+ * outside every pass) as `api`. A kind is present once a pass of it ran, at $0 when the pass reported nothing. {} when
+ * the credential's billing is not known and no key spend was booked.
+ */
+export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
+  const out = {};
+  const put = (kind, usd) => {
+    if (kind) out[kind] = round6((out[kind] ?? 0) + (usd ?? 0));
+  };
+  for (const r of (records || []).filter((x) => x && !x.noRun)) {
+    const key = nonNeg(r.workerKeyUsd);
+    const usd = nonNeg(r.usd);
+    put(passBilling(billing, r), usd === null ? null : Math.max(0, usd - (key ?? 0)));
+    if (key) put("api", key);
+  }
+  if (extraKeyUsd > 0) put("api", extraKeyUsd);
+  return out;
+}
+
+/** A `usdByBilling` read back from a stored record or line: its BILLING codes at finite non-negative dollars; {} for none or a broken one. */
+export function billingRead(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  return Object.fromEntries(Object.entries(v).filter(([k, n]) => Object.hasOwn(BILLING, k) && typeof n === "number" && Number.isFinite(n) && n >= 0));
+}
+
+/** Several `usdByBilling` maps summed (each read through billingRead). */
+export function addBilling(...maps) {
+  const out = {};
+  for (const m of maps) for (const [k, n] of Object.entries(billingRead(m))) out[k] = round6((out[k] ?? 0) + n);
+  return out;
+}
+
+/**
+ * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling), `fmt` writing a part's
+ * dollars: "" for billed API spend alone, or when nothing names a billing; " API-equivalent (subscription)" or
+ * " API-equivalent (included credits)" for that kind alone; for a mix, every part: " ($0.30 API + $1.20 API-equivalent
+ * (subscription))", with dollars no record named a billing for (a sandbox vendor's) as a bare part.
+ */
+export function billingText(usd, byBilling, fmt = (n) => `$${n.toFixed(2)}`) {
+  const map = billingRead(byBilling);
+  const kinds = Object.keys(map);
+  if (!kinds.length) return "";
+  const named = Object.values(map).reduce((s, n) => s + n, 0);
+  const rest = typeof usd === "number" && Number.isFinite(usd) ? round6(usd - named) : 0;
+  const parts = Object.entries(map).filter(([, n]) => n > 0);
+  if (rest >= 0.00005) parts.push(["", rest]);
+  // Nothing above $0: the one kind named, if there is one.
+  if (!parts.length) return kinds.length === 1 && kinds[0] !== "api" ? ` ${BILLING[kinds[0]]}` : "";
+  if (parts.length === 1) return parts[0][0] && parts[0][0] !== "api" ? ` ${BILLING[parts[0][0]]}` : "";
+  if (parts.every(([k]) => k === "api" || k === "")) return "";
+  return ` (${parts.map(([k, n]) => `${fmt(n)}${k ? ` ${BILLING[k]}` : ""}`).join(" + ")})`;
+}
 
 /** A model id without its provider prefix: `openai/gpt-6.1-sol` (the AI Gateway's form) is `gpt-6.1-sol`. */
 export const bareModel = (model) => String(model ?? "").replace(/^[A-Za-z0-9._-]+\//, "");
@@ -607,15 +691,23 @@ export const outageError = (r) => !!r && r.status === null && r.type === "server
 export const answeredError = (r) => !!r && r.status !== null && r.status >= 400 && r.status < 500;
 
 /**
+ * Claude Code's own words on a model's dollars, kept beside them: `provider` (the API backend that served it:
+ * "firstParty", "bedrock", "vertex", ...; passBilling reads it) and `costBasis` (the price table its costUSD came from:
+ * "list", "managed" or "unknown"). Each only when it is a short code.
+ */
+const CODE = /^[A-Za-z0-9_-]{1,40}$/;
+const modelSource = (u) => Object.fromEntries(["provider", "costBasis"].filter((k) => typeof u?.[k] === "string" && CODE.test(u[k])).map((k) => [k, u[k]]));
+
+/**
  * Claude Code's per-model usage (`modelUsage` in a result, or in a transcript's cost-state line) as Pendulum's models,
  * tokens and summed dollars; null when there is none. Cache writes and the per-model split are kept so cost reads by
- * component on the bench's scorecard.
+ * component on the bench's scorecard, with each model's `provider` and `costBasis` (modelSource).
  */
 function claudeModels(modelUsage) {
   if (!modelUsage || typeof modelUsage !== "object" || !Object.keys(modelUsage).length) return null;
   const out = { models: {}, tokens: { input: null, output: null, cached: null, written: null }, usd: null };
   for (const [name, u] of Object.entries(modelUsage)) {
-    const m = { input: num(u?.inputTokens), cached: num(u?.cacheReadInputTokens), written: num(u?.cacheCreationInputTokens), output: num(u?.outputTokens), usd: num(u?.costUSD) };
+    const m = { input: num(u?.inputTokens), cached: num(u?.cacheReadInputTokens), written: num(u?.cacheCreationInputTokens), output: num(u?.outputTokens), usd: num(u?.costUSD), ...modelSource(u) };
     out.tokens.input = add(out.tokens.input, add(m.input, add(m.cached, m.written)));
     out.tokens.output = add(out.tokens.output, m.output);
     out.tokens.cached = add(out.tokens.cached, m.cached);
@@ -676,6 +768,8 @@ export function parseClaude(stdout, model) {
   if (outageError(failure)) rec.providerOutage = failure;
   // The Claude Code that ran, as its stream's init line names it: whether a resumed total is a running total (sinceSession).
   if (typeof init?.claude_code_version === "string") rec.harnessVersion = init.claude_code_version;
+  // Where its key came from ("none": an OAuth login or token, no API key): what the pass's dollars are (passBilling).
+  if (typeof init?.apiKeySource === "string" && init.apiKeySource.length <= 60) rec.apiKeySource = init.apiKeySource;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -1079,7 +1173,7 @@ function mergeModels(a, b) {
   const out = { ...(a ?? {}) };
   for (const [name, m] of Object.entries(b ?? {})) {
     const p = out[name];
-    out[name] = p ? { input: add(p.input, m.input), cached: add(p.cached, m.cached), written: add(p.written, m.written), output: add(p.output, m.output), usd: add(p.usd, m.usd) } : m;
+    out[name] = p ? { input: add(p.input, m.input), cached: add(p.cached, m.cached), written: add(p.written, m.written), output: add(p.output, m.output), usd: add(p.usd, m.usd), ...modelSource(p), ...modelSource(m) } : m;
   }
   return out;
 }
@@ -1122,7 +1216,7 @@ export function sinceSession(rec, prior) {
   const models = rec.models
     ? Object.fromEntries(Object.entries(rec.models).map(([name, m]) => {
         const p = prior.models?.[name] ?? {};
-        return [name, { input: less(m.input, p.input), cached: less(m.cached, p.cached), written: less(m.written, p.written), output: less(m.output, p.output), usd: less(m.usd, p.usd) }];
+        return [name, { input: less(m.input, p.input), cached: less(m.cached, p.cached), written: less(m.written, p.written), output: less(m.output, p.output), usd: less(m.usd, p.usd), ...modelSource(m) }];
       }))
     : rec.models;
   const t = rec.tokens ?? {};

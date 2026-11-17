@@ -297,9 +297,12 @@ A claim comment with a heartbeat marks an Objective a local loop is running, so 
 
 ### Spend
 
-Each local run writes its dollars into its progress comment, so the `daily_usd` cap counts local and Actions spend together, on any machine.
+Each local run writes its dollars into its progress comment, so `daily_usd` counts local and Actions spend together, on any machine.
+`daily_usd` gates starting stages: once the UTC day's spend reaches it, the loop starts no new stage until the next day, and stages already running (and review stages and answer passes) go on.
 Every stage writes one: $0 when it ran no harness pass.
 A `--here` run writes no spend line; it is not counted.
+
+**On a login, the dollars are API-equivalent.** A local run on the harness's own login, a Claude plan token or a Codex ChatGPT login records what its passes would cost at API list prices (Claude Code's `total_cost_usd`, Codex tokens priced from the API table): not a charge, and every figure says so, "$1.20 API-equivalent (subscription)". Copilot's AI credits are "API-equivalent (included credits)". A Claude pass whose Claude Code reports an API key (a Console login, `ANTHROPIC_API_KEY` in the shell) or a provider other than Anthropic's is billed spend and shown bare, as is an API key's or the AI Gateway's. The spend line keeps the parts (`usdByBilling`), the day's total and the scorecard say each, and `max_usd` and `daily_usd` count the figure whatever it is.
 
 **While a stage runs,** each write of its comment carries the dollars its harness passes have reported so far (`usd`) and, as runs of unknown cost (`usdUnknown`, with why in `usdUnknownWhy`), each pass that ended without reporting and each pass still running, so a stage that is killed or loses its machine leaves what it knew: never $0 and never a reading of a pass's stream.
 - A stage stopped by a signal (Ctrl-C, SIGTERM or SIGHUP, or its loop stopping) writes its line once more as it stops, after its harness is killed, when it differs from what the line shows, waiting at most 5 s for GitHub.

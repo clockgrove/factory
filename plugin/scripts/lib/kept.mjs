@@ -68,13 +68,13 @@ export function newLine(moves, n) {
 }
 
 /**
- * The file a hunk is judged against: whole when it is at most `max` bytes; else the lines around where the hunk applies
+ * The file a hunk is judged against: whole when it is at most `max` bytes (unless `whole` is false); else the lines around where the hunk applies
  * (its old lines carried into the file by `moves`, newLine, and as many after them as its new side has), `context` lines
  * either side, with `lines` {from, to, total}. null when even that is over `max`.
  */
-export function hunkView({ file, hunk, moves = [], max, context }) {
+export function hunkView({ file, hunk, moves = [], max, context, whole = true }) {
   const text = String(file ?? "");
-  if (Buffer.byteLength(text) <= max) return { file: text, lines: null };
+  if (whole && Buffer.byteLength(text) <= max) return { file: text, lines: null };
   const all = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
   // A hunk with no old line (git's `-0,0`: a file the base did not have) has nothing to carry: from the file's start.
   const first = hunk.count ? newLine(moves, hunk.from) : hunk.from === 0 ? 1 : newLine(moves, hunk.from) + 1;

@@ -24,8 +24,10 @@ const CHILD = "01a1ce4c-c48f-7a91-8213-42a5c3ae2283";
 const MODEL = "gpt-6.1-sol";
 const parentText = fixture("codex-0.167-spawn-parent.jsonl");
 const childText = fixture("codex-0.167-spawn-child.jsonl");
-const PARENT_TOKENS = { input: 2700500, cached: 2632832, written: 0, output: 5946 };
-const CHILD_TOKENS = { input: 1454076, cached: 1404544, written: 0, output: 5122 };
+// Each passed the long-context threshold in all, with no one request over it (`long`, read request by request).
+const NO_LONG = { input: 0, cached: 0, written: 0, output: 0 };
+const PARENT_TOKENS = { input: 2700500, cached: 2632832, written: 0, output: 5946, long: NO_LONG };
+const CHILD_TOKENS = { input: 1454076, cached: 1404544, written: 0, output: 5122, long: NO_LONG };
 const rel = (id, at = "21-48-19") => join("2026", "11", "11", `rollout-2026-11-11T${at}-${id}.jsonl`);
 const named = (thread, id, kind = "started") => `${JSON.stringify({ timestamp: "2026-11-12T05:50:00.000Z", ordinal: 9000, type: "event_msg", payload: { type: "item_completed", thread_id: thread, item: { type: "SubAgentActivity", kind, agent_thread_id: id, agent_path: "/root/x" } } })}\n`;
 /** A child of `parent` with the implementer's real counts, under another id. */
@@ -62,7 +64,7 @@ test("a rollout's own thread: its parent, its model, its own token totals, the t
 test("a forked sub-agent's copy of its parent's history is skipped; a total carried in is not its own", () => {
   const forked = fixture("codex-0.167-spawn-forked-child.jsonl");
   const own = codexRollout(forked);
-  assert.deepEqual(own.tokens, { input: 624464, cached: 603776, written: 0, output: 1301 });
+  assert.deepEqual(own.tokens, { input: 624464, cached: 603776, written: 0, output: 1301, long: NO_LONG });
   const [meta, ...rest] = forked.trim().split("\n");
   const copied = [
     JSON.stringify({ ordinal: 5, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 9e6, output_tokens: 9e4 }, last_token_usage: { input_tokens: 1e5 } } } }),
@@ -114,7 +116,7 @@ test("a run's record gains each thread's own share, priced at its own model; a t
   const rec = { harness: "codex", model: MODEL, usd: priceCodex(MODEL, PARENT_TOKENS), tokens: { ...PARENT_TOKENS } };
   const thread = codexRollout(childText);
   const { rec: out, totals } = withSubAgents(rec, [thread]);
-  assert.deepEqual(out.tokens, { input: 2700500 + 1454076, cached: 2632832 + 1404544, written: 0, output: 5946 + 5122 });
+  assert.deepEqual(out.tokens, { input: 2700500 + 1454076, cached: 2632832 + 1404544, written: 0, output: 5946 + 5122, long: NO_LONG });
   assert.equal(out.usd, Math.round((rec.usd + 0.2907384) * 10000) / 10000);
   assert.deepEqual(out.subAgents, [{ id: CHILD, parent: PARENT, model: MODEL, usd: 0.2907, tokens: CHILD_TOKENS }]);
   assert.ok(!out.usdUnknown);
@@ -226,7 +228,9 @@ test("a Codex run counts its sub-agents in this pass, on a resume, and in a late
     const more = { input: CHILD_TOKENS.input + 30000, cached: CHILD_TOKENS.cached + 20000, written: 0, output: CHILD_TOKENS.output + 400 };
     const tick = JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: more.input, cached_input_tokens: more.cached, cache_write_input_tokens: 0, output_tokens: more.output }, last_token_usage: { input_tokens: 30000, cached_input_tokens: 20000, output_tokens: 400 } } } });
     const grownParent = { ...PARENT_TOKENS, input: PARENT_TOKENS.input + 5000, output: PARENT_TOKENS.output + 50 };
-    pass({ [rel(P2, "21-47-43")]: parent2, [rel(C2)]: `${child2}${tick}\n` }, stream(P2, grownParent));
+    // Codex appends the resumed thread's requests to its rollout.
+    const parentTick = JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: grownParent.input, cached_input_tokens: grownParent.cached, cache_write_input_tokens: 0, output_tokens: grownParent.output }, last_token_usage: { input_tokens: 5000, cached_input_tokens: 0, output_tokens: 50 } } } });
+    pass({ [rel(P2, "21-47-43")]: `${parent2}${parentTick}\n`, [rel(C2)]: `${child2}${tick}\n` }, stream(P2, grownParent));
     const review = await run(P2, "review-fix-1");
     assert.deepEqual(review.subAgents[0].tokens, { input: 30000, cached: 20000, written: 0, output: 400 }, "only the implementer's new work");
     assert.equal(review.usd, Math.round((priceCodex(MODEL, { input: 5000, cached: 0, written: 0, output: 50 }) + priceCodex(MODEL, { input: 30000, cached: 20000, written: 0, output: 400 })) * 10000) / 10000);

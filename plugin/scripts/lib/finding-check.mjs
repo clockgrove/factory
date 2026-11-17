@@ -318,6 +318,17 @@ export function namedTestRunner({ checkout, commands = [], env = process.env, he
   };
 }
 
+/**
+ * The open findings a review stage lists (session.mjs unaddressedReviewComments), as its findings record names them
+ * before any check of its own (#546): each `open`, with the review that raised it (a line comment's
+ * `pull_request_review_id`, a review body finding's own id) or the login of the reviewer outside Pendulum (`from`).
+ */
+export const listedFindings = (list = []) =>
+  list.map((c) => {
+    const review = Number.isSafeInteger(c?.pull_request_review_id) ? c.pull_request_review_id : Number(/^r(\d+)-\d+$/.exec(String(c?.id))?.[1]) || null;
+    return { id: c?.id, outcome: "open", ...(c?.from ? { from: c.from } : review ? { review } : {}) };
+  });
+
 /** What the check found on a finding it leaves open, as a Block names it (session.mjs openFindingsExit). */
 export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-fixed", notCheckable: "not-checkable" });
 
@@ -340,15 +351,21 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
  * git's diff of what the pull request changed from `from` to its head (session.mjs answerDiff), `from` the commit a
  * finding was raised on (`raisedOn`, else `since`). `decisions`: the maintainers' recorded decisions the check may read a
  * finding as settled by, only as session.mjs objectiveDecisions returns them (authors with write access).
- * Returns {resolved, open, unjudged, found}: ids; `unjudged`, the ones the decider gave no verdict on, each {id, error};
- * `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}.
+ * Returns {resolved, open, unjudged, found, outcomes}: ids; `unjudged`, the ones the decider gave no verdict on, each {id,
+ * error}; `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}; `outcomes`, how
+ * each answered finding ended (#546), each {id, outcome} (logic.mjs FINDING_OUTCOMES), from the branch the check took
+ * and whether it ended resolved (its evidence posted and its thread resolved, or a thread already resolved, which gets
+ * no evidence post), never from a note. The stage's progress reporter, when it keeps a findings record
+ * (`progress.findings`), gets them in it, written at once.
  */
 export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, runTest = null, diffOf = async () => null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
   const replies = new Map(parseReplies(repliesText, findings.map((f) => f.id)).map((r) => [String(r.id), r]));
   const answered = findings.filter((f) => replies.has(String(f.id)));
-  if (!answered.length) return { resolved: [], open: [], unjudged: [], found: [] };
+  if (!answered.length) return { resolved: [], open: [], unjudged: [], found: [], outcomes: [] };
   // Each finding resolved, by id, with the evidence posted in its thread (null: the check is off, so there is none).
   const yes = new Map();
+  // How each finding the check resolves ended (logic.mjs FINDING_OUTCOMES), by id, as the branch that resolves it says.
+  const how = new Map();
   const unjudged = [];
   const found = [];
   const say = async (line) => {
@@ -364,6 +381,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     const test = replies.get(String(f.id)).test;
     const r = runTest ? await Promise.resolve(runTest(test, { before: f.raisedOn || since })).catch((e) => ({ unchecked: `the test could not be run (${String(e?.message || e).slice(0, 120)})` })) : { unchecked: "no test can be run where this check runs" };
     const id = String(f.id);
+    if (r.fixed) how.set(id, "fixed-test");
     if (r.fixed) yes.set(id, `the test this answer names fails without the fix and passes with it: \`${r.run}\`, by the repository's validation command \`${test.command}\`, failed on the tree of ${short(r.before)} (where the finding was raised, the test's own files as the head has them) and passed on ${short(r.head)}. The finding is resolved.`);
     else if (r.failed) found.push({ id: f.id, kind: FOUND.testFailed, note: `test failed: \`${r.run}\` exited ${r.code} on ${short(r.head)}` });
     else pre.set(id, r.passes ? `not evidence: \`${r.run}\` passes without the fix too, on the tree of ${short(r.before)}` : `not checkable: ${r.unchecked}`);
@@ -377,7 +395,10 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
   const judged = answered.filter((f) => !replies.get(String(f.id)).test || pre.has(String(f.id)));
   if (judged.length && !check?.judge) {
     await say(`finding check: off (${check?.off || "no-key"}); a reply answers its finding`);
-    for (const f of judged) yes.set(String(f.id), null);
+    for (const f of judged) {
+      yes.set(String(f.id), null);
+      how.set(String(f.id), "not-checkable");
+    }
   } else if (judged.length) {
     const diffs = new Map();
     for (const from of new Set(judged.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
@@ -398,6 +419,7 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
       const at = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}` : "";
       const said = v?.verdict ? `${at}${alertDecided ? " (code scanning's alert: a decision does not settle it: open)" : unsure ? " (a newer decision did not fit the question: open)" : RESOLVING.has(v.verdict) && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
       log(`finding check (${check.model}): ${findingPlace(it)} (comment ${it.id}): ${said}`);
+      if (resolves(v, floor.min) && !alertDecided && !unsure) how.set(String(it.id), v.verdict === "fixed" ? "fixed-verdict" : "answered");
       if (resolves(v, floor.min) && !alertDecided && !unsure) yes.set(String(it.id), `the finding check (${who}) judged this answer ${v.verdict}, at confidence ${v.confidence.toFixed(2)} (${floor.text}). The finding is resolved.`);
       else if (!v?.verdict) {
         unjudged.push({ id: it.id, error: v?.error || "no_answer" });
@@ -441,5 +463,10 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     }
   }
   const done = new Set(resolved.map(String));
-  return { resolved, open: answered.filter((f) => !done.has(String(f.id))).map((f) => f.id), unjudged, found };
+  // A finding left open: what the check found on it (a failed test or a no is not fixed; no verdict, not checkable), or
+  // open when its resolution could not be posted.
+  const left = new Map([...unjudged.map((u) => [String(u.id), "not-checkable"]), ...found.map((x) => [String(x.id), x.kind === FOUND.notCheckable ? "not-checkable" : "not-fixed"])]);
+  const outcomes = answered.map((f) => ({ id: f.id, outcome: done.has(String(f.id)) ? how.get(String(f.id)) : (left.get(String(f.id)) ?? "open") }));
+  if (typeof progress?.findings === "function") await Promise.resolve(progress.findings({ items: outcomes }, { write: true })).catch((e) => log(`finding check: the findings record could not be written (${String(e?.message || e).slice(0, 120)})`));
+  return { resolved, open: answered.filter((f) => !done.has(String(f.id))).map((f) => f.id), unjudged, found, outcomes };
 }

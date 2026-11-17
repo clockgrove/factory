@@ -1,6 +1,6 @@
 ---
 name: pendulum-report
-description: "Report what Pendulum's Objectives cost and how many tokens they used, over a period or a set of Objectives, from `pendulum report --json`: totals by billing kind, runs of unknown cost with their reasons, breakdowns by stage, pass, model, harness and Pendulum version, per-Objective rows and hot spots, every figure precomputed; presented as a table, chart, page or document as the user asks; on request, model-usage proposals. Use when the user asks what Pendulum cost, where its spend or tokens went, which model to try where, or for a cost report, chart or dashboard of its runs. Not for one Objective's walk-away scorecard row (pendulum-score) or what is running now (pendulum-status)."
+description: "Report what Pendulum's Objectives cost and how many tokens they used, over a period or a set of Objectives, from `pendulum report --json`: totals by billing kind, runs of unknown cost with their reasons, breakdowns by stage, pass, model, harness and Pendulum version, per-Objective rows, review findings and their outcomes, and hot spots, every figure precomputed; presented as a table, chart, page or document as the user asks; on request, model-usage proposals. Use when the user asks what Pendulum cost, where its spend or tokens went, which model to try where, or for a cost report, chart or dashboard of its runs. Not for one Objective's walk-away scorecard row (pendulum-score) or what is running now (pendulum-status)."
 ---
 
 # /pendulum:pendulum-report [scope]

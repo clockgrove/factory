@@ -8,14 +8,15 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CONCURRENCY, FINDING_QUESTION, INPUT_CAPS, checkAnswers, decisionsPart, findingInput, namedTestRunner, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
+import { CONCURRENCY, FINDING_QUESTION, INPUT_CAPS, checkAnswers, decisionsPart, findingInput, listedFindings, namedTestRunner, openFindingCheck, resolves } from "../scripts/lib/finding-check.mjs";
 import { dropHeldSecrets, holdSecrets } from "../scripts/lib/inputs.mjs";
 import { RETRY, resolvePendulumThreads } from "../scripts/lib/github.mjs";
 import { parseReplies, postReplies } from "../scripts/lib/handoff.mjs";
 import { simpleCommand } from "../scripts/lib/shell.mjs";
-import { decideExit, marker, reviewBody, setSelf } from "../scripts/lib/logic.mjs";
+import { decideExit, findingsOf, marker, reviewBody, setSelf } from "../scripts/lib/logic.mjs";
 import { openOutbox } from "../scripts/lib/outbox.mjs";
-import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, checkState, objectiveDecisions, openFindingsExit, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+import { ANSWER_ROUNDS, FINDING_CHECK_TRIES, answerDiff, checkState, objectiveDecisions, openFindingsExit, progressReporter, readAnswerRounds, unaddressedReviewComments } from "../scripts/lib/session.mjs";
+import { buildReport } from "../scripts/lib/report.mjs";
 import { MIN_CONFIDENCE } from "../scripts/lib/triage.mjs";
 import { findingCheckRow } from "../scripts/doctor.mjs";
 import { CODE_SCANNING, answeredReviewers } from "../scripts/lib/third-party-review.mjs";
@@ -145,7 +146,7 @@ test("#368: only the finding check's yes resolves a finding's thread; a no keeps
     const fake = decider({ "FINDING-A": "fixed", "FINDING-B": "unresolved", "FINDING-C": "unavailable" });
     const progress = [];
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: openFindingCheck({ inputs: { triageModel: "fake/decider" }, decider: fake }), diffOf, since: RAISED, issueBody: "Intro.\n\n## Acceptance\n1. null input is refused\n2. errors are typed", rules: "AGENTS.md:\nrule 3: every branch has a test", opts: { token: "t" }, progress: async (l) => progress.push(l) });
-    assert.deepEqual(out, { resolved: [100], open: [200, 300], unjudged: [{ id: 300, error: "unavailable" }], found: [{ id: 200, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (fake/decider)" }] });
+    assert.deepEqual(out, { resolved: [100], open: [200, 300], unjudged: [{ id: 300, error: "unavailable" }], found: [{ id: 200, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (fake/decider)" }], outcomes: [{ id: 100, outcome: "fixed-verdict" }, { id: 200, outcome: "not-fixed" }, { id: 300, outcome: "not-checkable" }] });
     assert.deepEqual([...gh.state.resolved], ["T100"], "only the yes is resolved");
     // Each question carries the finding, the reply, the change since the finding was raised (its own file, then the
     // others), the issue's acceptance entries and the repository's rules, each fenced.
@@ -200,7 +201,7 @@ test("#368: without a decider key a reply answers its finding as before, said on
     await postReplies(REPO, 12, 7, replies, [100, 200], { token: "t" });
     const progress = [];
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check, diffOf, opts: { token: "t" }, progress: async (l) => progress.push(l) });
-    assert.deepEqual(out, { resolved: [100, 200], open: [], unjudged: [], found: [] });
+    assert.deepEqual(out, { resolved: [100, 200], open: [], unjudged: [], found: [], outcomes: [{ id: 100, outcome: "not-checkable" }, { id: 200, outcome: "not-checkable" }] });
     assert.deepEqual(progress, ["finding check: off (no-key); a reply answers its finding"]);
     assert.deepEqual(await list(), []);
   });
@@ -519,7 +520,7 @@ test("#474: a recorded owner decision settles a finding re-raised past the answe
   assert.match(partOf(input) ?? "", /^owner-kim, 2026-11-16 18:57Z, on the issue:\nOwner: the merge queue's red is main's own[\s\S]*\n\nowner-kim, 2026-11-16 22:37Z, on the issue:\nOwner decision \(2026-11-16\)/);
   assert.match(input, /Finding by Pendulum's reviewer, at docs\/review\.md:88, raised 2026-11-16 21:57Z:\n/);
   assert.ok(FINDING_QUESTION.choices.some((c) => c.value === "decided"));
-  assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [] });
+  assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [], outcomes: [{ id: 100, outcome: "answered" }] });
   assert.deepEqual([...gh.state.resolved], ["T100"]);
   assert.deepEqual(open, []);
   assert.equal(exit.exit, "delivered");
@@ -535,7 +536,7 @@ test("#474: the same decision text from a commenter without write access settles
   assert.match(part ?? "", /^owner-kim, 2026-11-16 18:57Z, on the issue:\nOwner: the merge queue's red is main's own/);
   assert.doesNotMatch(part, /done by the owner after merge/);
   assert.match(replyPart(input), /done by the owner after merge/);
-  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }] });
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }], outcomes: [{ id: 100, outcome: "not-fixed" }] });
   assert.deepEqual([...gh.state.resolved], []);
   assert.deepEqual(open.map((c) => c.id), [100]);
   assert.equal(exit.exit, "blocked");
@@ -547,7 +548,7 @@ test("#474: a broad approval posted before an unrelated finding settles nothing;
   const { input, out, open, exit } = await decisionAfterRounds(OWNER, { decision: "LGTM, ship it.", finding, phrase: "src/auth.ts" });
   assert.match(partOf(input), /owner-kim, 2026-11-16 22:37Z, on the issue:\nLGTM, ship it\./);
   assert.match(input, /at src\/auth\.ts:14, raised 2026-11-16 23:30Z:/, "the finding is later than the approval, and the question shows both times");
-  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }] });
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }], outcomes: [{ id: 100, outcome: "not-fixed" }] });
   assert.equal(exit.exit, "blocked");
   const { instructions } = FINDING_QUESTION;
   assert.match(instructions, /settles a finding only when it speaks to the very thing this finding asks: its acceptance entry, rule, file or behaviour/);
@@ -570,7 +571,7 @@ test("#474: a maintainer's decision never settles code scanning's alert, whateve
     const fake = decisionReader("src/merge.ts is accepted");
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: openFindingCheck({ inputs: { triageModel: "fake/decider" }, decider: fake }), diffOf, since: RAISED, decisions, opts: { token: "t" }, progress: async (l) => progress.push(l) });
     assert.equal(fake.asked.length, 1, "the model answered decided");
-    assert.deepEqual(out, { resolved: [], open: [300], unjudged: [], found: [{ id: 300, kind: "not-fixed", note: "judged not resolved: decided 0.90 (code scanning's alert: a decision does not settle it: open) (fake/decider)" }] });
+    assert.deepEqual(out, { resolved: [], open: [300], unjudged: [], found: [{ id: 300, kind: "not-fixed", note: "judged not resolved: decided 0.90 (code scanning's alert: a decision does not settle it: open) (fake/decider)" }], outcomes: [{ id: 300, outcome: "not-fixed" }] });
     assert.deepEqual([...gh.state.resolved], []);
     assert.deepEqual((await list()).map((c) => c.id), [300]);
     assert.deepEqual(progress, ["finding check (fake/decider): 0 of 1 answer(s) resolve their findings; still open: src/merge.ts:8"]);
@@ -623,7 +624,7 @@ test("#474: an issue waiver, then a newer reversal on the PR, then a window full
   assert.match(part, new RegExp(SETTLES), "the issue's waiver, within its share");
   assert.match(part, /^\(1 more decision\(s\), none of them the newest, are not shown for length\.\)/);
   assert.doesNotMatch(part, /Notes 800:/, "the oldest issue decision is the one left out");
-  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }] });
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: unresolved 0.90 (perplexity/pplx-decider-v1.2)" }], outcomes: [{ id: 100, outcome: "not-fixed" }] });
   assert.equal(exit.exit, "blocked");
 });
 
@@ -636,7 +637,7 @@ test("#474: when a decision newer than the oldest one shown is left out for leng
   assert.match(part, new RegExp(SETTLES));
   assert.doesNotMatch(part, /Reversal/);
   // The fake model, seeing only the waiver, answers decided: the guard keeps the finding open.
-  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: decided 0.90 (a newer decision did not fit the question: open) (perplexity/pplx-decider-v1.2)" }] });
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: "judged not resolved: decided 0.90 (a newer decision did not fit the question: open) (perplexity/pplx-decider-v1.2)" }], outcomes: [{ id: 100, outcome: "not-fixed" }] });
   assert.equal(exit.exit, "blocked");
   const { left } = decisionsPart(decisions);
   assert.ok(left.some((d) => d.key === "comment:950"));
@@ -738,7 +739,7 @@ test("#516: a named test that fails without the fix and passes with it resolves 
     const progress = [];
     const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: fakeCheck(fake), runTest, diffOf, since: RAISED, opts: { token: "t" }, progress: async (l) => progress.push(l) });
-    assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [] });
+    assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [], outcomes: [{ id: 100, outcome: "fixed-test" }] });
     assert.equal(fake.asked.length, 0, "no decision call");
     assert.deepEqual([...gh.state.resolved], ["T100"]);
     assert.equal(evidenceOf(gh).get(100), `<!-- pendulum:7:resolved:100 -->\nPendulum: the test this answer names fails without the fix and passes with it: \`${testLine("test/guard.test.mjs")}\`, by the repository's validation command \`node scripts/test.mjs\`, failed on the tree of ${repo.before.slice(0, 7)} (where the finding was raised, the test's own files as the head has them) and passed on ${repo.head.slice(0, 7)}. The finding is resolved.`);
@@ -771,7 +772,7 @@ test("#516: a named test that fails on the head keeps the finding open with no d
     const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
     const note = `test failed: \`${testLine("test/store.test.mjs")}\` exited 1 on ${repo.head.slice(0, 7)}`;
-    assert.deepEqual(out, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "test-failed", note }] });
+    assert.deepEqual(out, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "test-failed", note }], outcomes: [{ id: 200, outcome: "not-fixed" }] });
     assert.equal(fake.asked.length, 0, "the decision model does not overrule a failed test");
     assert.equal(evidenceOf(gh).size, 0);
     atHeadClean(repo);
@@ -812,7 +813,7 @@ test("#516: a named test that is no evidence (passes without the fix too, names 
       const runTest = namedTestRunner({ checkout: r.dir, commands: r.commands, env: r.env, head: r.head, beforeGreen: greenAt(r.before), ...opts });
       const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
       const note = `${pre}; judged not fixed: unresolved 0.90 (fake/decider)`;
-      assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note }] }, pre);
+      assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note }], outcomes: [{ id: 100, outcome: "not-fixed" }] }, pre);
       assert.equal(fake.asked.length, 1, "the decision model judges it");
       atHeadClean(r);
       for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
@@ -830,7 +831,7 @@ test("#516: a named test that is no evidence (passes without the fix too, names 
     await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
     const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(sure("fixed", 0.92)), runTest, diffOf, opts: { token: "t" } });
-    assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [] });
+    assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [], outcomes: [{ id: 100, outcome: "fixed-verdict" }] });
     assert.match(evidenceOf(gh).get(100), /judged this answer fixed, at confidence 0\.92 \(default floor 0\.7\)/);
   });
 });
@@ -873,14 +874,14 @@ test("#516: a decision model's fixed resolves a reply with no test at the floor,
     const replies = JSON.stringify([{ id: 100, body: "Fixed in abc1234.", fixed: true }]);
     await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
     const at = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: (await list()).filter((c) => c.id === 100), repliesText: replies, check: fakeCheck(sure("fixed", MIN_CONFIDENCE)), diffOf, since: RAISED, opts: { token: "t" } });
-    assert.deepEqual(at, { resolved: [100], open: [], unjudged: [], found: [] });
+    assert.deepEqual(at, { resolved: [100], open: [], unjudged: [], found: [], outcomes: [{ id: 100, outcome: "fixed-verdict" }] });
     assert.equal(evidenceOf(gh).get(100), `<!-- pendulum:7:resolved:100 -->\nPendulum: the finding check (fake/decider) judged this answer fixed, at confidence ${MIN_CONFIDENCE.toFixed(2)} (default floor ${MIN_CONFIDENCE}). The finding is resolved.`);
     const below = MIN_CONFIDENCE - 0.01;
     const replies2 = JSON.stringify([{ id: 200, body: "Fixed in def5678.", fixed: true }]);
     await postReplies(REPO, 12, 7, replies2, [200], { token: "t" });
     const under = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies2, check: fakeCheck(sure("fixed", below)), diffOf, since: RAISED, opts: { token: "t" } });
     const note = `judged not fixed: fixed ${below.toFixed(2)} (under default floor ${MIN_CONFIDENCE}: open) (fake/decider)`;
-    assert.deepEqual(under, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "not-fixed", note }] });
+    assert.deepEqual(under, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "not-fixed", note }], outcomes: [{ id: 200, outcome: "not-fixed" }] });
     assert.equal(evidenceOf(gh).has(200), false);
     for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
         await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: under.found }, { token: "t" });
@@ -992,7 +993,7 @@ test("#516: a command that ignores its arguments fails on a before that was red 
     // Not validated (or the stage's held red): no evidence.
     const runTest = namedTestRunner({ checkout: dir, commands: repo.commands, env: repo.env, head, beforeGreen: greenAt() });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
-    assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: `not checkable: ${before.slice(0, 7)}, where the finding was raised, is not known green, so a failure there would not be the finding's; judged not fixed: unresolved 0.90 (fake/decider)` }] });
+    assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: `not checkable: ${before.slice(0, 7)}, where the finding was raised, is not known green, so a failure there would not be the finding's; judged not fixed: unresolved 0.90 (fake/decider)` }], outcomes: [{ id: 100, outcome: "not-fixed" }] });
     assert.equal(fake.asked.length, 1);
     assert.equal(evidenceOf(gh).size, 0);
     atHeadClean(repo);
@@ -1001,4 +1002,88 @@ test("#516: a command that ignores its arguments fails on a before that was red 
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
   assert.match(src, /const beforeGreen = async \(sha\) => sha !== heldRed\?\.sha && \(await isValidated\(repo, pr\.number, issue, sha, token\)\);\n\s+const runTest = namedTestRunner\(\{ checkout, commands: inputs\.validation, env: passEnv, head, beforeGreen,/);
+});
+
+// ------------------------------------------------------------------ #546: each finding's outcome as data
+
+test("#546: the real finding check writes each finding's outcome into the review stage's findings record, from exact fields, and the report counts them exactly", async () => {
+  const repo = testRepo();
+  const alertG = { ...alert, id: 700, body: "## CodeQL / Prototype-polluting assignment\nFINDING-G" };
+  const gh = github({
+    lineComments: [raisedOn(repo.before, 100, "src/guard.mjs", 1, "FINDING-A: null input passes the guard"), root(200, "src/b.ts", 9, "FINDING-B"), root(300, "src/c.ts", 4, "FINDING-C"), root(400, "src/d.ts", 2, "FINDING-D"), root(500, "src/e.ts", 3, "FINDING-E"), root(600, "src/f.ts", 6, "FINDING-F"), alertG],
+  });
+  await withGitHub(gh, async () => {
+    // The review stage's own progress reporter, as review.mjs keeps it: the review its reviewer posted (id 1), then the
+    // open findings it lists, then the check's outcomes.
+    const reporter = progressReporter(REPO, 7, { token: "t" }, { stage: "review", runId: "71001", harness: "claude", model: "claude-fable-5-2", soFar: null });
+    await reporter.findings({ pr: 12, reviews: [1] });
+    const listed = await list();
+    await reporter.findings({ pr: 12, items: listedFindings(listed), listed: true });
+    reporter.spend(0.5, { usdByBilling: { api: 0.5 }, billing: "api" });
+    // 100: a named test that fails without the fix; 200: the model's fixed; 300 and 700: rebutted; 400: unresolved;
+    // 500: no verdict; 600: no answer.
+    const replies = JSON.stringify([fixedWith(100, "test/guard.test.mjs"), { id: 200, body: "Fixed: b guards it.", fixed: true }, { id: 300, body: "Acceptance 2 permits it." }, { id: 400, body: "Fixed.", fixed: true }, { id: 500, body: "Done." }, { id: 700, body: "Rule 3 permits it." }]);
+    await postReplies(REPO, 12, 7, replies, [100, 200, 300, 400, 500, 700], { token: "t" });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
+    const fake = decider({ "FINDING-B": "fixed", "FINDING-C": "rebutted", "FINDING-D": "unresolved", "FINDING-E": "unavailable", "FINDING-G": "rebutted" });
+    const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: listed, repliesText: replies, check: openFindingCheck({ inputs: { triageModel: "fake/decider" }, decider: fake }), runTest, diffOf, since: RAISED, opts: { token: "t" }, progress: reporter });
+    assert.deepEqual(out.outcomes, [
+      { id: 100, outcome: "fixed-test" },
+      { id: 200, outcome: "fixed-verdict" },
+      { id: 300, outcome: "answered" },
+      { id: 400, outcome: "not-fixed" },
+      { id: 500, outcome: "not-checkable" },
+      { id: 700, outcome: "answered" },
+    ]);
+    const stage = gh.state.issueComments.find((c) => c.body.startsWith("<!-- pendulum:7:progress:review:71001 -->"));
+    assert.deepEqual(findingsOf(stage.body), {
+      pr: 12,
+      reviews: [1],
+      items: [
+        { id: 100, outcome: "fixed-test", review: 1 },
+        { id: 200, outcome: "fixed-verdict", review: 1 },
+        { id: 300, outcome: "answered", review: 1 },
+        { id: 400, outcome: "not-fixed", review: 1 },
+        { id: 500, outcome: "not-checkable", review: 1 },
+        { id: 600, outcome: "open", review: 1, listed: true },
+        { id: 700, outcome: "answered", from: CODE_SCANNING },
+      ],
+      more: 0,
+    });
+    // The report reads that comment as Pendulum's own and counts each outcome exactly, beside the stage's dollars.
+    const comments = gh.state.issueComments.map((c) => ({ ...c, issue_url: "https://api.github.com/repos/acme/app/issues/7" }));
+    const r = buildReport(reportRead(comments), { now: "2026-11-18T00:00:00Z" });
+    const outcomes = (o) => ({ "fixed-test": 0, "fixed-verdict": 0, answered: 0, "not-fixed": 0, "not-checkable": 0, open: 0, ...o });
+    const api = (n) => ({ usd: { api: n, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, unknownRuns: 0, unknownWhy: [] });
+    assert.deepEqual(r.findings.totals, { findings: 7, outcomes: outcomes({ "fixed-test": 1, "fixed-verdict": 1, answered: 2, "not-fixed": 1, "not-checkable": 1, open: 1 }), reviewStages: 1, cost: api(0.5), unnamed: 0 });
+    assert.deepEqual(r.findings.byReviewer, [
+      { key: "claude-fable-5-2", outside: false, findings: 6, outcomes: outcomes({ "fixed-test": 1, "fixed-verdict": 1, answered: 1, "not-fixed": 1, "not-checkable": 1, open: 1 }), reviewStages: 1, cost: api(0.5) },
+      { key: CODE_SCANNING, outside: true, findings: 1, outcomes: outcomes({ answered: 1 }), reviewStages: null, cost: null },
+    ]);
+    assert.deepEqual(r.findings.byStage, [{ issue: 7, stage: "71001", model: "claude-fable-5-2", findings: 6, outcomes: outcomes({ "fixed-test": 1, "fixed-verdict": 1, answered: 1, "not-fixed": 1, "not-checkable": 1, open: 1 }), cost: api(0.5) }]);
+    assert.deepEqual(r.objectives[0].findings, r.findings.totals);
+  });
+  // The review stage keeps that record: the review it posted, then each open finding it lists before its own check.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  const posted = src.indexOf("await progress.findings({ pr: pr.number, reviews: [posted.review?.id] });");
+  assert.ok(posted > src.indexOf("const posted = await postReview("), "the posted review is recorded");
+  const listedAt = src.indexOf("await progress.findings({ pr: pr.number, items: listedFindings(listedOpen), listed: true });");
+  assert.ok(listedAt > src.indexOf("const listedOpen = await unaddressedReviewComments(") && listedAt < src.indexOf("await judgeAnswers(again,"), "the listed findings are recorded before any check");
+  assert.match(src, /if \(again\.length\) await progress\.findings\(\{ items: listedFindings\(toAnswer\), listed: true \}\);/);
+  assert.match(src, /const r = await checkAnswers\(\{[^\n]*opts: token, progress \}\)/);
+});
+
+/** What readReport would hand buildReport for Objective 7 with `comments` read: no PRs, artifacts or local records. */
+const reportRead = (comments) => ({
+  repo: REPO,
+  scope: { since: null, until: null, defaultPeriod: false, issues: [7], label: null, parent: null },
+  appId: null,
+  self: [],
+  issues: new Map([[7, { number: 7, title: "Seven", state: "open", labels: [] }]]),
+  pulls: [],
+  comments,
+  artifacts: new Map(),
+  local: new Map(),
+  source: { stopped: null, comments: comments.length, pullsRead: true, artifactsRead: new Set(), artifacts: { listed: 0, downloaded: 0, cached: 0, expired: 0, noResult: 0, failed: 0, unreadable: 0, foreign: 0 }, foreignIssues: new Set(), localRecords: 0, selfKnown: true, login: SELF, calls: { max: 300, planned: 0, made: 0, byKind: {}, open: false } },
 });

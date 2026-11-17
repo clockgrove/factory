@@ -1,6 +1,6 @@
 ---
 name: pendulum-status
-description: "Show what Clockgrove Pendulum is doing in the current repository, read-only: each open Objective's state and route, and for a Blocked one or a Question the reason and the way on (resume, answer or restart), taken only on the user's yes. Use when the user asks what Clockgrove Pendulum is doing, what is running or queued, why an Objective is Blocked or stuck, or how to answer or resume one. Not for whether the repository is set up (pendulum-doctor) or the scorecard of finished Objectives (pendulum-score)."
+description: "Show what Pendulum is doing in the current repository, read-only: each open Objective's state and route, and for a Blocked one or a Question the reason and the way on (resume, answer or restart), taken only on the user's yes. Use when the user asks what Pendulum is doing, what is running or queued, why an Objective is Blocked or stuck, or how to answer or resume one. Not for whether the repository is set up (pendulum-doctor) or the scorecard of finished Objectives (pendulum-score)."
 ---
 
 # /pendulum:pendulum-status [issue]

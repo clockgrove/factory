@@ -1,6 +1,6 @@
 ---
 name: pendulum-setup
-description: "Install Clockgrove Pendulum in the current repository, one step at a time on the user's yes: add .github/workflows/pendulum.yml through a pull request, create the GitHub App, and apply the merge queue, labels, Project board and a read-only default workflow token; or set up local mode on the user's machine. Use when the user asks to set up, install or configure Clockgrove Pendulum for a repository. Not for checking whether it is set up (pendulum-doctor)."
+description: "Install Pendulum in the current repository, one step at a time on the user's yes: add .github/workflows/pendulum.yml through a pull request, create the GitHub App, and apply the merge queue, labels, Project board and a read-only default workflow token; or set up local mode on the user's machine. Use when the user asks to set up, install or configure Pendulum for a repository. Not for checking whether it is set up (pendulum-doctor)."
 ---
 
 # /pendulum:pendulum-setup

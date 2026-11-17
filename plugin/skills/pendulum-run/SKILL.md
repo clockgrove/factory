@@ -1,6 +1,6 @@
 ---
 name: pendulum-run
-description: "Run one Clockgrove Pendulum Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`pendulum run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Pendulum to push only on a second yes. Use when the user asks to run, work or build one Clockgrove Pendulum Objective on their machine. Not for working the whole queue (pendulum-serve) or kicking the Action's dispatcher (pendulum-kick)."
+description: "Run one Pendulum Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`pendulum run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Pendulum to push only on a second yes. Use when the user asks to run, work or build one Pendulum Objective on their machine. Not for working the whole queue (pendulum-serve) or kicking the Action's dispatcher (pendulum-kick)."
 ---
 
 # /pendulum:pendulum-run <issue> [--here]

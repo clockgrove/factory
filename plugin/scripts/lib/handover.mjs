@@ -165,7 +165,7 @@ export function handoverText({ issue, named = [], from = "issue", pr = null, pat
   return [
     `Pendulum: the workflow hand-over for #${issue}: ${list(files ?? patchFiles(body))}. ${WHY} ${pr ? `${pr === true ? "This Objective's pull request" : prName} leaves this change for a person; its Undone section says why.` : `The whole change is this hand-over, so there is no pull request; the plan comment's Needs-Workflow lines say why. Close this issue once it is applied.`}`,
     "",
-    `**Apply it ${when}**, in a clone of this repository, with Clockgrove Pendulum's command \`pendulum handover ${issue}\`. ${SIGNAL(issue)} It reads this comment again, checks the change as Pendulum did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`pendulum handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
+    `**Apply it ${when}**, in a clone of this repository, with Pendulum's command \`pendulum handover ${issue}\`. ${SIGNAL(issue)} It reads this comment again, checks the change as Pendulum did, puts it on a new branch \`${branch}\` from \`${defaultBranch}\` and shows you the diff, then stops. ${RISK} When you have read it, \`pendulum handover ${issue} --push\` commits it, pushes the branch and opens its pull request. Then remove the \`${HANDOVER_LABEL}\` label from #${issue}.`,
     "",
     "By hand, the same steps:",
     "",

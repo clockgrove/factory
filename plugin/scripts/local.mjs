@@ -3923,7 +3923,7 @@ const sessionIssueFile = (dir) => join(process.env.PENDULUM_IN || resolve(dir, s
 /** A session's refusal of an issue whose author, last editor or latest title renamer cannot vouch for it: the Blocked notice's words. */
 const untrustedRefusal = (t, what) => new Error(`${what}: ${t.reason}. ${t.fix}`);
 /** A draft (pendulum:draft) is run on no route, a session's included (lib/stop.mjs stopCause): the refusal and its fix. */
-const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Clockgrove Pendulum Objective ${issue}")`);
+const draftRefusal = (issue, what) => new Error(`${what}: #${issue} is a draft (${DRAFT_LABEL}), which Pendulum never runs; start it first (take ${DRAFT_LABEL} off and apply the Objective label, or ask "Start Pendulum Objective ${issue}")`);
 
 /**
  * `pendulum issue <issue> [--out FILE]`: the issue as a session reads it (/pendulum:pendulum-run --here, /pendulum:pendulum-review-here), written

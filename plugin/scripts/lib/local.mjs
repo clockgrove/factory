@@ -2220,8 +2220,16 @@ export function localBaseEnv(env = process.env, extra = [], { workerSecrets = ""
   const out = {};
   for (const [k, v] of Object.entries(env)) if (keep.test(k) || wanted.has(k)) out[k] = v;
   // Tool telemetry would only hit the sandbox's network allow-list (a Codex sandbox reports each refusal as an error).
-  return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", ...out };
+  return { TURBO_TELEMETRY_DISABLED: "1", NEXT_TELEMETRY_DISABLED: "1", ...AGENT_SHELL_TELEMETRY_OFF, ...out };
 }
+
+/**
+ * The variables that keep the tools an agent's commands run from reporting usage, given to the harness on every route
+ * (harness.mjs harnessCommand), whose commands inherit them, and locally to every process (localBaseEnv): the
+ * DO_NOT_TRACK convention, and the GitHub CLI's own GH_TELEMETRY, which gh reads before DO_NOT_TRACK
+ * (docs.github.com/en/github-cli/github-cli/github-cli-telemetry).
+ */
+export const AGENT_SHELL_TELEMETRY_OFF = { DO_NOT_TRACK: "1", GH_TELEMETRY: "false" };
 
 /** Where local mode's token for a repository lives: ~/.config/pendulum/tokens/<owner>/<name> (the sandboxes hide ~/.config/pendulum). */
 export function tokenFile(repoFull, home = homedir()) {

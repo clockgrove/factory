@@ -26,7 +26,7 @@ import { relayProbeCommand } from "./relay-shim.mjs";
 import { liveSpend } from "./live-spend.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
-import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
+import { AGENT_SHELL_TELEMETRY_OFF, GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
@@ -374,7 +374,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
-      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...VENDOR_TELEMETRY_OFF.claude.env, ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}), ...(local?.claudeEnv ? { CLAUDE_ENV_FILE: local.claudeEnv } : {}) } };
+      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}), ...(local?.claudeEnv ? { CLAUDE_ENV_FILE: local.claudeEnv } : {}) } };
     }
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
@@ -394,7 +394,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (compaction) args.push("-c", `model_auto_compact_token_limit=${Number(compaction)}`);
       // The session id travels as an extra variable, so a runner's agent uid gets it with the key (runHarness agentExtra).
       const gw = gateway?.session ? { PENDULUM_GATEWAY_SESSION: gateway.session } : {};
-      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV, ...gw } : runner ? { ...HARNESS_GIT_ENV, ...codexRunnerEnv(runner), ...gw } : gw };
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...(local ? { ...HARNESS_GIT_ENV, ...gw } : runner ? { ...HARNESS_GIT_ENV, ...codexRunnerEnv(runner), ...gw } : gw) } };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
@@ -426,7 +426,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // it (1.0.107, checked live), so it is what is left, never plus the session's past. Copilot takes no less than 30
       // credits; with less than that left runHarness starts no Copilot run at all.
       if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
-      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV } : runner ? { ...HARNESS_GIT_ENV, ...copilotRunnerEnv(runner) } : {} };
+      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...(local ? { ...HARNESS_GIT_ENV } : runner ? { ...HARNESS_GIT_ENV, ...copilotRunnerEnv(runner) } : {}) } };
     }
     default:
       throw new Error(`unknown harness ${harness}`);

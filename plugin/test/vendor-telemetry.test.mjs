@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { claudeRunner, codexRunner, copilotRunner, decisionLaunch, harnessCommand, runHarness } from "../scripts/lib/harness.mjs";
-import { HARNESS_API_DOMAINS, LOCAL_DOMAINS, harnessOuterSettings, localSandbox } from "../scripts/lib/local.mjs";
+import { HARNESS_API_DOMAINS, LOCAL_DOMAINS, harnessOuterSettings, localBaseEnv, localSandbox } from "../scripts/lib/local.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
 
 const HARNESSES = ["claude", "codex", "copilot"];
@@ -17,6 +17,14 @@ const fixture = (name) => join(import.meta.dirname, "fixtures", name);
 const CLAUDE_ENV = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1" };
 const codexOff = (args) => args.some((a, i) => a === "-c" && args[i + 1] === "analytics.enabled=false");
 const copilotOff = (args) => args.includes("--disable-client-telemetry");
+
+// What the agent's shell gets on every route, for the tools its commands run: the DO_NOT_TRACK convention and gh's own variable.
+const SHELL_ENV = { DO_NOT_TRACK: "1", GH_TELEMETRY: "false" };
+
+/** Whether a pass's env carries SHELL_ENV, which the harness's commands inherit. */
+function assertShellOff({ env }, where) {
+  for (const [k, v] of Object.entries(SHELL_ENV)) assert.equal(env[k], v, `${where}: ${k} for the agent's shell`);
+}
 
 /** Whether a launch (`env`, `args`) carries `harness`'s switches; `preserved`: the names a runner's agent filter lets through. */
 function assertOff(harness, { env, args, preserved = null }, where) {
@@ -37,9 +45,11 @@ test("#489: every harness's pass carries its vendor's telemetry switches on the 
   const local = localSandbox({ PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: ["/u"], domains: LOCAL_DOMAINS, clone: "/c", readOnly: [], claudeDir: "/u/claude" }) });
   for (const harness of HARNESSES) {
     for (const resume of [null, "00000000-0000-0000-0000-000000000003"]) {
-      assertOff(harness, harnessCommand({ harness, model: "m", prompt: "p", resume, runner: runners[harness] }), `${harness} on a runner${resume ? ", resumed" : ""}`);
-      assertOff(harness, harnessCommand({ harness, model: "m", prompt: "p", resume, local }), `${harness} locally${resume ? ", resumed" : ""}`);
-      assertOff(harness, harnessCommand({ harness, model: "m", prompt: "p", resume }), `${harness} unsandboxed${resume ? ", resumed" : ""}`);
+      for (const [where, route] of [["on a runner", { runner: runners[harness] }], ["locally", { local }], ["unsandboxed", {}]]) {
+        const c = harnessCommand({ harness, model: "m", prompt: "p", resume, ...route });
+        assertOff(harness, c, `${harness} ${where}${resume ? ", resumed" : ""}`);
+        assertShellOff(c, `${harness} ${where}${resume ? ", resumed" : ""}`);
+      }
     }
   }
   // Codex through the AI Gateway too.
@@ -78,12 +88,15 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(out[h])}, "utf8"));
   process.env.PATH = `${bin}:${saved}`;
   try {
     for (const harness of HARNESSES) {
-      const env = { PATH: process.env.PATH, HOME: bin, GITHUB_ACTIONS: "true", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", CODEX_API_KEY: "sk-dummy", COPILOT_GITHUB_TOKEN: "ghu_dummy" };
+      const env = { PATH: process.env.PATH, HOME: bin, GITHUB_ACTIONS: "true", GH_TELEMETRY: "enabled", DO_NOT_TRACK: "0", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", CODEX_API_KEY: "sk-dummy", COPILOT_GITHUB_TOKEN: "ghu_dummy" };
       await runHarness({ harness, model: "m", prompt: "p", maxUsd: 0, cwd: bin, env, timeoutMs: 60_000, label: "work-1", reviewer: true });
     }
     const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.deepEqual(calls.map((c) => c.harness), HARNESSES);
-    for (const c of calls) assertOff(c.harness, c, `${c.harness}'s process`);
+    for (const c of calls) {
+      assertOff(c.harness, c, `${c.harness}'s process`);
+      assertShellOff(c, `${c.harness}'s process`);
+    }
   } finally {
     process.env.PATH = saved;
   }
@@ -99,4 +112,9 @@ test("#489: local mode's harness sandbox reaches no vendor reporting host", () =
   // The model, sign-in and token hosts stay.
   assert.deepEqual(HARNESS_API_DOMAINS.claude, ["api.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"]);
   assert.deepEqual(HARNESS_API_DOMAINS.copilot, ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com"]);
+});
+
+test("#489: local mode starts every process with DO_NOT_TRACK and gh's telemetry off, whatever the developer's shell says", () => {
+  const env = localBaseEnv({ PATH: "/bin", HOME: "/home/dev", GH_TELEMETRY: "enabled", DO_NOT_TRACK: "0" });
+  for (const [k, v] of Object.entries(SHELL_ENV)) assert.equal(env[k], v, k);
 });

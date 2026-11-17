@@ -892,9 +892,9 @@ test("queue red: a deterministic failure only the queue's jobs run (another OS) 
 // assetgrove's queue CI of 2026-11-16: the Windows leg under `timeout-minutes: 20`, Quality the required roll-up.
 const LIMIT_CI = "on: merge_group\njobs:\n  test:\n    strategy:\n      matrix:\n        os: [ubuntu-26.04, windows-2025]\n    name: test (${{ matrix.os }}, 1/1)\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 20\n    steps:\n      - run: pnpm test\n  Quality:\n    needs: test\n    if: always()\n    runs-on: ubuntu-26.04\n    steps:\n      - run: test \"${{ needs.test.result }}\" = success\n";
 
-/** The queue's run on `sha` whose Windows leg (id) was cancelled after `ranMs`, and the Quality roll-up red after it. */
-function queueCancel(fake, { sha, id, ranMs }) {
-  const start = Date.now() - 40 * MIN;
+/** The queue's run on `sha`, started `startAgo` ms ago, whose Windows leg (id) was cancelled after `ranMs`, and the Quality roll-up red after it. */
+function queueCancel(fake, { sha, id, ranMs, startAgo = 40 * MIN }) {
+  const start = Date.now() - startAgo;
   const at = (ms) => new Date(start + ms).toISOString();
   const leg = "test (windows-2025, 1/1)";
   fake.s.workflow = LIMIT_CI;
@@ -910,27 +910,58 @@ function queueCancel(fake, { sha, id, ranMs }) {
   return leg;
 }
 
-test("queue red: a job cancelled at its time limit is never a flake, never enqueued again as one: its fix pass and the Block say it was cancelled at its limit (#519)", async () => {
+test("queue red: a job cancelled at its time limit is never a flake: one fix pass, said as the job running past its limit on the queue's commit, never as the PR's own change, and so is its Block (#519)", async () => {
   const { queueFailureLines, redLines } = await import("../scripts/lib/session.mjs");
-  for (const [ranMs, said] of [[20 * MIN + 11_000, "cancelled at its 20-minute limit"], [3 * MIN, "cancelled after 3 min, before its 20-minute limit"]]) {
-    const fake = fakeGitHub();
-    await withGitHub(fake, async () => {
-      const leg = queueCancel(fake, { sha: "8".repeat(40), id: ranMs > 10 * MIN ? 9630 : 9640, ranMs });
-      fake.s.removals = [queueDrop(ago(5 * MIN))];
-      assert.equal(await merge({}), "queue-red");
-      // A decider that calls every job a flake never decides it: the leg is not asked.
-      const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
-      assert.equal(step.state, "fixing", `${said}: no re-enqueue as a flake`);
-      assert.notEqual(records(fake)[0].kind, "flaky");
-      const text = `the ${leg} job was ${said}`;
-      assert.equal(step.red.lead.split("\n")[0], `--- Quality (required check), from ${leg}: ${text}`);
-      assert.match(step.line, new RegExp(`${text.replace(/[()]/g, "\\$&")}; the PR's own change, one fix pass`));
-      // The answer pass's ask: the leg's exit is the cancel.
-      assert.ok(redLines(step.red, { files: false }).includes(`Exit: ${text}`), redLines(step.red, { files: false }).join("\n"));
-      // The queue Block's failed-job lines say it too.
-      assert.match(await queueFailureLines(repo, { prNumber: PR, base: "main", since: ago(3600_000), actionsToken: "job" }, { token: "t" }), new RegExp(`^\`${leg.replace(/[()]/g, "\\$&")}\`: ${text.replace(/[()]/g, "\\$&")}`));
-    });
-  }
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const sha = "8".repeat(40);
+    const leg = queueCancel(fake, { sha, id: 9630, ranMs: 20 * MIN + 11_000, startAgo: 60 * MIN });
+    fake.s.removals = [queueDrop(ago(38 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    // A decider that calls every job a flake never decides it: the leg is not asked.
+    const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+    assert.equal(step.state, "fixing", "no re-enqueue as a flake");
+    assert.equal(step.line, `merge queue run red on 8888888: the ${leg} job ran past its 20-minute limit on the queue's commit 8888888; one fix pass (the answer pass)`);
+    const text = `the ${leg} job was cancelled at its 20-minute limit`;
+    assert.equal(step.red.lead.split("\n")[0], `--- Quality (required check), from ${leg}: ${text}`);
+    // The answer pass's ask: the leg's exit is the cancel.
+    assert.ok(redLines(step.red, { files: false }).includes(`Exit: ${text}`), redLines(step.red, { files: false }).join("\n"));
+    // The queue Block's failed-job lines say it too.
+    assert.match(await queueFailureLines(repo, { prNumber: PR, base: "main", since: ago(3 * 3600_000), actionsToken: "job" }, { token: "t" }), new RegExp(`^\`${leg.replace(/[()]/g, "\\$&")}\`: ${text.replace(/[()]/g, "\\$&")}`));
+
+    // The fix's head goes back in and runs past the limit again: no progress, Blocked, said as the limit again.
+    queueCancel(fake, { sha: "9".repeat(40), id: 9640, ranMs: 20 * MIN + 30_000, startAgo: 36 * MIN });
+    fake.s.removals.push(queueDrop(ago(14 * MIN)));
+    assert.equal(await merge({}), "queue-red");
+    const blocked = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+    assert.equal(blocked.state, "blocked");
+    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit 9999999 failed: the ${leg.replace(/[()]/g, "\\$&")} job ran past its 20-minute limit on the queue's commit 9999999, after Pendulum's fix pass, which made no progress`));
+    for (const said of [step.line, blocked.line, blocked.reason]) assert.doesNotMatch(said, /own change/);
+  });
+  // Triage off: a job past its limit is read exactly, so it gets its fix pass too, never a re-enqueue.
+  const off = fakeGitHub();
+  await withGitHub(off, async () => {
+    queueCancel(off, { sha: "8".repeat(40), id: 9650, ranMs: 20 * MIN + 11_000 });
+    off.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    assert.equal((await reviewReads(off)).state, "fixing");
+  });
+});
+
+test("queue red: a job cancelled before its limit (by hand) is no flake and not known to be the PR's change: Blocked at once, no fix pass, no re-enqueue (#519)", async () => {
+  const fake = fakeGitHub();
+  await withGitHub(fake, async () => {
+    const leg = queueCancel(fake, { sha: "8".repeat(40), id: 9660, ranMs: 3 * MIN });
+    fake.s.removals = [queueDrop(ago(5 * MIN))];
+    assert.equal(await merge({}), "queue-red");
+    const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
+    assert.equal(step.state, "blocked");
+    assert.equal(step.cause, "work");
+    assert.equal(step.red, undefined, "no fix pass");
+    assert.equal(step.reason, `the merge queue's run on its commit 8888888: the ${leg} job was cancelled after 3 min, before its 20-minute limit: not a flake and not known to be the PR's change; re-apply the label`);
+    assert.deepEqual(records(fake).map((r) => [r.state, r.kind]), [["blocked", "cancelled"]]);
+    assert.equal(fake.s.enqueued.length, 0);
+  });
 });
 
 // ------------------------------------------------------------------ the queue's fix passes: bounded, recorded once done (#312 review)

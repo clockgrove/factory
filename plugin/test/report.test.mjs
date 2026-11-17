@@ -665,3 +665,34 @@ test("report (#533): the call budget stopped before the usage records: the stage
   assert.deepEqual([stopped.count, stopped.issues, stopped.stages], [2, [3], [{ issue: 3, stage: "work", key: "44002648279" }, { issue: 3, stage: "review", key: "44002920873" }]]);
   assert.ok(!r.source.missing.some((m) => m.code === "no-ledger"));
 });
+
+test("report (#533): a stage with a spend line takes its tokens from its usage record; the spend line carries none, so none twice", async () => {
+  const { json: r } = await report(linedWorld(), { issue: 3 });
+  // The work stage's three passes and the review's one, 100k input each, as writeUsage summed them.
+  const want = { input: 400_000, output: 16_000, cached: 320_000, written: 60_000 };
+  assert.deepEqual(byIssue(r, 3).tokens, want);
+  assert.deepEqual(r.totals.tokens, want);
+  assert.deepEqual(r.breakdowns.stage.find((x) => x.key === "review").tokens, { input: 100_000, output: 4_000, cached: 80_000, written: 15_000 });
+});
+
+test("report (#533): no App id on a mixed route: the App's stages are each one stage of unknown cost, their records neither a second stage nor their dollars", async () => {
+  const w = linedWorld();
+  w.comments.push(progress(3, "review", "local-m1", { user: ME, at: "2026-11-17T02:40:00Z", spend: { usd: 0.1, parts: { usdByBilling: { api: 0.1 }, billing: "api" } } }));
+  const fake = fakeGitHub(w);
+  // Built while the token's login is known, as the command builds it: the local stage is the reader's own.
+  const r = await over(fake, async () => buildReport(await readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }), { now: new Date(NOW).toISOString() }));
+  assert.ok(fake.calls.some((c) => c.includes("/actions/artifacts")), "the local stage's ledger is wanted: the artifacts are read");
+  const three = byIssue(r, 3);
+  assert.equal(r.totals.stages, 3);
+  assert.deepEqual(three.stages, { work: 1, rebase: 0, review: 2 });
+  assert.deepEqual(usd(three), { api: 0.1, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "the trusted line's dollars alone");
+  assert.equal(three.cost.unknownRuns, 2);
+  assert.deepEqual(three.cost.unknownWhy, ["unattributed"]);
+});
+
+test("report (#533): the budget goes to dollars before ledgers: Objectives with a stage that has no spend line are read first", async () => {
+  const { calls } = await report(linedWorld(), { since: "2026-11-17" });
+  const lists = calls.filter((c) => c.includes("/actions/artifacts?name=")).map((c) => new URL(`https://x${c.slice(4)}`).searchParams.get("name"));
+  // #7 and #8 have a stage with no spend line (their dollars); #3 and #5 need only ledgers.
+  assert.deepEqual(lists, ["pendulum-usage-7", "pendulum-usage-7-review", "pendulum-usage-8", "pendulum-usage-8-review", "pendulum-usage-3", "pendulum-usage-3-review", "pendulum-usage-5", "pendulum-usage-5-review"]);
+});

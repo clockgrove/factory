@@ -371,7 +371,10 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     // dollars stay the stage's (buildReport); the record gives its ledger.
     const stageKey = (c) => /^<!-- pendulum:\d+:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->/.exec(c.body || "")?.[1] ?? null;
     const needs = (n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && (!spendParts(c.body) || !Array.isArray(localOf(n).get(stageKey(c))?.ledger)));
-    const wanted = [...issues.keys()].filter(needs);
+    // Dollars before ledgers: the Objectives with a stage that has no spend line are read first, so a budget that runs
+    // out costs per-pass detail before it costs a dollar figure.
+    const unlinedIn = (n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && !spendParts(c.body));
+    const wanted = [...issues.keys()].filter(needs).sort((a, b) => Number(unlinedIn(b)) - Number(unlinedIn(a)) || a - b);
     source.artifactsWanted = new Set(wanted);
     if (wanted.length) budget.plan(wanted.length * 2, `the usage artifact lists of ${wanted.length} Objective(s) with a stage whose dollars or per-pass ledger only its usage record holds`);
     for (const n of wanted) {
@@ -622,9 +625,12 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     const lineKeys = new Set(lines.map((l) => l.progressRun));
     const unlined = new Set(stages.filter((c) => !spendParts(c.body)).map((c) => runOf(c.body)));
     const ledgerOf = new Map();
+    // The stage comments Pendulum cannot attribute to itself, as lines: a record that names one of them is that stage's
+    // own record, the same stage, so it is neither counted beside it nor its dollars taken (that stage stays unknown).
+    const theirLines = stageSpendRecords(n, sorted(vouched.filter((c) => progress.test(c.body || ""))), [], { all: true });
     const records = (artifacts?.get(n) || []).filter((r) => {
       const covered = allLines.filter(coversLine(r));
-      if (!covered.length) return inWindow(r.ended ?? r.started, scope);
+      if (!covered.length) return !theirLines.some(coversLine(r)) && inWindow(r.ended ?? r.started, scope);
       const inPeriod = covered.filter((l) => lineKeys.has(l.progressRun));
       if (!inPeriod.length) return false;
       if (inPeriod.some((l) => unlined.has(l.progressRun))) return true;
@@ -673,6 +679,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       const localRec = key ? localRecs.get(key) : null;
       // A lined stage's usage record, read for its ledger and version alone.
       const recordOf = rec.source === "spend" && key ? ledgerOf.get(key) ?? null : null;
+      // A lined stage's tokens are its record's: a spend line carries none, so none is counted twice.
+      const tokens = recordOf?.tokens && typeof recordOf.tokens === "object" ? recordOf.tokens : part.tokens;
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
       const model = rec.source === "decisions" ? "decisions" : modelKey(rec.model) ?? modelKey(line?.model);
       // The Pendulum release from the first record that names one (a spend line's harness line names none).
@@ -680,15 +688,15 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;
       addCost(row.cost, c);
       addCost(totals, c);
-      addTokens(row.tokens, part.tokens);
-      addTokens(totalTokens, part.tokens);
+      addTokens(row.tokens, tokens);
+      addTokens(totalTokens, tokens);
       // A sandbox booking with no stage of its own counts its cost, but no stage.
       const count = rec.notStage ? 0 : 1;
-      views.stage.add(stageKind, c, part.tokens, count);
-      views.harness.add(harness, c, part.tokens, count);
-      views.model.add(model, c, part.tokens, count);
-      views.version.add(rec.source === "decisions" ? "decisions" : version, c, part.tokens, count);
-      if (by.includes("account")) views.account.add(rec.source === "decisions" ? "decisions" : account, c, part.tokens, count);
+      views.stage.add(stageKind, c, tokens, count);
+      views.harness.add(harness, c, tokens, count);
+      views.model.add(model, c, tokens, count);
+      views.version.add(rec.source === "decisions" ? "decisions" : version, c, tokens, count);
+      if (by.includes("account")) views.account.add(rec.source === "decisions" ? "decisions" : account, c, tokens, count);
       if (rec.source !== "decisions" && !rec.notStage) {
         stagesSeen += 1;
         row.stages[stageKind] += 1;

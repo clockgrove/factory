@@ -7,10 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RETRY, repoOf } from "../scripts/lib/github.mjs";
-import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
+import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { LEDGER_MAX, ledgerMarker, ledgerOfComment, setSelf, spendParts, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { PROGRESS_LEDGER_ROOM, progressReporter, writeUsage } from "../scripts/lib/session.mjs";
 import { BILLING, UNKNOWN_WHY } from "../scripts/lib/usage.mjs";
+
+/** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
+const PENDULUM_VERSION = pendulumBuild();
 
 RETRY.sleep = async () => {};
 

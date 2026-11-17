@@ -49,6 +49,7 @@ import { unknownOf } from "./lib/usage.mjs";
 import { sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
 import { launcherDispatch } from "./lib/cross-os.mjs";
+import { pendulumBuild } from "./lib/release.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
 export const CLAIM_LEASE_MS = 10 * 60_000;
@@ -365,6 +366,8 @@ export function stageEnvironment({ inputs, defaults = inputs, env = process.env,
   if (appSlug) out.PENDULUM_APP_SLUG = appSlug;
   // The key that opens an earlier stage's sealed session for a resume (lib/seal.mjs), never the App's key it comes from.
   if (transcriptKey) out.PENDULUM_SEAL_KEY = transcriptKey.toString("base64");
+  // The build the stage's records name (release.mjs pendulumBuild): this launcher's, whose plugin the sandbox runs.
+  out.PENDULUM_STAGE_BUILD = pendulumBuild({ env });
   return out;
 }
 

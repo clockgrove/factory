@@ -58,9 +58,15 @@ export const UNKNOWN_WHY = {
   relay: "calls through the relayed gateway key whose cost the gateway did not report",
   // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
   sandbox: "the sandbox vendor did not report the stage's usage",
-  // Decision calls through the AI Gateway (adapters/decider-ai-gateway.mjs) whose cost the gateway did not report: no
-  // cost in the answer and no generation record, or a call that failed after it was sent.
-  decision: "decision calls through the AI Gateway whose cost the gateway did not report",
+  // Decision calls through the AI Gateway (adapters/decider-ai-gateway.mjs DECISION_UNKNOWN), by what came back: a call
+  // that failed after it was sent, with no figure and no record to price it;
+  decision: "decision calls through the AI Gateway that failed after they were sent, with no cost reported",
+  // the gateway answered and gave no cost: none in its answer, and no generation named or no record of it;
+  "decision-no-cost": "decision calls the AI Gateway answered without a cost: none in the answer and no generation record",
+  // the generation the call named was looked up and every lookup failed, or the lookup's bound passed;
+  "decision-lookup": "decision calls through the AI Gateway whose generation lookup failed before it gave a cost",
+  // the stage wrote its usage before the call's price came (decider.mjs settleDecisionCosts' bound).
+  "decision-unsettled": "decision calls through the AI Gateway whose price had not come when the stage wrote its usage",
   // The scorer's: a usage record from before records named their progress comment, beside a comment of its stage with
   // dollars that no record names; it may be that comment's stage, so its figure is not added to the comment's
   // (cost-join.mjs withLines).
@@ -286,15 +292,21 @@ export function passKind(label) {
 }
 
 /**
- * A stage's dollars by pass kind (PASS_KINDS), from its pass `records` on a credential of `billing`: per kind that ran,
+ * The keys of a stage's dollars by pass (usdByPass): the pass kinds (PASS_KINDS) and `decision`, the stage's decision
+ * calls on either route (a gateway decision record, a harness decision run: each record marked `decision`).
+ */
+export const PASS_KEYS = Object.freeze([...PASS_KINDS, "decision"]);
+
+/**
+ * A stage's dollars by pass (PASS_KEYS), from its pass `records` on a credential of `billing`: per key that ran,
  * `{usd, usdUnknown?, usdByBilling?}`, the known dollars of its passes (a relayed key's share in them), their runs of
- * unknown cost and the known dollars by billing (usdByBilling). A pass that never ran, a decision record and a pass with
- * no kind are in none: their dollars are the stage's own. {} when no pass of a kind ran.
+ * unknown cost and the known dollars by billing (usdByBilling). The stage's decision records are under `decision`. A
+ * pass that never ran and a pass with no kind are in none: their dollars are the stage's own. {} when none ran.
  */
 export function usdByPass(records, billing) {
   const out = {};
   for (const r of records || []) {
-    const kind = r && !r.noRun && !r.decision ? passKind(r.label) : null;
+    const kind = !r || r.noRun ? null : r.decision ? "decision" : passKind(r.label);
     if (kind) (out[kind] ??= []).push(r);
   }
   return Object.fromEntries(
@@ -319,11 +331,11 @@ export function rerunRead(v) {
   return { afterBlock: v.afterBlock, repeated: Array.isArray(v.repeated) ? [...new Set(v.repeated.filter((k) => PASS_KINDS.includes(k)))] : [] };
 }
 
-/** A `usdByPass` read back from a stored record or line: its PASS_KINDS at finite non-negative dollars; {} for none or a broken one. */
+/** A `usdByPass` read back from a stored record or line: its PASS_KEYS at finite non-negative dollars; {} for none or a broken one. */
 export function passRead(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
   const out = {};
-  for (const kind of PASS_KINDS) {
+  for (const kind of PASS_KEYS) {
     const p = v[kind];
     const usd = nonNeg(p?.usd);
     if (usd === null || p.usd < 0) continue;
@@ -1396,7 +1408,9 @@ function priceCredits({ nano, negative, status, tokens }, creditUsd) {
   if (nano === null) return { aiu: null, usd: null, why: "no AI credits reported" };
   if (status && status !== "complete" && status !== "partial") return { aiu: null, usd: null, why: `AI credits ${status}` };
   if (nano === 0 && ((tokens?.input ?? 0) > 0 || (tokens?.output ?? 0) > 0)) return { aiu: 0, usd: null, why: "zero AI credits for a run that used tokens" };
-  return { aiu: Math.round(nano / 1e6) / 1e3, usd: Math.round((nano / 1e9) * creditUsd * 10000) / 10000, partial: status === "partial", why: null };
+  // The dollars are not rounded per pass (a stage's passes add up to its credits' worth, #565): only float noise is
+  // taken off, at 1e-10 of a dollar.
+  return { aiu: Math.round(nano / 1e6) / 1e3, usd: Math.round((nano / 1e9) * creditUsd * 1e10) / 1e10, partial: status === "partial", why: null };
 }
 
 /**

@@ -348,6 +348,16 @@ outputs:
 runs:
   using: composite
   steps:
+    # The ref the workflow's `uses:` names for this action, read before any nested `uses:` below can leave
+    # github.action_ref empty or set to its own (actions/runner#2473): the Pendulum build its records name
+    # (release.mjs pendulumBuild).
+    - name: Pendulum's ref
+      id: pendulum-ref
+      shell: bash
+      env:
+        REF: ${{ github.action_ref }}
+      run: printf 'ref=%s\n' "${REF//[$'\r\n']/}" >> "$GITHUB_OUTPUT"
+
     - name: Node
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
@@ -529,6 +539,8 @@ runs:
         PENDULUM_USAGE_DIR: ${{ runner.temp }}/pendulum-usage
         # The scripts, skills, agents and task card are one tree: the plugin beside this action.
         PENDULUM_PLUGIN_ROOT: ${{ github.action_path }}/plugin
+        # The ref the workflow's uses: names for this action, as the first step read it: the build its records name.
+        PENDULUM_ACTION_REF: ${{ steps.pendulum-ref.outputs.ref }}
       run: |
         set -euo pipefail
         # The launcher sets its own (an ended sandbox stage's usage, or none). Work and review upload the directory the next

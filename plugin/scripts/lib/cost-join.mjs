@@ -518,6 +518,6 @@ export function decisionSpendRecords(n, comments = [], { keep = () => true } = {
       const unknown = days.reduce((s, d) => s + (d.usdUnknown ?? 0), 0);
       const usd = Math.round(days.reduce((s, d) => s + d.usd, 0) * 1e6) / 1e6;
       // The AI Gateway's calls, billed to its key: `api` (usage.mjs BILLING).
-      return { source: "decisions", harness: null, model: null, billing: "api", usdByBilling: { api: usd }, usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}), tokens: { input: null, output: null, cached: null, written: null }, basis: "pendulum:decision-spend lines of decision calls outside a stage (the AI Gateway's cost)" };
+      return { source: "decisions", harness: null, model: null, billing: "api", usdByBilling: { api: usd }, usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: [...new Set(days.flatMap((d) => (d.usdUnknown ? d.usdUnknownWhy : [])))] } : {}), tokens: { input: null, output: null, cached: null, written: null }, basis: "pendulum:decision-spend lines of decision calls outside a stage (the AI Gateway's cost)" };
     });
 }

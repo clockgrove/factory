@@ -583,7 +583,8 @@ test("#479 dispatcher: an answer check's gateway call outside any stage is carri
   gh.gateway.cost = null;
   gh.comment(47, PERSON, "use the second one");
   assert.deepEqual((await tick(gh, { key: true })).answered, [47], "an unknown cost never stops the screen");
-  assert.deepEqual(decisionSpendEntries(answeredRecords(gh, 47)[0].body), [{ date: today, calls: 1, usd: 0, usdUnknown: 1, usdUnknownWhy: ["decision"] }]);
+  // Its line says why (#565): the gateway answered and gave no cost.
+  assert.deepEqual(decisionSpendEntries(answeredRecords(gh, 47)[0].body), [{ date: today, calls: 1, usd: 0, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"] }]);
   const later = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
   assert.ok(Math.abs(later.spentToday - 0.0031) < 1e-9);
   assert.equal(later.unknownToday, 1);

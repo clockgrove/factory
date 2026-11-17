@@ -8,14 +8,15 @@
 // marker the card reads is trusted only from Pendulum itself (pendulumOwn: its login here, or its App by id). A stage
 // comment by someone else who can push counts as a run of unknown cost, never its dollars; anyone else's counts nothing.
 
+import { pendulumBuild } from "./release.mjs";
 import { DRAFT_LABEL } from "./stop.mjs";
-import { DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
+import { DEFAULTS } from "./inputs.mjs";
 import { stageHarnessOf } from "./cost-join.mjs";
 import { addTokens, isAnswer, isFix, stagePassFigures, zeroTokens } from "./pass-figures.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
-import { BILLING, BILLING_WORDS, PASS_KINDS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, PASS_KEYS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
 const ms = (at) => (typeof at === "number" ? at : at ? Date.parse(at) : NaN);
@@ -690,8 +691,8 @@ function costTable(d, t, rows) {
   return [`| Stage | Time | ${one ? `Cost (${one})` : "Cost"} |`, "| --- | ---: | ---: |", ...lines, `| **Total** | **${durationText(t.wall)}** | **${costText(t.usd, t.unknown)}${t.usd > 0 && !one ? billingWords(t.usd, t.byBilling) : ""}** |`].join("\n");
 }
 
-/** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KINDS less `conflict`, which is churn), in its order. */
-const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes" });
+/** The pass kinds' and stages' words in the breakdown (usage.mjs PASS_KEYS less `conflict`, which is churn), in its order. */
+const ASKED = Object.freeze({ work: "Work", review: "Review", answer: "Answer passes", fix: "Fix passes", decision: "Decision calls" });
 /** The churn the breakdown names apart (markChurn), in its order. */
 const CHURN = Object.freeze({
   "rebase-conflict": "Conflict rebases after other PRs merged",
@@ -881,7 +882,7 @@ export function finishSummary(d) {
   const money = (r) => ({ usd: r.usd, cents: r.cents, unknown: r.unknown, byBilling: billingRead(r.byBilling) });
   return {
     v: SUMMARY_VERSION,
-    pendulum: PENDULUM_VERSION,
+    pendulum: pendulumBuild(),
     issue: d.issue,
     started: d.started,
     merged: d.merged,
@@ -1016,7 +1017,7 @@ export function readSummary(body, n) {
   });
   const asked = (Array.isArray(v.asked) ? v.asked : []).map((r) => {
     const money = moneyRead(r, { nullable: true });
-    return money && [...PASS_KINDS, "sandbox"].includes(r.what) ? { part: countOf(r.part) ?? null, what: r.what, ...money } : null;
+    return money && [...PASS_KEYS, "sandbox"].includes(r.what) ? { part: countOf(r.part) ?? null, what: r.what, ...money } : null;
   });
   const churn = (Array.isArray(v.churn) ? v.churn : []).map((r) => {
     const money = moneyRead(r, { nullable: true });
@@ -1124,6 +1125,15 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
  * dollars, and of its stages whose harness line names no model, for their model; read only when there is such a stage.
  * A failed read or write throws.
  */
+/**
+ * Whether the newest PR on Objective `n`'s branch (`pendulum/<n>`) merged: when a finish card is due (postFinishCard's
+ * test, wait.mjs closedAs). One read. A failed read throws.
+ */
+export async function newestPrMerged(repo, n, opts) {
+  const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=1`, opts)) || [];
+  return !!branch[0]?.merged_at;
+}
+
 export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
   const n = issue.number;
   const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));

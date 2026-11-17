@@ -66,7 +66,7 @@ test("a local work stage that ran no harness pass ends with a $0 spend line, not
   assert.ok(last, `the stage wrote no progress comment:\n${out}`);
   assert.match(last, /exit: blocked/, out);
   assert.doesNotMatch(last, /crashed/, "a Block by its own check, not a crash");
-  assert.deepEqual(lineOf(last), { usd: 0 }, last);
+  assert.deepEqual(lineOf(last), { usd: 0, noPass: true }, last);
 });
 
 const LIB = (f) => pathToFileURL(join(SCRIPTS, "lib", f)).href;
@@ -135,7 +135,7 @@ test("a stage killed after a real pass leaves that pass's reported dollars in it
   const usd = Number(/written (\S+)/.exec(s.out())?.[1]);
   assert.ok(usd > 0, `the pass reported no dollars:\n${s.out()}\n${s.err()}`);
   const line = lineOf(gh.progress.at(-1));
-  assert.deepEqual(line, { usd }, "the pass had ended: its dollars are known, nothing is unknown");
+  assert.deepEqual(line, { usd, running: true }, "the pass had ended: its dollars are known, nothing is unknown; the line was written while the stage ran");
   assert.deepEqual(spendOf(gh.progress.at(-1)), { usd, unknown: 0 }, "daily_usd counts it");
 });
 
@@ -257,17 +257,20 @@ const near = (a, b) => Math.abs(a - b) < 1e-6;
 // running then as a run of unknown cost; the session totals it recorded are reported ones only, so the resumed stage
 // counts the rest, from the session's own running total: every pass is counted once, none at a guess.
 const ONE = { usdUnknown: 1, usdUnknownWhy: ["unreported"] };
+// A line written while its stage ran says so (#565 W4: `running`, and `usdRunning` for its passes still open then): a
+// SIGKILL leaves the last such line; a stop's own write (SIGTERM, harness already killed) carries neither.
+const RAN = { running: true };
 for (const [how, killed, own, unknown, passes] of [
-  ["after", "after a finished pass and a write that shows it", PASS, {}, 3],
-  ["window", "as its pass ends, before a write shows it", 0, {}, 3],
-  ["mid", "in the middle of a pass that then runs on", 0, ONE, 3],
-  ["failed", "after a second pass whose write failed to land", PASS, {}, 4],
+  ["after", "after a finished pass and a write that shows it", PASS, RAN, 3],
+  ["window", "as its pass ends, before a write shows it", 0, RAN, 3],
+  ["mid", "in the middle of a pass that then runs on", 0, { ...ONE, ...RAN, usdRunning: 1 }, 3],
+  ["failed", "after a second pass whose write failed to land", PASS, RAN, 4],
   // The stop's write shows the pass still running as a run of unknown cost; the resumed stage counts its half.
   ["term", "by SIGTERM in the middle of a pass, before a write shows it", 0, ONE, 2.5],
   // Its stop write never sent: the line is the last that landed, and the resumed stage still counts the half pass.
-  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, {}, 2.5],
+  ["term-unsent", "by SIGTERM in the middle of a pass, its stop write never sent", 0, RAN, 2.5],
   // Its stop write answered 502 (it may have landed): the totals it recorded are reported ones, so nothing is lost.
-  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, {}, 2.5],
+  ["term-5xx", "by SIGTERM in the middle of a pass, its stop write answered 502", 0, RAN, 2.5],
 ]) {
   test(`a stage killed ${killed}, then resumed: the stages' lines sum to ${passes} passes' spend, none counted twice or guessed`, async () => {
     const lines = await stages(["end", how, "end"]);
@@ -367,7 +370,7 @@ test("a final write waits for a status write in flight, and its spend line repla
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = `http://127.0.0.1:${server.address().port}`;
   try {
-    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, unknown: 1 }) });
+    const progress = progressReporter(repoOf("owner/repo"), 7, { token: "t" }, { stage: "work", runId: "1", soFar: async () => ({ usd: 0.5, unknown: 2, running: 1 }) });
     progress.live("harness working", { force: true });
     await new Promise((r) => setTimeout(r, 30));
     progress.spend(1.25, null);
@@ -376,8 +379,13 @@ test("a final write waits for a status write in flight, and its spend line repla
     process.env.GITHUB_API_URL = saved;
     server.close();
   }
-  assert.deepEqual(landed.map(lineOf), [{ usd: 0.5, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, { usd: 1.25 }]);
+  // #565 W4: the line written while the stage runs says so, and how many of its unknown runs were still open; the final one neither.
+  assert.deepEqual(landed.map(lineOf), [{ usd: 0.5, usdUnknown: 2, usdUnknownWhy: ["unreported"], running: true, usdRunning: 1 }, { usd: 1.25 }]);
   assert.match(landed.at(-1), /exit: delivered/);
+  const { spendParts } = await import("../scripts/lib/logic.mjs");
+  const read = spendParts(landed[0]);
+  assert.deepEqual([read.running, read.usdRunning, read.usdUnknown], [true, 1, 2], "read back: one of its two unknown runs in flight");
+  assert.deepEqual([spendParts(landed.at(-1)).running, spendParts(landed.at(-1)).usdRunning], [undefined, undefined]);
 });
 
 test("the default progress writer of a local stage carries the stage's spend so far; a --here writer (soFar null) none", async () => {
@@ -395,7 +403,7 @@ test("the default progress writer of a local stage carries the stage's spend so 
     for (const [k, v] of [["GITHUB_API_URL", saved[0]], ["PENDULUM_LOCAL", saved[1]]]) if (v === undefined) delete process.env[k];
     gh.close();
   }
-  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0 }, null]);
+  assert.deepEqual(gh.progress.map(lineOf), [{ usd: 0, running: true }, null]);
 });
 
 test("stageSpendLine: $0 for no pass; the record's known dollars and key share; runs of unknown cost named, never priced", () => {

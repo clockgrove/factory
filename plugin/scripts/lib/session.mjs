@@ -2,6 +2,7 @@
 // protected-path commit guard, the PR, Pendulum's own validation passes with the
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
+import { pendulumBuild } from "./release.mjs";
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -59,7 +60,7 @@ import {
   transientError,
   RETRY,
 } from "./github.mjs";
-import { PENDULUM_VERSION, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
@@ -87,7 +88,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling, passKind } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
@@ -1027,10 +1028,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const runUrl = process.env.GITHUB_RUN_ID && process.env.GITHUB_SERVER_URL ? `${process.env.GITHUB_SERVER_URL}/${repo.full}/actions/runs/${process.env.GITHUB_RUN_ID}` : null;
   // Not final: the known dollars so far, and the runs of unknown cost (those still running among them).
   // The dollars by billing as the passes booked them when they ended (harness.mjs meterPass: each at its own, the
-  // relayed key's as `api`); a reading with no split books the passes' at the credential's.
-  const interimOf = (live) => {
+  // relayed key's as `api`); a reading with no split books the passes' at the credential's. A line written while the
+  // stage runs says so (`running: true`, #565) with how many of its unknown runs are still open (`usdRunning`), so a
+  // reader takes those as in flight; the stage's final line, and the last one of a stage stopped by a signal
+  // (`stopped`: its harness killed, nothing open any more), carries neither.
+  const interimOf = (live, { stopped = false } = {}) => {
     const byBilling = live.byBilling ? addBilling(live.byBilling) : addBilling(billing ? { [billing]: Math.max(0, live.usd - (live.keyUsd ?? 0)) } : {}, live.keyUsd > 0 ? { api: live.keyUsd } : {});
-    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}) };
+    const open = Number.isInteger(live.running) && live.running > 0 ? Math.min(live.running, live.unknown) : 0;
+    const parts = { ...(Object.keys(byBilling).length ? { usdByBilling: byBilling } : {}), ...(live.unknown > 0 ? { usdUnknown: live.unknown, usdUnknownWhy: ["unreported"] } : {}), ...(stopped ? {} : { running: true, ...(open ? { usdRunning: open } : {}) }) };
     return { spend: live.usd, spendParts: Object.keys(parts).length ? parts : null };
   };
   const bodyOf = (interim) => {
@@ -1063,7 +1068,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     // A rebase line set since the last write that landed (progress.rebase) is written now too, the spend part kept.
     const withRebase = rebase !== null;
     if (!more && !(withRebase && !rebaseShown)) return;
-    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(more ? interimOf(live) : shownInterim)}` }, token }, { ms: STOP_WRITE_MS });
+    const r = restSync(`repos/${repo.full}/issues/comments/${commentId}`, { method: "PATCH", body: { body: `${key}\n${bodyOf(more ? interimOf(live, { stopped: true }) : shownInterim)}` }, token }, { ms: STOP_WRITE_MS });
     if (!r.ok) log(`progress: the stopped stage's ${more ? `spend line ($${live.usd})` : "rebase line"} ${r.sent ? "may not have landed" : "was not written"}: ${r.error}`);
     if (r.ok && withRebase) rebaseShown = true;
     if (more && (r.ok || r.sent)) live.commit?.();
@@ -2247,7 +2252,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
     // model and host labels that chose them (none: the repository's defaults), the hosts its host labels opened, the
     // worker's and the reviewer's reasoning effort (null: the model's own) and the Pendulum release that ran the stage.
-    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: PENDULUM_VERSION } } : {}),
+    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: pendulumBuild() } } : {}),
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),
@@ -2295,14 +2300,18 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The kind its harness passes share (usage.mjs stageBilling; `unknown` when they differ or none ran): what the
     // scorer reads for the stage's harness dollars, the relayed key's being `api` in usdByBilling.
     billing: stageBilling(records || [], billing),
-    // Its known dollars by pass kind (usage.mjs usdByPass: work, review, answer, fix and conflict passes, from their
-    // labels), each with its runs of unknown cost and billing: what the finish card breaks the stage down by (#517). The
-    // rest of `usd` (decision calls, the exit record, the relay's spend outside every pass) is the stage's own.
+    // Its known dollars by pass (usage.mjs usdByPass: work, review, answer, fix and conflict passes, from their labels,
+    // and its decision calls under `decision`), each with its runs of unknown cost and billing: what the finish card
+    // breaks the stage down by (#517). The rest of `usd` (the exit record, the relay's spend outside every pass) is the
+    // stage's own.
     ...((byPass) => (Object.keys(byPass).length ? { usdByPass: byPass } : {}))(usdByPass(records || [], billing)),
     // What the stage ran again (#517), its own record: the Block it is the first stage after and the pass kinds it ran
     // again (usage.mjs rerunRead), and a review stage started only to judge answers already made (review.mjs judgeOnly).
     ...((r) => (r ? { rerun: r } : {}))(rerunRead(rerun)),
     ...(judgeOnly === true ? { judgeOnly: true } : {}),
+    // A stage that ran no pass of a kind (usage.mjs PASS_KINDS: no work, review, answer, fix or conflict pass ran; a
+    // decision call, the exit record and a pass that never ran are none): no round of any (#565), as its spend line says.
+    ...((records || []).some((r) => r && !r.noRun && !r.decision && passKind(r.label)) ? {} : { noPass: true }),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).

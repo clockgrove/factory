@@ -593,8 +593,13 @@ export function deciderCheck({ inputs, env = process.env, home = homedir() }) {
   if (kind.name === "off") return PASS("decision calls", kind.route === "off" ? `off (decision_route off): ${offText}` : `off: decision_route gateway and no AI Gateway key (${kind.code}), so ${offText}`);
   if (kind.name === "ai-gateway") return PASS("decision calls", `the AI Gateway's decision models (triage ${inputs.triageModel || TRIAGE_MODEL}, drift ${inputs.driftModel || DRIFT_MODEL})`);
   const harness = inputs.harness ? `the stage's own harness (${inputs.harness})` : "the stage's own harness";
-  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check): no AI Gateway key (${kind.code})`;
+  // On Copilot each such call is a prompt of its own: one premium request, billed to the seat as AI credits (#565).
+  const copilot = inputs.harness === "copilot";
+  const text = `${harness} on its login, one short call with no tools per question (triage, drift, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check): no AI Gateway key (${kind.code})${copilot ? "; on Copilot each call costs one premium request, billed to the seat as AI credits" : ""}`;
   if (kind.code !== "no-key") return WARN("decision calls", text, "fix ~/.config/pendulum/ai-gateway-key as docs/LOCAL.md says (a regular file, chmod 600, in a ~/.config/pendulum no harness can read), or remove it");
+  // Pendulum's own key, never a worker secret: the worker's keys are the worker's.
+  const ownKey = env.GITHUB_ACTIONS ? "the workflow's `ai_gateway_api_key` input (the repository secret AI_GATEWAY_API_KEY)" : "~/.config/pendulum/ai-gateway-key as docs/LOCAL.md says";
+  if (copilot) return WARN("decision calls", text, `give Pendulum its own AI Gateway key (${ownKey}) so the gateway's decision models answer them, or set decision_route off to make none`);
   return PASS("decision calls", text);
 }
 

@@ -19,6 +19,7 @@ const REPO = { owner: "acme", name: "widgets", full: "acme/widgets" };
 const CI = "on: [pull_request, merge_group]\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        node: [20, 22]\n    steps:\n      - run: npm test\n  lint:\n    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm run lint\n  shared:\n    uses: ./.github/workflows/checks.yml\n";
 const RELEASE =
   "on:\n  push:\n    tags: ['v*']\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions: { contents: read }\n    steps:\n      - run: npm pack\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh release create\n  deploy:\n    uses: ./.github/workflows/deploy.yml\n";
+const LINT = "on:\n  pull_request:\n    paths: ['src/**']\npermissions: read-all\njobs:\n  eslint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx eslint .\n";
 const DEPLOY = "on:\n  workflow_call:\npermissions:\n  contents: write\njobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./ship.sh\n";
 
 /**
@@ -26,7 +27,7 @@ const DEPLOY = "on:\n  workflow_call:\npermissions:\n  contents: write\njobs:\n 
  * pages; `files` the default branch's contents, a path in `missing` 404s, one in `broken` 403s), its pull_request runs
  * and their jobs, its rulesets and variables. Every request is logged as `METHOD path`; `putStatus` answers the PUT.
  */
-async function fakeGitHub({ perms = { default_workflow_permissions: "write", can_approve_pull_request_reviews: false }, files = { ".github/workflows/ci.yml": CI }, missing = [], broken = [], runs = [], jobs = {}, rulesets = [], variables = {}, putStatus = 204 } = {}) {
+async function fakeGitHub({ perms = { default_workflow_permissions: "write", can_approve_pull_request_reviews: false }, files = { ".github/workflows/ci.yml": CI }, missing = [], broken = [], runs = [], jobs = {}, rulesets = [], variables = {}, orgVariables = null, ownerType = "User", putStatus = 204, getStatus = 200 } = {}) {
   const state = { perms: { ...perms }, puts: [], requests: [], rulesets: [...rulesets], posted: [] };
   const listed = [...Object.keys(files), ...missing, ...broken, "dynamic/github-code-scanning/codeql"].map((path, i) => ({ id: i + 1, path, name: path.split("/").pop(), state: "active" }));
   const server = createServer((req, res) => {
@@ -38,10 +39,10 @@ async function fakeGitHub({ perms = { default_workflow_permissions: "write", can
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       const b = body ? JSON.parse(body) : null;
-      if (p === "/repos/acme/widgets" && req.method === "GET") return json(200, { full_name: "acme/widgets", name: "widgets", default_branch: "main", private: false, owner: { login: "acme", type: "User" } });
+      if (p === "/repos/acme/widgets" && req.method === "GET") return json(200, { full_name: "acme/widgets", name: "widgets", default_branch: "main", private: false, owner: { login: "acme", type: ownerType } });
       if (p === "/repos/acme/widgets" && req.method === "PATCH") return json(200, {});
       if (p === "/repos/acme/widgets/actions/permissions/workflow") {
-        if (req.method === "GET") return json(200, state.perms);
+        if (req.method === "GET") return getStatus === 200 ? json(200, state.perms) : json(getStatus, { message: "Must have admin rights to Repository." });
         state.puts.push(b);
         if (putStatus !== 204) return json(putStatus, { message: "refused" });
         Object.assign(state.perms, b);
@@ -73,6 +74,10 @@ async function fakeGitHub({ perms = { default_workflow_permissions: "write", can
       }
       const variable = /^\/repos\/acme\/widgets\/actions\/variables\/(\w+)$/.exec(p)?.[1];
       if (variable && variables[variable] !== undefined) return json(200, { name: variable, value: variables[variable] });
+      if (p === "/repos/acme/widgets/actions/organization-variables") {
+        if (orgVariables === "denied") return json(403, { message: "Resource not accessible by integration" });
+        if (orgVariables) return json(200, { total_count: orgVariables.length, variables: orgVariables });
+      }
       return json(404, { message: "Not Found" });
     });
   });
@@ -166,55 +171,92 @@ test("--preset first-run warns when a repository variable sets a cap over it", a
   }
 });
 
-test("required checks: setup infers them from the latest pull request's checks, else the CI workflow's jobs; --ci-checks overrides; the preview names them", async () => {
-  // The latest pull request's head ran CI (a matrix leg, a job, a skipped one) and Pendulum's own workflow.
+test("--preset first-run warns of an organization variable shared with the repository, or says it could not read them", async () => {
+  const gh = await fakeGitHub({ perms: { default_workflow_permissions: "read" }, orgVariables: [{ name: "PENDULUM_MAX_CONCURRENT", value: "4" }, { name: "OTHER", value: "x" }] });
+  try {
+    const r = await setup(gh, ["--apply", "workflow", "--preset", "first-run"]);
+    assert.match(r.out, /WARNING: the organization variable PENDULUM_MAX_CONCURRENT \(4\), shared with this repository, sets this over the workflow file/);
+  } finally {
+    await gh.close();
+  }
+  const denied = await fakeGitHub({ perms: { default_workflow_permissions: "read" }, orgVariables: "denied" });
+  try {
+    const r = await setup(denied, ["--apply", "workflow", "--preset", "first-run"]);
+    assert.match(r.out, /could not read the organization variables shared with it \(HTTP 403\): check no PENDULUM_MAX_USD or PENDULUM_MAX_CONCURRENT variable sets these over the preset/);
+    assert.doesNotMatch(r.out, /WARNING/);
+  } finally {
+    await denied.close();
+  }
+});
+
+test("required checks: only the branch's own or --ci-checks are applied; the preview lists candidates with their marks; --ci-checks= clears them; nothing inferred reaches the workflow file", async () => {
+  // The latest pull request's head ran CI (a passed matrix leg, a failed and a skipped job), a paths-filtered lint
+  // workflow with no merge_group trigger, and Pendulum's own workflow.
   const runs = [
     { id: 11, name: "CI", path: ".github/workflows/ci.yml", head_sha: "abc1234def", pull_requests: [{ number: 7 }] },
+    { id: 13, name: "Lint", path: ".github/workflows/lint.yml", head_sha: "abc1234def", pull_requests: [{ number: 7 }] },
     { id: 12, name: "Pendulum", path: ".github/workflows/pendulum.yml", head_sha: "abc1234def", pull_requests: [{ number: 7 }] },
     { id: 10, name: "CI", path: ".github/workflows/ci.yml", head_sha: "0ld", pull_requests: [{ number: 6 }] },
   ];
-  const jobs = { 11: [{ name: "test (22)", conclusion: "success" }, { name: "Lint", conclusion: "failure" }, { name: "docs", conclusion: "skipped" }], 12: [{ name: "dispatch", conclusion: "success" }], 10: [{ name: "old", conclusion: "success" }] };
-  const gh = await fakeGitHub({ runs, jobs });
+  const jobs = { 11: [{ name: "test (22)", conclusion: "success" }, { name: "Lint", conclusion: "failure" }, { name: "docs", conclusion: "skipped" }], 13: [{ name: "eslint", conclusion: "success" }], 12: [{ name: "dispatch", conclusion: "success" }], 10: [{ name: "old", conclusion: "success" }] };
+  const files = { ".github/workflows/ci.yml": CI, ".github/workflows/lint.yml": LINT };
+  const gh = await fakeGitHub({ runs, jobs, files, ownerType: "Organization" });
   try {
     const preview = await setup(gh, ["--apply", "protection"]);
     assert.equal(preview.status, 0, preview.out);
-    assert.match(preview.out, /required checks test \(22\), Lint \(from the checks that ran on pull request #7 \(CI\); --ci-checks names others\)/);
+    assert.match(preview.out, /required checks none; candidates, from the checks that passed on pull request #7, none applied until you name them: "test \(22\)" \(CI\), "eslint" \(Lint; its workflow has no merge_group trigger, so it never reports in the merge queue .*; its workflow has a paths filter on pull_request, so a pull request outside those paths never gets it and cannot merge\); to require some, run this step again with --ci-checks/);
+    assert.doesNotMatch(preview.out, /"Lint"|"docs"|"dispatch"|"old"/, "failed, skipped, Pendulum's and older runs' jobs are no candidates");
     const r = await setup(gh, ["--apply", "protection", "--yes"]);
     assert.equal(r.status, 0, r.out);
     const rule = (i) => gh.state.posted[i].rules.find((x) => x.type === "required_status_checks")?.parameters.required_status_checks.map((c) => c.context);
-    assert.deepEqual(rule(0), ["test (22)", "Lint"]);
-    assert.match(r.out, /checks from the checks that ran on pull request #7/);
+    assert.equal(rule(0), undefined, "a candidate is never applied on its own");
+    assert.match(r.out, /candidates, from the checks that passed on pull request #7/);
 
-    // --ci-checks wins, and nothing is inferred.
-    const before = gh.state.requests.length;
-    const own = await setup(gh, ["--apply", "protection", "--ci-checks", "quality", "--yes"]);
+    // The person names what they accept.
+    const own = await setup(gh, ["--apply", "protection", "--ci-checks", "test (22)", "--yes"]);
     assert.equal(own.status, 0, own.out);
-    assert.deepEqual(rule(1), ["quality"]);
-    assert.ok(!gh.state.requests.slice(before).some((q) => q.includes("/actions/runs")), "no runs read");
+    assert.deepEqual(rule(1), ["test (22)"]);
+
+    // --ci-checks= clears them and reads no candidates; a re-render with it empties the file's PENDULUM_CI_CHECKS.
+    const clone = mkdtempSync(join(tmpdir(), "first-setup-clone-"));
+    const out = join(clone, "p.yml");
+    assert.equal((await setup(gh, ["--apply", "workflow", "--ci-checks", "quality", "--out", out, "--yes"], clone)).status, 0);
+    assert.equal(workflowSettings(readFileSync(out, "utf8")).env.PENDULUM_CI_CHECKS, "quality");
+    const at = gh.state.requests.length;
+    const cleared = await setup(gh, ["--apply", "protection,workflow", "--ci-checks=", "--out", out, "--yes"], clone);
+    assert.equal(cleared.status, 0, cleared.out);
+    assert.equal(rule(2), undefined);
+    assert.equal(workflowSettings(readFileSync(out, "utf8")).env.PENDULUM_CI_CHECKS, "");
+    assert.ok(!gh.state.requests.slice(at).some((q) => q.includes("/actions/runs")), "no candidates read");
+    assert.match(cleared.out, /--ci-checks= clears them/);
+
+    // A first render never writes inferred names: PENDULUM_CI_CHECKS stays empty, so the runtime reads the live ruleset.
+    const first = join(clone, "first.yml");
+    const w = await setup(gh, ["--apply", "workflow", "--out", first, "--yes"], clone);
+    assert.equal(w.status, 0, w.out);
+    assert.equal(workflowSettings(readFileSync(first, "utf8")).env.PENDULUM_CI_CHECKS, "");
   } finally {
     await gh.close();
   }
 
-  // No pull request ran yet: the CI workflow's jobs, less those whose check names GitHub gives only when they run.
+  // No pull request ran yet: the job names of the workflows on pull_request are the candidates, less those GitHub names
+  // only when they run; a user's repository has no merge queue, so no merge_group mark.
   const fresh = await fakeGitHub();
   try {
     const preview = await setup(fresh, ["--apply", "protection"]);
     assert.equal(preview.status, 0, preview.out);
-    assert.match(preview.out, /required checks Lint \(from the jobs of ci\.yml \(\.github\/workflows\/ci\.yml\); no pull request has run it yet; left out test, shared, whose check names GitHub gives only when they run/);
-    // A first render records them as PENDULUM_CI_CHECKS too.
-    const clone = mkdtempSync(join(tmpdir(), "first-setup-clone-"));
-    const w = await setup(fresh, ["--apply", "workflow", "--out", join(clone, "p.yml"), "--yes"], clone);
-    assert.equal(w.status, 0, w.out);
-    assert.equal(workflowSettings(readFileSync(join(clone, "p.yml"), "utf8")).env.PENDULUM_CI_CHECKS, "Lint");
+    assert.match(preview.out, /candidates, from the job names of the workflows on pull_request \(no pull request has passed them yet\), none applied until you name them: "Lint" \(ci\.yml\); their check names known only once they run: test \(ci\.yml\), shared \(ci\.yml\)/);
   } finally {
     await fresh.close();
   }
 
-  // The branch already requires checks: those.
+  // The branch already requires checks: those are exact, and kept.
   const required = await fakeGitHub({ rulesets: [{ id: 5, name: "main rules", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"] } }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "build" }] } }] }] });
   try {
-    const preview = await setup(required, ["--apply", "protection"]);
-    assert.match(preview.out, /required checks build \(from the default branch's required checks;/);
+    const r = await setup(required, ["--apply", "protection", "--yes"]);
+    assert.equal(r.status, 0, r.out);
+    assert.deepEqual(required.state.posted[0].rules.find((x) => x.type === "required_status_checks").parameters.required_status_checks.map((c) => c.context), ["build"]);
+    assert.match(r.out, /checks from the default branch's required checks, kept/);
   } finally {
     await required.close();
   }
@@ -289,6 +331,33 @@ test("the default-token step: a refused PUT names the fix and runs after the wor
     const r = await setup(gh, ["--apply", "default-token", "--yes"]);
     assert.equal(r.status, 0, r.out);
     assert.deepEqual(gh.state.puts, [{ default_workflow_permissions: "read" }]);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("the default-token step: a refused read of the setting names the same fix in the preview and with --yes", async () => {
+  const gh = await fakeGitHub({ getStatus: 403 });
+  try {
+    const preview = await setup(gh, ["--apply", "default-token"]);
+    assert.equal(preview.status, 0, preview.out);
+    assert.match(preview.out, /default-token: set the repository's default workflow token to read-only; could not read the default workflow token: it needs a gh login that administers acme\/widgets \(classic `repo` scope or fine-grained Administration: write\) \(HTTP 403\)/);
+    const r = await setup(gh, ["--apply", "default-token", "--yes"]);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /could not read the default workflow token: it needs a gh login that administers acme\/widgets/);
+    assert.deepEqual(gh.state.puts, []);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("the default-token step lists a workflow on push and workflow_call with its own permissions in both roles", async () => {
+  const both = "on:\n  push:\n  workflow_call:\npermissions:\n  contents: read\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo\n";
+  const gh = await fakeGitHub({ files: { ".github/workflows/both.yml": both, ".github/workflows/deploy.yml": DEPLOY } });
+  try {
+    const st = await withApi(gh, () => defaultTokenState(REPO, { token: "dummy" }));
+    assert.deepEqual(st.own, [".github/workflows/both.yml"], "on push, its own permissions: left alone");
+    assert.deepEqual(st.reusable.sort(), [".github/workflows/both.yml", ".github/workflows/deploy.yml"], "called, its caller's token");
   } finally {
     await gh.close();
   }

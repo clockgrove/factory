@@ -177,41 +177,76 @@ export async function applyProtection(repo, { ciChecks, queue }, opts) {
 const ciRun = (r) => !/(^|\/)pendulum\.ya?ml$/.test(r?.path || "") && !/^dynamic\//.test(r?.path || "");
 
 /**
- * The required check names setup proposes when neither --ci-checks nor the workflow file gives any, `{checks, source}`
- * with where they came from, read as the user's own gh login: the default branch's required checks; else the jobs that
- * ran on the latest pull request's head in its pull_request workflows, by the names GitHub gave their checks (matrix
- * legs and called workflows' jobs included, skipped jobs not); else the jobs of the CI workflow on pull_request, less
- * those whose check name is known only once they run (a matrix, a called workflow, a name from an expression). `checks`
- * is empty when none is found.
+ * Candidate required checks for a person to choose from, never applied by setup itself (a guess is no decision):
+ * `{candidates, source, left}`, read as the user's own gh login. The candidates are the jobs that passed on the latest
+ * pull request's head in its pull_request workflows, by the names GitHub gave their checks; else, with none, the jobs of
+ * the workflows on pull_request, less those whose check name GitHub gives only when they run (`left`: a matrix, a called
+ * workflow, a name from an expression). Each is `{name, workflow, marks}`, `marks` naming why it may not suit: its
+ * workflow has no merge_group trigger while a merge queue is in play (`queue`), or a paths: filter on pull_request.
  */
-export async function inferCiChecks(repo, opts) {
-  const required = await requiredChecks(repo, opts).catch(() => []);
-  if (required.length) return { checks: required, source: "the default branch's required checks" };
+export async function ciCheckCandidates(repo, opts, { queue = false } = {}) {
+  const docs = new Map();
+  const docOf = async (path) => {
+    if (!docs.has(path)) {
+      let doc = null;
+      try {
+        doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
+      } catch {
+        // marked below as unread
+      }
+      docs.set(path, doc);
+    }
+    return docs.get(path);
+  };
+  const marks = (doc) => {
+    if (!doc) return ["its workflow file could not be read on the default branch"];
+    const out = [];
+    if (queue && !workflowEvents(doc).includes("merge_group")) out.push("its workflow has no merge_group trigger, so it never reports in the merge queue and a queued pull request waits for it until the queue times out");
+    const on = doc.on ?? doc.true;
+    const pr = on && typeof on === "object" && !Array.isArray(on) ? on.pull_request : null;
+    if (pr && typeof pr === "object" && (pr.paths !== undefined || pr["paths-ignore"] !== undefined)) out.push("its workflow has a paths filter on pull_request, so a pull request outside those paths never gets it and cannot merge");
+    return out;
+  };
+  const out = [];
+  const left = [];
+  let source = "";
   const runs = (await rest(`repos/${repo.full}/actions/runs?event=pull_request&per_page=30`, opts).catch(() => null))?.workflow_runs || [];
   const latest = runs.find(ciRun);
   if (latest) {
-    const same = runs.filter((r) => ciRun(r) && r.head_sha === latest.head_sha);
-    const names = [];
-    for (const r of same) {
+    for (const r of runs.filter((x) => ciRun(x) && x.head_sha === latest.head_sha)) {
       const jobs = (await rest(`repos/${repo.full}/actions/runs/${r.id}/jobs?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
-      for (const j of jobs) if (j?.name && j.conclusion !== "skipped") names.push(j.name);
+      const passed = jobs.filter((j) => j?.name && j.conclusion === "success");
+      if (passed.length) {
+        const m = marks(await docOf(r.path));
+        for (const j of passed) out.push({ name: j.name, workflow: r.name, marks: m });
+      }
     }
     const pr = latest.pull_requests?.[0]?.number;
-    if (names.length) return { checks: [...new Set(names)], source: `the checks that ran on ${pr ? `pull request #${pr}` : `pull request head ${String(latest.head_sha).slice(0, 7)}`} (${[...new Set(same.map((r) => r.name))].join(", ")})` };
+    source = `the checks that passed on ${pr ? `pull request #${pr}` : `pull request head ${String(latest.head_sha).slice(0, 7)}`}`;
   }
-  const ci = await ciWorkflowTriggers(repo, opts).catch(() => ({}));
-  if (!ci.found || !ci.path) return { checks: [], source: "no CI workflow on pull_request found" };
-  let doc;
-  try {
-    doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${ci.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
-  } catch (e) {
-    return { checks: [], source: `could not read ${ci.path} (${e.status ? `HTTP ${e.status}` : e.message})` };
+  if (!out.length) {
+    const list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+    for (const w of list) {
+      if (!ciRun(w) || w.state !== "active") continue;
+      const doc = await docOf(w.path);
+      if (!doc || !workflowEvents(doc).includes("pull_request")) continue;
+      const m = marks(doc);
+      for (const [id, j] of Object.entries(doc.jobs && typeof doc.jobs === "object" ? doc.jobs : {})) {
+        if (j?.strategy?.matrix || typeof j?.uses === "string" || (typeof j?.name === "string" && j.name.includes("${{"))) left.push(`${id} (${w.name})`);
+        else out.push({ name: typeof j?.name === "string" ? j.name : id, workflow: w.name, marks: m });
+      }
+    }
+    source = "the job names of the workflows on pull_request (no pull request has passed them yet)";
   }
-  const jobs = Object.entries(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {});
-  const later = ([, j]) => Boolean(j?.strategy?.matrix) || typeof j?.uses === "string" || (typeof j?.name === "string" && j.name.includes("${{"));
-  const checks = jobs.filter((e) => !later(e)).map(([id, j]) => (typeof j?.name === "string" ? j.name : id));
-  const left = jobs.filter(later).map(([id]) => id);
-  return { checks, source: `the jobs of ${ci.name} (${ci.path}); no pull request has run it yet${left.length ? `; left out ${left.join(", ")}, whose check names GitHub gives only when they run (a matrix leg, a called workflow's job, a name from an expression): pass --ci-checks with them` : ""}` };
+  const seen = new Set();
+  return { candidates: out.filter((c) => !seen.has(c.name) && seen.add(c.name)), source, left };
+}
+
+/** The protection preview's account of the candidates: each with its workflow and marks, and how to apply some. */
+export function candidatesText({ candidates, source, left }) {
+  if (!candidates.length && !left.length) return "; no candidates found: pass --ci-checks with the checks your CI reports on pull requests";
+  const each = candidates.map((c) => `${JSON.stringify(c.name)} (${c.workflow}${c.marks.length ? `; ${c.marks.join("; ")}` : ""})`);
+  return `; candidates, from ${source}, none applied until you name them: ${each.join(", ") || "none"}${left.length ? `; their check names known only once they run: ${left.join(", ")}` : ""}; to require some, run this step again with --ci-checks "<the names, comma-separated>"`;
 }
 
 /** `login#id` for the workflow's notify user, so Pendulum trusts the account and not whoever holds the login later. */
@@ -723,8 +758,20 @@ const localCallee = (uses) => (typeof uses === "string" && uses.startsWith("./")
  * its caller's. `offBranch`: listed by GitHub but not on the default branch (they run from other branches, on the same
  * default). `unread`: could not be read or parsed.
  */
+/** The default-token step's error for GitHub's refusal of the setting itself, read or write: what to fix. */
+function tokenSettingError(e, repo, doing) {
+  if (e?.status === 403 || e?.status === 404) return new Error(`${doing}: it needs a gh login that administers ${repo.full} (classic \`repo\` scope or fine-grained Administration: write) (HTTP ${e.status})`);
+  if (e?.status === 409) return new Error(`${doing}: your organization or enterprise sets this; ask an owner (HTTP 409)`);
+  return e;
+}
+
 export async function defaultTokenState(repo, opts) {
-  const perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, opts);
+  let perms;
+  try {
+    perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, opts);
+  } catch (e) {
+    throw tokenSettingError(e, repo, "could not read the default workflow token");
+  }
   const list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, paginate: true })) || [];
   const docs = new Map();
   const offBranch = [];
@@ -743,10 +790,12 @@ export async function defaultTokenState(repo, opts) {
   const own = [];
   const reusable = [];
   for (const [path, doc] of docs) {
-    if (workflowEvents(doc).includes("workflow_call")) reusable.push(path);
+    const events = workflowEvents(doc);
+    if (events.includes("workflow_call")) reusable.push(path);
     const ids = defaultTokenJobs(doc);
     if (!ids.length) {
-      if (!reusable.includes(path)) own.push(path);
+      // On its own triggers it runs with its own permissions; called, with its caller's: listed for each role it has.
+      if (events.some((e) => e !== "workflow_call")) own.push(path);
       continue;
     }
     const jobs = ids.map((id) => {
@@ -783,9 +832,7 @@ export async function applyDefaultToken(repo, opts) {
   try {
     await rest(`repos/${repo.full}/actions/permissions/workflow`, { ...opts, method: "PUT", body });
   } catch (e) {
-    if (e.status === 403 || e.status === 404) throw new Error(`the default workflow token was not changed: it needs a gh login that administers ${repo.full} (classic \`repo\` scope or fine-grained Administration: write) (HTTP ${e.status})`);
-    if (e.status === 409) throw new Error(`the default workflow token was not changed: your organization or enterprise sets this; ask an owner (HTTP 409)`);
-    throw e;
+    throw tokenSettingError(e, repo, "the default workflow token was not changed");
   }
   return `the default workflow token is read-only now (it was ${state.current}); ${defaultTokenReach(state)}`;
 }
@@ -796,7 +843,7 @@ export async function defaultTokenPlan(repo, opts) {
   try {
     state = await defaultTokenState(repo, opts);
   } catch (e) {
-    return `set the repository's default workflow token to read-only (could not read it now: ${e.status ? `HTTP ${e.status}` : e.message}; it needs admin); runs as your gh login`;
+    return `set the repository's default workflow token to read-only; ${e.message}`;
   }
   if (state.current === "read") return "nothing: the default workflow token is already read-only";
   return `set the repository's default workflow token (now ${state.current}) to read-only, which doctor requires; workflow files are not changed: ${defaultTokenReach(state)}; runs as your gh login (needs admin)`;
@@ -809,15 +856,25 @@ export async function defaultTokenPlan(repo, opts) {
 export async function presetOverrides(repo, preset, opts) {
   const keys = Object.keys(PRESETS[preset] || {}).map((k) => `PENDULUM_${k.toUpperCase()}`).filter((k) => VARIABLE_SETTINGS.has(k));
   const over = [];
+  const unread = [];
   for (const k of keys) {
     try {
       const v = await rest(`repos/${repo.full}/actions/variables/${k}`, opts);
-      over.push(`${k} (${v?.value})`);
+      over.push(`the repository variable ${k} (${v?.value})`);
     } catch (e) {
-      if (e.status !== 404) return `; could not read the repository variables (${e.status ? `HTTP ${e.status}` : e.message}): check no ${keys.join(" or ")} variable sets these over the preset`;
+      if (e.status !== 404) unread.push(`the repository's variables (${e.status ? `HTTP ${e.status}` : e.message})`);
     }
   }
-  return over.length ? `; WARNING: the repository variable ${over.join(" and ")} sets ${over.length > 1 ? "these" : "this"} over the workflow file, so the ${preset} preset's value does not apply while it stands (gh variable delete <name>)` : "";
+  // An organization's variables shared with the repository reach the Action's jobs too (INSTALL.md, Settings in layers).
+  try {
+    const org = (await rest(`repos/${repo.full}/actions/organization-variables?per_page=30`, { ...opts, paginate: true })) || [];
+    for (const v of org) if (keys.includes(v?.name) && !over.some((o) => o.includes(` ${v.name} `))) over.push(`the organization variable ${v.name} (${v.value}), shared with this repository,`);
+  } catch (e) {
+    if (e.status !== 404) unread.push(`the organization variables shared with it (${e.status ? `HTTP ${e.status}` : e.message})`);
+  }
+  const warn = over.length ? `; WARNING: ${over.join(" and ")} ${over.length > 1 ? "set these" : "sets this"} over the workflow file, so the ${preset} preset's value does not apply while ${over.length > 1 ? "they stand" : "it stands"} (gh variable delete <name>)` : "";
+  const unknown = [...new Set(unread)];
+  return `${warn}${unknown.length ? `; could not read ${unknown.join(" or ")}: check no ${keys.join(" or ")} variable sets these over the preset` : ""}`;
 }
 
 /** setup's steps that `all` (or no `--apply`) runs, in the order it runs them. */
@@ -891,14 +948,23 @@ async function main() {
   // The App step reads the repository (its owner and ids) with the user's own gh login: no App exists yet.
   const repoData = steps.includes(APP_STEP) ? await getRepo(repo, { token: null }) : null;
   if (repoData && secretScope === "org" && repoData.owner?.type !== "Organization") throw new Error(`--secret-scope org: ${repo.owner} is no organization; the secrets go on the repository`);
-  // The required checks: --ci-checks or the workflow file's, else inferred for the protection step and a first render.
-  let checksFrom = inputs.ciChecks.length ? (explicit.ci_checks !== undefined ? "--ci-checks" : "the workflow file's PENDULUM_CI_CHECKS") : "";
-  if (!inputs.ciChecks.length && (steps.includes("protection") || (steps.includes("workflow") && !before))) {
-    const found = await inferCiChecks(repo, { token: null });
-    inputs.ciChecks = found.checks;
-    checksFrom = found.source;
+  // The protection step's required checks: --ci-checks (`--ci-checks=` clears them), else the workflow file's, else the
+  // branch's existing required checks, which are exact. Anything else is only a candidate the person names to apply.
+  let protectionChecks = inputs.ciChecks;
+  let checksFrom = explicit.ci_checks !== undefined ? (inputs.ciChecks.length ? "--ci-checks" : "--ci-checks= clears them") : inputs.ciChecks.length ? "the workflow file's PENDULUM_CI_CHECKS" : "";
+  let candidates = "";
+  if (steps.includes("protection") && explicit.ci_checks === undefined && !inputs.ciChecks.length) {
+    const required = await requiredChecks(repo, { token: null }).catch(() => []);
+    if (required.length) {
+      protectionChecks = required;
+      checksFrom = "the default branch's required checks, kept";
+    } else {
+      const repoInfo = await getRepo(repo, { token: null }).catch(() => null);
+      const queue = args.merge_queue !== "false" && !noQueueReason(repoInfo);
+      candidates = candidatesText(await ciCheckCandidates(repo, { token: null }, { queue }));
+    }
   }
-  const checksText = inputs.ciChecks.length ? `${inputs.ciChecks.join(", ")} (from ${checksFrom}; --ci-checks names others)` : `none (${checksFrom || "none given"}: pass --ci-checks)`;
+  const checksText = protectionChecks.length ? `${protectionChecks.join(", ")} (from ${checksFrom})` : `none${checksFrom ? ` (${checksFrom})` : ""}${candidates}`;
   const presetNote = args.preset && steps.includes("workflow") ? await presetOverrides(repo, args.preset, { token: null }) : "";
   const plan = {
     app: repoData && appPlan(repoData, secretScope),
@@ -906,7 +972,7 @@ async function main() {
     project: `create the Pendulum Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns (none on a repository a user owns: no GitHub App can move its cards)`,
     protection: `create or update the "pendulum" ruleset on the default branch (a merge queue where GitHub offers one, required checks ${checksText}, no deletion or force push) and set squash commits to take the PR's title and body; runs as your gh login (needs admin), not the App`,
     "default-token": null,
-    workflow: `write ${args.out || ".github/workflows/pendulum.yml"} from workflow-template.yml${args.preset ? ` with the ${args.preset} preset (${Object.entries(PRESETS[args.preset]).map(([k, v]) => `${k} ${v}`).join(", ")}; a flag beside it wins)${presetNote}` : ""}${before ? "" : `, PENDULUM_CI_CHECKS ${checksText}`}${args.sandbox ? ` with launch jobs for the ${args.sandbox} sandbox (secrets VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)` : ""}${before ? `, keeping the settings the existing file states unless a flag gives one` : ""}`,
+    workflow: `write ${args.out || ".github/workflows/pendulum.yml"} from workflow-template.yml${args.preset ? ` with the ${args.preset} preset (${Object.entries(PRESETS[args.preset]).map(([k, v]) => `${k} ${v}`).join(", ")}; a flag beside it wins)${presetNote}` : ""}${args.sandbox ? ` with launch jobs for the ${args.sandbox} sandbox (secrets VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)` : ""}${before ? `, keeping the settings the existing file states unless a flag gives one` : ""}`,
   };
   if (!yes) {
     // The default token's line reads which workflows the change reaches, as the user's own gh login (it needs admin).
@@ -920,7 +986,7 @@ async function main() {
     if (s === APP_STEP) note = await applyApp(repo, repoData, secretScope, { replace: args.replace === "true" });
     else if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
-    else if (s === "protection") note = `${await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null })}${inputs.ciChecks.length ? ` (checks from ${checksFrom})` : ""}`;
+    else if (s === "protection") note = `${await applyProtection(repo, { ciChecks: protectionChecks, queue: args.merge_queue !== "false" }, { token: null })}${protectionChecks.length ? ` (checks from ${checksFrom})` : checksFrom ? ` (${checksFrom})` : candidates}`;
     // Repository Actions settings need administration, which the App does not have: the user's own gh login.
     else if (s === DEFAULT_TOKEN_STEP) note = await applyDefaultToken(repo, { token: null });
     else if (s === "workflow") note = `${await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts })}${presetNote}`;

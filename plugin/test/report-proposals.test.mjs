@@ -259,11 +259,14 @@ const pass = (label, model, tokens, at) => ({ label, model, effort: "medium", st
 const plus = (...ts) => Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, ts.reduce((n, t) => n + t[k], 0)]));
 const less = (a, b) => Object.fromEntries(["input", "output", "cached", "written"].map((k) => [k, a[k] - b[k]]));
 
-/** Objective `n`'s one Codex review stage, its harness line naming the Objective's three models; `extra` its other lines. */
-function reviewStage(w, n, { subagent = null, user = ME, key = `local-${n}`, extra = [] } = {}) {
+/**
+ * Objective `n`'s one Codex stage (a review on REVIEWER by default), its harness line naming its `model` and the
+ * Objective's three models; `extra` its other lines.
+ */
+function reviewStage(w, n, { kind = "review", model = REVIEWER, subagent = null, user = ME, key = `local-${n}`, extra = [] } = {}) {
   w.issues.push({ number: n, title: `Objective ${n}`, state: "closed", labels: [{ name: "pendulum:objective" }], created_at: "2026-11-17T01:00:00Z", user: ME });
   const bot = user === BOT ? { performed_via_github_app: { id: 2271, slug: "clockgrove-pendulum" }, author_association: "CONTRIBUTOR" } : { author_association: "OWNER" };
-  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user, ...bot, created_at: "2026-11-17T02:00:00Z", updated_at: "2026-11-17T02:10:00Z", body: [`<!-- pendulum:${n}:progress:review:${key} -->`, "Pendulum review: started.", harnessMarker("codex", REVIEWER, { worker: WORKER, subagent, reviewer: REVIEWER, labels: [] }), ...extra].join("\n") });
+  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user, ...bot, created_at: "2026-11-17T02:00:00Z", updated_at: "2026-11-17T02:10:00Z", body: [`<!-- pendulum:${n}:progress:${kind}:${key} -->`, `Pendulum ${kind}: started.`, harnessMarker("codex", model, { worker: WORKER, subagent, reviewer: REVIEWER, labels: [] }), ...extra].join("\n") });
   w.pulls.push({ number: n + 1000, head: { ref: `pendulum/${n}`, repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: "2026-11-17T02:05:00Z", merged_at: "2026-11-17T02:20:00Z", state: "closed" });
 }
 const empty = () => ({ issues: [], comments: [], pulls: [], artifacts: {} });
@@ -335,6 +338,41 @@ test("report --rates: a review stage whose passes' models no ledger names gives 
     assert.deepEqual(r.rates.items, [], n);
     assert.deepEqual(r.rates.skipped.map((x) => [x.model, x.why]).sort(), [[WORKER, "pass-models"], [REVIEWER, "pass-models"]].sort(), n);
   }
+});
+
+test("report --rates: a stage's decision records are in no model's mix, from its ledger line or its usage record", async () => {
+  const DECIDED = { input: 30_000, output: 2_000, cached: 0, written: 0 };
+  const ledger = [pass("work-1", WORKER, ANSWER_T, 0), { ...pass("triage", "gpt-6-luna", DECIDED, 2), decision: true, calls: 2 }];
+  const w = empty();
+  reviewStage(w, 50, { kind: "work", model: WORKER, extra: [spendMarker(0.2, { usdByBilling: { api: 0.2 }, billing: "api" }), ledgerMarker(ledger, { model: WORKER, version: PENDULUM_VERSION, published: [WORKER, "gpt-6-luna", REVIEWER] })] });
+  // The same stage on Actions: its record's tokens hold its decision record's (session.mjs writeUsage).
+  const run = (nextId += 1);
+  reviewStage(w, 51, { kind: "work", model: WORKER, user: BOT, key: String(run) });
+  const record = { harness: "codex", model: WORKER, usd: 0.2, usdByBilling: { api: 0.2 }, billing: "api", runs: 1, exit: "delivered", progressRun: String(run), started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:10:00Z", tokens: plus(ANSWER_T, DECIDED), ledger };
+  w.artifacts["pendulum-usage-51"] = [{ id: run, name: "pendulum-usage-51", expired: false, created_at: "2026-11-17T02:10:00Z", workflow_run: { id: run, repository_id: 1, head_repository_id: 1 }, record }];
+  for (const n of ["50", "51"]) {
+    const { json: r } = await report(w, ["--issue", n, "--rates", "gpt-6.1-terra"]);
+    assert.deepEqual(r.rates.skipped, [], n);
+    assert.deepEqual(r.rates.items.map((x) => x.model), [WORKER], n);
+    assert.deepEqual(mixOf(r, WORKER), partsOf(ANSWER_T), n);
+    priceRatio(r, WORKER, "gpt-6.1-terra", ANSWER_T);
+  }
+});
+
+test("report --rates: a stage whose ledger names another model than its harness line is under the ledger's model; an alias of its own is its own", async () => {
+  const w = empty();
+  // The harness line names the worker's model; every pass of its ledger ran on another.
+  reviewStage(w, 52, { kind: "work", model: WORKER, extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", REVIEWER, ANSWER_T, 0)], { model: WORKER, version: PENDULUM_VERSION, published: [WORKER, REVIEWER] })] });
+  const { json: r } = await report(w, ["--issue", "52", "--rates", "gpt-6.1-terra"]);
+  assert.deepEqual(r.rates.skipped, []);
+  assert.deepEqual(r.rates.items.map((x) => x.model), [REVIEWER]);
+  assert.deepEqual(mixOf(r, REVIEWER), partsOf(ANSWER_T));
+  priceRatio(r, REVIEWER, "gpt-6.1-terra", ANSWER_T);
+  // A ledger naming the price table's row of the harness line's alias (gpt-5.6 is gpt-5.6-sol): one model, the line's.
+  const alias = empty();
+  reviewStage(alias, 53, { kind: "work", model: "gpt-5.6", extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", "gpt-5.6-sol", ANSWER_T, 0)], { model: "gpt-5.6", version: PENDULUM_VERSION, published: ["gpt-5.6", "gpt-5.6-sol"] })] });
+  const { json: a } = await report(alias, ["--issue", "53", "--rates", "gpt-6.1-terra"]);
+  assert.deepEqual([...new Set([...a.rates.items, ...a.rates.skipped].map((x) => x.model).filter(Boolean))], ["gpt-5.6"]);
 });
 
 test("report --rates: the command line takes model ids only", () => {

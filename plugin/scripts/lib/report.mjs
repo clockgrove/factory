@@ -734,7 +734,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const totals = zeroCost();
   const totalTokens = zeroTokens();
   const unknownItems = [];
-  const mixes = mixBook(prices?.longContextAbove);
+  const mixes = mixBook(prices);
   const views = { stage: breakdown(), pass: breakdown(), model: breakdown(), harness: breakdown(), version: breakdown(), account: breakdown() };
   const passMinutes = new Map();
   const cacheByKind = new Map();
@@ -1304,9 +1304,10 @@ const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
 /**
  * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the model breakdown counts
  * them, but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
- * stage's, as the cost join prices them (usage.mjs priceStage). A stage whose ledger's harness passes (its decision
- * records left out) name more than one model (a review stage's review pass on the reviewer's model, its answer and fix
- * passes on the worker's) is split by them: each model gets its own passes' tokens, a thread's taken from the passes it
+ * stage's, as the cost join prices them (usage.mjs priceStage); its decision records' tokens are in no model's. A stage
+ * whose ledger's harness passes (its decision records left out) name more than one model (a review stage's review pass on
+ * the reviewer's model, its answer and fix passes on the worker's), or one that is not the stage's (an alias or a dated
+ * snapshot of it aside), is split by them: each model gets its own passes' tokens, a thread's taken from the passes it
  * ran in (its `run`, their label) and put under the thread's model. A stage whose passes may have run on another model
  * than its own that no ledger names (no ledger, or a pass on a model the ledger line does not name, on a stage not on the
  * worker's model) marks its model and the worker's `pass-models`. Where no record splits the threads out (a progress
@@ -1316,7 +1317,10 @@ const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
  * is not known (a pass's, from a ledger, is known only when its whole input is under `above`). A stage with no input or
  * output tokens marks its model `no-tokens`.
  */
-function mixBook(above) {
+function mixBook(prices) {
+  const above = prices?.longContextAbove;
+  // Two names of one model: the same, or the same row of the price table (an alias, a dated snapshot).
+  const same = (a, b) => a === b || codexRow(prices, a, { at: null }).id === codexRow(prices, b, { at: null }).id;
   const rows = new Map();
   const row = (m) => {
     if (!rows.has(m)) rows.set(m, { key: m, tokens: zeroTokens(), long: noLong(), why: new Set() });
@@ -1348,7 +1352,7 @@ function mixBook(above) {
       const unsplit = (m) => !Array.isArray(subs) && !!subagent && subagent !== m && (worker === null || m === worker);
       const passes = Array.isArray(ledger) ? ledger.filter((e) => e && typeof e === "object" && e.decision !== true) : null;
       const models = passes?.length && passes.every((e) => modelKey(e.model)) ? [...new Set(passes.map((e) => e.model))] : null;
-      if (models && models.length > 1) {
+      if (models && (models.length > 1 || !same(models[0], model))) {
         const by = new Map(models.map((m) => [m, { tokens: zeroTokens(), long: noLong(), whole: true, threads: [] }]));
         for (const e of passes) {
           const r = by.get(e.model);
@@ -1371,8 +1375,11 @@ function mixBook(above) {
       }
       if (!models && worker && worker !== model) mark([model, worker], "pass-models");
       if (unsplit(model)) mark([model, subagent], "sub-agents");
-      if (!threads.length) return add(model, tokens, longShare(tokens, above));
-      const [own, long] = less(tokens, longShare(tokens, above), threads);
+      // Its decision records' tokens (a record's `tokens` holds them, session.mjs writeUsage) are no pass's: taken out,
+      // so its mix is its passes' alone, the record's long-context share kept.
+      const decisions = Array.isArray(ledger) ? ledger.filter((e) => e?.decision === true && e.tokens && typeof e.tokens === "object") : [];
+      if (!threads.length && !decisions.length) return add(model, tokens, longShare(tokens, above));
+      const [own, long] = less(tokens, longShare(tokens, above), [...decisions, ...threads]);
       add(model, own, long);
       for (const t of threads) add(modelKey(t.model) ?? model, t.tokens, longShare(t.tokens, above));
     },

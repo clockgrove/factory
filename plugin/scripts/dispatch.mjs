@@ -110,7 +110,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
+export async function dispatch(inputs, { token, decisionRole = "dispatcher", notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (PENDULUM_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -524,7 +524,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       continue;
     }
     answerCheck ??= openAnswerCheck({ inputs });
-    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, opts, dryRun });
+    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, role: decisionRole, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, opts, dryRun });
     if (!screen.requeue) {
       // Said when it is judged; a comment judged at an earlier tick keeps it open quietly.
       if (!screen.judged) log(`  #${issue.number}: the Question stays open: ${screen.why}`);

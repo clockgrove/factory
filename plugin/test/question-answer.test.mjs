@@ -593,7 +593,7 @@ test("#479 dispatcher: an answer check's gateway call outside any stage is carri
 
 const decisionsComments = (gh, n) => gh.comments(n).filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:dispatcher -->\n`).test(c.body));
 
-test("#479 dispatcher: a call whose check writes no record goes in the dispatcher's one decisions comment, its day added to; a deleted one is posted again", async () => {
+test("#479 dispatcher: a call whose check writes no record goes in the dispatcher's one decisions comment, read fresh, its day added to and another writer's kept", async () => {
   const { decisionSpendEntries } = await import("../scripts/lib/logic.mjs");
   const { bookDecisionSpend, decisionsMarker, flushDecisionSpend } = await import("../scripts/lib/decision-spend.mjs");
   const today = new Date().toISOString().slice(0, 10);
@@ -620,17 +620,117 @@ test("#479 dispatcher: a call whose check writes no record goes in the dispatche
     await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher" });
   });
   assert.equal(gh.comments(49).map((c) => c.updated_at).join(), before);
-  // A comment the caller read that is gone by the write (PATCH 404) is posted again, with the days it held.
-  const stale = { ...decisionsComments(gh, 49)[0] };
-  gh.drop(49, stale.id);
+  // Another writer of the role (a second dispatcher run) adds its day after this one's last write: read fresh, it is kept.
+  const other = decisionsComments(gh, 49)[0];
+  gh.edit(other.id, `${other.body}\n<!-- pendulum:decision-spend {"date":"2000-01-01","calls":1,"usd":0.5} -->`);
   await onGitHub(gh, async () => {
     bookDecisionSpend({ issue: 49, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0.004 }) });
-    await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher", comments: async () => [stale] });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher" });
   });
-  const again = decisionsComments(gh, 49);
-  assert.equal(again.length, 1);
-  assert.ok(again[0].body.startsWith(`${decisionsMarker(49, "dispatcher")}\n`));
-  assert.deepEqual(decisionSpendEntries(again[0].body), [{ date: today, calls: 4, usd: 0.007, usdUnknown: 1, usdUnknownWhy: ["decision"] }]);
+  assert.equal(decisionsComments(gh, 49).length, 1);
+  assert.deepEqual(decisionSpendEntries(decisionsComments(gh, 49)[0].body), [
+    { date: "2000-01-01", calls: 1, usd: 0.5 },
+    { date: today, calls: 4, usd: 0.007, usdUnknown: 1, usdUnknownWhy: ["decision"] },
+  ]);
+});
+
+test("#479 a decisions comment's write: one gone by the write (PATCH 404) is posted again; a write that landed but lost its answer is not added twice", async () => {
+  const { decisionSpendEntries } = await import("../scripts/lib/logic.mjs");
+  const { bookDecisionSpend, decisionsMarker, flushDecisionSpend } = await import("../scripts/lib/decision-spend.mjs");
+  const today = new Date().toISOString().slice(0, 10);
+  const mark = decisionsMarker(50, "serve");
+  // A GitHub of one issue's comments, as `api` (rest, listComments): `onPatch` decides each edit's fate.
+  const github = (comments, onPatch) => {
+    const posts = [];
+    return {
+      posts,
+      comments,
+      api: {
+        listComments: async () => comments.map((c) => ({ ...c })),
+        rest: async (path, { method, body }) => {
+          if (method === "POST") {
+            const c = { id: 900 + posts.length, user: PERSON, body: body.body };
+            posts.push(c);
+            comments.push(c);
+            return c;
+          }
+          return onPatch(Number(/(\d+)$/.exec(path)[1]), body.body);
+        },
+      },
+    };
+  };
+  setSelf(PERSON.login);
+  try {
+    // Gone between the read and the write: posted again with the days the read held.
+    const held = `${mark}\n<!-- pendulum:decision-spend {"date":"${today}","calls":1,"usd":0.001} -->`;
+    const gone = github([{ id: 1, user: PERSON, body: held }], async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    });
+    bookDecisionSpend({ issue: 50, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0.002 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "serve", api: gone.api });
+    assert.equal(gone.posts.length, 1);
+    assert.ok(gone.posts[0].body.startsWith(`${mark}\n`));
+    assert.deepEqual(decisionSpendEntries(gone.posts[0].body), [{ date: today, calls: 2, usd: 0.003 }]);
+    // The edit lands, then its answer is lost (a 502): a fresh read shows the body sent, so it is not tried again.
+    const lost = github([{ id: 2, user: PERSON, body: held }], async (id, body) => {
+      lost.comments.find((c) => c.id === id).body = body;
+      throw Object.assign(new Error("Bad Gateway"), { status: 502 });
+    });
+    bookDecisionSpend({ issue: 50, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0.002 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "serve", api: lost.api });
+    assert.equal(lost.posts.length, 0);
+    assert.deepEqual(decisionSpendEntries(lost.comments[0].body), [{ date: today, calls: 2, usd: 0.003 }], "added once");
+    // An edit that did not land is tried once more from a fresh read.
+    let tries = 0;
+    const flaky = github([{ id: 3, user: PERSON, body: held }], async (id, body) => {
+      tries += 1;
+      if (tries === 1) throw Object.assign(new Error("Bad Gateway"), { status: 502 });
+      flaky.comments.find((c) => c.id === id).body = body;
+      return {};
+    });
+    bookDecisionSpend({ issue: 50, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0.002 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "serve", api: flaky.api });
+    assert.equal(tries, 2);
+    assert.deepEqual(decisionSpendEntries(flaky.comments[0].body), [{ date: today, calls: 2, usd: 0.003 }]);
+  } finally {
+    setSelf(null);
+  }
+});
+
+test("#479 launcher: an unanswered notice that cannot be written leaves its call's spend to the launcher's decisions comment", async () => {
+  const { launchOne } = await import("../scripts/launch.mjs");
+  const { decisionSpendEntries } = await import("../scripts/lib/logic.mjs");
+  const today = new Date().toISOString().slice(0, 10);
+  const gh = fakeGitHub([{ number: 51 }]);
+  await ask(gh, 51);
+  verdictFor(gh, { "this week": NO });
+  gh.gateway.cost = 0.0025;
+  gh.fail.writes.push(/^<!-- pendulum:51:question:unanswered:/);
+  const realFetch = globalThis.fetch;
+  const keys = ["GITHUB_API_URL", "GITHUB_ACTIONS", "GITHUB_RUN_ID"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  process.env.GITHUB_API_URL = "https://github.test";
+  delete process.env.GITHUB_ACTIONS;
+  delete process.env.GITHUB_RUN_ID;
+  globalThis.fetch = gh.fetch;
+  gatewayKey(true);
+  setSelf(BOT.login);
+  try {
+    gh.comment(51, PERSON, "busy this week");
+    const c = gh.comments(51).at(-1);
+    const held = await launchOne({ inputs: { repo: REPO.full, appToken: "t", objectiveLabel: OBJ, timeoutMinutes: 60, ciChecks: [], maintainers: [] }, eventName: "issue_comment", payload: { action: "created", issue: { number: 51 }, comment: { ...c, author_association: "OWNER" } } });
+    assert.equal(held.exit, "skipped", JSON.stringify(held));
+    assert.equal(unanswered(gh, 51).length, 0, "the notice was not written");
+    const launcher = gh.comments(51).filter((x) => x.body.startsWith("<!-- pendulum:51:decisions:launcher -->\n"));
+    assert.equal(launcher.length, 1);
+    assert.deepEqual(decisionSpendEntries(launcher[0].body), [{ date: today, calls: 1, usd: 0.0025 }]);
+  } finally {
+    gatewayKey(false);
+    globalThis.fetch = realFetch;
+    setSelf(null);
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 test("an edited comment is a new version, judged once more", async () => {

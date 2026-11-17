@@ -720,7 +720,7 @@ test("#479: a stage's gateway call the gateway gives no cost for is of unknown c
     assert.equal(records[0].usdUnknown, 1, "not come by the bound: unknown");
     release();
     await new Promise((r) => setTimeout(r, 50));
-    assert.equal(records[0].usd, 0, "a price that comes later is never read");
+    assert.equal(records[0].usd, null, "a price that comes later is never read: nothing priced, one unknown");
     assert.equal(stageSpendNow().usd, before.usd);
   });
 });

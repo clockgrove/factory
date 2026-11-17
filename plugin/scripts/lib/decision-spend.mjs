@@ -5,7 +5,7 @@
 // as one line per UTC day (logic.mjs decisionSpendMarker) into a record the check writes anyway (carryDecisionSpend:
 // the answer check's answered record or unanswered notice, the merge pass's read record), so it costs no comment and no
 // call; or, where the check writes no record, into the one decisions comment of the process's role on the issue
-// (flushDecisionSpend, `<!-- pendulum:<n>:decisions:<role> -->`). daily_usd (github.mjs localSpendToday) and the
+// (flushDecisionSpend, `<!-- pendulum:<n>:decisions:<role> -->`, read fresh before each write). daily_usd (github.mjs localSpendToday) and the
 // scorecard (bench objective.mjs decisionRecords) read the lines in Pendulum's own comments. Dollars are the gateway's
 // cost or unknown (usage.mjs UNKNOWN_WHY `decision`), never an estimate; a day of $0 known with nothing unknown is no
 // line.
@@ -107,12 +107,14 @@ export function decisionsBody(role, body, days) {
 /**
  * Write what this process booked for repository `repo` (bookDecisionSpend) that no record carried into the decisions
  * comment of its `role` (DECISION_ROLES) on each Objective's issue, with `opts` (Pendulum's own token: its login is
- * what daily_usd and the scorecard trust): that comment edited with the days added, or posted the first time, or again
- * when the one it had is gone. `comments(issue)`, when given, is the issue's comments as the caller already read them
- * (no read here); else they are read once. A write that fails is tried once more, then the calls are booked again
- * (a long-lived loop writes them at its next flush) and the log says so. Never throws. `dryRun`: logged, not written.
+ * what daily_usd and the scorecard trust): the issue's comments read fresh (one read, so a day another writer of the
+ * role added since is kept), then that comment edited with the days added, or posted the first time, or again when the
+ * one it had is gone by the write. A write that fails is tried once more from a fresh read, unless that read shows the
+ * body it sent (the write landed and only its answer was lost), so no day is added twice. Then the calls are booked
+ * again (a long-lived loop writes them at its next flush) and the log says so. Never throws. `dryRun`: logged, not
+ * written.
  */
-export async function flushDecisionSpend(repo, opts, { role, comments = null, dryRun = false, timeoutMs = SETTLE_MS, api = { rest, listComments } } = {}) {
+export async function flushDecisionSpend(repo, opts, { role, dryRun = false, timeoutMs = SETTLE_MS, api = { rest, listComments } } = {}) {
   if (!DECISION_ROLES.includes(role)) throw new TypeError(`unknown decisions role ${role}`);
   const issues = [...new Set(BOOKED.filter((e) => e.repo === repo?.full).map((e) => e.issue))];
   for (const issue of issues) {
@@ -126,21 +128,30 @@ export async function flushDecisionSpend(repo, opts, { role, comments = null, dr
     // Only Pendulum's own comment, the marker on its first line, is its to edit; before Pendulum knows its login, one by
     // someone who can push is.
     const ours = (c) => (selfLogin() ? isSelf(c) : trustedAuthor(c)) && (c.body || "").startsWith(`${mark}\n`);
-    const once = async (fresh) => {
-      const given = !fresh && comments ? await comments(issue) : null;
-      const list = Array.isArray(given) ? given : await api.listComments(repo, issue, opts);
-      const had = (list || []).find(ours);
+    let sent = null;
+    const once = async () => {
+      const had = ((await api.listComments(repo, issue, opts)) || []).find(ours);
       const body = `${mark}\n${decisionsBody(role, had?.body ?? "", days)}`;
+      sent = body;
       const post = () => api.rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } });
       if (!had) return post();
       return api.rest(`repos/${repo.full}/issues/comments/${had.id}`, { ...opts, method: "PATCH", body: { body } }).catch((e) => {
-        // The comment it had is gone (deleted): posted again, with the days it held as the caller read them.
+        // The comment it had is gone (deleted): posted again, with the days it held as just read.
         if (e?.status !== 404) throw e;
         return post();
       });
     };
+    const landed = async () => sent !== null && ((await api.listComments(repo, issue, opts).catch(() => null)) || []).some((c) => ours(c) && c.body === sent);
+    // Written, or tried twice; a failure whose body a fresh read shows landed counts as written.
+    const write = async () => {
+      try {
+        await once();
+      } catch (e) {
+        if (!(await landed())) throw e;
+      }
+    };
     try {
-      await once(false).catch(() => once(true));
+      await write().catch(write);
     } catch (e) {
       days.put();
       log(`#${issue}: the decision calls' spend outside a stage was not written (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"}); booked again for the next write`);

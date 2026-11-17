@@ -3742,7 +3742,7 @@ export class Local {
       const marked = [];
       // No Action runs here (actionState): this loop picks the Objectives without pendulum:local too, labelling each first.
       const adopt = (await this.actionState().catch(() => null)) === "none";
-      this.dispatching = dispatch(inputs, { token: this.token, adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
+      this.dispatching = dispatch(inputs, { token: this.token, decisionRole: "serve", adopt, notice: this.notice, localSlots: waitLine ? 0 : slots.left(), localTake: slots.take, localFull: waitLine || box.why || "this loop is at PENDULUM_LOCAL_MAX_CONCURRENT", localHeld, localHold: (issue) => this.limitHold(issue.labels, issue.number, issue.updated_at ?? null), localStopped, localLive: (n) => !!liveStage(this.ws(n)), localStopping: () => !!this.stopping, localMarked: (n) => marked.push(n), thirdPartyReads: (this.thirdPartyReads ??= new Map()), readCache: (this.timelines ??= new Map()) }).catch(async (e) => {
         // A 401 the local token itself gets again (not the notice App's): GitHub no longer takes it. Said once, by source.
         if (e?.status === 401 && (await rest(`repos/${this.repo.full}`, { token: this.token }).then(() => false, (x) => x?.status === 401))) {
           refused = this.token;

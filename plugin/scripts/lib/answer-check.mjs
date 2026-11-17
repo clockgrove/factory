@@ -240,7 +240,7 @@ const unwritten = (what, issue) => (e) => log(`#${issue}: the ${what} was not wr
  * version judged no decision before (`judged`) or one the check reads as no decision now (its notice posted, unless
  * `dryRun`); true otherwise. A decision it reads is recorded, so the work stage does not judge it again. The call ran
  * outside any stage: its cost goes in the notice or the record it writes (decision-spend.mjs carryDecisionSpend), else
- * in the decisions comment of the caller's `role` (`dispatcher` or `launcher`), read from the `comments` it was given.
+ * in the decisions comment of the caller's `role` (`dispatcher`, `serve` or `launcher`).
  */
 export async function screenAnswer({ check, repo, issue, since, comments, decisions, label, appId = null, opts, dryRun = false, role = "dispatcher" }) {
   const r = await judgeAnswer({ check, repo, issue, comments, decisions, since, appId });
@@ -253,7 +253,7 @@ export async function screenAnswer({ check, repo, issue, since, comments, decisi
   }
   if (r.answered && !dryRun) await carry((extra) => postAnswered(repo, r.answered, { opts, extra })).catch(unwritten("answered record", issue));
   // No record written (no verdict, under the floor, or a record that failed): the role's own decisions comment.
-  if (decisionSpendBooked(repo.full, issue)) await flushDecisionSpend(repo, opts, { role, dryRun, comments: async (n) => (n === issue && Array.isArray(comments) ? comments : null) });
+  if (decisionSpendBooked(repo.full, issue)) await flushDecisionSpend(repo, opts, { role, dryRun });
   return { requeue: true, why: r.why };
 }
 

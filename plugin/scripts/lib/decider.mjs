@@ -105,10 +105,12 @@ const gatewayRecord = (model) => {
   return rec;
 };
 // A call whose price is still settling is in neither figure: its meter is still open (harness.mjs openPasses counts it
-// as running, of unknown cost, for a stopped stage), so it is counted once.
+// as running, of unknown cost, for a stopped stage), so it is counted once. `usd` is null when no call was priced and
+// some is of unknown cost; $0 only while every call is still settling (a record with no figure would read as one more
+// run of unknown cost, usage.mjs unknownRuns, beside the open meters).
 const refresh = (rec) => {
   const c = GATEWAY_COUNTS.get(rec);
-  rec.usd = c.known ?? 0;
+  rec.usd = c.known ?? (c.unknown ? null : 0);
   const n = c.unknown;
   if (n) Object.assign(rec, { usdUnknown: n, usdUnknownWhy: ["decision"] });
   else {

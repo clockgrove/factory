@@ -1279,9 +1279,10 @@ function ownCodexPrice(rec, tokens, { at } = {}) {
  */
 export function sinceSession(rec, prior, { at } = {}) {
   // Codex's running total is its tokens, priced here: a prior total whose dollars were unknown (a pass past the
-  // long-context threshold whose requests were not read, a promotional rate that had ended) is still subtracted.
-  const codex = rec?.harness === "codex";
-  if (!rec || !prior || (codex ? !runningTokens(prior.tokens) : prior.usd === null || prior.usd === undefined)) return rec;
+  // long-context threshold whose requests were not read, a promotional rate that had ended) is still subtracted. A
+  // prior with no token counts is taken by its dollars, as every other harness's.
+  const codex = rec?.harness === "codex" && runningTokens(prior?.tokens);
+  if (!rec || !prior || (!codex && (prior.usd === null || prior.usd === undefined))) return rec;
   // No running total: the pass's dollars and tokens are unknown, neither its total nor a share of it taken.
   const notRunning = (why) => {
     const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: ${why}` };

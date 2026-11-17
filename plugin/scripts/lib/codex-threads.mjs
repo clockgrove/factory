@@ -17,7 +17,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { jsonLines, markUnknown, priceCodex } from "./usage.mjs";
+import { CODEX_PRICES, jsonLines, longShare, markUnknown, priceCodex, rolloutRequests, sumLong, withLong } from "./usage.mjs";
 
 /** A Codex thread id (a UUID, as Codex makes them): safe as a file name, a `find -name` pattern and an object key. */
 export const plainThread = (id) => typeof id === "string" && /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/.test(id);
@@ -52,6 +52,8 @@ const KEYS = ["input", "cached", "written", "output"];
 /** Markers of the only lines read; the rest of a rollout (prompts, tool output) is never parsed. */
 const WANTED = ['"token_count"', '"agent_thread_id"', '"thread_settings_applied"', '"turn_context"'];
 const NAMES_ONLY = ['"agent_thread_id"'];
+/** The long-context threshold of the price table: a request over it is at the long-context rate. */
+const ABOVE = CODEX_PRICES.longContextAbove;
 
 /**
  * One rollout's own thread: `{id, parent, model, tokens, names}`, or null when its first line is no `session_meta`.
@@ -90,6 +92,8 @@ export function codexRollout(text, { namesOnly = false } = {}) {
     const base = Object.fromEntries(KEYS.map((k) => [k, Math.max(0, counts[0].total[k] - (counts[0].last?.[k] ?? counts[0].total[k]))]));
     const end = counts.at(-1).total;
     tokens = Object.fromEntries(KEYS.map((k) => [k, Math.max(0, end[k] - base[k])]));
+    // Its requests over the long-context threshold, read one by one (usage.mjs rolloutRequests; unknown when they cannot be).
+    tokens = withLong(tokens, rolloutRequests(counts, ABOVE)?.long ?? null, ABOVE);
   }
   const parent = meta.source?.subagent?.thread_spawn?.parent_thread_id;
   return { id: meta.id, parent: plainThread(parent) ? parent : null, model: model || turnModel || null, tokens, names };
@@ -161,13 +165,14 @@ const less = (a, b) => Math.max(0, (a ?? 0) - (b ?? 0));
  * in `subAgents`. Returns `{rec, totals}`: `totals` maps each thread to its running total, for the next pass's `prior`.
  * A thread whose model has no price is spend of unknown cost (usage.mjs UNKNOWN_WHY `sub-agent`); a run whose own
  * dollars are unknown (no turn completed) gets its threads' known dollars and stays a run of unknown cost, so the caps
- * still count what is known and nothing is read as $0.
+ * still count what is known and nothing is read as $0. `at` dates the spend for a promotional rate (usage.mjs codexRow).
  */
-export function withSubAgents(rec, threads, prior = () => null) {
+export function withSubAgents(rec, threads, prior = () => null, { at } = {}) {
   const totals = Object.create(null);
   if (!threads?.length) return { rec, totals };
   const shares = [];
   const tokens = { ...rec.tokens };
+  const longs = [longShare(rec.tokens, ABOVE)];
   let usd = rec.usd;
   let unpriced = false;
   for (const t of threads) {
@@ -176,11 +181,13 @@ export function withSubAgents(rec, threads, prior = () => null) {
     const p = prior(t.id)?.tokens;
     // A total below the one already counted is not this thread's running total: counted as reported.
     const running = p && KEYS.every((k) => (t.tokens[k] ?? 0) >= (p[k] ?? 0));
-    const own = running ? Object.fromEntries(KEYS.map((k) => [k, less(t.tokens[k], p[k])])) : { ...t.tokens };
-    const price = priceCodex(model, own);
-    totals[t.id] = { usd: priceCodex(model, t.tokens), tokens: t.tokens, model };
+    const plain = running ? Object.fromEntries(KEYS.map((k) => [k, less(t.tokens[k], p[k])])) : Object.fromEntries(KEYS.map((k) => [k, t.tokens[k]]));
+    const own = withLong(plain, running ? sumLong([longShare(t.tokens, ABOVE), longShare(p, ABOVE)], -1) : longShare(t.tokens, ABOVE), ABOVE);
+    const price = priceCodex(model, own, { at });
+    totals[t.id] = { usd: priceCodex(model, t.tokens, { at }), tokens: t.tokens, model };
     shares.push({ id: t.id, parent: t.parent, model, usd: price, tokens: own });
     for (const k of KEYS) tokens[k] = add(tokens[k], own[k]);
+    longs.push(longShare(own, ABOVE));
     if (price === null) {
       if (KEYS.some((k) => own[k] > 0)) unpriced = true;
     } else if (usd === null || usd === undefined) {
@@ -189,7 +196,7 @@ export function withSubAgents(rec, threads, prior = () => null) {
     } else usd += price;
   }
   if (!shares.length) return { rec, totals };
-  const out = { ...rec, tokens, usd: typeof usd === "number" ? Math.round(usd * 10000) / 10000 : usd, subAgents: shares };
+  const out = { ...rec, tokens: withLong(tokens, sumLong(longs), ABOVE), usd: typeof usd === "number" ? Math.round(usd * 10000) / 10000 : usd, subAgents: shares };
   if (unpriced) markUnknown(out, "sub-agent");
   // The run's own spend stays unknown when its own dollars were (its record's mark, or `unreported` when it had none).
   if ((rec.usd === null || rec.usd === undefined) && !out.usdUnknown) markUnknown(out, "unreported");

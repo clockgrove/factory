@@ -1377,9 +1377,9 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
   const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
-  // A Codex run's rate-limit snapshots are in its rollout only, from the copy just captured on a runner: every pass's
-  // quota reading (usage.mjs quotaReading), and a failed run's usage limit when the stream names no refusal of its own
-  // (usage.mjs providerRefusal).
+  // A Codex run's rate-limit snapshots and request sizes are in its rollout only, from the copy just captured on a runner:
+  // every pass's quota reading (usage.mjs quotaReading), its long-context share (usage.mjs rolloutLong), and a failed
+  // run's usage limit when the stream names no refusal of its own (usage.mjs providerRefusal).
   const rollout = harness === "codex" && ranSession ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
@@ -1391,10 +1391,11 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, since: started });
+  // The rollout also prices a Codex run past the long-context threshold, request by request (usage.mjs rolloutLong).
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, requests: rollout, since: started, at: ended });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
-  const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
+  const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null, { at: ended });
   const rec = counted.rec;
   for (const [id, total] of Object.entries(counted.totals)) SESSION_TOTALS.set(id, total);
   // Threads this run may have spawned that were not read (a rollout absent, too large or unreadable, the read limit),
@@ -1513,7 +1514,7 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
   }
 }
 /**
- * A Codex run's own rollout, its `token_count` lines only, for its rate limits (usage.mjs quotaReading, providerRefusal): on a runner
+ * A Codex run's own rollout, its `token_count` lines only, for its rate limits and request sizes (usage.mjs quotaReading, providerRefusal, rolloutLong): on a runner
  * from the copy Pendulum captured right after the run (never what the agent's home holds by then), locally from the
  * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
  * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
@@ -1541,7 +1542,7 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
     if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
     return counts(readFileSync(join(root, newest.f), "utf8"));
   } catch (e) {
-    log(`${label}: Codex's rollout could not be read for its rate limits (${String(e?.message || e).slice(0, 160)})`);
+    log(`${label}: Codex's rollout could not be read for its rate limits and request sizes (${String(e?.message || e).slice(0, 160)})`);
     return null;
   }
 }

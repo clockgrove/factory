@@ -30,7 +30,7 @@ import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, 
 import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
-import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
+import { parseUsage, promoCodex, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
 import { DRIFT_MODEL } from "./lib/drift.mjs";
@@ -64,7 +64,7 @@ const PLAN_ROW = {
   fix: "plan limits assume ordinary individual use: use it only on your own repository, never for a product; Pendulum does not check whose repository it is (docs/INSTALL.md, Claude on your subscription)",
 };
 
-export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
+export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local", now = Date.now() }) {
   // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs), as the stage runs it.
   const inputs = routeInputs(asked, given);
   const out = [];
@@ -113,9 +113,12 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
-    for (const m of new Set([inputs.model, inputs.reviewerModel].filter(Boolean))) {
-      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey });
-      if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
+    for (const m of new Set([inputs.model, inputs.reviewerModel, inputs.subagentModel].filter(Boolean))) {
+      // A promotional rate: WARN in the week before it ends, FAIL once it has (its runs are then of unknown cost).
+      const promo = promoCodex("codex", m, { at: now });
+      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey, at: now });
+      if (promo) out.push(check("codex model", promo.status, promo.detail, "upgrade Pendulum to a release whose plugin/scripts/lib/codex-prices.json has OpenAI's current rate for it, or use another model with a row there"));
+      else if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
     }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     const gateway = inputs.codexGatewayKey;

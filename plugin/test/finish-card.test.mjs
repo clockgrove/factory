@@ -135,6 +135,31 @@ test("finish card: Pendulum is its own login here or its App by id, never anothe
   assert.match(md, /Pendulum found no record of this run's stages, so its cost shows as unknown, not as a number\./);
 });
 
+test("finish card: after a route switch, the other route's App stages are runs of unknown cost even with no App id to match them by", async () => {
+  const { pendulumOwn, throughApp } = await import("../scripts/lib/finish-card.mjs");
+  const APP = { id: 5778155, slug: "clockgrove-pendulum" };
+  assert.ok(throughApp({ user: bot, performed_via_github_app: APP }));
+  assert.ok(!throughApp({ user: { login: "github-actions[bot]", type: "Bot" }, performed_via_github_app: { id: 15368, slug: "github-actions" } }), "GitHub Actions is no App route");
+  assert.ok(!throughApp({ user: { login: "someone", type: "User" }, performed_via_github_app: APP }), "the author must be the App's own bot");
+  // The Action's App built it; the person's local loop (no PENDULUM_LOCAL_APP_ID) ran the review and posts the card.
+  setWriters("clockgrove/pendulum-scratch", ["dev"]);
+  setSelf("dev");
+  try {
+    const comments = withSpend({ review: { usd: 0.163442 } }).map((c) => (c.body.startsWith("<!-- pendulum:3:progress:review:") ? { ...c, user: { login: "dev", type: "User" } } : { ...c, performed_via_github_app: APP }));
+    const d = finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments, pulls: pulls(), checks: real.checks, records: real.records, mine: pendulumOwn(null) });
+    assert.deepEqual(d.stages.map((s) => [s.kind, s.usd, s.unknown]), [["build", null, 1], ["review", 0.163442, 0]]);
+    const md = renderFinishCard(d);
+    assert.match(md, /<h3 align="center">Merged in 3 min 54 s for \$0\.16 plus spend that was not reported\.<\/h3>/);
+    assert.match(md, /\*\*\$0\.16 \+ unknown\*\*/);
+    assert.doesNotMatch(md, /\$0\.36/, "the App's figures are never read from another route");
+    assert.doesNotMatch(md, /for \$0\.16\.<\/h3>|\*\*\$0\.16\*\*/, "no bare $0.16 total");
+    assert.equal(d.planned, false, "its plan marker is not this route's to trust");
+  } finally {
+    setSelf(null);
+    setWriters("clockgrove/pendulum-scratch", []);
+  }
+});
+
 test("finish card: a run with unreported spend shows it as unknown, never as a number, and draws no cost chart", () => {
   // The work stage was killed before its harness reported (a run of unknown cost, $0 known); the review reported $0.10.
   const comments = withSpend({ work: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, review: { usd: 0.1 } });

@@ -52,6 +52,16 @@ export function labelTime(issue, timeline, label = OBJECTIVE, clockAfter = null)
  */
 export const pendulumOwn = (appId = null) => (x) => pendulumNotice(x, appId);
 
+/**
+ * Whether a comment came through a GitHub App other than GitHub Actions, as that App's `<slug>[bot]`: another route's
+ * Pendulum App when this route has no App id to match it by (local mode without PENDULUM_LOCAL_APP_ID). Its stage
+ * comment then counts as a run of unknown cost, never its figures, so a route switch adds "+ unknown", never a wrong total.
+ */
+export const throughApp = (c) => {
+  const app = c?.performed_via_github_app;
+  return !!app && app.slug !== "github-actions" && typeof app.slug === "string" && c.user?.login === `${app.slug}[bot]`;
+};
+
 /** Whether a closed Objective gets a finish card by its labels: none that ended Blocked or on a Question. */
 export const cardable = (labels) => !labels.some((n) => STATE_LABELS[n] === "Blocked" || STATE_LABELS[n] === "Question");
 
@@ -104,10 +114,11 @@ export function gateChecks(checks, mergedAt, required = []) {
  *  records      the stages' usage records (session.mjs writeUsage: the Actions artifacts), each naming its progress
  *               comment's key (`progressRun`)
  *  mine         whose comments, reviews and PRs are Pendulum's (pendulumOwn; logic.mjs isSelf by default)
- *  pushed       whose comments are by someone who can push (logic.mjs pushAuthor): a progress or vendor comment of theirs
- *               that is not Pendulum's is a stage of unknown cost (its time shown, never its figures)
+ *  pushed       whose comments are by someone who can push (logic.mjs pushAuthor) or came through a GitHub App other than
+ *               Actions (throughApp): a progress or vendor comment of theirs that is not Pendulum's is a stage of unknown
+ *               cost (its time shown, never its figures)
  */
-export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = pushAuthor }) {
+export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c) }) {
   const n = issue.number;
   const merged = pulls.filter((p) => p?.pr?.merged_at).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
   if (!merged.length) return null;
@@ -116,8 +127,8 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   const started = labelTime(issue, timeline, label) ?? merged[0].pr.created_at;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(mergedAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
-  // Stage comments by someone who can push that Pendulum cannot attribute to itself (another route's login): each is
-  // a run of unknown cost. A stranger's paste counts nothing.
+  // Stage comments by someone who can push, or through another App, that Pendulum cannot attribute to itself (another
+  // route's login or App): each is a run of unknown cost. A stranger's paste counts nothing.
   const vouched = comments.filter((c) => !mine(c) && pushed(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
 
   // Each stage: its progress comment, from its first write (the stage's start) to its last (its exit line).

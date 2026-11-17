@@ -1,6 +1,6 @@
 ---
 name: pendulum-report
-description: "Report what Pendulum's Objectives cost and how many tokens they used, over a period or a set of Objectives, from `pendulum report --json`: totals by billing kind, runs of unknown cost with their reasons, breakdowns by stage, pass, model, harness and Pendulum version, per-Objective rows and hot spots, every figure precomputed; presented as a table, chart, page or document as the user asks. Use when the user asks what Pendulum cost, where its spend or tokens went, or for a cost report, chart or dashboard of its runs. Not for one Objective's walk-away scorecard row (pendulum-score) or what is running now (pendulum-status)."
+description: "Report what Pendulum's Objectives cost and how many tokens they used, over a period or a set of Objectives, from `pendulum report --json`: totals by billing kind, runs of unknown cost with their reasons, breakdowns by stage, pass, model, harness and Pendulum version, per-Objective rows and hot spots, every figure precomputed; presented as a table, chart, page or document as the user asks; on request, model-usage proposals. Use when the user asks what Pendulum cost, where its spend or tokens went, which model to try where, or for a cost report, chart or dashboard of its runs. Not for one Objective's walk-away scorecard row (pendulum-score) or what is running now (pendulum-status)."
 ---
 
 # /pendulum:pendulum-report [scope]
@@ -16,7 +16,7 @@ Run the report and present its figures. Pendulum is the data layer: its JSON car
 
 ## Present it
 
-Shape it as the user asks: a table, a chart, an HTML page, a document. Every harness does the same with the same JSON. The schema is in [reference.md](reference.md).
+Shape it as the user asks (table, chart, HTML page, document). The schema is in [reference.md](reference.md).
 
 - **Use the figures as given.** Never add, subtract, average, convert, extrapolate or estimate a dollar figure, and never compute a new one: no total across kinds, no per-day or per-Objective average the JSON does not hold, no "would have cost". Rounding a figure for display is fine.
 - **Keep each kind apart**, labelled with `words`: `api` is billed per use; `subscription` reads "API-equivalent at list prices, on the subscription"; `credits` reads "Copilot AI credits, billed to the seat"; `unknown` is billing not recorded; `sandbox` is the cloud sandbox vendor's cost. A chart may stack kinds only with each labelled, never as one sum.
@@ -28,4 +28,4 @@ Shape it as the user asks: a table, a chart, an HTML page, a document. Every har
 
 ## After
 
-End with one line: the scope, the Objectives counted, and the unknown count.
+End with one line: the scope, the Objectives counted, and the unknown count. Only when the user asks what to try, write proposals by [proposals.md](proposals.md).

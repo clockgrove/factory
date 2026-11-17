@@ -24,7 +24,7 @@ import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } 
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
 import { STATE_LABELS, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { labelTime, pendulumOwn, throughApp } from "./finish-card.mjs";
-import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead, codexRow } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
 import { spread } from "./spread.mjs";
@@ -77,6 +77,12 @@ export function reportIssues(values = []) {
   return [...new Set(out)];
 }
 
+/** `--rates` values (model ids, each alone or joined by commas) as model ids, in order and once each; null when one is not. */
+export function reportModels(values = []) {
+  const out = values.flatMap((v) => String(v).split(",")).map((v) => v.trim());
+  return out.length && out.every((m) => MODEL.test(m)) ? [...new Set(out)] : null;
+}
+
 /** Why `pendulum report`'s flags do not make a report (a line for the usage message), or null. */
 export function reportCheck(f) {
   if (f.since !== undefined && !reportTime(f.since)) return `--since takes a date (2026-11-01) or a time with its zone, not ${JSON.stringify(f.since)}`;
@@ -95,6 +101,7 @@ export function reportCheck(f) {
   if (f.by !== undefined && f.by !== "account") return `--by takes account, not ${JSON.stringify(f.by)}`;
   if (f["max-calls"] !== undefined && !Number.isSafeInteger(f["max-calls"])) return "--max-calls takes a whole number of calls";
   if (f.app !== undefined && !Number.isSafeInteger(f.app)) return "--app takes the Pendulum App's numeric id";
+  if (f.rates !== undefined && !reportModels(f.rates)) return `--rates takes model ids (gpt-6.1-terra, or several joined by commas), not ${JSON.stringify(f.rates.join(" "))}`;
   if (f.self !== undefined && f.self.some((l) => !LOGIN.test(l))) return `--self takes a GitHub login, not ${JSON.stringify(f.self.find((l) => !LOGIN.test(l)))}`;
   return null;
 }
@@ -670,9 +677,10 @@ function breakdown() {
 
 /**
  * The report's figures from what readReport read (pure). `prices`: the Codex price table (cost-join.mjs loadPrices).
- * `by`: the extra breakdowns asked for (`account`). `now`: when it was made (ISO).
+ * `by`: the extra breakdowns asked for (`account`). `rates`: the candidate models of `--rates` (rateRatios), or null.
+ * `tables`: the published rate tables (rateTables). `now`: when it was made (ISO).
  */
-export function buildReport(read, { prices = loadPrices(), by = [], now = new Date().toISOString() } = {}) {
+export function buildReport(read, { prices = loadPrices(), by = [], rates = null, tables = rateTables(prices), now = new Date().toISOString() } = {}) {
   const { repo, scope, issues, pulls, comments, artifacts, local, source } = read;
   const mine = ownPredicate(read.appId ?? null, read.self ?? []);
   const pushed = (c) => pushAuthor(c) || throughApp(c);
@@ -930,6 +938,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       blockedOrUnmergedSpend: { rankBy: "stages", items: rank(objectives.filter((o) => o.outcome === "blocked" || o.outcome === "closed-unmerged").map((o) => ({ issue: o.issue, outcome: o.outcome, stages: o.stages.work + o.stages.rebase + o.stages.review, cost: o.cost })), "stages") },
     },
     comparison: scope.compare && read.arms ? comparisonOf(read.arms, objectives, armMeasures) : null,
+    rates: rates ? rateRatios(views.model.rows(), rates, tables, { at: now }) : null,
     source: sourceOf(source, trust, missing, read),
   };
   return report;
@@ -1041,6 +1050,87 @@ function sourceOf(source, trust, missing, read) {
   };
 }
 
+// ------------------------------------------------------------------ rate ratios (--rates)
+
+/** What a rate ratio is, word for word as the harness labels it: no dollar unit, never a cost. */
+export const RATIO_WORDS = "ratio of published rates on the recorded token mix (no dollar unit)";
+/** Why a model or a pair of models has no rate ratio. */
+export const RATIO_WHY = Object.freeze({
+  "no-rate-table": "no published rate table of Pendulum's has this model (Anthropic's models have none: Claude Code reports its own dollars)",
+  "price-ended": "its rate in the table was a promotional one, which has ended",
+  "other-vendor": "the two models are of different vendors, whose rates are never compared",
+  "no-tokens": "no input and output tokens recorded for this model",
+});
+
+/**
+ * The published rate tables a rate ratio reads, one per vendor (#547): OpenAI's is the Codex price table (cost-join.mjs
+ * loadPrices). Pendulum holds no other vendor's rates: Claude Code and Copilot report their own dollars.
+ */
+export const rateTables = (prices) => [{ vendor: "openai", file: "codex-prices.json", table: prices }];
+
+/** A model's published rates: `{vendor, file, id, rate}` from the first table that lists it, else `{why}` (RATIO_WHY). */
+function publishedRate(tables, model, at) {
+  let ended = null;
+  for (const t of tables) {
+    const row = codexRow(t.table, model, { at });
+    if (row.rate) return { vendor: t.vendor, file: t.file, id: row.id, rate: row.rate };
+    if (row.why === "price-ended") ended ??= { vendor: t.vendor, why: "price-ended" };
+  }
+  return ended ?? { why: "no-rate-table" };
+}
+
+/**
+ * A token mix weighed at a row of published rates, per million tokens: the uncached input (input less its cache reads
+ * and writes) at `input`, cache reads at `cached`, cache writes at `write` (`input` for a model with none) and output
+ * at `output`. A weight, not dollars: only the ratio of two of them on one mix is ever reported.
+ */
+const weigh = (mix, r) => mix.uncached * r.input + mix.cached * r.cached + mix.written * (r.write ?? r.input) + mix.output * r.output;
+
+/**
+ * `--rates`: for each model of the model breakdown with recorded tokens and a published rate table, the ratio of each
+ * named candidate's published rates to its own, on its recorded token mix (the tokens the breakdown holds for it), at the
+ * table's standard rates (the long-context tier is not applied). Only within one vendor's table: a candidate of another
+ * vendor, or a model no table lists, gets no ratio and is listed in `skipped` with its code (RATIO_WHY). No dollar figure:
+ * a ratio has no unit, and the mix is token counts. `at`: when the rates are read (a promotional rate prices only before
+ * its end).
+ */
+export function rateRatios(modelRows, candidates, tables, { at }) {
+  const items = [];
+  const skipped = [];
+  const asked = candidates.map((c) => ({ candidate: c, ...publishedRate(tables, c, at) }));
+  for (const c of asked) if (c.why) skipped.push({ model: null, candidate: c.candidate, why: c.why });
+  for (const row of modelRows) {
+    if (row.key === null || row.key === "decisions") continue;
+    const own = publishedRate(tables, row.key, at);
+    if (own.why) {
+      skipped.push({ model: row.key, candidate: null, why: own.why });
+      continue;
+    }
+    const t = row.tokens;
+    const input = num(t?.input);
+    const output = num(t?.output);
+    const cached = num(t?.cached) ?? 0;
+    const written = num(t?.written) ?? 0;
+    const mix = input === null || output === null ? null : { uncached: Math.max(0, input - cached - written), cached, written, output };
+    const base = mix ? weigh(mix, own.rate) : 0;
+    if (!(base > 0)) {
+      skipped.push({ model: row.key, candidate: null, why: "no-tokens" });
+      continue;
+    }
+    for (const c of asked) {
+      if (c.why || c.id === own.id) continue;
+      if (c.vendor !== own.vendor) {
+        skipped.push({ model: row.key, candidate: c.candidate, why: "other-vendor" });
+        continue;
+      }
+      items.push({ model: row.key, rateOf: own.id, candidate: c.candidate, candidateRateOf: c.id, vendor: own.vendor, mix, ratio: round6(weigh(mix, c.rate) / base) });
+    }
+  }
+  const used = tables.filter((t) => items.some((i) => i.vendor === t.vendor));
+  const basis = used.map((t) => `${t.vendor}'s published standard rates (no long-context tier) from ${t.file} dated ${t.table.date}`).join("; ");
+  return { words: RATIO_WORDS, candidates, basis: basis || null, tables: tables.map((t) => ({ vendor: t.vendor, file: t.file, date: t.table.date ?? null })), items, skipped: skipped.map((s) => ({ ...s, text: RATIO_WHY[s.why] })) };
+}
+
 // ------------------------------------------------------------------ Markdown
 
 const money = (n) => `$${n.toFixed(n !== 0 && Math.abs(n) < 0.01 ? 4 : 2)}`;
@@ -1060,7 +1150,7 @@ export function renderReport(r) {
   if (r.comparison) {
     // Two arms: their figures side by side, and the source; no figure across both arms.
     out.push(...renderComparison(r.comparison, r.words));
-    return `${[...out, ...renderSource(r.source)].join("\n")}\n`;
+    return `${[...out, ...renderRates(r.rates), ...renderSource(r.source)].join("\n")}\n`;
   }
   out.push("", "## Totals", "", "Each kind's dollars are apart; they are never added together.", "", table(COST_HEAD, [costCells(r.totals.cost)]));
   out.push("", `- API: ${r.words.api}. Subscription: ${r.words.subscription}. Copilot: ${r.words.credits}. Sandbox: ${r.words.sandbox}.`);
@@ -1086,7 +1176,17 @@ export function renderReport(r) {
   list("Cache-write share by pass label", h.cacheWriteShare.items, (x) => `${x.passLabel} ${(x.share * 100).toFixed(1)}% (${x.written} of ${x.input} input tokens)`);
   list("Cost per model minute", h.costPerModelMinute.items, (x) => `#${x.issue} ${money(x.usdPerModelMinute)}/min ${x.billing} (${money(x.usd)} over ${x.modelMinutes} min)`);
   list("Spend in Objectives that ended Blocked or closed unmerged", h.blockedOrUnmergedSpend.items, (x) => `#${x.issue} ${x.outcome}, ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
-  return `${[...out, ...renderSource(r.source)].join("\n")}\n`;
+  return `${[...out, ...renderRates(r.rates), ...renderSource(r.source)].join("\n")}\n`;
+}
+
+/** `--rates`' lines: each ratio with its basis, never a dollar figure, then what has none and why. */
+function renderRates(rates) {
+  if (!rates) return [];
+  const out = ["", "## Rate ratios", "", `Each ratio is the ${rates.words}: the candidate's published rates over the recorded model's, on that model's tokens in this report, within one vendor's rates. It is no cost, and no figure here is dollars.`];
+  if (rates.basis) out.push("", `Rates: ${rates.basis}.`);
+  out.push("", rates.items.length ? table(["Recorded model", "Candidate", "Ratio", "Uncached in", "Cache reads", "Cache writes", "Out"], rates.items.map((x) => [x.model, x.candidate, `${x.ratio}×`, x.mix.uncached, x.mix.cached, x.mix.written, x.mix.output])) : "No ratio.");
+  for (const s of rates.skipped) out.push(`- No ratio for ${[s.model, s.candidate].filter(Boolean).map((m) => `\`${m}\``).join(" to ")}: ${s.text}.`);
+  return out;
 }
 
 /** The source section's lines. */

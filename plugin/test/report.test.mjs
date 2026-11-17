@@ -383,7 +383,7 @@ const shape = (v, at = "") => (Array.isArray(v) ? (v.length ? shape(v[0], `${at}
 test("report: --json keeps its schema: every field the documented shape names, of its type", async () => {
   const { json: r } = await report(world(), { since: "2026-11-17", by: "account" });
   const keys = (o) => Object.keys(o).sort();
-  assert.deepEqual(keys(r), ["breakdowns", "comparison", "generatedAt", "hotSpots", "objectives", "pendulum", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
+  assert.deepEqual(keys(r), ["breakdowns", "comparison", "generatedAt", "hotSpots", "objectives", "pendulum", "rates", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
   assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
   assert.deepEqual(keys(r.words), ["api", "credits", "sandbox", "subscription", "unknown"]);
   assert.deepEqual(keys(r.totals), ["cost", "objectives", "passes", "stages", "tokens"]);

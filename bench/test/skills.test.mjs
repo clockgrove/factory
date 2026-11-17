@@ -9,6 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { INTERNAL_SKILLS, PLUGIN_ROOT_SENTENCE, USER_SKILLS, skillRules, skillSet, skillsDigest, unshippedRefs } from "../skills.mjs";
+import { DEFAULTS, VARIABLE_SETTINGS } from "../../plugin/scripts/lib/inputs.mjs";
+import { parseYaml } from "../../plugin/scripts/lib/yaml.mjs";
+import { PRESETS, renderWorkflow, templateEnvInputs } from "../../plugin/scripts/setup.mjs";
 
 const SCRIPT = join(import.meta.dirname, "..", "skills.mjs");
 const skills = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
@@ -154,6 +157,53 @@ test("the setup skill's local-mode steps give only commands, paths and examples 
   assert.ok(spans.length > 20);
   assert.deepEqual(spans.filter((s) => !guide.includes(s)), [], "code docs/LOCAL.md does not give");
   assert.match(readFileSync(join(CHECKOUT, "plugin", "skills", "pendulum-setup", "SKILL.md"), "utf8"), /walk \[local\.md\]\(local\.md\)/);
+});
+
+// A newcomer's first setup (#470): the setup skill asks three things (the harness and its credential, the caps,
+// auto-merge) and recommends the first-run preset, whose lines must be the preset setup.mjs applies.
+test("the setup skill's first setup asks exactly three things, and its first-run preset lines are setup's preset", () => {
+  const skill = readFileSync(join(CHECKOUT, "plugin", "skills", "pendulum-setup", "SKILL.md"), "utf8");
+  const section = skill.split(/^## /m).find((s) => s.startsWith("1. The workflow file"))?.split("\n").slice(1).join("\n");
+  assert.ok(section, "SKILL.md has step 1, the workflow file");
+  const flags = (text) => [...text.matchAll(/`(--[a-z-]+(?: [a-z-]+)?)`/g)].map((m) => m[1]);
+  const asked = section.split("\n").filter((l) => /^\d+\. /.test(l));
+  assert.deepEqual(asked.map(flags), [["--harness", "--credential"], ["--max-usd", "--daily-usd"], ["--auto-merge"]], "three questions, one topic each");
+  // Nothing else in the step is a setting to ask about: only the preset it recommends.
+  const rest = section.split("\n").filter((l) => !/^\d+\. /.test(l)).join("\n");
+  assert.deepEqual([...new Set(flags(rest))], ["--preset first-run"]);
+  const preset = Object.fromEntries([...section.matchAll(/^- `([a-z_]+)` (\S+):/gm)].map((m) => [m[1], m[2]]));
+  assert.deepEqual(preset, PRESETS["first-run"]);
+});
+
+// The settings a first setup leaves at their defaults are listed in the skill's reference.md, so the skill can tell the
+// user what they can change later and where: every setting the runner route's workflow renders, with setup's default and
+// whether a repository variable sets it.
+test("the setup reference's Workflow settings name every setting the workflow renders, its default and its variable", () => {
+  const ref = readFileSync(join(CHECKOUT, "plugin", "skills", "pendulum-setup", "reference.md"), "utf8");
+  const section = ref.split(/^## /m).find((s) => s.startsWith("Workflow settings\n"));
+  assert.ok(section, "reference.md has Workflow settings");
+  const rows = new Map(
+    section
+      .split("\n")
+      .filter((l) => l.startsWith("| `--"))
+      .map((l) => l.slice(1, -1).split("|").map((c) => c.trim()))
+      .map((r) => [/^`(--[^`]+)`$/.exec(r[0])[1], r]),
+  );
+  const template = readFileSync(join(CHECKOUT, "plugin", "workflow-template.yml"), "utf8");
+  const inputs = templateEnvInputs(template);
+  const rendered = Object.keys(parseYaml(renderWorkflow(template, { action: "clockgrove/pendulum@v1.0.0" })).env);
+  assert.ok(rendered.length > 15);
+  for (const key of rendered) {
+    const input = inputs.get(key);
+    assert.ok(input, `${key} is rendered from an input`);
+    const row = rows.get(`--${input.replace(/_/g, "-")}`);
+    assert.ok(row, `a row for --${input.replace(/_/g, "-")}`);
+    const code = /^`([^`]*)`$/.exec(row[1])?.[1];
+    if (code !== undefined) assert.equal(code, DEFAULTS[input], `${key}'s default`);
+    else assert.equal(DEFAULTS[input], "", `${key}: a default in words (none, the harness's) is an empty input`);
+    assert.equal(row[2], VARIABLE_SETTINGS.has(key) ? `\`${key}\`` : "no", `${key}: whether a variable sets it`);
+  }
+  assert.ok(rows.has("--preset first-run"));
 });
 
 // How a skill is shown and loaded (#456): the internal stage skills stay out of every harness's user menu and implicit

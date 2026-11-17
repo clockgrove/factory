@@ -120,7 +120,7 @@ This runs Pendulum's doctor, which changes nothing. Each line reads PASS, WARN o
 
 ### 4. File your first Objective
 
-Start with a modest feature: one your CI can test, in this repository, that touches no workflow files. With the first-run preset's $5 per job, a feature spanning a few files suits a first run; raise `max_usd` before you hand Pendulum larger work. Then ask, describing it in your own words:
+Start with a modest feature: one your CI can test, in this repository, that touches no workflow files. With the first-run preset's $5 per job, a feature spanning a few files suits a first run; raise `max_usd` before you hand Pendulum larger work, and set `max_objective_usd` if you want a limit on one Objective's total. Then ask, describing it in your own words:
 
 > File a Pendulum Objective: `mytool list` should support `--format json` beside the table, so scripts can read its output.
 
@@ -152,7 +152,7 @@ It asks whether to start it now (it adds the `pendulum:objective` label), save i
 - The reviewer comments on the PR, and the coding agent answers each comment.
 - With the first-run preset, the PR is marked ready for review. Read it and merge it yourself.
 
-Runs take from a few minutes to a few hours. Afterwards, the plan comment, the progress comment, the PR's body and the review show how Pendulum ran it ([What it records](#what-it-records)). If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
+Runs take from a few minutes to a few hours. When it merges, a finish card on the issue sums up the time, cost and who did what; the plan comment, the progress comment, the PR's body and the review show the detail ([What it records](#what-it-records)). If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
 
 **Why the issue has this shape:** the worker reads the issue as the whole specification. The Goal says what should change; each Acceptance entry is something a reviewer can check, and the reviewer judges every one, met or not; the Context records what you have already decided. Your tests then confirm the behaviour on the PR.
 
@@ -184,7 +184,11 @@ Pendulum acts only on issues written by people who can push to the repository, o
 
 ### What it records
 
-Every Objective leaves a written trail on GitHub, so you can see how Pendulum ran it without opening a log:
+Every Objective leaves a written trail on GitHub, so you can see how Pendulum ran it without opening a log.
+
+**When an Objective merges, Pendulum posts a finish card on its issue:** one comment that sums up the run. It has a headline with the time to merge and the cost, status, wall-clock and cost badges, a sentence on what you did and what Pendulum did (commits, lines and files changed, checks passed, review findings), a timeline of the stages, a cost table by stage and model with a chart, where the dollars went (including any rework Pendulum caused, shown apart), and the full run log folded away. Every figure comes from GitHub or Pendulum's own records; anything it has no record of shows as unknown, never as an estimate. On GitHub Actions and the cloud sandbox, the merged PR's body gets the same headline and badges at its top. An Objective that ends Blocked or with a Question gets no card ([The finish card](docs/USAGE.md#the-finish-card)).
+
+Along the way, and for every Objective however it ends:
 
 | Where | What it shows |
 | --- | --- |
@@ -196,6 +200,7 @@ Every Objective leaves a written trail on GitHub, so you can see how Pendulum ra
 | **Labels and Project board** | Where each Objective stands: `pendulum:running`, `pendulum:in-review`, `pendulum:blocked`, `pendulum:question` |
 | **Usage artifact** on each Actions run | `pendulum-usage-<issue>`: the models, tokens and dollars, how the job ended, and its event log, kept up to 90 days. On a public repository the session transcripts are sealed by default ([Data and privacy](docs/PRIVACY.md#what-goes-to-github)) |
 | **Scorecard** | Ask "Show the Pendulum scorecard": one row per Objective with whether it merged with no one stepping in, solution quality, operator minutes and dollars ([bench/README.md](bench/README.md)) |
+| **Cost report** | Ask "What did Pendulum cost this month?": totals by billing kind, runs of unknown cost, and where the tokens went ([docs/REPORT.md](docs/REPORT.md)) |
 
 The [real run](#a-real-run) above shows the progress comment and the reviewer's comment as they appear on GitHub. [What you see on the issue](docs/USAGE.md#what-you-see-on-the-issue) has the details.
 
@@ -312,6 +317,7 @@ Each cell about another tool comes from that tool's own documentation; [docs/COM
 | Know what data goes where | [docs/PRIVACY.md](docs/PRIVACY.md) |
 | Compare Pendulum with alternatives, with sources | [docs/COMPARISON.md](docs/COMPARISON.md) |
 | Understand the design, its contracts and the 1.0 bar | [docs/PLAN.md](docs/PLAN.md) |
+| See what Pendulum has cost, and where the tokens went | [docs/REPORT.md](docs/REPORT.md) |
 | See how runs are scored | [bench/README.md](bench/README.md) |
 | Read release notes | [Releases](https://github.com/clockgrove/pendulum/releases) |
 

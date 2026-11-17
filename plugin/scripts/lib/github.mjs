@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
@@ -1619,21 +1619,25 @@ const USAGE_DOWNLOADS = 8;
 
 /**
  * Today's spend by runs that upload no usage artifact (local mode, any machine, a cloud sandbox): the spend lines in
- * the progress comments and a sandbox stage's vendor comments updated today, and today's comments of decision calls
- * made outside any stage (decision-spend.mjs, on every route), written by Pendulum or someone who can push, as
- * `{usd, unknown}` (logic.mjs spendOf: the known dollars and the runs of unknown cost). Actions stages write no
- * progress spend line, so nothing here is counted twice with the artifacts.
+ * the progress comments and a sandbox stage's vendor comments updated today, and the decision-spend lines dated today
+ * (decision calls made outside any stage, decision-spend.mjs, on every route) in any Pendulum comment, written by
+ * Pendulum or someone who can push, as `{usd, unknown}` (logic.mjs spendOf and decisionSpendOf: the known dollars and
+ * the runs of unknown cost). The comments read are those updated since the start of the day before, so a line written
+ * just after midnight still counts on the day it names. Actions stages write no progress spend line, so nothing here
+ * is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
-  // One paged read of the repository's comments updated today (issues and PRs alike), not one per Objective.
-  const comments = (await rest(`repos/${repo.full}/issues/comments?since=${dateIso}T00:00:00Z&per_page=100`, { token, paginate: true })) || [];
+  const since = new Date(Date.parse(`${dateIso}T00:00:00Z`) - 86_400_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  // One paged read of the repository's comments updated since (issues and PRs alike), not one per Objective.
+  const comments = (await rest(`repos/${repo.full}/issues/comments?since=${since}&per_page=100`, { token, paginate: true })) || [];
   let usd = 0;
   let unknown = 0;
   for (const c of comments) {
-    if (!trustedAuthor(c) || !String(c.updated_at || "").startsWith(dateIso)) continue;
-    // A decision-spend comment counts on the day it names (one per day), whenever it was last written.
-    const decisions = /^<!-- pendulum:\d+:decisions:(\d{4}-\d{2}-\d{2}):[0-9a-f]{12} -->/.exec(c.body || "");
-    if (decisions ? decisions[1] !== dateIso : !/^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "")) continue;
+    if (!trustedAuthor(c) || !/^<!-- pendulum:\d+:/.test(c.body || "")) continue;
+    const d = decisionSpendOf(c.body, { date: dateIso });
+    usd += d.usd;
+    unknown += d.unknown;
+    if (!String(c.updated_at || "").startsWith(dateIso) || !/^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "")) continue;
     const s = spendOf(c.body);
     usd += s.usd;
     unknown += s.unknown;

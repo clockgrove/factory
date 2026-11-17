@@ -165,6 +165,11 @@ function fakeGitHub(open, { self = BOT } = {}) {
     gateway,
     fail,
     comments: (n) => issues.get(n).comments,
+    /** A comment deleted now. */
+    drop(n, id) {
+      const one = issues.get(n);
+      one.comments = one.comments.filter((c) => c.id !== id);
+    },
     /** A person editing their comment now. */
     edit(id, text) {
       const c = [...issues.values()].flatMap((i) => i.comments).find((x) => x.id === id);
@@ -551,37 +556,81 @@ test("dispatcher with an AI Gateway key: a comment that gives no decision keeps 
   assert.equal(gh.gateway.calls.length, 2, "no second call for the same comment");
 });
 
-test("#479 dispatcher: an answer check's gateway call outside any stage is booked on its issue, where daily_usd reads it; one the gateway gives no cost for is unknown", async () => {
+test("#479 dispatcher: an answer check's gateway call outside any stage is carried by the notice or record it writes, where daily_usd reads it; one the gateway gives no cost for is unknown", async () => {
   const { todaysSpend } = await import("../scripts/dispatch.mjs");
-  const decisionsOf = (gh, n) => gh.comments(n).filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:\\d{4}-\\d{2}-\\d{2}:[0-9a-f]{12} -->`).test(c.body));
+  const { decisionSpendEntries } = await import("../scripts/lib/logic.mjs");
+  const today = new Date().toISOString().slice(0, 10);
   const gh = fakeGitHub([{ number: 47 }, { number: 48 }]);
   await ask(gh, 47);
   await ask(gh, 48);
   verdictFor(gh, { "use the second one": YES, "back tomorrow": NO });
   gh.gateway.cost = 0.0031;
   gh.comment(47, PERSON, "thanks, I'll look at this when I'm back tomorrow");
+  const writes = gh.comments(47).length;
   await tick(gh, { key: true });
   assert.equal(gh.gateway.calls.length, 1);
   assert.equal(gh.gateway.lookups, 1, "the call's generation looked up");
-  const [booked] = decisionsOf(gh, 47);
-  assert.ok(booked, "a decision-spend comment on the issue");
-  assert.equal(booked.user.login, BOT.login, "Pendulum's own, which daily_usd trusts");
-  assert.match(booked.body, /\n<!-- pendulum:spend \{"usd":0\.0031\} -->$/);
-  // daily_usd's sum (the dispatcher's own read) counts it.
+  const [notice] = unanswered(gh, 47);
+  assert.deepEqual(decisionSpendEntries(notice.body), [{ date: today, calls: 1, usd: 0.0031 }], "the unanswered notice carries the call");
+  assert.equal(gh.comments(47).length, writes + 1, "no comment beside the notice");
+  assert.equal(decisionsComments(gh, 47).length, 0);
   const spent = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
   assert.ok(Math.abs(spent.spentToday - 0.0031) < 1e-9);
   assert.equal(spent.unknownToday, 0);
-  // The next call about #47 in this process adds to its own comment; one the gateway gives no cost for is unknown.
+  // A call the gateway gives no cost for (no generation named) is unknown, carried by the answered record; the screen goes on.
   gh.gateway.cost = null;
   gh.comment(47, PERSON, "use the second one");
   assert.deepEqual((await tick(gh, { key: true })).answered, [47], "an unknown cost never stops the screen");
-  assert.equal(decisionsOf(gh, 47).length, 1, "one comment per process and day");
-  assert.match(decisionsOf(gh, 47)[0].body, /2 calls, \$0\.0031 plus 1 run of unknown cost/);
-  assert.match(decisionsOf(gh, 47)[0].body, /<!-- pendulum:spend \{"usd":0\.0031,"usdUnknown":1,"usdUnknownWhy":\["decision"\]\} -->$/);
+  assert.deepEqual(decisionSpendEntries(answeredRecords(gh, 47)[0].body), [{ date: today, calls: 1, usd: 0, usdUnknown: 1, usdUnknownWhy: ["decision"] }]);
   const later = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
   assert.ok(Math.abs(later.spentToday - 0.0031) < 1e-9);
   assert.equal(later.unknownToday, 1);
-  assert.deepEqual(decisionsOf(gh, 48), [], "nothing asked about #48, nothing booked there");
+  // A stranger's paste of a decision-spend line counts nothing.
+  gh.comment(48, STRANGER, `<!-- pendulum:48:decisions:dispatcher -->\n<!-- pendulum:decision-spend {"date":"${today}","calls":1,"usd":100} -->`);
+  const pasted = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
+  assert.ok(Math.abs(pasted.spentToday - 0.0031) < 1e-9);
+});
+
+const decisionsComments = (gh, n) => gh.comments(n).filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:dispatcher -->\n`).test(c.body));
+
+test("#479 dispatcher: a call whose check writes no record goes in the dispatcher's one decisions comment, its day added to; a deleted one is posted again", async () => {
+  const { decisionSpendEntries } = await import("../scripts/lib/logic.mjs");
+  const { bookDecisionSpend, decisionsMarker, flushDecisionSpend } = await import("../scripts/lib/decision-spend.mjs");
+  const today = new Date().toISOString().slice(0, 10);
+  const gh = fakeGitHub([{ number: 49 }]);
+  await ask(gh, 49);
+  // A reading under the floor writes no record: the comment resumes the Question, and the call goes in the dispatcher's comment.
+  verdictFor(gh, { "maybe": { choice: "no_decision", confidence: 0.3 } });
+  gh.gateway.cost = 0.001;
+  gh.comment(49, PERSON, "maybe the first");
+  assert.deepEqual((await tick(gh, { key: true })).answered, [49]);
+  assert.equal(decisionsComments(gh, 49).length, 1);
+  assert.deepEqual(decisionSpendEntries(decisionsComments(gh, 49)[0].body), [{ date: today, calls: 1, usd: 0.001 }]);
+  // The next one the same day is added to it: one comment, its writer the only one.
+  await onGitHub(gh, async () => {
+    bookDecisionSpend({ issue: 49, repo: REPO.full }, { calls: 2, settled: Promise.resolve({ usd: 0.002, usdUnknown: 1 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher" });
+  });
+  assert.equal(decisionsComments(gh, 49).length, 1);
+  assert.deepEqual(decisionSpendEntries(decisionsComments(gh, 49)[0].body), [{ date: today, calls: 3, usd: 0.003, usdUnknown: 1, usdUnknownWhy: ["decision"] }]);
+  // $0 known with nothing unknown is no line, and no write.
+  const before = gh.comments(49).map((c) => c.updated_at).join();
+  await onGitHub(gh, async () => {
+    bookDecisionSpend({ issue: 49, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher" });
+  });
+  assert.equal(gh.comments(49).map((c) => c.updated_at).join(), before);
+  // A comment the caller read that is gone by the write (PATCH 404) is posted again, with the days it held.
+  const stale = { ...decisionsComments(gh, 49)[0] };
+  gh.drop(49, stale.id);
+  await onGitHub(gh, async () => {
+    bookDecisionSpend({ issue: 49, repo: REPO.full }, { calls: 1, settled: Promise.resolve({ usd: 0.004 }) });
+    await flushDecisionSpend(REPO, { token: "t" }, { role: "dispatcher", comments: async () => [stale] });
+  });
+  const again = decisionsComments(gh, 49);
+  assert.equal(again.length, 1);
+  assert.ok(again[0].body.startsWith(`${decisionsMarker(49, "dispatcher")}\n`));
+  assert.deepEqual(decisionSpendEntries(again[0].body), [{ date: today, calls: 4, usd: 0.007, usdUnknown: 1, usdUnknownWhy: ["decision"] }]);
 });
 
 test("an edited comment is a new version, judged once more", async () => {

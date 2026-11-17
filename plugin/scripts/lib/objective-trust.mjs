@@ -11,7 +11,6 @@
 import { createHash } from "node:crypto";
 import { collaboratorPermission, getIssue, graphql, issueTextChangedAt, labelersOf, primeSelf, rest } from "./github.mjs";
 import { log } from "./inputs.mjs";
-import { flushDecisionSpend } from "./decision-spend.mjs";
 import { keptLine } from "./edit-check.mjs";
 import { DRAFT_LABEL, goTrust, labelTrust } from "./stop.mjs";
 import { choiceLabels, choiceOf, chosenInputs, foundationLabel, hostsOf, hostsProblem, isChoiceLabel, routeProblem } from "./choice.mjs";
@@ -297,8 +296,6 @@ export async function planStateNow(repo, issue, { sha, editedAt = null, issueDat
   const posted = await (read.planComment ?? planComment)(repo, issue, opts);
   const edited = posted && !posted.record ? await textEditedAt(repo, issue, editedAt, opts, read.changedAt) : null;
   const judged = issueData ? await judgedEdit({ repo, issue, record: posted?.record, now: { sha, title: issueData.title, body: issueData.body, labels }, check }) : { kept: false, record: null };
-  // An edit check asked here runs outside any stage (a session's CLI): its cost written now (decision-spend.mjs).
-  await flushDecisionSpend(repo, opts);
   return { posted, state: planTextState({ sha, plan: posted, editedAt: edited, kept: judged.kept }), record: judged.record ?? posted?.record ?? null };
 }
 
@@ -326,8 +323,6 @@ export async function editedSincePlan(repo, issue, opts, { gh = { graphql }, rea
     if (t.ok) {
       sha = t.sha;
       judged = await judgedEdit({ repo, issue, record: posted.record, now: { sha, title: t.title, body: t.body, labels: t.labels }, check });
-      // The merge pass's edit check, outside a stage on the dispatcher or a local loop: its cost written now.
-      await flushDecisionSpend(repo, opts);
     }
   }
   if (judged.record && posted.text !== null) await stampPlan(repo, issue, posted, judged.record, opts);

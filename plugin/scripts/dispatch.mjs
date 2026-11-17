@@ -37,6 +37,7 @@ import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -1871,7 +1872,11 @@ async function main() {
     return;
   }
   const failedLaunch = eventName === "workflow_dispatch" && /^[1-9]\d{0,9}$/.test(String(payload?.inputs?.failed_launch ?? "")) ? Number(payload.inputs.failed_launch) : null;
-  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch });
+  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch }).finally(() =>
+    // The tick's decision calls outside a stage that no record carried (the merge pass's edit and comment checks, an
+    // answer check with no verdict): the dispatcher's decisions comment, before the job ends (decision-spend.mjs).
+    flushDecisionSpend(repoOf(inputs.repo), { token }, { role: "dispatcher", dryRun: args.dry_run === "true" }),
+  );
   const summary = reportDispatch(result, inputs, { json: !!args.json });
   // With a cloud sandbox the matrix also carries the sweep's re-launches; the launcher decides each one's stage.
   const named = [...result.ready, ...(result.relaunch || [])];

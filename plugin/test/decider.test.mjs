@@ -7,9 +7,10 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deciderKind, openDecider } from "../scripts/lib/decider.mjs";
+import { deciderKind, openDecider, settleDecisionCosts } from "../scripts/lib/decider.mjs";
+import { NEVER_SENT, answerCost, gatewayDecider } from "../scripts/lib/adapters/decider-ai-gateway.mjs";
 import { decisionPrompt, parseAnswer } from "../scripts/lib/adapters/decider-harness.mjs";
-import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, openPasses, runDecision, stageBudgetLeft, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
+import { DECISION_RUN, DECISION_SH, decisionLaunch, decisionSpend, openPasses, carveDriftReserve, driftReserve, meterPass, passMaxUsd, reservedSpend, runDecision, stagePasses, stageSpendNow } from "../scripts/lib/harness.mjs";
 import { cacheSummary } from "../scripts/lib/usage.mjs";
 import { TRIAGE_QUESTION, openTriage } from "../scripts/lib/triage.mjs";
 import { DRIFT_QUESTION, GOALS, WINDOW, openDrift } from "../scripts/lib/drift.mjs";
@@ -20,7 +21,7 @@ import { holdSecrets, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { setAgent } from "../scripts/lib/proc.mjs";
 import { answerDecider } from "../scripts/review.mjs";
 import { FINDING_QUESTION, openFindingCheck } from "../scripts/lib/finding-check.mjs";
-import { openKeptCheck } from "../scripts/lib/kept.mjs";
+import { KEPT_QUESTION, openKeptCheck } from "../scripts/lib/kept.mjs";
 
 const fixture = (name) => readFileSync(join(import.meta.dirname, "fixtures", name), "utf8");
 const LIMIT_RUN = fixture("claude-2.1.323-usage-limit.jsonl");
@@ -551,23 +552,28 @@ test("#379: a stage harness's usage limit in the rebase check ends the stage thr
   assert.doesNotMatch(blocked, /could not resolve the conflict/);
 });
 
+
 /**
  * A fake AI Gateway on fetch (#479), never the real one: `/v1/decisions` answers `choice`, naming generation `id` in its
- * x-generation-id header when given (`status` other than 200: an error answer instead); `/v1/generation` gives that
- * generation's `total_cost` (`cost`), or 404 with none. Any other host fails the test.
+ * x-generation-id header when given and its own reported cost `reported` when given (`status` other than 200: an error
+ * answer, `type` its error type); `/v1/generation` gives that generation's `total_cost` (`cost`), or 404 with none,
+ * once `hold` (a promise) settles. Any other host fails the test.
  */
-function fakeGateway({ choice = "kept", confidence = 0.9, id = null, cost = null, status = 200 } = {}) {
-  const seen = { decisions: 0, lookups: [] };
-  const fetch = async (url) => {
+function fakeGateway({ choice = "kept", confidence = 0.9, id = null, cost = null, reported = null, status = 200, type = "internal_server_error", hold = null } = {}) {
+  const seen = { decisions: 0, lookups: [], posts: [] };
+  const fetch = async (url, init = {}) => {
     const u = new URL(url);
     assert.equal(u.host, "ai-gateway.vercel.sh");
     if (u.pathname === "/v1/decisions") {
       seen.decisions += 1;
-      if (status !== 200) return new Response('{"error":{"type":"internal_server_error"}}', { status });
-      return new Response(JSON.stringify({ answers: [{ type: "choice", choice, confidence }] }), { status: 200, headers: { "content-type": "application/json", ...(id ? { "x-generation-id": id } : {}) } });
+      seen.posts.push(init);
+      const headers = { "content-type": "application/json", ...(id ? { "x-generation-id": id } : {}) };
+      if (status !== 200) return new Response(JSON.stringify({ error: { type } }), { status, headers });
+      return new Response(JSON.stringify({ answers: [{ type: "choice", choice, confidence }], ...(reported !== null ? { providerMetadata: { gateway: { cost: String(reported), ...(id ? { generationId: id } : {}) } } } : {}) }), { status: 200, headers });
     }
     if (u.pathname === "/v1/generation") {
       seen.lookups.push(u.searchParams.get("id"));
+      if (hold) await hold;
       return cost === null ? new Response("{}", { status: 404 }) : new Response(JSON.stringify({ data: { id: u.searchParams.get("id"), total_cost: cost } }), { status: 200, headers: { "content-type": "application/json" } });
     }
     return new Response("{}", { status: 404 });
@@ -577,108 +583,190 @@ function fakeGateway({ choice = "kept", confidence = 0.9, id = null, cost = null
 const KEY_INPUTS = { aiGatewayApiKey: "vck_dummy_key_123" };
 const ON_ACTIONS = { GITHUB_ACTIONS: "true" };
 const HUNK = { path: "src/a.ts", hunks: [{ at: 1, text: "@@ -1 +1,2 @@\n-x\n+a" }], file: "a\nb\n" };
-/** A stage as worker.mjs builds its decision stage: its records, and max_usd's known remainder (harness.mjs stageBudgetLeft). */
-const gatewayStage = (maxUsd = 5) => {
+const GEN = "gen_PRICED0000000000000000A1";
+/** A stage as worker.mjs builds its decision stage, with its records. */
+const gatewayStage = () => {
   const records = [];
-  return { records, stage: { harness: "claude", model: "m-1", env: {}, record: (r) => records.push(r), budgetLeft: () => stageBudgetLeft(maxUsd) } };
+  return { records, stage: { harness: "claude", model: "m-1", env: {}, record: (r) => records.push(r) } };
+};
+const withFetch = async (fetch, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
 };
 
-test("#479: a gateway decision call in a stage is priced from its generation's record and lands in the stage's spend, decision record, usage and caps", async () => {
-  const gw = fakeGateway({ id: "gen_PRICED0000000000000000A1", cost: 0.0042 });
-  const real = globalThis.fetch;
-  globalThis.fetch = gw.fetch;
-  try {
+test("#479: what one gateway answer costs before any lookup, by the relay's rules", () => {
+  const body = (type) => ({ error: { type } });
+  // A refusal before any model ran is $0; one naming a generation is looked up all the same.
+  assert.deepEqual(answerCost(402, body("insufficient_funds")), { usd: 0, id: null, reported: false });
+  assert.deepEqual(answerCost(402, body("payment_failed")), { usd: null, id: null, reported: false }, "any other 402 may have been billed");
+  assert.deepEqual(answerCost(429, body("rate_limit_exceeded"), GEN), { usd: 0, id: GEN, reported: false });
+  assert.deepEqual(answerCost(401, body("authentication_error")), { usd: 0, id: null, reported: false });
+  // A 400 or 422 is $0 only with a pre-model error type: with any other, or none, the model may have run.
+  assert.deepEqual(answerCost(400, body("invalid_request_error")), { usd: 0, id: null, reported: false });
+  assert.deepEqual(answerCost(400, {}), { usd: null, id: null, reported: false });
+  assert.deepEqual(answerCost(422, body("failed_dependency"), GEN), { usd: null, id: GEN, reported: false });
+  // A 5xx saying no generation ran is $0 only when it names none.
+  assert.deepEqual(answerCost(503, body("service_unavailable_error")), { usd: 0, id: null, reported: false });
+  assert.deepEqual(answerCost(503, body("service_unavailable_error"), GEN), { usd: null, id: GEN, reported: false });
+  assert.deepEqual(answerCost(500, body("internal_server_error")), { usd: null, id: null, reported: false });
+  assert.deepEqual(answerCost(302, null), { usd: 0, id: null, reported: false }, "a redirect is never followed");
+  // An answer's own reported cost: no lookup.
+  assert.deepEqual(answerCost(200, { answers: [], providerMetadata: { gateway: { cost: "0.007", generationId: GEN } } }), { usd: 0.007, id: GEN, reported: true });
+  assert.deepEqual(answerCost(200, { answers: [] }, GEN), { usd: null, id: GEN, reported: false });
+});
+
+test("#479: the gateway decider answers at once and prices aside: the reported cost with no lookup, else the generation's record; a lookup stops after two 'no record' answers", async () => {
+  const fast = (gw) => gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: gw.fetch, lookupDelaysMs: [1, 1, 1, 1], lookupMaxMs: 5_000 });
+  const reported = fakeGateway({ id: GEN, reported: 0.007, cost: 0.5 });
+  const a = await fast(reported).decide(INPUT, KEPT_QUESTION);
+  assert.equal(a.verdict, "kept");
+  assert.equal(reported.seen.posts[0].redirect, "manual", "the POST follows no redirect, as the relay's");
+  assert.deepEqual(await a.spend.settled, { usd: 0.007 });
+  assert.deepEqual(reported.seen.lookups, [], "a reported cost is not looked up");
+  // No reported cost: the generation's record, which comes after the verdict.
+  let release;
+  const looked = fakeGateway({ id: GEN, cost: 0.004, hold: new Promise((r) => (release = r)) });
+  const b = await fast(looked).decide(INPUT, KEPT_QUESTION);
+  assert.equal(b.verdict, "kept", "the verdict does not wait for the price");
+  let settled = null;
+  b.spend.settled.then((s) => (settled = s));
+  await until(() => looked.seen.lookups.length === 1);
+  assert.equal(settled, null);
+  release();
+  assert.deepEqual(await b.spend.settled, { usd: 0.004 });
+  // A record that never comes: two 404s end the lookup, and the call is of unknown cost.
+  const none = fakeGateway({ id: GEN });
+  const c = await fast(none).decide(INPUT, KEPT_QUESTION);
+  assert.deepEqual(await c.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision"] });
+  assert.equal(none.seen.lookups.length, 2);
+});
+
+test("#479: a 429 naming a generation is looked up from $0; a request that never left the machine is no call; one cut after it was sent is of unknown cost", async () => {
+  const opts = { key: "vck_dummy_key_123", model: "m", lookupDelaysMs: [1, 1, 1, 1], lookupMaxMs: 5_000 };
+  const limited = fakeGateway({ status: 429, type: "rate_limit_exceeded", id: GEN, cost: 0.002 });
+  const a = await gatewayDecider({ ...opts, fetchImpl: limited.fetch }).decide(INPUT, KEPT_QUESTION);
+  assert.equal(a.error, "rate_limited");
+  assert.equal(a.spend.calls, 2, "tried twice");
+  assert.deepEqual(await a.spend.settled, { usd: 0.004 });
+  const cut = (code) => async () => {
+    throw new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) });
+  };
+  assert.ok(NEVER_SENT.has("ECONNREFUSED"));
+  const refused = await gatewayDecider({ ...opts, fetchImpl: cut("ECONNREFUSED") }).decide(INPUT, KEPT_QUESTION);
+  assert.equal(refused.spend.calls, 0);
+  assert.deepEqual(await refused.spend.settled, { usd: null });
+  const reset = await gatewayDecider({ ...opts, fetchImpl: cut("ECONNRESET") }).decide(INPUT, KEPT_QUESTION);
+  assert.equal(reset.spend.calls, 2);
+  assert.deepEqual(await reset.spend.settled, { usd: null, usdUnknown: 2, usdUnknownWhy: ["decision"] });
+});
+
+test("#479: a gateway decision call in a stage is running, of unknown cost, until its price comes; then it is in the stage's spend, decision record, usage and caps", async () => {
+  let release;
+  const gw = fakeGateway({ id: GEN, cost: 0.0042, hold: new Promise((r) => (release = r)) });
+  await withFetch(gw.fetch, async () => {
     const { records, stage } = gatewayStage();
     const before = stageSpendNow();
     const decided = decisionSpend();
     const check = openKeptCheck({ inputs: KEY_INPUTS, env: ON_ACTIONS, stage });
-    assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" });
-    assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" });
-    assert.deepEqual(gw.seen.lookups, ["gen_PRICED0000000000000000A1", "gen_PRICED0000000000000000A1"], "each call's generation looked up");
-    // One decision record for the stage's gateway calls, folded, beside its passes.
+    assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" }, "the verdict, before the price");
+    assert.equal(stageSpendNow().unknown, before.unknown + 1, "the spend line shows it running");
+    assert.ok(openPasses().some((p) => p.decision), "a stopped stage counts it as of unknown cost");
     assert.equal(records.length, 1);
+    assert.equal(records[0].usdUnknown, undefined, "counted once: as the open call, not in the record too");
+    await until(() => gw.seen.lookups.length === 1);
+    release();
+    await settleDecisionCosts();
     assert.equal(records[0].decider, "ai-gateway");
-    assert.equal(records[0].decision, true);
-    assert.equal(records[0].calls, 2);
-    assert.ok(Math.abs(records[0].usd - 0.0084) < 1e-9);
-    assert.equal(records[0].usdUnknown, undefined);
-    assert.ok(stagePasses().includes(records[0]), "kept with the stage's passes, for a stopped stage");
-    // The stage's spend so far (the spend line, max_usd's remainder) and the validation loop's decision spend.
-    assert.ok(Math.abs(stageSpendNow().usd - before.usd - 0.0084) < 1e-9);
+    assert.equal(records[0].calls, 1);
+    assert.ok(Math.abs(records[0].usd - 0.0042) < 1e-9);
+    assert.ok(stagePasses().includes(records[0]), "kept with the stage's passes");
     assert.equal(stageSpendNow().unknown, before.unknown);
-    assert.ok(Math.abs(decisionSpend() - decided - 0.0084) < 1e-9);
-    assert.deepEqual(sumSpend(records), { usd: records[0].usd, unknown: 0 });
-    // The stage's usage record: in `usd`, broken out for the bench's Codex re-pricing.
+    assert.ok(Math.abs(stageSpendNow().usd - before.usd - 0.0042) < 1e-9);
+    assert.ok(Math.abs(decisionSpend() - decided - 0.0042) < 1e-9);
     const usage = writeUsage(mkdtempSync(join(tmpdir(), "pendulum-gw-usage-")), { harness: "claude", model: "m-1", records, passes: 0, exit: "pr", reason: "", credentialBasis: "login" });
-    assert.ok(Math.abs(usage.usd - 0.0084) < 1e-9);
-    assert.ok(Math.abs(usage.gatewayDecisionUsd - 0.0084) < 1e-9);
-    assert.equal(usage.gatewayDecisionCalls, 2);
+    assert.ok(Math.abs(usage.usd - 0.0042) < 1e-9);
+    assert.ok(Math.abs(usage.gatewayDecisionUsd - 0.0042) < 1e-9);
+    assert.equal(usage.gatewayDecisionCalls, 1);
     assert.equal(usage.runs, 0, "a decision record is no run");
-  } finally {
-    globalThis.fetch = real;
-  }
+  });
 });
 
-test("#479: a gateway decision call the gateway gives no cost for is of unknown cost, never $0, and the stage goes on with its verdict", async () => {
-  const real = globalThis.fetch;
-  try {
-    // An answer naming no generation and no cost: nothing to look up.
-    const bare = fakeGateway();
-    globalThis.fetch = bare.fetch;
+test("#479: a stage's gateway call the gateway gives no cost for is of unknown cost, never $0, and the stage goes on; a price not come by the stage's end is unknown and never read after", async () => {
+  await withFetch(fakeGateway().fetch, async () => {
     const { records, stage } = gatewayStage();
     const before = stageSpendNow();
     const check = openKeptCheck({ inputs: KEY_INPUTS, env: ON_ACTIONS, stage });
     assert.deepEqual(await check.judge(HUNK), { kept: true, lost: false, why: "" }, "the verdict stands");
-    assert.deepEqual(bare.seen.lookups, []);
-    assert.equal(records[0].usd, null);
+    await settleDecisionCosts();
     assert.equal(records[0].usdUnknown, 1);
     assert.deepEqual(records[0].usdUnknownWhy, ["decision"]);
-    assert.equal(stageSpendNow().unknown, before.unknown + 1, "the spend line says one more run of unknown cost");
+    assert.equal(stageSpendNow().unknown, before.unknown + 1);
     assert.equal(stageSpendNow().usd, before.usd);
     assert.deepEqual(sumSpend(records), { usd: 0, unknown: 1 });
-    // A 5xx after the call was sent, tried twice: each try of unknown cost, folded into the same record.
-    const failing = fakeGateway({ status: 500 });
-    globalThis.fetch = failing.fetch;
-    const v = await check.judge(HUNK);
-    assert.equal(v.kept, false);
-    assert.equal(failing.seen.decisions, 2);
-    assert.equal(records.length, 1);
-    assert.equal(records[0].usdUnknown, 3);
-    assert.equal(records[0].calls, 3);
-    const usage = writeUsage(mkdtempSync(join(tmpdir(), "pendulum-gw-usage-")), { harness: "claude", model: "m-1", records, passes: 0, exit: "pr", reason: "", credentialBasis: "login" });
-    assert.equal(usage.usd, null);
-    assert.equal(usage.usdUnknown, 3);
-    assert.ok(usage.usdUnknownWhy.includes("decision"));
-    // A refusal before any model ran (a 401 with its type) costs $0: known, not unknown.
-    const refused = gatewayStage();
-    globalThis.fetch = async () => new Response('{"error":{"type":"authentication_error"}}', { status: 401 });
-    await openKeptCheck({ inputs: { ...KEY_INPUTS, decisionRoute: "gateway" }, env: ON_ACTIONS, stage: refused.stage }).judge(HUNK);
-    assert.deepEqual(sumSpend(refused.records), { usd: 0, unknown: 0 });
-  } finally {
-    globalThis.fetch = real;
-  }
+  });
+  let release;
+  const slow = fakeGateway({ id: GEN, cost: 1, hold: new Promise((r) => (release = r)) });
+  await withFetch(slow.fetch, async () => {
+    const { records, stage } = gatewayStage();
+    const before = stageSpendNow();
+    await openKeptCheck({ inputs: KEY_INPUTS, env: ON_ACTIONS, stage }).judge(HUNK);
+    await until(() => slow.seen.lookups.length === 1);
+    await settleDecisionCosts({ timeoutMs: 20 });
+    assert.equal(records[0].usdUnknown, 1, "not come by the bound: unknown");
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(records[0].usd, 0, "a price that comes later is never read");
+    assert.equal(stageSpendNow().usd, before.usd);
+  });
 });
 
-test("#479: the drift advisory is not asked of the stage's harness once max_usd has less known left than one call's cap, said once; the rebase check still runs", async () => {
-  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"kept","confidence":0.9}'));
-  // max_usd with $0.10 known left: under one decision call's own cap ($0.30).
-  const maxUsd = stageSpendNow().usd + 0.1;
-  const { stage } = stageOf(bin, "claude");
-  stage.budgetLeft = () => stageBudgetLeft(maxUsd);
-  assert.ok(stage.budgetLeft() < DECISION_RUN.maxUsd);
+test("#479: the drift reserve: 10% of max_usd, at least one call's cap, at most max_usd, none with no cap; passes get the rest, so a first pass running beside the advisory cannot spend it", async () => {
+  assert.equal(driftReserve(25), 2.5);
+  assert.equal(driftReserve(1), DECISION_RUN.maxUsd);
+  assert.equal(driftReserve(0.31), DECISION_RUN.maxUsd);
+  assert.equal(driftReserve(DECISION_RUN.maxUsd), 0, "no more than one call's cap: no room for the advisory");
+  assert.equal(driftReserve(0), 0);
+  assert.equal(carveDriftReserve(0), 0);
+  assert.equal(passMaxUsd(0), 0, "no cap: nothing changes");
+  // The worker and the review stage carve it before any pass, and every pass cap is max_usd less its unspent part.
+  for (const file of ["worker.mjs", "review.mjs"]) {
+    const src = readFileSync(join(import.meta.dirname, "..", "scripts", file), "utf8");
+    assert.match(src, /carveDriftReserve\(inputs\.maxUsd, \{ on: deciderKind\(\{ inputs \}\)\.name !== "off" \}\);\n {2}const passCap = \(\) => passMaxUsd\(inputs\.maxUsd\);/);
+    // Past the carve, max_usd is read whole only to carve, to make the pass cap, and in a log line that names it.
+    const rest = src.replace("carveDriftReserve(inputs.maxUsd,", "").replace("passMaxUsd(inputs.maxUsd)", "").replaceAll("max_usd ${inputs.maxUsd} (less the drift reserve)", "");
+    assert.doesNotMatch(rest, /inputs\.maxUsd/, `${file}: no pass cap reads max_usd whole`);
+  }
+  assert.match(readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8"), /maxUsd: attempt === 1 \? passCap\(\) : budgetLeft\(\)/);
+  // max_usd $1: $0.30 reserved, so the first pass starts with $0.70.
+  carveDriftReserve(1);
+  const spentBefore = reservedSpend();
+  assert.equal(passMaxUsd(1), 0.7);
+  const pass = meterPass({ label: "work-1" });
+  // A drift call costs $0.12 of the reserve; then $0.18 is left, under one call's cap: not asked again.
+  const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"on_task","confidence":0.9}', 0.12));
+  const { stage, kept } = stageOf(bin, "claude");
   const at = { now: 0 };
   const drift = openDrift({ inputs: {}, env: {}, stage, now: () => at.now });
-  await checkpoint(drift, at, 10);
-  await checkpoint(drift, at, 20);
-  assert.equal(calls().length, 0, "no drift call");
-  // The rebase check gates the merge: it runs whatever is left.
-  assert.deepEqual(await openKeptCheck({ inputs: {}, env: {}, stage }).judge(HUNK), { kept: true, lost: false, why: "" });
-  assert.equal(calls().length, 1);
-  // With a cap's worth left, the same drift advisory is asked.
-  const roomy = fakeHarness("claude", claudeSays('{"choice":"on_task","confidence":0.9}'));
-  const open = stageOf(roomy.bin, "claude");
-  open.stage.budgetLeft = () => stageBudgetLeft(stageSpendNow().usd + 10);
-  const at2 = { now: 0 };
-  await checkpoint(openDrift({ inputs: {}, env: {}, stage: open.stage, now: () => at2.now }), at2, 10, () => open.kept.length === 1);
-  assert.equal(roomy.calls().length, 1);
+  try {
+    await checkpoint(drift, at, 10, () => kept.length === 1);
+    assert.equal(calls().length, 1);
+    assert.ok(Math.abs(reservedSpend() - spentBefore - 0.12) < 1e-9);
+    await checkpoint(drift, at, 20);
+    await checkpoint(drift, at, 30);
+    assert.equal(calls().length, 1, "the reserve's rest is under one call's cap: not asked again");
+    // The reserve's spent part is in the stage's spend: the passes' cap grows by it, so their room is unchanged.
+    assert.ok(Math.abs(passMaxUsd(1) - (0.7 + 0.12)) < 1e-9);
+    // The rebase check gates the merge: it runs whatever is left of the reserve.
+    assert.deepEqual(await openKeptCheck({ inputs: {}, env: {}, stage }).judge(HUNK), { kept: false, lost: false, why: "the decision model gave no answer (no_answer)" });
+    assert.equal(calls().length, 2);
+    assert.ok(Math.abs(reservedSpend() - spentBefore - 0.12) < 1e-9, "an essential call is no drift spend");
+  } finally {
+    pass.end({ usd: 0 });
+    carveDriftReserve(0);
+  }
 });

@@ -1200,20 +1200,22 @@ test("cost: runs of unknown cost are counted beside the known dollars, from a re
   assert.match(markdownTable([row]), /\| \$2\.00 plus 1 run of unknown cost \|/);
 });
 
-test("#479 cost: decision calls outside a stage (their own comment's spend line) join the row on every route, and a Codex stage's gateway decision dollars survive its re-pricing", () => {
+test("#479 cost: decision calls outside a stage (the decision-spend lines in Pendulum's own comments) join the row on every route, and a Codex stage's gateway decision dollars survive its re-pricing", () => {
   // A local Objective whose stages' spend lines hold $2, and the dispatcher's decision calls about it: $0.0031 and one
   // call the gateway gave no cost for.
   const local = localMerge(63);
   const at = "2031-03-02T00:30:00Z";
-  local.issueComments.push({ id: 77, user: OPERATOR, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:2031-03-02:0123456789ab -->\nPendulum's decision calls about this Objective outside a stage on 2031-03-02 (the AI Gateway): 2 calls, $0.0031 plus 1 run of unknown cost.\n<!-- pendulum:spend ${JSON.stringify({ usd: 0.0031, usdUnknown: 1, usdUnknownWhy: ["decision"] })} -->` });
+  // One in the dispatcher's decisions comment, one carried by an answer check's notice.
+  local.issueComments.push({ id: 77, user: OPERATOR, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:dispatcher -->\nDecision calls by UTC day:\n<!-- pendulum:decision-spend ${JSON.stringify({ date: "2031-03-02", calls: 1, usd: 0.0021 })} -->` });
+  local.issueComments.push({ id: 79, user: OPERATOR, created_at: at, updated_at: at, body: `<!-- pendulum:63:question:unanswered:x -->\nQuestion still open.\n<!-- pendulum:decision-spend ${JSON.stringify({ date: "2031-03-02", calls: 2, usd: 0.001, usdUnknown: 1, usdUnknownWhy: ["decision"] })} -->` });
   // Someone else's paste of the marker counts nothing.
-  local.issueComments.push({ id: 78, user: { login: "passer-by", type: "User" }, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:2031-03-02:ffffffffffff -->\n<!-- pendulum:spend {"usd":100} -->` });
+  local.issueComments.push({ id: 78, user: { login: "passer-by", type: "User" }, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:dispatcher -->\n<!-- pendulum:decision-spend {"date":"2031-03-02","calls":1,"usd":100} -->` });
   const before = scoreObjective(localMerge(63), { prices, now: NOW }).cost.usd;
   const row = scoreObjective(local, { prices, now: NOW });
   assert.ok(Math.abs(row.cost.usd - before - 0.0031) < 1e-9);
   assert.equal(row.cost.usdUnknown, 1);
   assert.deepEqual(row.cost.usdUnknownWhy, ["decision"]);
-  assert.match(row.cost.basis, /includes 0\.0031 USD of decision calls outside a stage/);
+  assert.match(row.cost.basis, /includes 0\.0031 USD of decision calls outside a stage \(the AI Gateway's cost, 2 comment\(s\)\)/);
   // On Actions the stage dollars are the artifacts', and the comment still adds its own.
   const artifact = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-63/result.json", usd: 0.2, gatewayDecisionUsd: 0.0042, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };
   const priced = costOf([{ ...artifact, gatewayDecisionUsd: undefined }], prices).usd;

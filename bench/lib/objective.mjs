@@ -25,7 +25,7 @@
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
-import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
+import { BLOCK_CAUSES, blockCauseOf, decisionSpendEntries, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { UNKNOWN_WHY, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 
@@ -851,22 +851,23 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
 
 /**
  * Usage records of the decision calls made about the Objective outside any stage (the dispatcher's, the launcher's and
- * local mode's answer, comment, edit and lapse checks), one per comment of Pendulum's own marked
- * `<!-- pendulum:<n>:decisions:<date>:<writer> -->` (plugin decision-spend.mjs): its spend line's known dollars and runs
- * of unknown cost, `source` "decisions", on every route (no usage artifact carries them).
+ * local mode's answer, comment, edit and lapse checks): the decision-spend lines (plugin logic.mjs decisionSpendMarker)
+ * in Pendulum's own comments on the issue, one record per comment that has any, summed over its days: their known
+ * dollars and calls of unknown cost, `source` "decisions", on every route (no usage artifact carries them). A line in
+ * anyone else's comment counts nothing.
  */
 export function decisionRecords(collected, { app = null } = {}) {
   const n = collected.issue.number;
   const self = pendulumLogin(collected.issueTimeline, app);
   const local = localLogin(collected);
   const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
-  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   return (collected.issueComments || [])
-    .filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:\\d{4}-\\d{2}-\\d{2}:[0-9a-f]{12} -->`).test(c.body || "") && mine(c))
+    .filter((c) => (c.body || "").startsWith(`<!-- pendulum:${n}:`) && mine(c) && decisionSpendEntries(c.body).length)
     .sort((a, b) => ms(a.created_at) - ms(b.created_at))
     .map((c) => {
-      const spend = spendOf(c.body);
-      return { source: "decisions", harness: null, model: null, usd: num(spend?.usd), ...unknownIn(spend), tokens: { input: null, output: null, cached: null, written: null }, basis: spend ? "pendulum:spend line of decision calls outside a stage (the AI Gateway's cost)" : "unknown: no pendulum:spend line in the decision calls' comment" };
+      const days = decisionSpendEntries(c.body);
+      const unknown = days.reduce((s, d) => s + (d.usdUnknown ?? 0), 0);
+      return { source: "decisions", harness: null, model: null, usd: Math.round(days.reduce((s, d) => s + d.usd, 0) * 1e6) / 1e6, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}), tokens: { input: null, output: null, cached: null, written: null }, basis: "pendulum:decision-spend lines of decision calls outside a stage (the AI Gateway's cost)" };
     });
 }
 

@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageBudgetLeft, stageLimits } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, carveDriftReserve, passMaxUsd, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
@@ -51,6 +51,8 @@ import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos
 import { judgedAnswers, openPlanAnswerCheck } from "./lib/plan-answer.mjs";
 import { CLEAN_REFUSED, checkoutHolds, continuePrompt, decisionsFed, enterStage, installEnd, keptPrompt, loginOf, pauseRecord } from "./lib/continue.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
+import { deciderKind, settleDecisionCosts } from "./lib/decider.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 
 /**
  * The conflict pass: the task card, then the rebase to make. `cause` says why the branch fell behind: a sibling
@@ -244,6 +246,10 @@ async function main() {
     // The gateway relay's call log (uploaded with the usage directory) carries text the caller chose: masked the same way.
     const maskedLog = maskFile(join(usageDir, CALL_LOG), [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey]);
     if (maskedLog) log(`masked ${maskedLog} secret occurrence(s) in ${CALL_LOG}`);
+    // The gateway decision calls' prices still settling are awaited (bounded) before the usage is written, and a
+    // decision call asked outside the stage's decider (the edit check when the harness's credential could not be read) is written now.
+    await settleDecisionCosts();
+    await flushDecisionSpend(repo, token, { role: "worker" });
     let usage;
     try {
       usage = writeUsage(usageDir, { progressRun: progress.runId, ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, records, passes, exit, reason, outage, usageLimit, credentialBasis, reentry, workerKey, harnessVersion: harnessVersion(inputs.harness), session: await (agentUser() ? saveAgentTranscript : saveTranscript)({ harness: inputs.harness, sessionId: records.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(records), usageDir, checkout, secrets: [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...keeper.issued, inputs.githubToken, inputs.appPrivateKey] }) });
@@ -455,12 +461,16 @@ async function main() {
   }
 
   // The decision calls (lib/decider.mjs): with an AI Gateway key the gateway answers them, without one this stage's
-  // harness on its login; either way each call's spend is in the stage's usage, and the drift advisory is not asked of
-  // the harness once max_usd has less known left than one call's cap (budgetLeft): one decision stage for all of them. Their env is the harness's own once the stage
+  // harness on its login; either way each call's spend is in the stage's usage, and the drift advisory spends only its
+  // own reserve of max_usd: one decision stage for all of them. Their env is the harness's own once the stage
   // builds it (step 5); before that, for the edit check and the answer check at the stage's start, the env every child
   // starts from with a credential read of their own (readyDecisionEnv), only when one asks the harness.
   let decisionEnv = null;
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r), budgetLeft: () => stageBudgetLeft(inputs.maxUsd) };
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
+  // The drift reserve (harness.mjs carveDriftReserve): carved out of max_usd before any pass runs, when a decider can
+  // answer here; every pass cap below is `passCap()`, max_usd less what the reserve has not spent.
+  carveDriftReserve(inputs.maxUsd, { on: deciderKind({ inputs }).name !== "off" });
+  const passCap = () => passMaxUsd(inputs.maxUsd);
   // That early read, once: never the passes' own, since federate() returns a key with no expiry and the passes read theirs
   // as they start (step 5), never one minted before setup and install. Masked like `cred` in everything the stage saves.
   const readyDecisionEnv = async () => {
@@ -716,7 +726,7 @@ async function main() {
   const io = await openHandoff({ repo, issue, issueData, env: childBase, opts: token, outbox, branch, record: planned.record });
   // The secrets this repository opted in to the worker's shell (lib/worker-secrets.mjs): carried to the harness alone.
   // An opted-in AI Gateway key stays in this process behind the relay; the shell gets its token (lib/worker-relay.mjs).
-  const opened = await openWorkerRelay({ inputs, shell: openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) }), usageDir });
+  const opened = await openWorkerRelay({ inputs: { ...inputs, maxUsd: passCap() }, shell: openWorkerSecrets(inputs, { pendulumKey: () => triageKey({ inputs }) }), usageDir });
   relay = opened.relay;
   const shellSecrets = opened.shell;
   // The token, the other values, and the key itself (which the shell no longer holds): masked in what the stage saves.
@@ -757,7 +767,7 @@ async function main() {
     issueTitle: issueData.title,
     issueBody: issueData.body,
     decisions,
-    maxUsd: inputs.maxUsd,
+    maxUsd: passCap(),
     maxParts: inputs.maxParts,
     timeoutMinutes: inputs.timeoutMinutes,
     validation: inputs.validation,
@@ -791,7 +801,7 @@ async function main() {
     log(`warning: ${unpriced}`);
     await progress(`unpriced: ${unpriced}`);
   }
-  const budgetLeft = () => (inputs.maxUsd > 0 ? Math.max(0, inputs.maxUsd - sumSpend(records).usd) : 0);
+  const budgetLeft = () => (passCap() > 0 ? Math.max(0, passCap() - sumSpend(records).usd) : 0);
   let died = 0;
   let rec = null;
   // Whether the work run has been recorded as reading the decisions. Only the work run is told to apply them: a
@@ -821,7 +831,7 @@ async function main() {
   if (local && !rebaseMode) pauseNow = async () => pauseRecord({ branch: outbox.expected(), restart: restartedAt(await listComments(repo, issue, token)), running: await runningSince(repo, issue, token), text: planText, harness: inputs.harness });
   if (rebaseMode && !rebaseConflict) rec = { ok: true, noRun: true, timedOut: false, budgetExceeded: false, error: null, finalText: "", usd: null, tokens: { input: null, output: null, cached: null }, basis: "no harness run: clean rebase", harness: inputs.harness, model: inputs.model };
   for (let attempt = 1; attempt <= 2 && !(rebaseMode && !rebaseConflict); attempt += 1) {
-    log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${inputs.maxUsd}`);
+    log(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""}, attempt ${attempt}, wall clock ${Math.round(remainingMs(deadlineAt) / 60000)} min, budget ${passCap()}`);
     await progress(`harness ${inputs.harness}${inputs.model ? ` (${inputs.model})` : ""} attempt ${attempt}`);
     await io.render();
     // The plan.md this pass wrote, read on the hand-off's tick: once it needs another repository, the harness is stopped there, so the Question costs the plan and not the work.
@@ -855,7 +865,7 @@ async function main() {
       prompt: attempt === 1 && restored?.id ? resumedPrompt : full ? (rebaseConflict ? conflictPrompt : workPrompt) : "Your previous process died. Continue the Objective from where the branch and $PENDULUM_OUT/plan.md stand; do not redo finished items.",
       // A resume the provider refuses for the session alone runs fresh with the whole card (harness.mjs runHarness).
       freshPrompt: (attempt === 1 && restored?.id && !continued) || rebaseConflict ? conflictPrompt : workPrompt,
-      maxUsd: attempt === 1 ? inputs.maxUsd : budgetLeft(),
+      maxUsd: attempt === 1 ? passCap() : budgetLeft(),
       resume: (attempt > 1 || restored?.id) && session.canResume ? session.id : null,
       cwd: checkout,
       env: harnessEnv,
@@ -875,7 +885,7 @@ async function main() {
     // Claude enforces max_usd inside the run; Codex and Copilot are checked here after it, on the known dollars: a run
     // of unknown cost (a Copilot run with no priced credits among them, usage.mjs UNKNOWN_WHY) adds none, and the stage
     // goes on.
-    if (inputs.maxUsd > 0 && sumSpend(records).usd >= inputs.maxUsd) rec.budgetExceeded = true;
+    if (passCap() > 0 && sumSpend(records).usd >= passCap()) rec.budgetExceeded = true;
     if (rec.refusal) log(`harness ${inputs.harness} was refused by the provider (${rec.error}); not retried`);
     if (rec.budgetExceeded || !crashed(rec)) break;
     // A resumed session the CLI could not continue falls back to a fresh run with the full prompt.
@@ -937,7 +947,7 @@ async function main() {
     // The pass answers for the branch like the work pass: a cap it reached Blocks with that cap, a death or a rebase or
     // merge it left in progress Blocks unpushed (the checkout's HEAD is then part of the work, not the branch).
     if (pass.timedOut) rec.timedOut = true;
-    if (pass.budgetExceeded || (inputs.maxUsd > 0 && sumSpend(records).usd >= inputs.maxUsd)) rec.budgetExceeded = true;
+    if (pass.budgetExceeded || (passCap() > 0 && sumSpend(records).usd >= passCap())) rec.budgetExceeded = true;
     await io.collect();
     // A provider's refusal of the pass Blocks the stage with it (decideExit), unpushed.
     if (pass.refusal) rec.refusal = pass.refusal;
@@ -995,7 +1005,7 @@ async function main() {
       harness: inputs.harness,
       effort: inputs.effort,
       model: inputs.model,
-      maxUsd: inputs.maxUsd,
+      maxUsd: passCap(),
       spentUsd: sumSpend(records).usd,
       session,
       taskCard: prompt,
@@ -1029,7 +1039,7 @@ async function main() {
   // 8. The exit. The harness's own verdict is its exit record (JSON it wrote, or answered with);
   // a run that had no harness (clean rebase) delivered by construction. A provider's refusal is not asked again.
   const refusal = rec?.refusal || validation?.harness?.refusal || null;
-  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: inputs.maxUsd, spentUsd: sumSpend(records).usd });
+  const asked = rebaseMode && !rebaseConflict ? { record: { exit: "delivered", reason: "", questions: [] }, usage: [] } : refusal ? { record: null, usage: [] } : planNeeds ? { record: exitFromOut(io.files()), usage: [] } : await exitRecord({ text: io.files()["exit.json"], harness: inputs.harness, model: inputs.model, effort: inputs.effort, session, cwd: checkout, env: harnessEnv, eventsFile, deadlineAt, maxUsd: passCap(), spentUsd: sumSpend(records).usd });
   records.push(...asked.usage);
   if (asked.usage.length) log(`exit record asked from the harness: ${asked.record.exit}`);
   // The question check may have turned QUESTION: items into assumptions: the PR body and plan comment follow pr.md and plan.md.

@@ -527,3 +527,114 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   assert.ok(!all.writes.some((w) => w.includes(finishMarker(3))));
   assert.deepEqual((await tickOver(fakeRepo())).finished, [3], "the Action posts it");
 });
+
+test("finish card (#544): the summary marker carries the card's own figures, from the same finishData, and reads back as written", async () => {
+  // Through the module's namespace, so the suite loads on a tree without the summary and this test alone fails there.
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const work = real.comments.find((c) => c.body.startsWith("<!-- pendulum:3:progress:work:"));
+  const key = /^<!-- pendulum:3:progress:(work:[A-Za-z0-9-]+) -->/.exec(work.body)[1];
+  // The plain run; and one with a conflict rebase (churn), a sandbox booked after the merge, a sandbox stage with no
+  // progress comment whose figures were not reported, and a review whose harness reported none.
+  const rebase = comment(911, "2026-11-17T02:26:12Z", `${work.body.replace(/progress:work:\d+/, "progress:work:911")}\n${spendLine({ usd: 0.07, usdByBilling: { api: 0.07 } })}\n<!-- pendulum:rebase-cost {"usd":0.07,"conflict":true} -->`, "2026-11-17T02:26:15Z");
+  const late = comment(901, "2026-11-17T03:00:00Z", `<!-- pendulum:3:vendor:${key} -->\nx\n${spendLine({ usd: 0.05, vendorUsd: 0.05 })}`);
+  const blind = comment(903, "2026-11-17T02:26:30Z", `<!-- pendulum:3:vendor:review:def -->\nx\n${spendLine({ usd: 0, vendorUsd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] })}`);
+  const runs = [withSelf(() => data()), withSelf(() => data({ comments: [...withSpend({ review: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["zeroed"] } }), rebase, late, blind], records: real.records.slice(0, 1) }))];
+  for (const d of runs) {
+    const body = card.finishCardBody(d);
+    const [head, line, ...rest] = body.split("\n");
+    assert.equal(head, finishMarker(3), "the card's own marker first, so one card per Objective still holds");
+    assert.match(line, /^<!-- pendulum:3:summary \{[^\n<>]*\} -->$/, "one hidden line, nothing in it that closes the comment");
+    assert.equal(rest.join("\n"), renderFinishCard(d), "the card itself is unchanged under it");
+    // It reads back exactly as written.
+    const s = card.readSummary(body, 3);
+    assert.deepEqual(s, card.finishSummary(d));
+    // Every figure is the card's own: its totals, rows and breakdown, never worked out another way.
+    const t = card.finishTotals(d);
+    assert.deepEqual([s.wallMs, s.cost.usd, s.cost.unknown, s.cost.byBilling, s.cost.why], [t.wall, t.usd, t.unknown, t.byBilling, t.why]);
+    assert.equal(s.cost.cents, Math.round(t.usd * 100));
+    assert.ok(body.includes(`**${card.costText(s.cost.usd, s.cost.unknown)}`), "the total the card's table shows");
+    assert.deepEqual(s.stages.map((x) => [x.kind, x.part, x.model, x.usd, x.unknown, x.byBilling, x.sandbox, x.churn]), d.stages.map((x) => [x.kind, x.part, x.model, x.usd, x.unknown, x.byBilling, x.sandbox, x.churn.map((c) => c.row)]));
+    const b = card.spendBreakdown(d);
+    assert.deepEqual(s.churn.map((r) => [r.row, r.stages, r.usd, r.cents, r.unknown]), b.churn.map((r) => [r.row, r.stages, r.usd, r.cents, r.unknown]));
+    assert.deepEqual(s.asked.map((r) => [r.usd, r.cents, r.unknown]), b.asked.map((r) => [r.usd, r.cents, r.unknown]));
+    assert.deepEqual([s.checks, s.commits, s.additions, s.deletions, s.files, s.prs, s.reviews], [d.checks, d.commits, d.additions, d.deletions, d.files, d.prs.map((p) => p.number), { count: d.reviews.count, findings: d.reviews.findings }]);
+    assert.equal(s.v, card.SUMMARY_VERSION);
+    assert.match(s.pendulum, /^\d+\.\d+\.\d+/);
+  }
+  // The richer run's figures: a churn row for the rebase, and every run of unknown cost with its reason.
+  const rich = card.readSummary(card.finishCardBody(runs[1]), 3);
+  assert.deepEqual(rich.churn.map((r) => [r.row, r.stages, r.usd]), [["rebase-conflict", 1, 0.07]]);
+  assert.deepEqual(rich.stages.map((x) => [x.kind, x.why]), [["build", []], ["rebase", []], ["review", ["zeroed"]], ["review", ["unreported"]]]);
+  assert.deepEqual([rich.sandbox.usd, rich.sandbox.unknown, rich.sandbox.why], [0.05, 1, ["sandbox"]]);
+  assert.deepEqual(rich.cost.why, ["sandbox", "unreported", "zeroed"]);
+  assert.deepEqual(rich.stageCounts, { work: 1, rebase: 1, review: 2 });
+
+  // A stage's passes by kind, model minutes, tokens and release are its ledger's, through the report's own
+  // stagePassFigures: from its usage record here, from the ledger line beside its spend line on newer stages.
+  const { stagePassFigures } = await import("../scripts/lib/pass-figures.mjs");
+  const pass = (label, usd, started, ended) => ({ label, usd, billing: "api", usdByBilling: { api: usd }, started, ended, tokens: { input: 1000, output: 10, cached: 500, written: 200 } });
+  const ledgers = [[pass("work-1", 0.3, "2026-11-17T02:24:40Z", "2026-11-17T02:25:10Z"), pass("answer", 0.05637, "2026-11-17T02:25:20Z", "2026-11-17T02:25:50Z")], [pass("review", 0.163442, "2026-11-17T02:26:21Z", "2026-11-17T02:26:51Z")]];
+  const withLedger = withSelf(() => data({ records: real.records.map((r, i) => ({ ...r, ledger: ledgers[i], ran: { pendulum: "0.10.1" }, tokens: { input: 1000 * ledgers[i].length, output: 10, cached: 0, written: 0 } })) }));
+  const sum = card.readSummary(card.finishCardBody(withLedger), 3);
+  assert.deepEqual(sum, card.finishSummary(withLedger));
+  assert.deepEqual(sum.stages.map((x) => x.passes), ledgers.map(stagePassFigures));
+  assert.deepEqual(sum.stages.map((x) => x.passes.map((k) => [k.kind, k.passes, k.minutes])), [[["work", 1, 0.5], ["answer", 1, 0.5]], [["review", 1, 0.5]]]);
+  assert.deepEqual(sum.stages.map((x) => [x.version, x.tokens.input]), [["0.10.1", 2000], ["0.10.1", 1000]]);
+  assert.deepEqual(rich.stages.map((x) => x.passes), [null, null, null, null], "no ledger, no passes: a reader reads the stages");
+  assert.deepEqual([rich.passes, rich.modelMinutes], [null, null], "an Objective's passes only when every stage's are known");
+  assert.deepEqual([sum.passes, sum.modelMinutes], [{ total: 3, answer: 1, fix: 0 }, 1.5]);
+  // A harness pass with no times: its passes count, its model minutes are not known.
+  const untimed = withSelf(() => data({ records: real.records.map((r, i) => ({ ...r, ledger: i ? [{ ...ledgers[1][0], started: null }] : ledgers[0] })) }));
+  assert.deepEqual([card.finishSummary(untimed).passes.total, card.finishSummary(untimed).modelMinutes], [3, null]);
+
+  // A summary over its bound is written with no stage's passes: a reader then reads the stages.
+  const many = Array.from({ length: 200 }, (_, i) => pass(`k${i}x`, 0.001, "2026-11-17T02:24:40Z", "2026-11-17T02:25:10Z"));
+  const huge = withSelf(() => data({ records: real.records.map((r) => ({ ...r, ledger: many })) }));
+  const hugeBody = card.finishCardBody(huge);
+  assert.ok(hugeBody.split("\n")[1].length <= card.SUMMARY_MAX);
+  assert.deepEqual(card.readSummary(hugeBody, 3).stages.map((x) => x.passes), [null, null]);
+  // Still over it with no stage's passes, or a body over GitHub's 65,536: the card is posted without a summary.
+  const crowd = Array.from({ length: 200 }, (_, i) => comment(2000 + i, `2026-11-17T02:25:${String(i % 60).padStart(2, "0")}Z`, `${work.body.replace(/progress:work:\d+/, `progress:work:${7000 + i}`)}\n${spendLine({ usd: 0.01, usdByBilling: { api: 0.01 } })}`));
+  const crowded = withSelf(() => data({ comments: [...real.comments, ...crowd] }));
+  assert.ok(card.summaryMarker(crowded) === null, "no summary line fits");
+  const crowdedBody = card.finishCardBody(crowded);
+  assert.equal(crowdedBody, `${finishMarker(3)}\n${renderFinishCard(crowded)}`);
+  assert.equal(card.readSummary(crowdedBody, 3), null);
+  // A marker anywhere but the line under the finish marker reads as none.
+  const plainBody = card.finishCardBody(runs[0]);
+  const [first, second, ...after] = plainBody.split("\n");
+  assert.equal(card.readSummary([first, "", second, ...after].join("\n"), 3), null);
+  assert.equal(card.readSummary(second, 3), null);
+
+  // A stage with a ledger line takes its passes from it, the source the report reads, even with its usage record read:
+  // the record's sub-second times give the same passes but not the same minutes.
+  const lined = withSpend({ work: { usd: 0.35637, usdByBilling: { api: 0.35637 } }, review: { usd: 0.163442, usdByBilling: { api: 0.163442 } } });
+  const ledgerLine = (i) => `<!-- pendulum:ledger ${JSON.stringify({ v: "0.10.1", p: ledgers[i].map((e) => ({ l: e.label, b: "api", u: e.usd, t: [Date.parse(e.started) / 1000, Date.parse(e.ended) / 1000], n: [1000, 10, 500, 200] })) })} -->`;
+  const withLines = lined.map((c) => (/^<!-- pendulum:3:progress:work:/.test(c.body) ? { ...c, body: `${c.body}\n${ledgerLine(0)}` } : /^<!-- pendulum:3:progress:review:/.test(c.body) ? { ...c, body: `${c.body}\n${ledgerLine(1)}` } : c));
+  const subSecond = real.records.map((r, i) => ({ ...r, ledger: ledgers[i].map((e) => ({ ...e, ended: e.ended.replace("Z", ".750Z") })) }));
+  const both = withSelf(() => data({ comments: withLines, records: subSecond }));
+  assert.deepEqual(card.finishSummary(both).stages.map((x) => x.passes.map((k) => k.minutes)), [[0.5, 0.5], [0.5]], "the ledger line's seconds, not the record's");
+
+  // A sandbox whose dollars are known but whose usage the vendor did not report keeps its run of unknown cost (as the
+  // cost join counts it), on the card and in the summary.
+  const keyOf = (stage) => /^<!-- pendulum:3:progress:((?:work|review):[A-Za-z0-9-]+) -->/.exec(real.comments.find((c) => c.body.startsWith(`<!-- pendulum:3:progress:${stage}:`)).body)[1];
+  const partial = comment(904, "2026-11-17T02:26:40Z", `<!-- pendulum:3:vendor:${keyOf("review")} -->\nx\n${spendLine({ usd: 0.02, vendorUsd: 0.02, usdUnknown: 1, usdUnknownWhy: ["sandbox"] })}`);
+  const sandboxed = withSelf(() => data({ comments: [...real.comments, partial] }));
+  assert.deepEqual(sandboxed.sandbox, { usd: 0.02, unknown: 1 });
+  assert.match(renderFinishCard(sandboxed), /plus spend that was not reported/);
+  assert.deepEqual(card.finishSummary(sandboxed).sandbox, { usd: 0.02, cents: 2, unknown: 1, why: ["sandbox"], foreign: [] });
+  // A teammate's vendor comment of one of Pendulum's stages is that stage's, no run of its own; one of no stage is a
+  // run of unknown cost of its stage's kind, one each.
+  const teammate = { login: "teammate", type: "User" };
+  const theirs = (id, at, key) => ({ ...comment(id, at, `<!-- pendulum:3:vendor:${key} -->\nx\n${spendLine({ usd: 0.5, vendorUsd: 0.5 })}`), user: teammate, author_association: "MEMBER" });
+  const foreign = withSelf(() => data({ comments: [...real.comments, theirs(905, "2026-11-17T02:26:41Z", keyOf("work")), theirs(906, "2026-11-17T02:26:42Z", "review:zz9"), theirs(907, "2026-11-17T02:26:43Z", "work:zz8")] }));
+  assert.deepEqual(foreign.sandbox, { usd: 0, unknown: 2 });
+  assert.deepEqual(card.finishSummary(foreign).sandbox.foreign, ["review", "work"]);
+
+  // Another issue's, another version's or a broken one reads as none.
+  const body = card.finishCardBody(runs[0]);
+  assert.equal(card.readSummary(body, 4), null);
+  assert.equal(card.readSummary(body.replace('"v":1', '"v":2'), 3), null);
+  assert.equal(card.readSummary(body.replace(/"usd":0\.35637/, '"usd":"0.35637"'), 3), null);
+  assert.equal(card.readSummary(body.replace(/"kind":"build"/, '"kind":"magic"'), 3), null);
+});

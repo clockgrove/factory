@@ -63,8 +63,16 @@ export const UNKNOWN_WHY = {
   decision: "decision calls through the AI Gateway whose cost the gateway did not report",
   // The scorer's: a usage record from before records named their progress comment, beside a comment of its stage with
   // dollars that no record names; it may be that comment's stage, so its figure is not added to the comment's
-  // (bench objective.mjs withLines).
+  // (cost-join.mjs withLines).
   unmatched: "a usage record that names no progress comment, beside one of its stage that may be the same stage",
+  // The finish card's and `pendulum report`'s: a stage comment by someone who can push, or through a GitHub App, that is
+  // not Pendulum's own login or App (another route's), so its figures are not taken (report.mjs, finish-card.mjs).
+  unattributed: "a stage comment Pendulum cannot attribute to itself (another login that can push, or another App), so its figures are not taken",
+  // `pendulum report`'s: a stage of Pendulum's own with no spend line in its progress comment and no usage record read
+  // for it (its artifact expired, was not readable, or was never uploaded).
+  "no-record": "the stage's progress comment has no spend line and no usage record of it was read (expired, unreadable or never uploaded)",
+  // `pendulum report`'s: its call budget (--max-calls) ran out before the stage's usage record was read.
+  stopped: "the report's call budget ran out before the stage's usage record was read",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
@@ -200,6 +208,46 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
   return out;
 }
 
+/**
+ * The stage's per-pass ledger (#512), for its usage record (session.mjs writeUsage): one entry per harness pass and per
+ * decision record in `records`, in order, on a credential of `billing`: its `label` (the pass's, harness.mjs runPass:
+ * `work-1`, `validation-fix-2`, `review`, `answer`, `decision`), `decision` for a decision record (with its `calls`),
+ * `model`, `effort` (the reasoning effort Pendulum asked for; null for the model's own), `started` and `ended` (ISO),
+ * `usd` (its known dollars, null when none was reported), `usdUnknown` and `usdUnknownWhy` (its runs of unknown cost,
+ * UNKNOWN_WHY; 0 and [] for none), `billing` (passBilling; null when the pass and the credential name none),
+ * `usdByBilling` (its known dollars by kind, a relayed key's share as `api`), `workerKeyUsd` (that share; null for none), `tokens`,
+ * `resumed` (whether it resumed a session) and `firstCache` (its first request's cache split, null when the harness
+ * reports none). A pass that never ran (`noRun`) has no entry. What the stage's merged figures are summed from, kept
+ * so `pendulum report` can break a stage's cost down by pass.
+ */
+export function passLedger(records, billing) {
+  const out = [];
+  for (const r of (records || []).filter((x) => x && !x.noRun)) {
+    const u = unknownOf([r]);
+    const t = r.tokens || {};
+    out.push({
+      label: typeof r.label === "string" ? r.label : null,
+      ...(r.decision ? { decision: true, calls: Number.isInteger(r.calls) ? r.calls : 1 } : {}),
+      model: r.model ?? null,
+      effort: typeof r.effort === "string" && r.effort ? r.effort : null,
+      started: r.started ?? null,
+      ended: r.ended ?? null,
+      usd: nonNeg(r.usd),
+      usdUnknown: u.usdUnknown ?? 0,
+      usdUnknownWhy: u.usdUnknownWhy ?? [],
+      billing: isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : null,
+      // Its known dollars by billing (usdByBilling's, for this pass alone): a relayed key's share (`workerKeyUsd`) is
+      // `api` whatever the pass's own kind.
+      usdByBilling: usdByBilling([r], billing),
+      workerKeyUsd: nonNeg(r.workerKeyUsd),
+      tokens: { input: t.input ?? null, output: t.output ?? null, cached: t.cached ?? null, written: t.written ?? null },
+      resumed: r.resumed === true,
+      firstCache: r.cache?.first ?? null,
+    });
+  }
+  return out;
+}
+
 /** A `usdByBilling` read back from a stored record or line: its BILLING codes at finite non-negative dollars; {} for none or a broken one. */
 export function billingRead(v) {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
@@ -213,6 +261,75 @@ export const billingCode = (v) => (isKind(v) ? v : null);
 export function addBilling(...maps) {
   const out = {};
   for (const m of maps) for (const [k, n] of Object.entries(billingRead(m))) out[k] = round6((out[k] ?? 0) + n);
+  return out;
+}
+
+/**
+ * The kinds of harness pass a stage's spend is broken down by (#517), each from the label the pass ran under, never
+ * from its words: `work` (the worker's prompt, `work-<n>`), `review` (the reviewer, its retry, fallback and foundation
+ * pass), `answer` (the answer pass and its scope hold), `fix` (a validation loop's fix and fresh passes, `<loop>-fix-<n>`
+ * and `<loop>-fresh-<n>`) and `conflict` (the work stage's catch-up pass after the default branch changed a workflow).
+ * They are the pendulum report's answer and fix passes too (report.mjs passLabel, isAnswer, isFix), so the card and the
+ * report never name one pass two ways. Any other pass (a fix pass's scope hold, the exit record, a decision call) has no
+ * kind here: its dollars stay in its stage.
+ */
+export const PASS_KINDS = Object.freeze(["work", "review", "answer", "fix", "conflict"]);
+export function passKind(label) {
+  const l = typeof label === "string" ? label : "";
+  if (/^work-\d+$/.test(l)) return "work";
+  if (l === "conflict") return "conflict";
+  if (/^review(?:-foundation)?(?:-retry|-fallback)?$/.test(l)) return "review";
+  if (l === "answer" || l === "answer-scope") return "answer";
+  if (/^(?:validation|pre-review-validation|review-validation)-(?:fix|fresh)-\d+$/.test(l)) return "fix";
+  return null;
+}
+
+/**
+ * A stage's dollars by pass kind (PASS_KINDS), from its pass `records` on a credential of `billing`: per kind that ran,
+ * `{usd, usdUnknown?, usdByBilling?}`, the known dollars of its passes (a relayed key's share in them), their runs of
+ * unknown cost and the known dollars by billing (usdByBilling). A pass that never ran, a decision record and a pass with
+ * no kind are in none: their dollars are the stage's own. {} when no pass of a kind ran.
+ */
+export function usdByPass(records, billing) {
+  const out = {};
+  for (const r of records || []) {
+    const kind = r && !r.noRun && !r.decision ? passKind(r.label) : null;
+    if (kind) (out[kind] ??= []).push(r);
+  }
+  return Object.fromEntries(
+    Object.entries(out).map(([kind, recs]) => {
+      const usd = round6(recs.reduce((s, r) => s + (nonNeg(r.usd) ?? 0), 0));
+      const unknown = recs.reduce((s, r) => s + unknownRuns(r), 0);
+      const by = usdByBilling(recs, billing);
+      return [kind, { usd, ...(unknown ? { usdUnknown: unknown } : {}), ...(Object.keys(by).length ? { usdByBilling: by } : {}) }];
+    }),
+  );
+}
+
+/**
+ * A stage's own record of what it ran again after a Block (#517), as result.json and the spend line carry it (`rerun`):
+ * `afterBlock`, the time of the Pendulum Blocked notice it is the first stage after (no other stage of the Objective
+ * started between), and `repeated`, the pass kinds (PASS_KINDS) it ran again of what had run before that notice: the
+ * work stage's own prompt (`work`) when it ran in a fresh session over the PR an earlier stage made. Read back: null for
+ * none or a broken one.
+ */
+export function rerunRead(v) {
+  if (!v || typeof v !== "object" || typeof v.afterBlock !== "string" || !Number.isFinite(Date.parse(v.afterBlock))) return null;
+  return { afterBlock: v.afterBlock, repeated: Array.isArray(v.repeated) ? [...new Set(v.repeated.filter((k) => PASS_KINDS.includes(k)))] : [] };
+}
+
+/** A `usdByPass` read back from a stored record or line: its PASS_KINDS at finite non-negative dollars; {} for none or a broken one. */
+export function passRead(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out = {};
+  for (const kind of PASS_KINDS) {
+    const p = v[kind];
+    const usd = nonNeg(p?.usd);
+    if (usd === null || p.usd < 0) continue;
+    const unknown = Number.isInteger(p.usdUnknown) && p.usdUnknown > 0 ? p.usdUnknown : 0;
+    const by = billingRead(p.usdByBilling);
+    out[kind] = { usd, ...(unknown ? { usdUnknown: unknown } : {}), ...(Object.keys(by).length ? { usdByBilling: by } : {}) };
+  }
   return out;
 }
 
@@ -453,7 +570,7 @@ export function promoCodex(harness, model, { at = Date.now() } = {}) {
 /**
  * The basis of a Codex run that reported no token counts: no `turn.completed` (a refused request, a turn cut short). Its
  * spend is unknown (UNKNOWN_WHY `unreported`), not zero (a cut turn may have spent tokens), and no price is missing. The bench says the same
- * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.
+ * (cost-join.mjs costOf), so the worker's record and the scorecard agree.
  */
 export const CODEX_NO_TOKENS = "unknown: no Codex turn completed, so Codex reported no tokens";
 const priceBasis = () => `priced at OpenAI's Standard rates from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;

@@ -84,7 +84,7 @@ async function endToEnd(rec, why, { harness, model }) {
   for (const k of ["usdLowerBound", "usdUpperBound"]) assert.equal(stored[k], undefined, `${why}: ${k}`);
   // The spend line, and the exit line's dollars.
   const line = stageSpendLine(usage);
-  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why] } }, `${why}: spend line`);
+  assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why], usdByPass: { work: { usd: knownUsd, usdUnknown: 1 } } } }, `${why}: spend line`);
   assert.match(usdText(usage), knownUsd ? /^2 plus 1 run of unknown cost \(/ : /^unknown \(/, `${why}: exit line`);
   assert.ok(usdText(usage).includes(UNKNOWN_WHY[why]), `${why}: the exit line says why`);
   // The cap compares the known dollars only: under it the stage goes on; the unknown run never fills it.
@@ -249,7 +249,7 @@ console.log(JSON.stringify({ type: "result", sessionId: "s" + n, exitCode: 0, us
 test("an Actions stage killed before it wrote result.json counts toward daily_usd as a run of unknown cost, never dropped", async () => {
   const { todaysUsage } = await import("../scripts/lib/github.mjs");
   const today = new Date().toISOString();
-  const artifact = (id, name) => ({ id, name, expired: false, created_at: today, workflow_run: { id: 1000 + id } });
+  const artifact = (id, name) => ({ id, name, expired: false, created_at: today, workflow_run: { id: 1000 + id, repository_id: 1, head_repository_id: 1 } });
   const server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ total_count: 2, artifacts: [artifact(1, "pendulum-usage-7"), artifact(2, "pendulum-usage-8")] }));

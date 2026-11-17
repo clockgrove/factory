@@ -250,7 +250,9 @@ export const backend = (env = process.env) => (isLocal(env) || env.PENDULUM_LOCA
 
 /**
  * Whether this stage records its dollars in its progress comment (logic.mjs spendMarker), where the dispatcher's daily
- * sum reads them: a local run, which uploads no usage artifact, and a cloud sandbox stage, whose artifact is uploaded
- * only when the stage ends (and is then marked so it is not counted twice).
+ * sum, the finish card and max_objective_usd read them: every stage on every route (#517). A local run uploads no usage
+ * artifact; an Actions or cloud sandbox stage's artifact is uploaded only when the stage ends, marked `spendInProgress`
+ * so it is not counted twice, and read only for a stage whose comment has no spend line (finish-card.mjs
+ * objectiveRecords).
  */
-export const spendInProgress = (env = process.env) => backend(env).name === "local" || env.PENDULUM_STAGE_SANDBOX === "1";
+export const spendInProgress = () => true;

@@ -58,9 +58,9 @@ import {
   transientError,
   RETRY,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { PENDULUM_VERSION, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -86,7 +86,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
@@ -703,8 +703,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
  * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
- * answered when a person answered it (a reply by someone who can push but Pendulum's own answer on the reviewer's
- * comment, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
+ * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
+ * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
  * answer (logic.mjs pendulumReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
  * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Pendulum's own reviews on the PR) decides which roots are the reviewer's by structure, which
@@ -725,7 +725,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
   // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
-  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? trustedAuthor(c) && !pendulumReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? personAnswer(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
   const answer = new Map(replies.filter(pendulumReply).map((c) => [c.in_reply_to_id, c.body]));
   const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.
@@ -2145,7 +2145,7 @@ export function gatewayDecisionFields(records) {
   return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false, rerun = null, judgeOnly = false }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2165,8 +2165,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     harnessVersion,
     model: merged.model ?? model ?? null,
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
-    // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
-    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
+    // model and host labels that chose them (none: the repository's defaults), the hosts its host labels opened, the
+    // worker's and the reviewer's reasoning effort (null: the model's own) and the Pendulum release that ran the stage.
+    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: PENDULUM_VERSION } } : {}),
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),
@@ -2214,6 +2215,14 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The kind its harness passes share (usage.mjs stageBilling; `unknown` when they differ or none ran): what the
     // scorer reads for the stage's harness dollars, the relayed key's being `api` in usdByBilling.
     billing: stageBilling(records || [], billing),
+    // Its known dollars by pass kind (usage.mjs usdByPass: work, review, answer, fix and conflict passes, from their
+    // labels), each with its runs of unknown cost and billing: what the finish card breaks the stage down by (#517). The
+    // rest of `usd` (decision calls, the exit record, the relay's spend outside every pass) is the stage's own.
+    ...((byPass) => (Object.keys(byPass).length ? { usdByPass: byPass } : {}))(usdByPass(records || [], billing)),
+    // What the stage ran again (#517), its own record: the Block it is the first stage after and the pass kinds it ran
+    // again (usage.mjs rerunRead), and a review stage started only to judge answers already made (review.mjs judgeOnly).
+    ...((r) => (r ? { rerun: r } : {}))(rerunRead(rerun)),
+    ...(judgeOnly === true ? { judgeOnly: true } : {}),
     turns: merged.turns ?? null,
     cache: cacheSummary(records),
     // Copilot: the premium requests and AI credits the stage used (the dollars are the credits at copilot_credit_usd).
@@ -2223,6 +2232,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // daily sum and the scorecard say "plus N runs of unknown cost".
     ...unknown,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
+    // Each pass's own figures (usage.mjs passLedger), which the merged ones above are summed from: `pendulum report` breaks
+    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder), never on GitHub.
+    ledger: passLedger(records || [], billing),
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,
@@ -3585,7 +3597,9 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
 
 /**
  * The review stage's exit with findings still open after its answer pass (decideExit's `findingsOpen`; `open`, those
- * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on).
+ * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on;
+ * `found`, what checkAnswers found on each it left open: a test that failed, an answer judged not fixed, a test that
+ * could not be run, each named beside its finding in the reason).
  * - A finding with no answer, or one the finding check read as not resolving it: within the answer rounds
  *   (takeAnswerRound), the review label goes back on and the exit is delivered with `rerun`, so the next review stage's
  *   answer pass takes it, with its earlier answer; past the bound the Block stands, naming each one and how to clear it.
@@ -3598,7 +3612,7 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
  * A record that cannot be read or written, or a label that cannot go back on, Blocks as any exit step does (exitStep).
  * Returns `decision`, changed.
  */
-export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], decider = null, limit = null }, opts) {
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], found = [], decider = null, limit = null }, opts) {
   delete decision.findingsOpen;
   const ctx = { issue, prNumber, objectiveLabel };
   const rec = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read`, () => readAnswerRounds(repo, ctx, opts));
@@ -3608,7 +3622,9 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const judged = open.filter((c) => !errors.has(String(c.id)));
   const codes = [...new Set(pending.map((c) => errors.get(String(c.id))))];
   const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}) };
-  const where = (list) => listed(list.map((c) => placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })));
+  // What the finding check found on each one it left open (finding-check.mjs FOUND): named beside its place.
+  const notes = new Map(found.map((x) => [String(x.id), x.note]));
+  const where = (list) => listed(list.map((c) => `${placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })}${notes.has(String(c.id)) ? ` (${notes.get(String(c.id))})` : ""}`));
   const tries = pending.length ? checkState({ checks: [...rec.checks, check] }).failed : 0;
   // Who was asked, as each line names it: the stage's harness or the AI Gateway's model.
   const who = decider?.name === "harness" ? `the stage's own harness (${decider.model})` : `the AI Gateway's decision model${decider?.model ? ` (${decider.model})` : ""}`;

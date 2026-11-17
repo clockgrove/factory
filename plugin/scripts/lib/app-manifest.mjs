@@ -187,6 +187,16 @@ export async function saveSecrets(repo, values, { org = false, env = process.env
   return saved;
 }
 
+/**
+ * Record the App's numeric id in the repository variable PENDULUM_APP_ID (APP_SECRETS.id's name, a variable beside the
+ * secret) with the user's gh login, for `pendulum report` and doctor to tell Pendulum's App's comments from another
+ * App's. The id is no secret: GitHub shows it on every comment the App writes. Returns null when saved, else why not.
+ */
+export async function saveAppIdVariable(repo, appId, { env = process.env } = {}) {
+  const r = await exec("gh", ["variable", "set", APP_SECRETS.id, "--repo", repo.full, "--body", String(appId)], { timeoutMs: SECRET_SET_MS, env }).catch((e) => ({ code: -1, stderr: e.code === "ENOENT" ? "gh is not on PATH" : e.message }));
+  return r.code === 0 ? null : `gh variable set ${APP_SECRETS.id} failed (${r.timedOut ? `no answer in ${SECRET_SET_MS / 1000} s` : `exit ${r.code}`}): ${String(r.stderr || r.stdout || "").trim().slice(0, 200)}`;
+}
+
 /** A secret's record, or null when GitHub has none by that name (404). */
 const secretAt = (path) => rest(path).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
 

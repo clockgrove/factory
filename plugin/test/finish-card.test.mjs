@@ -14,7 +14,17 @@ const real = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "fini
 const SELF = "clockgrove-pendulum[bot]";
 const bot = { login: SELF, type: "Bot" };
 const pulls = (over = {}) => [{ pr: real.pr, timeline: real.prTimeline, reviews: real.reviews, reviewComments: real.reviewComments, ...over }];
-const data = (over = {}) => finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: real.records, ...over });
+// Each usage record as objectiveRecords returns it, with its artifact's name: the stage whose progress comment it names.
+const tagged = (records, comments = real.comments) =>
+  records.map((r) => {
+    if (r.artifact) return r;
+    const stage = comments.map((c) => new RegExp(`^<!-- pendulum:3:progress:(work|review):${r.progressRun} -->`).exec(c.body || "")?.[1]).find(Boolean);
+    return stage ? { ...r, artifact: stage === "review" ? "pendulum-usage-3-review" : "pendulum-usage-3" } : r;
+  });
+const data = (over = {}) => {
+  const args = { repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: real.records, ...over };
+  return finishData({ ...args, records: tagged(args.records, args.comments) });
+};
 const withSelf = (fn) => {
   setSelf(SELF);
   try {
@@ -126,7 +136,7 @@ test("finish card: Pendulum is its own login here or its App by id, never anothe
     setWriters("clockgrove/pendulum-scratch", []);
   }
   // No stage found at all: the cost is unknown, never $0.00.
-  const none = withSelf(() => finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: real.records, mine: () => false, pushed: () => false }));
+  const none = withSelf(() => finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments: real.comments, pulls: pulls(), checks: real.checks, records: tagged(real.records), mine: () => false, pushed: () => false }));
   assert.deepEqual(none.stages, []);
   const md = renderFinishCard(none);
   assert.match(md, /<h3 align="center">Merged in 3 min 54 s; its cost is unknown\.<\/h3>/);
@@ -146,7 +156,7 @@ test("finish card: after a route switch, the other route's App stages are runs o
   setSelf("dev");
   try {
     const comments = withSpend({ review: { usd: 0.163442 } }).map((c) => (c.body.startsWith("<!-- pendulum:3:progress:review:") ? { ...c, user: { login: "dev", type: "User" } } : { ...c, performed_via_github_app: APP }));
-    const d = finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments, pulls: pulls(), checks: real.checks, records: real.records, mine: pendulumOwn(null) });
+    const d = finishData({ repo: "clockgrove/pendulum-scratch", issue: real.issue, timeline: real.timeline, comments, pulls: pulls(), checks: real.checks, records: tagged(real.records, comments), mine: pendulumOwn(null) });
     assert.deepEqual(d.stages.map((s) => [s.kind, s.usd, s.unknown]), [["build", null, 1], ["review", 0.163442, 0]]);
     const md = renderFinishCard(d);
     assert.match(md, /<h3 align="center">Merged in 3 min 54 s for \$0\.16 plus spend that was not reported\.<\/h3>/);
@@ -335,7 +345,7 @@ test("finish card: the PR body gets the headline and badges at its top, once how
   assert.equal(withFinishBlock(once, d), once);
 });
 
-test("finish card: an Actions stage's dollars come from its usage artifact; a token that may not read artifacts, or a failed download, reads no record", async () => {
+test("finish card: an Actions stage's dollars come from its usage artifact, its own run's on this repository's code only; a token that may not read artifacts, or a failed download, reads no record", async () => {
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -345,17 +355,26 @@ test("finish card: an Actions stage's dollars come from its usage artifact; a to
     const u = new URL(url);
     asked.push(u.searchParams.get("name"));
     const name = u.searchParams.get("name");
-    return new Response(JSON.stringify(status === 200 ? { total_count: 1, artifacts: [{ id: name.length, name, expired: false, workflow_run: { id: 44 } }, { id: 9, name, expired: true, workflow_run: { id: 45 } }] } : { message: "Resource not accessible by integration" }), { status, headers: { "content-type": "application/json" } });
+    const run = (id, head = 1) => ({ id, repository_id: 1, head_repository_id: head });
+    // The stage's own run's, an expired one, another run's, a fork's run under the same name, and one naming no repository.
+    const artifacts = [{ id: name.length, name, expired: false, workflow_run: run(44) }, { id: 9, name, expired: true, workflow_run: run(44) }, { id: 10, name, expired: false, workflow_run: run(46) }, { id: 11, name, expired: false, workflow_run: run(44, 2) }, { id: 12, name, expired: false, workflow_run: { id: 44 } }];
+    return new Response(JSON.stringify(status === 200 ? { total_count: artifacts.length, artifacts } : { message: "Resource not accessible by integration" }), { status, headers: { "content-type": "application/json" } });
   };
   const repo = { owner: "acme", name: "app", full: "acme/app" };
   try {
-    const recs = await objectiveRecords(repo, 3, { token: "t", download: async (a) => ({ artifact: a.name, usd: 1 }) });
+    const want = [{ stage: "work", key: "44" }, { stage: "review", key: "44-2" }];
+    const read = [];
+    const recs = await objectiveRecords(repo, 3, { token: "t", want, download: async (a) => (read.push(a.id), { usd: 1 }) });
     assert.deepEqual(asked, ["pendulum-usage-3", "pendulum-usage-3-review"]);
-    assert.deepEqual(recs.map((r) => r.artifact), ["pendulum-usage-3", "pendulum-usage-3-review"], "an expired artifact is not read");
-    const some = await objectiveRecords(repo, 3, { token: "t", download: async (a) => (a.name.endsWith("-review") ? Promise.reject(new Error("gh failed")) : { artifact: a.name }) });
+    assert.deepEqual(recs.map((r) => r.artifact), ["pendulum-usage-3", "pendulum-usage-3-review"], "each record names its artifact");
+    assert.deepEqual(read, [16, 23], "only the stage's own run's: never an expired one, another run's, a fork's or one naming no repository");
+    asked.length = 0;
+    assert.deepEqual(await objectiveRecords(repo, 3, { token: "t", want: [], download: async () => assert.fail("nothing to download") }), []);
+    assert.deepEqual(asked, [], "no stage without a spend line: nothing is listed");
+    const some = await objectiveRecords(repo, 3, { token: "t", want, download: async (a) => (a.name.endsWith("-review") ? Promise.reject(new Error("gh failed")) : {}) });
     assert.deepEqual(some.map((r) => r.artifact), ["pendulum-usage-3"], "a failed download is no record; the card goes on");
     status = 403;
-    assert.deepEqual(await objectiveRecords(repo, 3, { token: "t", download: async () => assert.fail("nothing to download") }), []);
+    assert.deepEqual(await objectiveRecords(repo, 3, { token: "t", want, download: async () => assert.fail("nothing to download") }), []);
   } finally {
     globalThis.fetch = realFetch;
     if (saved === undefined) delete process.env.GITHUB_API_URL;

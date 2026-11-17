@@ -19,7 +19,7 @@ import { preparePendulumHome, realRoots, runnerLaunch } from "./lib/claude-runne
 import { CODEX_RUNNER_HOME, CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, offListHost, resetCodexState } from "./lib/codex-runner.mjs";
 import { randomBytes } from "node:crypto";
 import { COLUMNS, collaboratorPermission, findProject, getRepo, listRulesets, repoOf, rest, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
-import { PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
+import { APP_ID_VARIABLE, appIdVariable, PENDULUM_VERSION, GUESS_MAX_HOURS, guessHoursMs, localLimits, machineSettings, input, mask, readFlags, resolveInputs, workflowDriftLines, workflowSettings, appliedLayers, ignoredLines, layerLines, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { REVIEW_LABEL, commandRefs, commandText, parseMaintainer, protectedPaths, refusalReason, selfLogin, setupGuard, unprotectedFiles } from "./lib/logic.mjs";
 import { SAFE_PATH, agentUser, exec, onPath, whichSync } from "./lib/proc.mjs";
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
@@ -666,6 +666,21 @@ export function reviewGuardCheck(text) {
   const jobs = doc?.jobs && typeof doc.jobs === "object" && !Array.isArray(doc.jobs) ? Object.entries(doc.jobs) : [];
   const guarded = jobs.filter(([, job]) => typeof job?.if === "string" && job.if.includes(guard)).map(([id]) => id);
   return guarded.length ? PASS("workflow triggers", `pull_request trigger; the ${REVIEW_LABEL} label guards ${guarded.join(", ")}`) : WARN("workflow triggers", `pull_request trigger without the ${REVIEW_LABEL} label guard`, `the review job must be guarded by the label the App applies: if: ${guard}`);
+}
+
+/**
+ * Whether the repository variable PENDULUM_APP_ID (APP_ID_VARIABLE, which `pendulum setup` writes beside the secret) names
+ * the App the job runs as (`appId`, the app_id input): `pendulum report` reads it to tell Pendulum's App's comments from
+ * another App's. On Actions only, where both are in reach without a call (`variable`: the `vars` input's value). A WARN with
+ * the one-time write when it is missing or names another App; no row without an App id.
+ */
+export function appIdVariableCheck({ variable, appId, repo }) {
+  const id = String(appId ?? "").trim();
+  if (!/^\d+$/.test(id)) return null;
+  const fix = `gh variable set ${APP_ID_VARIABLE} --repo ${repo.full} --body <the App's numeric id, the ${APP_ID_VARIABLE} secret's value> (setup's app step writes it for a new App)`;
+  if (variable === null || variable === undefined || String(variable).trim() === "") return WARN("app id variable", `the repository variable ${APP_ID_VARIABLE} is not set, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's without --app`, fix);
+  if (String(variable).trim() !== id) return WARN("app id variable", `the repository variable ${APP_ID_VARIABLE} names another App than the app_id input`, fix);
+  return PASS("app id variable", `${APP_ID_VARIABLE} names the App the jobs run as`);
 }
 
 export async function githubChecks({ inputs, repo, token, app, notice = false, env = process.env, job = !!env.GITHUB_ACTIONS, local = backend(env).name === "local", probeRerun = rerunProbeCheck, accounts = env.PENDULUM_ACCOUNTS }) {
@@ -2440,6 +2455,8 @@ async function main() {
   if (local) results.push(...localToolchainRows({ checkout, env: process.env, commands: localCommands(checkout, env) }));
   if (local && inputs.harness === "claude" && platform() === "linux") results.push(await claudeLocalStart({ checkout, commands: localCommands(checkout, env) }));
   if (app?.error) results.push(FAIL("app token", app.error, "check PENDULUM_APP_ID, the private key, and that the App is installed on this repository"));
+  const appVar = process.env.GITHUB_ACTIONS && !local ? appIdVariableCheck({ variable: appIdVariable(), appId: pre.appId, repo }) : null;
+  if (appVar) results.push(appVar);
   // The accounts for GitHub Actions and the cloud sandbox: the workflow's own env block (never a variable), as its jobs read it.
   const accounts = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_ACCOUNTS : wf.PENDULUM_ACCOUNTS;
   const autoAccount = process.env.GITHUB_ACTIONS ? process.env.PENDULUM_AUTO_ACCOUNT : wf.PENDULUM_AUTO_ACCOUNT;

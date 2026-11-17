@@ -383,7 +383,7 @@ const shape = (v, at = "") => (Array.isArray(v) ? (v.length ? shape(v[0], `${at}
 test("report: --json keeps its schema: every field the documented shape names, of its type", async () => {
   const { json: r } = await report(world(), { since: "2026-11-17", by: "account" });
   const keys = (o) => Object.keys(o).sort();
-  assert.deepEqual(keys(r), ["breakdowns", "comparison", "findings", "generatedAt", "hotSpots", "objectives", "pendulum", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
+  assert.deepEqual(keys(r), ["breakdowns", "comparison", "findings", "generatedAt", "hotSpots", "objectives", "pendulum", "rates", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
   assert.deepEqual(keys(r.findings), ["byReviewer", "byStage", "outcomes", "totals"]);
   assert.deepEqual(keys(r.findings.totals), ["cost", "findings", "outcomes", "reviewStages", "unnamed"]);
   assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
@@ -922,6 +922,19 @@ async function finishCard3(w, { user = BOT, association, app, edit = (b) => b } 
 const artifactCalls = (calls) => calls.filter((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD"));
 /** Everything a report says but where it read it from. */
 const figures = (r) => ({ totals: r.totals, unknown: r.unknown, breakdowns: r.breakdowns, objectives: r.objectives, hotSpots: r.hotSpots, findings: r.findings, missing: r.source.missing });
+
+test("report (#547): with --rates no Objective is read from its finish card's summary, which carries no sub-agent threads or long-context share: its stages are read", async () => {
+  const w = world();
+  w.comments.push(await finishCard3(w));
+  assert.equal((await report(w, { issue: 3 })).json.source.read.summaries, 1);
+  const rated = await report(w, { issue: 3, rates: "gpt-6-luna" });
+  assert.equal(rated.json.source.read.summaries, 0);
+  assert.ok(artifactCalls(rated.calls).some((c) => c.startsWith("DOWNLOAD")), "its usage records are read");
+  // Its figures are its stages' own, as without a card.
+  const stages = await report(world(), { issue: 3, rates: "gpt-6-luna" });
+  assert.deepEqual(figures(rated.json), figures(stages.json));
+  assert.deepEqual(rated.json.rates, stages.json.rates);
+});
 
 test("report (#544): a merged Objective is read from its finish card's summary, one comment, and the report says exactly what its stages say", async () => {
   const { readSummary } = await import("../scripts/lib/finish-card.mjs");

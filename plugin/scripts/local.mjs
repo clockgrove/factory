@@ -37,7 +37,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
-import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportScope } from "./lib/report.mjs";
+import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
@@ -250,9 +250,9 @@ export const COMMANDS = {
   },
   report: {
     args: [],
-    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, compare: { value: "NAME[,NAME]", many: true }, "compare-label": { value: "LABEL", many: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
+    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, compare: { value: "NAME[,NAME]", many: true }, "compare-label": { value: "LABEL", many: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, rates: { value: "MODEL[,MODEL...]", many: true }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
     check: reportCheck,
-    about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), or two experiment arms side by side (--compare A,B: the pendulum:experiment:<name> labels; --compare-label for any two labels), every figure precomputed: --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
+    about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), or two experiment arms side by side (--compare A,B: the pendulum:experiment:<name> labels; --compare-label for any two labels), every figure precomputed (--rates: the ratio of each named model's published rates to each recorded model's of one vendor, on its recorded token mix, no dollar unit): --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },
   hold: {
     args: ["list|release"],
@@ -4370,8 +4370,8 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
   const repoFull = cloneRepo(checkout ?? here, flags.repo);
   // Pendulum's App: --app, else the repository variable PENDULUM_APP_ID (readReport), else local mode's notice App.
   const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
-  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
-  const report = buildReport(read, { by: flags.by ? [flags.by] : [], now: new Date(now).toISOString() });
+  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], stages: !!flags.rates, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
+  const report = buildReport(read, { by: flags.by ? [flags.by] : [], rates: flags.rates ? reportModels(flags.rates) : null, now: new Date(now).toISOString() });
   out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
   if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);
   return report.source.complete ? 0 : STOPPED_EXIT;

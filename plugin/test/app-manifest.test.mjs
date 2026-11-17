@@ -107,7 +107,7 @@ function stubs({ authFails = false, failSet = "" } = {}) {
 const fs = require("node:fs");
 const a = process.argv.slice(2);
 if (a[0] === "auth" && a[1] === "token") { process.stdout.write("gho_fake\\n"); process.exit(0); }
-if (a[0] === "auth" && a[1] === "status") { if (${authFails}) { process.stderr.write("You are not logged into any GitHub hosts.\\n"); process.exit(1); } process.exit(0); }
+if (a[0] === "auth" && a[1] === "status") { if (a.slice(2).join(" ") !== "--hostname github.com") { process.stderr.write("unexpected " + a.join(" ")); process.exit(2); } if (${authFails}) { process.stderr.write("You are not logged into any GitHub hosts.\\n"); process.exit(1); } process.exit(0); }
 if (a[0] === "secret" && a[1] === "set") {
   const stdin = fs.readFileSync(0, "utf8");
   if (a[2] === ${JSON.stringify(failSet)}) { process.stderr.write("failed to set: " + stdin); process.exit(1); }
@@ -126,7 +126,7 @@ process.exit(1);
 /** setup --apply app as a person runs it, with the stubs on PATH. */
 function runSetup(gh, extra = [], stubOpts = {}) {
   const st = stubs(stubOpts);
-  const env = { ...process.env, PATH: `${st.bin}:${process.env.PATH}`, BROWSER: join(st.bin, "browser"), GITHUB_API_URL: gh.api, GITHUB_GRAPHQL_URL: `${gh.api}/graphql` };
+  const env = { ...process.env, PATH: `${st.bin}:${process.env.PATH}`, BROWSER: join(st.bin, "browser"), PENDULUM_TEST_GITHUB_WEB: gh.web, GITHUB_API_URL: gh.api, GITHUB_GRAPHQL_URL: `${gh.api}/graphql` };
   for (const k of ["GITHUB_ACTIONS", "GITHUB_WORKSPACE", "WSL_DISTRO_NAME"]) delete env[k];
   const child = spawn(process.execPath, [SETUP, "--repo", "acme/widgets", "--apply", "app", "--yes", ...extra], { cwd: st.dir, env, stdio: ["pipe", "pipe", "pipe"] });
   let out = "";
@@ -205,8 +205,10 @@ test("the App's manifest asks for exactly the shared permission list, never work
 test("the web origin follows the API, $BROWSER takes %s and arguments, and output holding any part of a secret is not shown", () => {
   assert.equal(webOrigin("https://api.github.com"), "https://github.com");
   assert.equal(webOrigin("https://api.github.com/"), "https://github.com");
-  assert.equal(webOrigin("https://ghe.example.com/api/v3"), "https://ghe.example.com");
-  assert.throws(() => webOrigin("https://proxy.example.com"), /neither GitHub's API nor a GitHub Enterprise Server's/);
+  // GitHub Enterprise Server and any other address are refused; only the tests' named fake is let through.
+  for (const api of ["https://ghe.example.com/api/v3", "https://proxy.example.com"]) assert.throws(() => webOrigin(api, {}), /the app step works with github\.com only/);
+  assert.equal(webOrigin("http://127.0.0.1:9/api/v3", { PENDULUM_TEST_GITHUB_WEB: "http://127.0.0.1:9" }), "http://127.0.0.1:9");
+  assert.throws(() => webOrigin("http://127.0.0.1:8/api/v3", { PENDULUM_TEST_GITHUB_WEB: "http://127.0.0.1:9" }), /github\.com only/);
   const url = "http://127.0.0.1:9/abc";
   assert.deepEqual(browserCommands("firefox", url), [["firefox", [url]]]);
   assert.deepEqual(browserCommands("firefox --new-window %s:chromium", url), [["firefox", ["--new-window", url]], ["chromium", [url]]]);
@@ -324,7 +326,7 @@ test("setup --apply app checks before the browser opens: a gh login, admin, no s
     [{}, [], { authFails: true }, /gh is not logged in \(gh auth status: You are not logged into any GitHub hosts\.\); run gh auth login/],
     [{ admin: false }, [], {}, /your gh login is no admin of acme\/widgets/],
     [{ repoSecrets: ["PENDULUM_APP_PRIVATE_KEY"] }, [], {}, /acme\/widgets already has PENDULUM_APP_PRIVATE_KEY: pass --replace/],
-    [{ orgDenied: true }, ["--secret-scope", "org"], {}, /cannot manage acme's organization secrets \(HTTP 403\)/],
+    [{ orgDenied: true }, ["--secret-scope", "org"], {}, /cannot manage acme's organization secrets \(HTTP 403\): an organization owner runs this \(a login without the admin:org scope gets it with `gh auth refresh -s admin:org`\)/],
     [{ orgSecrets: { PENDULUM_APP_ID: { visibility: "all", repos: [] } } }, ["--secret-scope", "org", "--replace"], {}, /acme's PENDULUM_APP_ID is shared with every repository of the organization/],
     [{ orgSecrets: { PENDULUM_APP_PRIVATE_KEY: { visibility: "selected", repos: ["acme/widgets", "acme/gears"] } } }, ["--secret-scope", "org", "--replace"], {}, /acme's PENDULUM_APP_PRIVATE_KEY also serves acme\/gears/],
     [{ orgSecrets: { PENDULUM_APP_ID: { visibility: "selected", repos: ["acme/widgets"] } } }, ["--secret-scope", "org"], {}, /acme's PENDULUM_APP_ID already serves acme\/widgets: pass --replace/],
@@ -368,7 +370,7 @@ test("setup --apply app: a gh that echoes the key and fails shows none of it, sa
       assert.deepEqual(leaks(text), []);
       assert.ok(!text.includes(PEM_LAST), "nor the key's last, short line");
     }
-    assert.match(out, /gh secret set PENDULUM_APP_PRIVATE_KEY failed \(exit 1\): \(its output held a secret value, so it is not shown\); saved PENDULUM_APP_ID\. The key is kept nowhere: at http:\/\/127\.0\.0\.1:\d+\/settings\/apps\/pendulum-widgets, Generate a private key/);
+    assert.match(out, /gh secret set PENDULUM_APP_PRIVATE_KEY failed \(exit 1\): \(its output held a secret value, so it is not shown\); saved PENDULUM_APP_ID\. The key is kept nowhere: at http:\/\/127\.0\.0\.1:\d+\/settings\/apps\/pendulum-widgets, Generate a private key, then save it with `gh secret set PENDULUM_APP_PRIVATE_KEY --repo acme\/widgets < key\.pem` and the App id 123456 with `gh secret set PENDULUM_APP_ID --repo acme\/widgets`/);
     assert.deepEqual(run.secrets().map((s) => s.args[2]), ["PENDULUM_APP_ID"]);
   } finally {
     run.child.kill();
@@ -478,6 +480,39 @@ test("an exchange that yields no App gives the redirect back: the page names the
     assert.equal((await p.flow).appId, 123456);
     assert.deepEqual(gh.conversions, ["expiredcode123", "code1abcdefghij"]);
   } finally {
+    p.restore();
+    gh.close();
+  }
+});
+
+test("a browser gone while the secrets are saved still ends the run with its result", { timeout: 60_000 }, async () => {
+  const gh = await fakeGitHub("Organization");
+  let release;
+  const slow = new Promise((r) => (release = r));
+  let saving;
+  const saveStarted = new Promise((r) => (saving = r));
+  const p = await inProcess(gh, {
+    save: async () => {
+      saving();
+      await slow;
+      return ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY"];
+    },
+  });
+  try {
+    const { action, manifest } = await loadStart(p.start);
+    const u = new URL(await postForm(action, manifest));
+    // The browser's tab is closed (or curl gives up) while setup saves: its connection is gone before the answer.
+    const req = request({ host: u.hostname, port: u.port, path: `${u.pathname}${u.search}` });
+    req.on("error", () => {});
+    req.end();
+    await Promise.race([saveStarted, p.flow.then(() => assert.fail("the flow ended before its save"))]);
+    req.destroy();
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    const result = await Promise.race([p.flow, new Promise((_, no) => setTimeout(() => no(new Error("the run never settled")), 5000))]);
+    assert.equal(result.slug, "pendulum-widgets");
+  } finally {
+    release();
     p.restore();
     gh.close();
   }

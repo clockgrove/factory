@@ -43,21 +43,25 @@ export const SECRET_SET_MS = 60_000;
 /** At most one "refused a redirect" line this often; the rest are counted into the next. */
 export const REFUSED_LINE_MS = 10_000;
 
+/** The variable the tests set to their fake GitHub's web origin, whose API is `<it>/api/v3`; nothing else sets it. */
+export const TEST_WEB_ENV = "PENDULUM_TEST_GITHUB_WEB";
+
 /**
- * GitHub's web origin for the API setup talks to: github.com for api.github.com, `<origin>` for a GitHub Enterprise
- * Server's `<origin>/api/v3`. The manifest form, the install page and the App's settings live there. Throws on any
- * other API address: no App is made on one host while its secrets go to another.
+ * GitHub's web origin, where the manifest form, the install page and the App's settings live: github.com, for
+ * api.github.com only. The step is refused on any other API address (GitHub Enterprise Server included, which it has
+ * not been tried on, and whose gh login and token it does not pick): no App is made on one host while its secrets go
+ * to another. The tests' fake GitHub is the one exception, named by TEST_WEB_ENV.
  */
-export function webOrigin(api = process.env.GITHUB_API_URL || "https://api.github.com") {
+export function webOrigin(api = process.env.GITHUB_API_URL || "https://api.github.com", env = process.env) {
   const a = String(api).replace(/\/+$/, "");
   if (a === "https://api.github.com") return "https://github.com";
-  const m = /^(https?:\/\/[^/?#]+)\/api\/v3$/.exec(a);
-  if (m) return m[1];
-  throw new Error(`GITHUB_API_URL ${a} is neither GitHub's API nor a GitHub Enterprise Server's (<origin>/api/v3): there is no web origin to create the App at`);
+  const fake = String(env[TEST_WEB_ENV] || "").replace(/\/+$/, "");
+  if (fake && a === `${fake}/api/v3`) return fake;
+  throw new Error(`GITHUB_API_URL is ${a}: the app step works with github.com only (GitHub Enterprise Server is not supported by it); create the App by hand`);
 }
 
-/** gh's env for `web`: GH_HOST names a server other than github.com. */
-export const ghEnv = (web, env = process.env) => (new URL(web).host === "github.com" ? env : { ...env, GH_HOST: new URL(web).host });
+/** The host gh's commands name: github.com. */
+export const GH_HOST = "github.com";
 
 /** The secret names the workflow passes to the Action. */
 export const APP_SECRETS = { id: "PENDULUM_APP_ID", key: "PENDULUM_APP_PRIVATE_KEY" };
@@ -197,7 +201,7 @@ const secretAt = (path) => rest(path).catch((e) => (e.status === 404 ? null : Pr
  */
 export async function appPreflight(repo, repoData, { org = false, replace = false, env = process.env } = {}) {
   const out = [];
-  const auth = await exec("gh", ["auth", "status"], { timeoutMs: 30_000, env }).catch((e) => ({ code: -1, stderr: e.code === "ENOENT" ? "gh is not on PATH" : e.message }));
+  const auth = await exec("gh", ["auth", "status", "--hostname", GH_HOST], { timeoutMs: 30_000, env }).catch((e) => ({ code: -1, stderr: e.code === "ENOENT" ? "gh is not on PATH" : e.message }));
   if (auth.code !== 0) return [`gh is not logged in (gh auth status: ${String(auth.stderr || auth.stdout || "").trim().split("\n")[0] || `exit ${auth.code}`}); run gh auth login`];
   if (repoData.permissions?.admin !== true) out.push(`your gh login is no admin of ${repoData.full_name}, and only an admin can save its secrets`);
   const names = Object.values(APP_SECRETS);
@@ -218,7 +222,7 @@ export async function appPreflight(repo, repoData, { org = false, replace = fals
   try {
     await rest(`orgs/${o}/actions/secrets?per_page=1`);
   } catch (e) {
-    out.push(`your gh login cannot manage ${o}'s organization secrets (${e.status ? `HTTP ${e.status}` : e.message}): an organization owner runs this, or use --secret-scope repo`);
+    out.push(`your gh login cannot manage ${o}'s organization secrets (${e.status ? `HTTP ${e.status}` : e.message}): an organization owner runs this (a login without the admin:org scope gets it with \`gh auth refresh -s admin:org\`), or use --secret-scope repo`);
     return out;
   }
   if (inRepo?.length) out.push(`${repoData.full_name} has its own ${inRepo.join(" and ")}, which would win over the organization's: delete them there, or use --secret-scope repo`);
@@ -297,7 +301,7 @@ export function openBrowser(url, env = process.env) {
  * `input` (a readable, default stdin) takes a pasted address; `save` stores the secrets (saveSecrets, with `env`);
  * `signal` (an AbortSignal) stops the flow and its listener.
  */
-export async function createAppFromManifest(repo, repoData, { org = false, web = webOrigin(), env = ghEnv(web), say = (l) => process.stdout.write(`${l}\n`), open = openBrowser, input = process.stdin, save = saveSecrets, waitMs = REDIRECT_WAIT_MS, exchangeMs = EXCHANGE_MS, signal = null } = {}) {
+export async function createAppFromManifest(repo, repoData, { org = false, web = webOrigin(), env = process.env, say = (l) => process.stdout.write(`${l}\n`), open = openBrowser, input = process.stdin, save = saveSecrets, waitMs = REDIRECT_WAIT_MS, exchangeMs = EXCHANGE_MS, signal = null } = {}) {
   const state = randomBytes(24).toString("hex");
   const startPath = `/${randomBytes(24).toString("hex")}`;
   const server = createServer();
@@ -375,14 +379,21 @@ export async function createAppFromManifest(repo, repoData, { org = false, web =
       saved = await save(repo, { [APP_SECRETS.id]: String(app.id), [APP_SECRETS.key]: app.pem }, { org, env });
     } catch (e) {
       const kept = e.saved?.length ? `; saved ${e.saved.join(", ")}` : "";
-      return fail(500, new Error(`${e.message}${kept}. The key is kept nowhere: at ${settings}, Generate a private key, then save it with \`gh secret set ${APP_SECRETS.key} < key.pem\` and the App id ${app.id} with \`gh secret set ${APP_SECRETS.id}\``));
+      const where = org ? `--org ${repo.owner} --repos ${repo.name}` : `--repo ${repo.full}`;
+      return fail(500, new Error(`${e.message}${kept}. The key is kept nowhere: at ${settings}, Generate a private key, then save it with \`gh secret set ${APP_SECRETS.key} ${where} < key.pem\` and the App id ${app.id} with \`gh secret set ${APP_SECRETS.id} ${where}\``));
     }
     const result = { appId: app.id, slug: app.slug, installUrl, saved };
     return { status: 302, location: installUrl, page: message("Install the App", `The App is created and its secrets are saved. Install it on ${repoData.full_name}: ${installUrl}`), settle: () => end(() => finish.ok(result)) };
   };
 
   server.on("request", (req, res) => {
+    // The run settles once its answer is written, or once the browser is gone (a closed tab, a curl that gave up),
+    // which Node reports as the response's close and never as the end's callback.
     const send = ({ status, page, location, settle }) => {
+      if (settle) {
+        res.once("close", settle);
+        if (res.destroyed || req.socket?.destroyed) return settle();
+      }
       res.writeHead(status, { ...PAGE_HEADERS, ...(location ? { location } : {}) });
       res.end(page, () => settle?.());
     };

@@ -32,7 +32,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
-import { APP_SECRETS, appName, appPreflight, createAppFromManifest, ghEnv, manifestPermissions, webOrigin } from "./lib/app-manifest.mjs";
+import { APP_SECRETS, appName, appPreflight, createAppFromManifest, manifestPermissions, webOrigin } from "./lib/app-manifest.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
@@ -623,7 +623,7 @@ export function appPlan(repoData, secretScope = "repo") {
  */
 async function applyApp(repo, repoData, secretScope, { replace = false } = {}) {
   const web = webOrigin();
-  const env = ghEnv(web);
+  const env = process.env;
   const org = secretScope === "org";
   const problems = await appPreflight(repo, repoData, { org, replace, env });
   if (problems.length) throw new Error(`the app step made nothing: ${problems.join("; ")}`);

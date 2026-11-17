@@ -14,7 +14,7 @@
 
 Clockgrove Pendulum turns a GitHub issue into a pull request (PR), using the coding agent you choose: Claude Code, Codex or GitHub Copilot CLI. You write what you want and what "done" means, and label the issue `pendulum:objective`. The coding agent plans and builds the change, Pendulum opens the PR, and a separate agent run reviews it. Then you merge it yourself, or, with auto-merge on, Pendulum merges it once your required CI checks pass.
 
-It is for maintainers of a GitHub repository with CI on pull requests who want to hand bounded, well-specified changes to a coding agent and keep their own issues, checks and merge queue as the workflow. It runs on GitHub Actions or on your own machine and keeps all its state in GitHub, so there is no server or database to host.
+It is for maintainers of a GitHub repository with CI on pull requests who want to hand whole features to a coding agent, from a change that fits in one PR to an epic delivered as a series of PRs, and keep their own issues, checks and merge queue as the workflow. It runs on GitHub Actions or on your own machine and keeps all its state in GitHub, so there is no server or database to host.
 
 - **The reviewer comments; it does not approve.** Your required checks decide whether a change can merge. With auto-merge on, no person reads the code before it lands, so setup recommends starting with auto-merge off.
 - **Pendulum is free (MIT); the runs are not.** Your model provider bills the coding agent's usage, and a private repository uses your GitHub Actions minutes.
@@ -34,7 +34,7 @@ It is for maintainers of a GitHub repository with CI on pull requests who want t
 | **Merged through the merge queue** | 02:27:36, 3 min 55 s after filing |
 | **Reported model cost** | $0.52: $0.36 for the worker (`claude-opus-5-5`, with `claude-sonnet-5-5` sub-agents), $0.16 for the reviewer (`claude-fable-5-2`), on an Anthropic API key, as Claude Code reported it in the runs' usage records. GitHub Actions minutes are not included. |
 
-This is one small, successful run, shown so you can see what Pendulum does on GitHub. It is not a typical cost or a measure of reliability. [bench/README.md](bench/README.md) describes how Pendulum scores runs: whether they merged with no one stepping in, solution quality, operator minutes and dollars.
+This is one small, successful run, chosen so each step is easy to follow on GitHub; Pendulum is meant for larger work ([Write a good Objective](#write-a-good-objective)). It is not a typical cost or a measure of reliability. [bench/README.md](bench/README.md) describes how Pendulum scores runs: whether they merged with no one stepping in, solution quality, operator minutes and dollars.
 
 <img src="docs/img/example-run.png" width="760" alt="Issue 3 and pull request 4 on clockgrove/pendulum-scratch: the issue labelled pendulum:objective, Pendulum's progress comment ending 'exit: delivered', the reviewer's comment-only pass judging the acceptance entry met, and the PR merged via the merge queue with 16 checks passed.">
 
@@ -52,10 +52,11 @@ Pendulum needs:
   - Codex: an OpenAI API key or a Vercel AI Gateway key, billed per use. Your ChatGPT plan works only in [local mode](#where-it-runs).
   - Copilot CLI: a token from an account with a Copilot seat; runs are billed to that seat as AI credits.
 
-It fits well when your tests check the behaviour you care about, your issues can state observable acceptance criteria, and you want to choose the coding agent per repository or per issue.
+It fits well for feature-sized work: what you would write up as a feature or an epic, with acceptance criteria someone can observe. Pendulum plans it, splits it across sub-agents and lands it as one or more PRs. It also needs tests that check the behaviour you care about, and lets you choose the coding agent per repository or per issue.
 
 It is a poor fit, or needs care, when:
 
+- **The change is a quick fix.** A one-line fix or a small tweak is faster and cheaper as a direct PR or a single agent session.
 - **Your tests are thin.** Your CI is the only check of correctness: Pendulum merges whatever your required checks let through.
 - **You need a person to approve every change.** Keep auto-merge off; the reviewer is not an approval gate.
 - **Your issues come from the community.** Pendulum acts only on issues written by someone who can push to the repository (or a maintainer you name), so others' issues must be refiled.
@@ -119,25 +120,27 @@ This runs Pendulum's doctor, which changes nothing. Each line reads PASS, WARN o
 
 ### 4. File your first Objective
 
-Pick a small behaviour change in this repository, one a test your CI runs can prove and that touches no workflow files. Then ask, describing it in your own words:
+Start with a modest feature: one your CI can test, in this repository, that touches no workflow files. With the first-run preset's $5 per job, a feature spanning a few files suits a first run; raise `max_usd` before you hand Pendulum larger work. Then ask, describing it in your own words:
 
-> File a Pendulum Objective: `mytool --version` should print the version from package.json.
+> File a Pendulum Objective: `mytool list` should support `--format json` beside the table, so scripts can read its output.
 
 The session writes the issue in the shape Pendulum reads and shows it to you. Its title is the outcome in a few words, and its body looks like this:
 
 ```markdown
 ## Goal
 
-`mytool --version` prints the tool's version, so users can report which release they run.
+`mytool list` can print its records as JSON, so scripts can use them without parsing the table.
 
 ## Acceptance
 
-- `mytool --version` prints the version from package.json and exits 0.
-- A test covers it.
+- `mytool list --format json` prints a JSON array with one object per record, holding the fields the table shows, and exits 0.
+- `mytool list` and `mytool list --format table` print the table as before.
+- An unknown format exits 2 with an error that names the accepted values.
+- Tests cover each case, and the README documents the option.
 
 ## Context
 
-- No other command's output changes.
+- No new dependencies.
 ```
 
 It asks whether to start it now (it adds the `pendulum:objective` label), save it as a draft issue (`pendulum:draft`, which Pendulum never runs), or keep discussing. Start it.
@@ -162,7 +165,7 @@ Runs take from a few minutes to a few hours. If the issue comes back Blocked or 
 ## How it works
 
 1. **You label an issue `pendulum:objective`.** The issue is now an Objective, and its text is the whole specification.
-2. **A worker plans and builds.** The worker is the coding agent. It writes a plan and the code in its own checkout, and Pendulum posts the plan on the issue and opens one PR. A large Objective arrives as up to six PRs, one at a time.
+2. **A worker plans and builds.** The worker is the coding agent, on a strong model. It writes a plan, which Pendulum posts on the issue, hands the plan's items to implementer sub-agents, usually on a cheaper model and side by side where they touch separate files, then integrates their work in its own checkout, and Pendulum opens a PR. A large Objective arrives as a series of PRs, one open at a time, each part starting once the one before has merged (up to six by default, `max_parts`).
 3. **Your CI decides.** The worker waits for your required checks. When one fails, it keeps fixing while each pass makes progress, within the job's spending and time limits, then the Objective is Blocked.
 4. **A reviewer comments.** The reviewer is a separate agent run that compares the change with the issue and judges each Acceptance entry. The worker must answer each comment: fix it, or explain why the issue or the repository's rules already settle it.
 5. **The PR lands.** With auto-merge on, Pendulum merges the commit that was reviewed once your required checks are green on it, through your merge queue when your repository has one. With auto-merge off, the PR waits for you.
@@ -181,12 +184,22 @@ Pendulum acts only on issues written by people who can push to the repository, o
 
 ## Write a good Objective
 
-An Objective is a bounded change with acceptance criteria someone can observe. The worker asks you something only when the work depends on a decision that should be yours (a Question). Otherwise, where the issue admits more than one reading, it takes the simplest one that meets every Acceptance entry and records it as an assumption, so write down what you have already decided.
+An Objective is a feature or an epic: work you would otherwise plan, break into tasks and land over one or several PRs. Pendulum does that planning and splitting itself, so write the issue as you would brief an engineer taking on the whole feature:
+
+- **Goal:** what users or callers can do once it is done, and why. State the outcome, not the implementation.
+- **Acceptance:** each thing that must be true, checkable through the real path: a command and its output, a request and its response, a behaviour a test proves. The reviewer judges every entry, met or not.
+- **Context:** what you have already decided, contracts that must not change, and what is out of scope. Out-of-scope notes go here, never under Acceptance.
+
+The worker asks you something only when the work depends on a decision that should be yours (a Question). Otherwise, where the issue admits more than one reading, it takes the simplest one that meets every Acceptance entry and records it as an assumption, so write down what you have already decided.
 
 | Weak | Better |
 | --- | --- |
-| "Improve error handling." | Goal: `mytool parse` reports invalid JSON clearly. Acceptance: `mytool parse bad.json` prints the parse error to stderr and exits 1; a test covers it. |
-| "Clean up the config loader; don't break anything." | Acceptance lists the observable result. Context: "The exported function names do not change." Out-of-scope notes go in Context, never under Acceptance, since every Acceptance entry is judged. |
+| "Add team invitations." | Goal: a workspace admin can invite people by email, and an invitee joins with one link. Acceptance: an invitation emails a link valid for 7 days; following it after sign-up adds the user to that workspace as a member; an expired or used link shows an error page; admins can list and revoke pending invitations; tests cover each path. Context: use the existing mailer; the sign-up form does not change. |
+| "Rebuild reporting." | Split the epic where it has a natural order: one Objective for the report export API, and one for the page that uses it, marked as blocked by the first. |
+
+**For an epic with an order,** file several Objectives and link them with GitHub's issue dependencies (blocked by), added before an issue gets its `pendulum:objective` label: Pendulum starts each one once the issues it waits on are closed. Objectives without an order run side by side, up to `max_concurrent`; where two edit the same files, Pendulum rebases or holds back the later one so their changes do not collide ([Siblings that touch the same files](docs/USAGE.md#siblings-that-touch-the-same-files)).
+
+**Quick fixes are better as a direct PR.** Pendulum's planning, review and CI loop is worth its cost on feature-sized work.
 
 Your tests check only what they test. A green check is evidence about those properties, not proof that the whole change is correct. [Write an Objective](docs/USAGE.md#write-an-objective) has the full guidance.
 

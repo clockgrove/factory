@@ -1200,7 +1200,7 @@ test("cost: a Codex run killed before any turn completed stays a run of unknown 
   assert.equal(cost.usd, 0.1815);
   assert.equal(cost.usdUnknown, 1);
   assert.deepEqual(cost.parts.map((p) => [p.usd, p.usdUnknown]), [[0.1815, 0], [null, 1]]);
-  assert.match(cost.basis, /^tokens priced from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
+  assert.match(cost.basis, /^tokens priced at OpenAI's Standard rates from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
   const row = scoreObjective(cleanMerge(62, [priced, killed]), { prices, now: NOW });
   assert.match(markdownTable([row]), /\$0\.18 plus 1 run of unknown cost \(/);
 });

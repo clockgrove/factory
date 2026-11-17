@@ -8,7 +8,7 @@
 // JSONL (`events.jsonl`) is accepted too, for runs made outside the Action.
 //
 //   claude   unit usd      total_cost_usd, modelUsage (sub-agents included)
-//   codex    unit usd      tokens priced from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
+//   codex    unit usd      tokens priced at OpenAI's Standard rates from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
 //   copilot  unit usd      AI credits from --usage-output-file at the run's $/credit (GitHub: $0.01), premium requests beside
 //
 // A count a harness does not report is null, never zero. Dollars are real or unknown (plugin usage.mjs UNKNOWN_WHY):
@@ -261,8 +261,9 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
       // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's. The spend
       // through a relayed gateway key is no harness spend: kept as the worker priced it.
-      // A promotional rate prices only spend before its end (usage.mjs codexRow): the record's own time dates it.
-      const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents, { at: rec.ended ?? rec.started ?? null });
+      // A promotional rate prices only spend before its end (usage.mjs codexRow): the record's end dates it (a stage's
+      // record ends with its latest pass or call, usage.mjs mergeUsage), and a record with none is of unknown cost there.
+      const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents, { at: rec.ended ?? null });
       const key = num(rec.workerKeyUsd);
       part.usd = priced.usd === null && key === null ? null : round4((priced.usd ?? 0) + (key ?? 0));
       // The record's own runs of unknown cost (a turn that failed, a sub-agent thread not read), or one for tokens this
@@ -274,7 +275,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // No tokens reported (no turn completed) is no missing price: the worker's own basis for it.
       const noTokens = (rec.tokens?.input ?? null) === null && (rec.tokens?.output ?? null) === null;
       const why = priced.why.find((w) => w !== "unreported") ?? "no-price";
-      part.basis = priced.usd === null ? (noTokens ? CODEX_NO_TOKENS : why === "no-price" ? `unknown: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}` : `unknown: ${UNKNOWN_WHY[why]} (${rec.model ?? "unknown model"}, ${PRICES_NAME})`) : `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+      part.basis = priced.usd === null ? (noTokens ? CODEX_NO_TOKENS : why === "no-price" ? `unknown: no price for ${rec.model ?? "unknown model"} in ${PRICES_NAME}` : `unknown: ${UNKNOWN_WHY[why]} (${rec.model ?? "unknown model"}, ${PRICES_NAME})`) : `tokens priced at OpenAI's Standard rates from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
     } else if (rec.harness === "copilot") {
       // The worker prices the AI credits its usage file reports (usage.mjs parseCopilot); an artifact from before that,
       // or a run that reported none, is of unknown cost.
@@ -327,7 +328,7 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       // Dollars priced from the table are the measure (PLAN.md); tokens stay the unit only while unpriced.
       out.unit = priced.length ? "usd" : "tokens";
       out.priceTableDate = prices.date;
-      out.basis = priced.length ? `tokens priced from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unpriced[0].basis;
+      out.basis = priced.length ? `tokens priced at OpenAI's Standard rates from ${PRICES_NAME} dated ${prices.date}${prices.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}` : unpriced[0].basis;
       out.note = prices.status === "placeholder" ? `${PRICES_NAME} carries placeholder rates; replace them before reading this as dollars` : null;
       break;
     case "copilot":

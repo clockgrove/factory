@@ -59,6 +59,12 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
+/** The `codex tier` row of a repository whose Codex runs on CODEX_API_KEY (OpenAI's pricing page, read 2026-11-16). */
+const CODEX_TIER_ROW = {
+  detail: "Codex's dollars are its tokens at OpenAI's Standard rates: they assume the OpenAI project's Service Tier is Standard. Codex reports no tier, so a project set to Fast is billed 2× those rates (2.5× on gpt-5.5, 1.8× on gpt-5-mini) and Pendulum cannot see it",
+  fix: "keep the key's OpenAI project on the Standard Service Tier (platform.openai.com, Settings, Project, General); Pendulum's Codex runs never ask for Fast",
+};
+
 /** The `claude credential` row of a repository on `credential: plan` (docs/INSTALL.md, Claude on your subscription). */
 const PLAN_ROW = {
   detail: "credential: plan: Claude stages run on your subscription's CLAUDE_CODE_OAUTH_TOKEN secret",
@@ -134,6 +140,9 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     } else if (!key) out.push(FAIL("codex credential", "no Codex credential: PENDULUM_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set PENDULUM_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
     else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.PENDULUM_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
     else out.push(PASS("codex credential", "CODEX_API_KEY present, step-scoped"));
+    // Codex reports no service tier, and an OpenAI project can make Fast its default for every request that names none
+    // (Pendulum's never do): the Codex price table's dollars assume Standard (codex-prices.json).
+    if (key && !gateway && !(env.GITHUB_ACTIONS && chatgptLogin(key))) out.push(WARN("codex tier", CODEX_TIER_ROW.detail, CODEX_TIER_ROW.fix));
   }
   if (h === "copilot") {
     const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN;

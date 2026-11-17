@@ -155,6 +155,9 @@ export function withLong(tokens, long, above) {
   return out;
 }
 
+/** Whether `tokens` is a Codex running total a pass reported (a turn completed): its input and output are counts. */
+export const runningTokens = (tokens) => !!tokens && isRate(tokens.input) && isRate(tokens.output);
+
 /** Long-context shares added (`sign` 1) or taken away (-1, never below zero); null when any is unknown. */
 export function sumLong(shares, sign = 1) {
   if (shares.some((s) => !s)) return null;
@@ -303,7 +306,7 @@ export function promoCodex(harness, model, { at = Date.now() } = {}) {
  * (bench/lib/cost.mjs costOf), so the worker's record and the scorecard agree.
  */
 export const CODEX_NO_TOKENS = "unknown: no Codex turn completed, so Codex reported no tokens";
-const priceBasis = () => `priced from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
+const priceBasis = () => `priced at OpenAI's Standard rates from table dated ${CODEX_PRICES.date}${CODEX_PRICES.status === "placeholder" ? " (PLACEHOLDER rates)" : ""}`;
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
@@ -1243,6 +1246,22 @@ export function claudeRunningTotals(version) {
   return at === -1 ? !m[4] : v[at] > CLAUDE_RUNNING_TOTALS[at];
 }
 
+/** The UNKNOWN_WHY codes a Codex price gives (codexPrice): a record's other reasons are its run's, not its price's. */
+const PRICE_WHY = new Set(["no-price", "price-ended", "long-context"]);
+
+/**
+ * A Codex pass's dollars from its own share `tokens` (sinceSession): `{usd, basis, usdUnknown?, usdUnknownWhy?}`, the
+ * record's reasons other than its price's kept, and the share's own price reason added when it cannot be priced. A run
+ * that reported no tokens keeps its record's dollars and reasons.
+ */
+function ownCodexPrice(rec, tokens, { at } = {}) {
+  if (!runningTokens(rec.tokens)) return { usd: rec.usd ?? null };
+  const p = codexPrice(CODEX_PRICES, rec.model, tokens, { at });
+  const why = [...(Array.isArray(rec.usdUnknownWhy) ? rec.usdUnknownWhy : []).filter((w) => !PRICE_WHY.has(w)), ...(p.usd === null ? [p.why ?? "no-price"] : [])];
+  const out = { usd: p.usd, basis: p.usd === null ? (rec.model ? (p.why === "no-price" || !p.why ? `unknown: no price for ${rec.model}` : `unknown: ${UNKNOWN_WHY[p.why]} (${rec.model})`) : rec.basis) : priceBasis() };
+  return why.length ? { ...out, usdUnknown: Math.max(1, Number.isInteger(rec.usdUnknown) ? rec.usdUnknown : 0), usdUnknownWhy: [...new Set(why)] } : { ...out, usdUnknown: undefined, usdUnknownWhy: undefined };
+}
+
 /**
  * Claude Code, Codex and Copilot report a resumed session's cost or tokens as the session's running total, so a pass
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
@@ -1251,8 +1270,11 @@ export function claudeRunningTotals(version) {
  * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, so its
  * pass's dollars and tokens are unknown (UNKNOWN_WHY `resumed-total`): neither its total nor a share of it is taken.
  */
-export function sinceSession(rec, prior) {
-  if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;
+export function sinceSession(rec, prior, { at } = {}) {
+  // Codex's running total is its tokens, priced here: a prior total whose dollars were unknown (a pass past the
+  // long-context threshold whose requests were not read, a promotional rate that had ended) is still subtracted.
+  const codex = rec?.harness === "codex";
+  if (!rec || !prior || (codex ? !runningTokens(prior.tokens) : prior.usd === null || prior.usd === undefined)) return rec;
   if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) {
     const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, models: undefined, basis: `unknown: ${UNKNOWN_WHY["resumed-total"]} (${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "no version named"})` };
     delete out.models;
@@ -1262,7 +1284,7 @@ export function sinceSession(rec, prior) {
   // start time across --resume); anything else is counted as reported.
   if (rec.harness === "copilot" && (!rec.sessionStartTime || rec.sessionStartTime !== prior.sessionStartTime)) return rec;
   // A total below the one already seen is not a running total (the session's cost state was never written): as reported.
-  if (rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return rec;
+  if (codex ? runningTokens(rec.tokens) && TOKEN_KEYS.some((k) => (rec.tokens[k] ?? 0) < (prior.tokens[k] ?? 0)) : rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return rec;
   const models = rec.models
     ? Object.fromEntries(Object.entries(rec.models).map(([name, m]) => {
         const p = prior.models?.[name] ?? {};
@@ -1277,8 +1299,13 @@ export function sinceSession(rec, prior) {
   const own = { input: less(t.input, pt.input), output: less(t.output, pt.output), cached: less(t.cached, pt.cached), written: less(t.written, pt.written) };
   // A Codex pass's long-context share: its running share less the one before (unknown when either is).
   const above = CODEX_PRICES.longContextAbove;
-  const tokens = rec.harness === "codex" ? withLong(own, sumLong([longShare(t, above), longShare(pt, above)], -1), above) : own;
-  return { ...rec, ...counts, ...cache, usd: less(rec.usd, prior.usd), tokens, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
+  const tokens = codex ? withLong(own, sumLong([longShare(t, above), longShare(pt, above)], -1), above) : own;
+  // A Codex pass's own share is priced on its own (`at` dates it for a promotional rate), and its price's reasons for
+  // unknown cost are its share's, not the running total's.
+  const priced = codex ? ownCodexPrice(rec, tokens, { at }) : { usd: less(rec.usd, prior.usd) };
+  const out = { ...rec, ...counts, ...cache, ...priced, tokens, models, sessionTotal: { usd: rec.usd, tokens: rec.tokens, models: rec.models, ...(rec.premiumRequests === undefined ? {} : { premiumRequests: rec.premiumRequests }), ...(rec.aiu === undefined ? {} : { aiu: rec.aiu }), ...(rec.sessionStartTime ? { sessionStartTime: rec.sessionStartTime } : {}) } };
+  for (const k of ["usdUnknown", "usdUnknownWhy"]) if (out[k] === undefined) delete out[k];
+  return out;
 }
 
 /** Several records of one stage summed: the known dollars, tokens, turns and credits, and its runs of unknown cost (unknownOf). */
@@ -1307,7 +1334,8 @@ export function mergeUsage(records) {
     out.ok = out.ok && r.ok;
     out.error = out.error || r.error;
     out.budgetExceeded = out.budgetExceeded || r.budgetExceeded;
-    out.ended = r.ended ?? out.ended;
+    // The stage's end is its latest record's (a decision call is listed last but may have ended before a pass).
+    if (Number.isFinite(Date.parse(r.ended)) && !(Date.parse(r.ended) <= Date.parse(out.ended))) out.ended = r.ended;
   }
   // Codex's long-context shares, summed (unknown when any is: usage.mjs longShare).
   if (first.harness === "codex") out.tokens = withLong(out.tokens, sumLong(live.map((r) => longShare(r.tokens, CODEX_PRICES.longContextAbove))), CODEX_PRICES.longContextAbove);

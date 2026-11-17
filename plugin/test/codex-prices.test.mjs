@@ -177,3 +177,81 @@ test("a promotional rate prices spend before its end only, and doctor warns in t
   assert.match(fail.detail, /^gpt-5\.6 is priced at OpenAI's promotional rate for gpt-5\.6-sol, which ended 2026-11-30: its runs are of unknown cost/);
   assert.equal(await row("gpt-6.1-sol", "2026-12-01T00:00:00Z"), null, "a rate with no end: nothing to say");
 });
+
+test("a resume after a pass of unknown cost counts only its own tokens: the unknown pass's running total is subtracted", async () => {
+  // Pass 1 passed the threshold with no rollout to read: unknown. Pass 2 resumes the thread, whose rollout now reads.
+  const first = [{ input: 300_000, output: 2_000 }];
+  const all = [...first, { input: 160_000, output: 1_000 }];
+  const one = parseCodex(stream(sum(first)), "gpt-6.1-sol");
+  assert.deepEqual([one.usd, one.usdUnknownWhy], [null, ["long-context"]]);
+  const two = sinceSession(parseCodex(stream(sum(all)), "gpt-6.1-sol", { requests: counts(all) }), { usd: one.usd, tokens: one.tokens });
+  assert.deepEqual(two.tokens, { input: 160_000, output: 1_000, cached: 0, written: 0 });
+  assert.equal(two.usd, Math.round(((160_000 * 2 + 1_000 * 10) / 1e6) * 10000) / 10000, "its own 160K, never pass 1's 300K again");
+  assert.ok(!two.usdUnknown);
+  // The same through runHarness: the unknown pass's total is kept as the session's, and the resume subtracts it.
+  const work = mkdtempSync(join(tmpdir(), "codex-resume-"));
+  const home = join(work, "codex");
+  const day = join(home, "sessions", "2026", "11", "16");
+  const bin = join(work, "bin");
+  mkdirSync(bin, { recursive: true });
+  // The fake codex prints `stdout.jsonl` and, when there is one, copies `rollout.jsonl` where Codex writes it.
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}\nconst fs = require("node:fs");\nif (fs.existsSync(${JSON.stringify(join(work, "rollout.jsonl"))})) { fs.mkdirSync(${JSON.stringify(day)}, { recursive: true }); fs.copyFileSync(${JSON.stringify(join(work, "rollout.jsonl"))}, ${JSON.stringify(join(day, `rollout-2026-11-16T10-00-00-${THREAD}.jsonl`))}); }\nprocess.stdout.write(fs.readFileSync(${JSON.stringify(join(work, "stdout.jsonl"))}, "utf8"));\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME };
+  process.env.PATH = `${bin}:${saved.PATH}`;
+  process.env.CODEX_HOME = home;
+  const run = (resume, label) => runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "p", maxUsd: 0, resume, cwd: work, env: { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: home }, timeoutMs: 60_000, label });
+  try {
+    writeFileSync(join(work, "stdout.jsonl"), stream(sum(first)));
+    const a = await run(null, "work-1");
+    assert.deepEqual([a.usd, a.usdUnknownWhy], [null, ["long-context"]]);
+    writeFileSync(join(work, "stdout.jsonl"), stream(sum(all)));
+    writeFileSync(join(work, "rollout.jsonl"), `${JSON.stringify({ type: "session_meta", payload: { id: THREAD } })}\n${counts(all)}\n`);
+    const b = await run(THREAD, "validation-fix-1");
+    assert.equal(b.usd, two.usd);
+    assert.ok(!b.usdUnknown);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a thread across the promotional rate's end: each pass is priced at its own time, and none is counted twice", () => {
+  const t1 = { input: 100_000, output: 1_000 };
+  const t2 = { input: 150_000, output: 1_500 };
+  const t3 = { input: 180_000, output: 1_800 };
+  const p1 = parseCodex(stream(t1), "gpt-5.6-sol", { at: "2026-11-29T20:00:00Z" });
+  assert.equal(p1.usd, Math.round(((100_000 * 4 + 1_000 * 20) / 1e6) * 10000) / 10000);
+  // Ended after it: of unknown cost, its share 50K.
+  const p2 = sinceSession(parseCodex(stream(t2), "gpt-5.6-sol", { at: "2026-11-30T01:00:00Z" }), { usd: p1.usd, tokens: p1.tokens }, { at: "2026-11-30T01:00:00Z" });
+  assert.deepEqual([p2.usd, p2.usdUnknownWhy, p2.tokens.input], [null, ["price-ended"], 50_000]);
+  // The next pass subtracts that pass's total, though its dollars were unknown.
+  const p3 = sinceSession(parseCodex(stream(t3), "gpt-5.6-sol", { at: "2026-12-01T00:00:00Z" }), { usd: p2.sessionTotal.usd, tokens: p2.sessionTotal.tokens }, { at: "2026-12-01T00:00:00Z" });
+  assert.deepEqual([p3.usd, p3.usdUnknownWhy, p3.tokens.input], [null, ["price-ended"], 30_000]);
+});
+
+test("the bench dates a stage by its latest record's end: a stage across the promotional rate's end is of unknown cost", () => {
+  const pass = (t, ended, extra = {}) => ({ ...parseCodex(stream(t), "gpt-5.6-sol", { at: ended }), started: ended, ended, ...extra });
+  const before = pass({ input: 100_000, output: 1_000 }, "2026-11-29T20:00:00Z");
+  const after = pass({ input: 50_000, output: 500 }, "2026-11-30T02:00:00Z");
+  // A decision call, kept last in the stage's records, that ended before the last pass.
+  const decision = pass({ input: 2_000, output: 50 }, "2026-11-29T21:00:00Z", { decision: true, label: "decision" });
+  const stage = mergeUsage([before, decision, after]);
+  assert.equal(stage.ended, "2026-11-30T02:00:00Z");
+  assert.equal(mergeUsage([before, after, decision]).ended, "2026-11-30T02:00:00Z", "whatever the order");
+  const cost = costOf([{ ...stage, runs: 2 }], CODEX_PRICES);
+  assert.deepEqual([cost.usd, cost.usdUnknownWhy], [null, ["price-ended"]]);
+  // A record with a start but no end is not dated by its start.
+  const { ended: _, ...noEnd } = before;
+  assert.deepEqual(costOf([{ ...noEnd, runs: 1 }], CODEX_PRICES).usd, null);
+  assert.equal(costOf([{ ...before, runs: 1 }], CODEX_PRICES).usd, before.usd);
+});
+
+test("doctor: a Codex API key's dollars assume the OpenAI project's Standard Service Tier, which Codex does not report", async () => {
+  const checks = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexApiKey: "sk-c" }, env: { GITHUB_ACTIONS: "true", PENDULUM_INPUT_CODEX_API_KEY: "sk-c" } });
+  const row = checks.find((c) => c.name === "codex tier");
+  assert.equal(row?.status, "WARN");
+  assert.match(row.detail, /Standard rates.*Service Tier is Standard.*Fast is billed 2× those rates \(2\.5× on gpt-5\.5, 1\.8× on gpt-5-mini\)/);
+  const gateway = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g" }, env: { GITHUB_ACTIONS: "true", PENDULUM_INPUT_CODEX_GATEWAY_KEY: "vck_g" } });
+  assert.equal(gateway.find((c) => c.name === "codex tier"), undefined, "the gateway's own account, not the adopter's project");
+});

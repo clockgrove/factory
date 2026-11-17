@@ -11,8 +11,6 @@ The mark is the lower half of a grandfather clock's case: an arched wooden windo
 
 The plugin's listing icon (`plugin/assets/icon.png`) and `docs/img/icon.png` are the cream icon; `docs/img/social-preview.png` is the repository's 1280×640 social preview.
 
-The Clockgrove and Pendulum names and this logo are the project's trademarks and are not covered by the repository's MIT license: use them to refer to Pendulum, not to brand a fork or a derivative.
-
 ## Web files
 
 - `web/favicon.ico`: bundled 16, 32 and 48 px favicon.

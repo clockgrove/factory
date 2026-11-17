@@ -180,23 +180,27 @@ To have Pendulum build on a workflow change instead, land that change yourself f
 
 ## Commands
 
-With the plugin installed in Claude Code, Codex or GitHub Copilot CLI, ask in plain words and use the full name, Clockgrove Pendulum: each request below loads the Pendulum skill that does it, and the full name keeps your agent from reading a bare "Pendulum" as something else, such as the Python date-time library of that name. Where your agent offers skills as slash commands, the command works too.
+Pendulum is a plugin of [Agent Skills](https://agentskills.io): one folder per skill under [`plugin/skills/`](../plugin/skills/), each a `SKILL.md` that Claude Code, Codex and GitHub Copilot CLI load the same way. With the plugin installed, ask in plain words and use the full name, Clockgrove Pendulum: each request below loads the Pendulum skill that does it, and the full name keeps your agent from reading a bare "Pendulum" as something else, such as the Python date-time library of that name. In Claude Code each skill is also a slash command, `/pendulum:<skill>`; Codex and Copilot list them among their own skills. Each command below links to its skill.
 
 | Say | Command | What it does |
 | --- | --- | --- |
-| "Set up Clockgrove Pendulum for this repository." | `/pendulum:pendulum-setup` | Installs Pendulum one consented step at a time, and opens the pull request that adds the workflow file |
-| "Is Clockgrove Pendulum set up correctly here?" | `/pendulum:pendulum-doctor` | Checks the repository, its settings, the credential and the runner; changes nothing |
-| "File a Clockgrove Pendulum Objective: ..." | `/pendulum:pendulum-file` | Writes what you describe as an Objective issue, shows it, and on your yes creates it started (`pendulum:objective`) or as a draft (`pendulum:draft`) |
+| "Set up Clockgrove Pendulum for this repository." | [`/pendulum:pendulum-setup`](../plugin/skills/pendulum-setup/SKILL.md) | Installs Pendulum one consented step at a time, and opens the pull request that adds the workflow file |
+| "Is Clockgrove Pendulum set up correctly here?" | [`/pendulum:pendulum-doctor`](../plugin/skills/pendulum-doctor/SKILL.md) | Checks the repository, its settings, the credential and the runner; changes nothing |
+| "File a Clockgrove Pendulum Objective: ..." | [`/pendulum:pendulum-file`](../plugin/skills/pendulum-file/SKILL.md) | Writes what you describe as an Objective issue, shows it, and on your yes creates it started (`pendulum:objective`) or as a draft (`pendulum:draft`) |
 | "Let's keep working on Clockgrove Pendulum Objective 12." | `/pendulum:pendulum-file <issue>` | Loads the draft from GitHub to refine it with you, and saves the changes back on your yes |
 | "Start Clockgrove Pendulum Objective 12." | `/pendulum:pendulum-file <issue>` | Starts a draft on your yes, after the trust check: takes `pendulum:draft` off and applies `pendulum:objective` |
-| "What is Clockgrove Pendulum doing here?" | `/pendulum:pendulum-status [issue]` | Shows each Objective's state; for a Blocked one or a Question, the reason and the way on (resume, answer or restart), taken on your yes (Blocked and Question, above) |
-| "Stop Clockgrove Pendulum Objective 12." | `/pendulum:pendulum-stop <issue>` | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again (An Objective's lifecycle, above) |
-| "Restart Clockgrove Pendulum Objective 12." | `/pendulum:pendulum-restart <issue>` | Applies `pendulum:restart` on your yes: the Objective starts over from the issue's current text (An Objective's lifecycle, above) |
-| "Run Clockgrove Pendulum Objective 42 here." | `/pendulum:pendulum-run <issue>` | Runs one Objective on this machine, in local mode or in the session itself |
-| "Review Clockgrove Pendulum PR 57." | `/pendulum:pendulum-review-here <pr>` | Runs the reviewer on one Pendulum PR in your session |
-| "Start the Clockgrove Pendulum local loop." | `/pendulum:pendulum-serve` | Starts the local loop ([LOCAL.md](LOCAL.md)) |
-| "Kick the Clockgrove Pendulum dispatcher." | `/pendulum:pendulum-kick [issue]` | Runs the Action's dispatcher now, which starts the Objectives that are ready, or one Objective |
-| "Apply the Clockgrove Pendulum workflow hand-over for Objective 12." | `/pendulum:pendulum-handover <issue>` | Puts the workflow change Pendulum handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
-| "Show the Clockgrove Pendulum scorecard." | `/pendulum:pendulum-score` | Prints the scorecard: walk-away, quality, operator minutes, cost |
+| "What is Clockgrove Pendulum doing here?", "Why is Clockgrove Pendulum Objective 12 Blocked?" | [`/pendulum:pendulum-status`](../plugin/skills/pendulum-status/SKILL.md) `[issue]` | Shows each Objective's state; for a Blocked one or a Question, the reason and the way on (resume, answer or restart), taken on your yes (Blocked and Question, above) |
+| "Stop Clockgrove Pendulum Objective 12." | [`/pendulum:pendulum-stop`](../plugin/skills/pendulum-stop/SKILL.md) `<issue>` | Removes the Objective's label on your yes: its running stage ends and nothing picks it up again (An Objective's lifecycle, above) |
+| "Restart Clockgrove Pendulum Objective 12." | [`/pendulum:pendulum-restart`](../plugin/skills/pendulum-restart/SKILL.md) `<issue>` | Applies `pendulum:restart` on your yes: the Objective starts over from the issue's current text (An Objective's lifecycle, above) |
+| "Run Clockgrove Pendulum Objective 42 here." | [`/pendulum:pendulum-run`](../plugin/skills/pendulum-run/SKILL.md) `<issue>` | Runs one Objective on this machine, in local mode or in the session itself |
+| "Review Clockgrove Pendulum PR 57." | [`/pendulum:pendulum-review-here`](../plugin/skills/pendulum-review-here/SKILL.md) `<pr>` | Runs the reviewer on one Pendulum PR in your session |
+| "Start the Clockgrove Pendulum local loop." | [`/pendulum:pendulum-serve`](../plugin/skills/pendulum-serve/SKILL.md) | Starts the local loop ([LOCAL.md](LOCAL.md)) |
+| "Kick the Clockgrove Pendulum dispatcher." | [`/pendulum:pendulum-kick`](../plugin/skills/pendulum-kick/SKILL.md) `[issue]` | Runs the Action's dispatcher now, which starts the Objectives that are ready, or one Objective |
+| "Apply the Clockgrove Pendulum workflow hand-over for Objective 12." | [`/pendulum:pendulum-handover`](../plugin/skills/pendulum-handover/SKILL.md) `<issue>` | Puts the workflow change Pendulum handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
+| "Show the Clockgrove Pendulum scorecard." | [`/pendulum:pendulum-score`](../plugin/skills/pendulum-score/SKILL.md) | Prints the scorecard: whether each Objective merged with no one stepping in, quality, operator minutes, cost |
+
+Five more skills are loaded for you. The worker follows [`pendulum-objective-plan`](../plugin/skills/pendulum-objective-plan/SKILL.md), [`pendulum-implement-split`](../plugin/skills/pendulum-implement-split/SKILL.md), [`pendulum-prove-acceptance`](../plugin/skills/pendulum-prove-acceptance/SKILL.md) and [`pendulum-deliver-pr`](../plugin/skills/pendulum-deliver-pr/SKILL.md), in that order; and the reviewer follows [`pendulum-review-pr`](../plugin/skills/pendulum-review-pr/SKILL.md).
+
+Install Pendulum as a plugin (the README's [Quick start](../README.md#quick-start)). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, kick, review-here, handover and score skills run, so those skills do not work installed that way.
 
 On the command line, `gh workflow run pendulum.yml -f issue=<number>` starts one Objective now, local mode has `pendulum serve`, `pendulum run <issue>` and `pendulum review <pr>`, and `pendulum wait` waits for the queue's next event on any route ([LOCAL.md](LOCAL.md), Run it).

@@ -98,7 +98,7 @@ Pendulum never handles a payment, and no bill comes from Clockgrove. To keep tho
 
 - **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change can cost under a dollar (the [real run](#a-real-run) above: $0.52), and a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Pendulum's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/pendulum:pendulum-run --here`) is neither capped nor counted.
 - **To run one Objective on a cheaper or a stronger model,** or another coding agent, label its issue (`pendulum:model:<id>`, `pendulum:harness:<name>`, and sub-agent and reviewer labels): the workflow's coding agent and models stay the defaults for the rest ([docs/USAGE.md](docs/USAGE.md), Choose the harness and models).
-- **Several subscriptions or keys of one coding agent work as one pool.** Declare them as accounts, and with automatic choice on, each worker or reviewer run starts on the free one with the most quota left, as Claude Code and Codex report it on each run: a usage limit sets aside only the account that met it, runs go on on the others, and that account comes back into use on its own. Set it up for your machine in [docs/LOCAL.md](docs/LOCAL.md) (Accounts), for GitHub Actions and the cloud sandbox in [docs/INSTALL.md](docs/INSTALL.md) (Several accounts).
+- **Several subscriptions or keys of one coding agent work as one pool:** each run starts on the account with the most quota left, and a usage limit sets aside only the account that met it ([docs/LOCAL.md](docs/LOCAL.md), Accounts; [docs/INSTALL.md](docs/INSTALL.md), Several accounts).
 - **Runs take from a few minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run pendulum.yml -f issue=<number>`) runs it even when that limit is reached.
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Pendulum stops at a ready-for-review PR and you merge it yourself.
@@ -146,7 +146,7 @@ The session runs Pendulum's doctor, which changes nothing. Each line it prints i
 
 > File a Clockgrove Pendulum Objective: `mytool --version` should print the version from package.json.
 
-The session writes the issue in the shape Pendulum reads, shows it to you, and asks whether to start it now, save it as a draft, or keep discussing. Started, it carries the `pendulum:objective` label, which starts the run. A draft carries `pendulum:draft` instead, which Pendulum never runs: say "Let's keep working on Clockgrove Pendulum Objective 12" to refine it in a later session (changes are saved to the issue on your yes), and "Start Clockgrove Pendulum Objective 12" when it is ready. The issue looks like this:
+The session writes the issue in the shape Pendulum reads, shows it to you, and asks whether to start it now (the `pendulum:objective` label starts the run), save it as a draft (`pendulum:draft`, which Pendulum never runs; [docs/USAGE.md](docs/USAGE.md#commands) has the requests that refine and start one), or keep discussing. The issue looks like this:
 
 ```markdown
 ## Goal
@@ -167,7 +167,7 @@ The same setup runs as scripts from a clone of Pendulum, with no coding agent in
 
 ### Run it on your own machine instead
 
-Local mode runs the same worker and reviewer on your machine. Claude Code and Codex run on the login you already have; Copilot uses the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly, below), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Pendulum in local mode" and the pendulum-setup skill sets up both. The local loop (`pendulum serve`) takes the Objectives labelled `pendulum:local`. Where no Action runs (GitHub lists no active `pendulum.yml` workflow for the repository), it takes every Objective, `pendulum:objective` alone included, and labels each `pendulum:local` as it picks it. With the Action active, an Objective without `pendulum:local` is the Action's, and `serve` says how many it leaves to it: add `pendulum:local` to run one on your machine. macOS support is partial: Claude Code and Codex only, and not yet proven on a full run. See [docs/LOCAL.md](docs/LOCAL.md).
+Local mode runs the same worker and reviewer on your machine: Claude Code and Codex on the login you already have, Copilot on the same seat token as on Actions. It needs no GitHub App and no secrets stored in GitHub, but more machine setup: Linux or WSL2 (macOS partly: Claude Code and Codex only, not yet proven on a full run), a few sandbox packages, and a GitHub token for this one repository. It reads its settings (models, caps, validation commands) from the workflow file on your default branch and runs on defaults without one, so say "Set up Clockgrove Pendulum in local mode" and the pendulum-setup skill sets up both. The local loop (`pendulum serve`) takes the Objectives labelled `pendulum:local`, and every Objective where no Pendulum Action runs ([docs/LOCAL.md](docs/LOCAL.md#routing), Routing).
 
 ### Local quick start
 
@@ -177,30 +177,11 @@ On Linux or WSL2, with the plugin installed (step 1) and Claude Code or Codex lo
 2. **Create a GitHub token for this one repository** and save it as [docs/LOCAL.md](docs/LOCAL.md) (Set it up, step 2) says.
 3. **Check the machine:** in your clone, ask "Is Clockgrove Pendulum set up for local mode here?" and fix what it names.
 4. **Start the loop:** say "Start the Clockgrove Pendulum local loop", or run `pendulum serve` in your clone and leave it running.
-5. **File an Objective** ("File a Clockgrove Pendulum Objective: ..."). With no Pendulum workflow active on GitHub, the loop takes it as filed and labels it `pendulum:local`. With one active, add `pendulum:local` beside `pendulum:objective`: the loop runs it on your machine, and GitHub Actions leaves it alone.
+5. **File an Objective** ("File a Clockgrove Pendulum Objective: ..."). Where a Pendulum workflow is active on GitHub, add `pendulum:local` beside `pendulum:objective` to run it on your machine.
 
 ## Skills
 
-Pendulum is a plugin of [Agent Skills](https://agentskills.io): one folder per skill under [`plugin/skills/`](plugin/skills/), each a `SKILL.md` that Claude Code, Codex and GitHub Copilot CLI load the same way. Ask in plain words with the full name, Clockgrove Pendulum. In Claude Code each skill is also a slash command, `/pendulum:<skill>`; Codex and Copilot list them among their own skills.
-
-| Skill | Say | What it does |
-| --- | --- | --- |
-| [`pendulum-setup`](plugin/skills/pendulum-setup/SKILL.md) | "Set up Clockgrove Pendulum for this repository." | Installs Pendulum one consented step at a time and opens the pull request that adds the workflow file |
-| [`pendulum-doctor`](plugin/skills/pendulum-doctor/SKILL.md) | "Is Clockgrove Pendulum set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
-| [`pendulum-file`](plugin/skills/pendulum-file/SKILL.md) | "File a Clockgrove Pendulum Objective: ...", "Let's keep working on Clockgrove Pendulum Objective 12.", "Start Clockgrove Pendulum Objective 12." | Writes what you describe as an Objective issue, shows it, and creates it on your yes, started or as a draft; refines a draft and saves it back, or starts it after the trust check, on your yes |
-| [`pendulum-status`](plugin/skills/pendulum-status/SKILL.md) | "What is Clockgrove Pendulum doing here?", "Why is Clockgrove Pendulum Objective 12 Blocked?" | Shows each Objective's state; for a Blocked one or a Question, the reason and the way on (resume, answer or restart), taken on your yes |
-| [`pendulum-stop`](plugin/skills/pendulum-stop/SKILL.md) | "Stop Clockgrove Pendulum Objective 12." | Removes the Objective's label on your yes: its run in progress ends and nothing picks it up again |
-| [`pendulum-restart`](plugin/skills/pendulum-restart/SKILL.md) | "Restart Clockgrove Pendulum Objective 12." | Applies `pendulum:restart` on your yes: the Objective starts over from the issue's current text |
-| [`pendulum-run`](plugin/skills/pendulum-run/SKILL.md) | "Run Clockgrove Pendulum Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |
-| [`pendulum-review-here`](plugin/skills/pendulum-review-here/SKILL.md) | "Review Clockgrove Pendulum PR 57." | Runs the reviewer on one Pendulum PR in your session |
-| [`pendulum-serve`](plugin/skills/pendulum-serve/SKILL.md) | "Start the Clockgrove Pendulum local loop." | Starts the loop that runs Objectives on this machine ([docs/LOCAL.md](docs/LOCAL.md)) |
-| [`pendulum-kick`](plugin/skills/pendulum-kick/SKILL.md) | "Kick the Clockgrove Pendulum dispatcher." | Runs the Action's dispatcher now, which starts the Objectives that are ready |
-| [`pendulum-handover`](plugin/skills/pendulum-handover/SKILL.md) | "Apply the Clockgrove Pendulum workflow hand-over for Objective 12." | Puts the workflow change Pendulum handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
-| [`pendulum-score`](plugin/skills/pendulum-score/SKILL.md) | "Show the Clockgrove Pendulum scorecard." | Prints the scorecard: whether each Objective merged with no one stepping in, quality, operator minutes, cost |
-
-Five more are loaded for you. The worker follows [`pendulum-objective-plan`](plugin/skills/pendulum-objective-plan/SKILL.md), [`pendulum-implement-split`](plugin/skills/pendulum-implement-split/SKILL.md), [`pendulum-prove-acceptance`](plugin/skills/pendulum-prove-acceptance/SKILL.md) and [`pendulum-deliver-pr`](plugin/skills/pendulum-deliver-pr/SKILL.md), in that order; and the reviewer follows [`pendulum-review-pr`](plugin/skills/pendulum-review-pr/SKILL.md).
-
-Install Pendulum as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, kick, review-here, handover and score skills run, so those skills do not work installed that way.
+Pendulum is a plugin of [Agent Skills](https://agentskills.io) that Claude Code, Codex and GitHub Copilot CLI load the same way. Ask in plain words with the full name, Clockgrove Pendulum; [docs/USAGE.md](docs/USAGE.md#commands) lists every request, its slash command and its skill.
 
 ## What Pendulum adds to your repository
 

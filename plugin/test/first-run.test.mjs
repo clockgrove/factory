@@ -1,12 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, existsSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { tokenFile } from "../scripts/lib/local.mjs";
+import { repoFromRemote, tokenFile } from "../scripts/lib/local.mjs";
 import { whichSync } from "../scripts/lib/proc.mjs";
 
 // The `factory` command's first use (#457), as a newcomer meets it: the real front (plugin/bin/factory) in its own
@@ -92,7 +92,14 @@ test("#457: a clone with no origin, or no clone, is one plain line naming the fi
   const out = await factory(["serve", "--once"], { ...fx, cwd: fx.home });
   assert.equal(out.status, 1);
   assert.equal(out.stderr.trim().split("\n").length, 1, out.stderr);
-  assert.match(out.stderr, /is not in a git clone .*; run factory in a clone of the repository, or pass --checkout CLONE/);
+  assert.match(out.stderr, /is not in a git clone .*; run this in a clone of the repository, or pass --checkout CLONE\n$/);
+  // A command that takes --repo in place of a clone names --repo.
+  for (const args of [["token", "set"], ["doctor"], ["wait", "--timeout", "1"]]) {
+    const r = await factory(args, { ...fx, cwd: fx.home, input: "github_pat_x\n" });
+    assert.equal(r.status, 1, args.join(" "));
+    assert.equal(r.stderr.trim().split("\n").length, 1, r.stderr);
+    assert.match(r.stderr, /is not in a git clone .*; run this in a clone of the repository, or pass --repo OWNER\/NAME\n$/, args.join(" "));
+  }
   // doctor.mjs itself, run directly as the docs and skills run it: the same line, not "--repo is required".
   const d = spawnSync(process.execPath, [join(PLUGIN, "scripts", "doctor.mjs"), "--local"], { cwd: fx.clone, env: fx.env, encoding: "utf8" });
   assert.ok(d.stderr.includes("has no remote named origin") && !d.stderr.includes("is required"), d.stderr);
@@ -102,7 +109,8 @@ test("#457: factory doctor (and doctor.mjs without --repo) checks the repository
   const fx = fixture();
   const gh = await fakeGithub();
   try {
-    const env = { ...fx.env, GITHUB_API_URL: gh.url, GITHUB_GRAPHQL_URL: `${gh.url}/graphql` };
+    // git alone on PATH: no harness CLI or gh of this machine runs under the fake home.
+    const env = { ...fx.env, PATH: gitOnly(fx.root), GITHUB_API_URL: gh.url, GITHUB_GRAPHQL_URL: `${gh.url}/graphql` };
     const r = await factory(["doctor"], { cwd: fx.clone, env });
     assert.ok(gh.asked.includes(`/repos/${REPO}`), `${gh.asked.join(", ")}\n${r.stderr}`);
     assert.ok(!r.stderr.includes("is required"), r.stderr);
@@ -153,8 +161,8 @@ test("#457: factory token set saves the token where local mode reads it, owner-o
   assert.equal(readFileSync(file, "utf8"), "github_pat_third");
   assert.equal(statSync(file).mode & 0o777, 0o600);
 
-  // Nothing given, or more than one word: refused, and the saved token stays.
-  for (const input of ["", "\n", "github_pat_a github_pat_b\n"]) {
+  // Nothing given, more than one word, or a character no GitHub token has: refused, and the saved token stays.
+  for (const input of ["", "\n", "github_pat_a github_pat_b\n", "github_pat_\u0001x\n", "github_pat_\u001b[2Jx", "ghp-x\n"]) {
     const bad = await factory(["token", "set"], { cwd: fx.clone, env: fx.env, input });
     assert.equal(bad.status, 1, JSON.stringify(input));
     assert.match(bad.stderr, /nothing saved/i);
@@ -169,10 +177,48 @@ test("#457: factory token set saves the token where local mode reads it, owner-o
   assert.equal(existsSync(join(fx.home, ".config", "factory", "escape")), false);
   const word = await factory(["token", "get"], { cwd: fx.clone, env: fx.env });
   assert.equal(word.status, 64);
+
+  // An owner's folder made by hand with group or world bits: owner-only again after a save.
+  chmodSync(join(fx.home, ".config", "factory", "tokens", "acme"), 0o755);
+  assert.equal((await factory(["token", "set"], { cwd: fx.clone, env: fx.env, input: "github_pat_fourth" })).status, 0);
+  assert.equal(statSync(join(fx.home, ".config", "factory", "tokens", "acme")).mode & 0o777, 0o700);
+  assert.equal(statSync(join(fx.home, ".config", "factory", "tokens")).mode & 0o777, 0o700);
+});
+
+test("#457: no token is saved or read through a symbolic link in ~/.config/factory, which the sandboxes hide by its path alone", async () => {
+  const fx = fixture();
+  const elsewhere = join(fx.root, "elsewhere");
+  mkdirSync(elsewhere);
+  const base = join(fx.home, ".config", "factory");
+  mkdirSync(join(fx.home, ".config"));
+  const links = [
+    [base, () => symlinkSync(elsewhere, base)],
+    [join(base, "tokens"), () => (mkdirSync(base), symlinkSync(elsewhere, join(base, "tokens")))],
+    [join(base, "tokens", "acme"), () => (mkdirSync(join(base, "tokens"), { recursive: true }), symlinkSync(elsewhere, join(base, "tokens", "acme")))],
+  ];
+  for (const [at, make] of links) {
+    make();
+    const r = await factory(["token", "set"], { cwd: fx.clone, env: fx.env, input: "github_pat_linked" });
+    assert.equal(r.status, 1, at);
+    assert.ok(r.stderr.includes(`${at} is a symbolic link`) && /Nothing saved/.test(r.stderr), r.stderr);
+    assert.equal(r.stderr.trim().split("\n").length, 1, r.stderr);
+    // A token already behind that link is not read either: serve stops with the same line.
+    writeFileSync(join(elsewhere, "widget"), "github_pat_planted");
+    const s = await factory(["serve", "--once"], { cwd: fx.clone, env: fx.env, path: gitOnly(mkdtempSync(join(fx.root, "p-"))) });
+    assert.equal(s.status, 1);
+    assert.ok(s.stderr.includes(`${at} is a symbolic link`), s.stderr);
+    assert.ok(!s.stderr.includes("github_pat_planted"));
+    renameSync(at, `${at}.gone`);
+  }
+});
+
+test("#457: repoFromRemote takes github.com alone as the host, never a name that ends in it", () => {
+  for (const url of ["https://github.com/acme/widget.git", "git@github.com:acme/widget.git", "ssh://git@github.com/acme/widget", "https://x-access-token:t@github.com/acme/widget/"]) assert.equal(repoFromRemote(url), REPO, url);
+  for (const url of ["https://evilgithub.com/acme/widget", "git@notgithub.com:acme/widget.git", "https://github.com.evil.io/acme/widget", "https://gitlab.com/acme/widget"]) assert.equal(repoFromRemote(url), null, url);
 });
 
 const script = platform() === "linux" ? whichSync("script") : null;
-test("#457: at a terminal, factory token set asks without echoing what is typed; Ctrl-C saves nothing", { skip: !script && "needs util-linux script for a terminal" }, async () => {
+test("#457: at a terminal, factory token set asks without echoing what is typed; Ctrl-C or Ctrl-Z saves nothing", { skip: !script && "needs util-linux script for a terminal" }, async () => {
   const fx = fixture();
   // A terminal of its own (script's pty); the token is typed once the prompt shows, as a person types it.
   const typed = (keys) =>
@@ -187,7 +233,9 @@ test("#457: at a terminal, factory token set asks without echoing what is typed;
           c.stdin.write(keys);
         }
       });
-      c.on("close", (status) => res({ status, screen }));
+      // A command that stops instead of ending (a Ctrl-Z it does not take) fails here, not as a hung suite.
+      const stuck = setTimeout(() => c.kill("SIGKILL"), 20_000);
+      c.on("close", (status) => (clearTimeout(stuck), res({ status, screen })));
     });
   const token = "github_pat_TYPED0457";
   const r = await typed(`${token}\r`);
@@ -198,6 +246,12 @@ test("#457: at a terminal, factory token set asks without echoing what is typed;
   assert.equal(c.status, 1, c.screen);
   assert.ok(!c.screen.includes("github_pat_NOT"));
   assert.match(c.screen, /cancelled; nothing saved/);
+  assert.equal(readFileSync(tokenFile(REPO, fx.home), "utf8"), token);
+  // Ctrl-Z: no stop with the echo back on and the prompt still reading; the command ends, nothing saved.
+  const z = await typed("github_pat_SUSPEND\u001a");
+  assert.equal(z.status, 1, z.screen);
+  assert.ok(!z.screen.includes("github_pat_SUSPEND"));
+  assert.match(z.screen, /cancelled; nothing saved/);
   assert.equal(readFileSync(tokenFile(REPO, fx.home), "utf8"), token);
 });
 
@@ -210,10 +264,13 @@ test("#457: serve with no token, or missing tools, says each in one line with it
     const env = { ...fx.env, GITHUB_API_URL: gh.url };
     const none = await factory(["serve", "--once"], { cwd: fx.clone, env, path: bin });
     assert.equal(none.status, 1);
-    const said = none.stderr.split("\n").filter((l) => l.startsWith("[factory] local:"));
-    assert.equal(said.length, 1, none.stderr);
-    assert.ok(said[0].includes(`no token for ${REPO}`) && said[0].includes("`factory token set`"), said[0]);
-    assert.ok(!/FACTORY_GUESS_HOURS|Factory's defaults/.test(none.stdout + none.stderr), "no listing of the settings");
+    // Every start problem at once, the token among them, each one line naming its fix.
+    assert.match(none.stderr, /local mode cannot start:\n/);
+    const token = none.stderr.split("\n").filter((l) => l.startsWith(`- no token for ${REPO}:`));
+    assert.equal(token.length, 1, none.stderr);
+    assert.ok(token[0].includes("`factory token set`"), token[0]);
+    assert.match(none.stderr, /\n- gh is not on PATH; install the GitHub CLI/);
+    assert.ok(!/FACTORY_GUESS_HOURS|Factory's defaults|settings, each over/.test(none.stdout + none.stderr), "no listing of the settings");
 
     const tools = await factory(["serve", "--once"], { cwd: fx.clone, env: { ...env, FACTORY_LOCAL_TOKEN: "github_pat_x" }, path: bin });
     assert.equal(tools.status, 1);

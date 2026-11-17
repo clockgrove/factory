@@ -2,7 +2,7 @@
 // local loop off each other's Objectives, the sandbox the harness and Factory's own shell
 // commands run in, the env a child may see, and the adopter's workflow env block read as the
 // local configuration. GitHub stays the only state.
-import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -2152,17 +2152,42 @@ export function tokenFile(repoFull, home = homedir()) {
   const [owner, name] = repoFull.split("/");
   return join(home, ".config", "factory", "tokens", owner, name);
 }
-/** Local mode's token for a repository: FACTORY_LOCAL_TOKEN, else its tokenFile; "" when neither is set. */
+/**
+ * Why local mode's token file for a repository may not be read or written, else null: a symbolic link at
+ * ~/.config/factory, its `tokens` folder, the owner's folder or the file itself. The sandboxes hide ~/.config/factory by
+ * that path alone, so a token behind a link could sit where a stage reads it.
+ */
+export function tokenPlaceProblem(repoFull, home = homedir()) {
+  const file = tokenFile(repoFull, home);
+  const base = join(home, ".config", "factory");
+  for (const at of [base, join(base, "tokens"), dirname(file), file]) {
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch {
+      return null;
+    }
+    if (st.isSymbolicLink()) return `${at} is a symbolic link; local mode keeps its token only under a real ~/.config/factory, which every sandbox hides by that path: replace the link with a real folder (or file) of your own`;
+  }
+  return null;
+}
+/**
+ * Local mode's token for a repository: FACTORY_LOCAL_TOKEN, else its tokenFile; "" when neither is set. Throws
+ * tokenPlaceProblem's line when the file is reached through a symbolic link.
+ */
 export function localToken(repoFull, env = process.env) {
   if (env.FACTORY_LOCAL_TOKEN) return env.FACTORY_LOCAL_TOKEN.trim();
+  const problem = tokenPlaceProblem(repoFull);
+  if (problem) throw new Error(problem);
   const f = tokenFile(repoFull);
   return existsSync(f) ? readFileSync(f, "utf8").trim() : "";
 }
 /**
- * Saves local mode's token for a repository where localToken reads it (tokenFile): a new file, owner-only (0600), put in
- * place by rename, so a link or a file of other mode there is replaced whole and no reader sees half a token; the folders
- * it creates are owner-only too. Returns the file's path. Refuses a repository that is not OWNER/NAME, an empty token,
- * or one with whitespace inside.
+ * Saves local mode's token for a repository where localToken reads it (tokenFile): a new file, owner-only (0600),
+ * synced and put in place by rename, so a file of other mode there is replaced whole and no reader sees half a token;
+ * the `tokens` and owner's folders are made owner-only (0700). Returns the file's path. Refuses a repository that is
+ * not OWNER/NAME, a token that is empty or holds anything but letters, digits and underscores (every GitHub token's
+ * characters), and a place behind a symbolic link (tokenPlaceProblem).
  */
 export function saveLocalToken(repoFull, token, home = homedir()) {
   // A repository's two names as GitHub allows them, so the file lands under tokens/ and nowhere else.
@@ -2170,13 +2195,27 @@ export function saveLocalToken(repoFull, token, home = homedir()) {
   if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) throw new Error(`--repo must be OWNER/NAME, not ${JSON.stringify(repoFull)}; nothing saved`);
   const t = String(token ?? "").trim();
   if (!t) throw new Error("no token given; nothing saved");
-  if (/\s/.test(t)) throw new Error("the token has whitespace inside it; paste the one token GitHub showed. Nothing saved");
+  if (!/^[A-Za-z0-9_]+$/.test(t)) throw new Error("the token holds characters no GitHub token has (only letters, digits and underscores); paste the one token GitHub showed. Nothing saved");
+  const placed = () => {
+    const problem = tokenPlaceProblem(repoFull, home);
+    if (problem) throw new Error(`${problem}. Nothing saved`);
+  };
+  placed();
   const file = tokenFile(repoFull, home);
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const temp = join(dirname(file), `.${basename(file)}.${process.pid}.tmp`);
+  const owner = dirname(file);
+  mkdirSync(owner, { recursive: true, mode: 0o700 });
+  placed();
+  for (const d of [dirname(owner), owner]) chmodSync(d, 0o700);
+  const temp = join(owner, `.${basename(file)}.${process.pid}.tmp`);
   rmSync(temp, { force: true });
   try {
-    writeFileSync(temp, t, { mode: 0o600, flag: "wx" });
+    const fd = openSync(temp, "wx", 0o600);
+    try {
+      writeSync(fd, t);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     chmodSync(temp, 0o600);
     renameSync(temp, file);
   } catch (e) {
@@ -2198,19 +2237,19 @@ const gitRan = (r) => {
 
 /** OWNER/NAME from a GitHub remote's URL (https, ssh or scp form), else null. */
 export function repoFromRemote(url) {
-  const m = /github\.com[:/]([^/]+)\/([^/]+?)(\.git)?\/?$/.exec(url || "");
+  const m = /(?:^|[@/])github\.com[:/]([^/]+)\/([^/]+?)(\.git)?\/?$/.exec(url || "");
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
 /**
  * The top directory of the clone `dir` is in, its real path. A missing git, or a directory in no clone, throws one plain
- * line naming the fix, never git's own failure.
+ * line naming the fix, never git's own failure: a clone, or `instead` (the flag the command takes in its place).
  */
-export function cloneTop(dir) {
+export function cloneTop(dir, instead = "--checkout CLONE") {
   const r = gitRan(gitTry(["-C", dir, "rev-parse", "--show-toplevel"]));
   if (r.status !== 0) {
     const said = String(r.stderr || "").trim().split("\n")[0];
-    throw new Error(`${dir} is not in a git clone${said ? ` (git: ${said})` : ""}; run factory in a clone of the repository, or pass --checkout CLONE`);
+    throw new Error(`${dir} is not in a git clone${said ? ` (git: ${said})` : ""}; run this in a clone of the repository, or pass ${instead}`);
   }
   return realpathSync(r.stdout.trim());
 }
@@ -2222,7 +2261,7 @@ export function cloneTop(dir) {
  */
 export function cloneRepo(dir, repo = null) {
   if (repo) return repo;
-  const top = cloneTop(dir);
+  const top = cloneTop(dir, "--repo OWNER/NAME");
   const remotes = gitRan(gitTry(["-C", top, "remote"]));
   if (remotes.status !== 0 || !remotes.stdout.split("\n").includes("origin")) throw new Error(`the clone at ${top} has no remote named origin; add the GitHub repository as origin (git remote add origin https://github.com/OWNER/NAME.git), or pass --repo OWNER/NAME`);
   const url = gitRan(gitTry(["-C", top, "remote", "get-url", "origin"]));

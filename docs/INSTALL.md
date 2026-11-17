@@ -128,7 +128,7 @@ These stay in the reviewed workflow file only, since they steer trust, where mon
 - On Actions a variable can lower `FACTORY_TIMEOUT_MINUTES` but not raise it past the workflow's value: the runner jobs' own `timeout-minutes` is the file's.
 - Factory's variables are the repository's own: set them on the repository. An organization-level `FACTORY_*` variable is not supported. The Action cannot tell the two apart (its `vars` context holds both, and the job token cannot list the repository's own), so there an organization variable the repository does not override would apply; local mode lists only the repository's own. `factory serve` and doctor (with `--local`, or a login that can read them) name each organization `FACTORY_*` variable shared with the repository.
 - The workflow passes the variables only once it is rendered with `vars` on every Factory step: re-render it (Upgrade, below). An older file has no variable layer on Actions.
-- `doctor` prints each effective setting and its layer (`settings`), and `factory serve` does at its start; a running `serve` takes a variable's change as it takes the workflow's (LOCAL.md, Settings and repins while `serve` runs).
+- `doctor` prints each setting that is set and its layer (`settings`), and `factory serve` does once its start checks pass; the settings left at Factory's defaults are named only with `--verbose`; a running `serve` takes a variable's change as it takes the workflow's (LOCAL.md, Settings and repins while `serve` runs).
 
 ## Third-party reviewers
 

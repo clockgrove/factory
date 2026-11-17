@@ -568,7 +568,7 @@ How a change applies:
 ## Configuration
 
 Local mode reads the repository's `.github/workflows/factory.yml` `env:` block as committed on the default branch: harness, models, validation, protected paths, budgets.
-The repository's `FACTORY_*` variables go over it, as on the Action (INSTALL.md, Settings in layers), listed with the local token; `serve` prints each setting and its layer when it starts.
+The repository's `FACTORY_*` variables go over it, as on the Action (INSTALL.md, Settings in layers), listed with the local token; `serve` prints each setting that is set and its layer once its start checks pass, and names the ones left at Factory's defaults only with `--verbose`.
 
 **Reading the variables.** A variable may lower a cap, so the start's read fails closed: `serve` starts no stage until a read gets through (it waits a network outage out, and tries again from 15 seconds, doubling to five minutes) or GitHub says the token may not read them (403 or 404: the workflow's values, with the warning).
 A refused token (401) is no fallback: `serve` names it, and where to replace it, every third try, and takes the replaced one at the next; `run` and `review` try three times, then stop with nothing started.

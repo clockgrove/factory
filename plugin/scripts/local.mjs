@@ -779,10 +779,22 @@ export class Local {
     return r.value;
   }
 
+  /**
+   * The local token as its source holds it now, for a running loop: "" (with the reason logged, once per reason) when
+   * its file is reached through a symbolic link (lib/local.mjs tokenPlaceProblem), so the loop keeps the token it has.
+   */
+  tokenNow() {
+    try {
+      return localToken(this.repoFull);
+    } catch (e) {
+      if (this.tokenPlaceSaid !== e.message) log(`the local token is not read again: ${e.message}`);
+      this.tokenPlaceSaid = e.message;
+      return "";
+    }
+  }
+
   /** The settings (takeSettings, after the repository's variables), the token check and the routing label. */
   async init({ serve = false } = {}) {
-    // No token: nothing GitHub-bound can start, so the start says so first, as the one thing to fix.
-    if (!this.token) throw new Error(`local mode cannot start: ${noTokenLine(this.repoFull)}`);
     await this.startVariables({ serve });
     this.takeSettings();
     await checkToken(this.repoFull, this.token, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") });
@@ -3194,7 +3206,7 @@ export class Local {
       } else if (i === 0) log(serve ? "serve starts no stage until it reads the repository's variables, or GitHub says the token may not" : "trying again before anything starts");
       await new Promise((r) => setTimeout(r, Math.min((this.startVariablesMs ?? START_VARIABLES_MS) * 2 ** i, 5 * 60_000)));
       // A token replaced in its source meanwhile is the one read with.
-      this.token = localToken(this.repoFull) || this.token;
+      this.token = this.tokenNow() || this.token;
       state = await this.readVariables();
     }
     if (state !== "read") return;
@@ -3541,7 +3553,7 @@ export class Local {
     let againAt = Infinity;
     while (!this.stopping) {
       if (refused !== null) {
-        const now = localToken(this.repoFull);
+        const now = this.tokenNow();
         const check = () =>
           checkToken(this.repoFull, now, { max: this.bounded("FACTORY_LOCAL_TOKEN_PROBE_MAX") }).then(
             () => true,
@@ -4219,7 +4231,7 @@ function doctorCommand(flags) {
   const here = resolve(flags.checkout || process.cwd());
   let checkout = here;
   try {
-    checkout = cloneTop(here);
+    checkout = cloneTop(here, "--repo OWNER/NAME");
   } catch (e) {
     if (!flags.repo) throw e;
   }
@@ -4232,7 +4244,7 @@ function doctorCommand(flags) {
 
 /**
  * A secret typed at the terminal, never echoed: readline over the terminal (`stdin`, in raw mode) with its echo written
- * nowhere, the prompt on stderr once the echo is off. From a pipe or a file, every byte of stdin. Ctrl-C refuses.
+ * nowhere, the prompt on stderr once the echo is off. From a pipe or a file, every byte of stdin. Ctrl-C or Ctrl-Z refuses.
  */
 export function readSecret(prompt, { stdin = process.stdin, err = process.stderr } = {}) {
   if (!stdin.isTTY)
@@ -4254,7 +4266,8 @@ export function readSecret(prompt, { stdin = process.stdin, err = process.stderr
       fn();
     };
     rl.on("line", (line) => end(() => res(line)));
-    rl.on("SIGINT", () => end(() => rej(new Error("cancelled; nothing saved"))));
+    // Ctrl-C, and Ctrl-Z: a stop would turn the echo back on with the prompt still reading, and leave the front waiting.
+    for (const key of ["SIGINT", "SIGTSTP"]) rl.on(key, () => end(() => rej(new Error("cancelled; nothing saved"))));
     rl.on("close", () => {
       if (!answered) end(() => res(""));
     });

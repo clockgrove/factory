@@ -570,7 +570,9 @@ export function setStageBilling(kind) {
 
 /**
  * The file in a stage's usage directory that holds each session's running total as the stage's progress comment last
- * counted it, written after each successful write of that comment (session.mjs progressReporter). A stage killed before
+ * counted it, and that line's spend (`spend`: its known dollars and runs of unknown cost), written after each
+ * successful write of that comment (session.mjs progressReporter). A stage ended by its launcher books that spend
+ * (stage.mjs killedUsage), so its artifact and its progress comment say the same. A stage killed before
  * it wrote a result.json leaves it, and the next stage that resumes the same live session starts from it (session.mjs
  * restoreTranscript): what the killed stage's spend line counted is not counted again, and what it did not count is.
  */
@@ -600,7 +602,7 @@ export function stageSpendNow() {
   const commit = () => {
     if (!dir) return;
     try {
-      writeOwn(join(dir, SESSION_TOTALS_FILE), `${JSON.stringify({ harness, at: new Date().toISOString(), totals })}\n`);
+      writeOwn(join(dir, SESSION_TOTALS_FILE), `${JSON.stringify({ harness, at: new Date().toISOString(), totals, spend: { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, unknown } })}\n`);
     } catch (e) {
       log(`session totals not written: ${String(e?.message || e).slice(0, 120)}`);
     }
@@ -1282,6 +1284,8 @@ export function joinLost(lost, rec, { limit = false, busy = false, jobs = false 
     usdUnknownWhy: m.usdUnknownWhy,
     ...billingSigns(m),
     ...(keyed.length ? { workerKeyUsd: keyed.reduce((s, r) => s + Math.max(0, r.workerKeyUsd), 0) } : {}),
+    // Every run's relayed calls of unknown cost, as its dollars are: the stage's count (session.mjs writeUsage) never misses one.
+    ...(all.some((r) => Number(r.workerKeyUnknown) > 0) ? { workerKeyUnknown: all.reduce((s, r) => s + Math.max(0, Number(r.workerKeyUnknown) || 0), 0) } : {}),
     ...(subs.length ? { subAgents: subs } : {}),
     started: lost[0].started ?? rec.started,
     ...(jobs ? { jobReruns: lost.length } : limit ? { limitWaits: lost.length } : busy ? { busyWaits: lost.length } : { lostToOutage: lost.length }),

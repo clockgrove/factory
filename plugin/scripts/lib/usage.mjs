@@ -38,9 +38,9 @@ export const UNKNOWN_WHY = {
   // Claude Code's result was an error with total_cost_usd 0 after its stream reported tokens: a crashed session's final
   // result can carry zeroed totals.
   zeroed: "Claude Code's error result carried a zeroed cost after its stream reported tokens",
-  // A resumed Claude session on a Claude Code before 2.1.277 (or one that named no version): its totals may restart at
-  // zero on resume, so no running total can be taken off them.
-  "resumed-total": "a resumed Claude session on a Claude Code older than 2.1.277, whose totals may restart at zero",
+  // A resumed session whose reported total is no running total: Claude Code before 2.1.277 (or one that named no
+  // version), whose totals may restart at zero on resume, or any harness's total below the one already counted.
+  "resumed-total": "a resumed session's reported total is no running total (Claude Code before 2.1.277, or a total below the one already counted)",
   // A Codex model with no row in the price table, or no model named: its tokens have no published rate here.
   "no-price": "the Codex model has no row in the price table",
   // Codex reported a failed request (a stream `error` or `turn.failed`): the provider may have billed tokens Codex never reports.
@@ -829,9 +829,11 @@ export function parseClaude(stdout, model) {
   if (failure) rec.providerError = failure;
   if (outageError(failure)) rec.providerOutage = failure;
   // The Claude Code that ran, as its stream's init line names it: whether a resumed total is a running total (sinceSession).
-  if (typeof init?.claude_code_version === "string") rec.harnessVersion = init.claude_code_version;
+  const version = lines.find((l) => l?.type === "system" && l.subtype === "init")?.claude_code_version ?? lines.find((l) => typeof l?.claude_code_version === "string")?.claude_code_version;
+  if (typeof version === "string") rec.harnessVersion = version;
   // Where its key came from ("none": no API key, which an OAuth login and a bearer token both report): passBilling.
-  if (typeof init?.apiKeySource === "string" && init.apiKeySource.length <= 60) rec.apiKeySource = init.apiKeySource;
+  const keySource = lines.find((l) => l?.type === "system" && l.subtype === "init")?.apiKeySource;
+  if (typeof keySource === "string" && keySource.length <= 60) rec.apiKeySource = keySource;
   // A subscription's rate-limit windows (`rate_limit_event`), which Claude Code reports on a claude.ai login only: the
   // positive sign of a subscription (passBilling).
   if (lines.some((l) => l?.type === "rate_limit_event")) rec.planLimits = true;
@@ -1150,6 +1152,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   rec.subtype = rec.ok ? "success" : "error";
   if (!rec.ok) rec.error = `copilot exited ${exitCode}`;
   let turns = 0;
+  // Whether the run printed its result line: one killed before it reported its usage only up to its last checkpoint.
+  let ended = false;
   let streamNano = null;
   let streamRequests = null;
   let ttlSeconds = null;
@@ -1166,6 +1170,7 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
       for (const m of e.data?.modelCacheState || []) if (num(m?.cacheTtlSeconds) !== null) ttlSeconds = num(m.cacheTtlSeconds);
     }
     if (e.type === "result") {
+      ended = true;
       if (e.sessionId) rec.sessionId = String(e.sessionId);
       const r = nonNegative(e.usage?.premiumRequests);
       if (r !== null) streamRequests = Math.max(streamRequests ?? 0, r);
@@ -1202,6 +1207,8 @@ export function parseCopilot(stdout, model, exitCode = 0, { usageFile, creditUsd
   // Credits not reported in full: the run's spend is unknown beyond what was (UNKNOWN_WHY), never $0 and never a bound.
   if (p.usd === null) markUnknown(rec, a.tokens.input === null && a.tokens.output === null && a.nano === null ? "unreported" : "credits");
   else if (p.partial) markUnknown(rec, "credits");
+  // Killed before its result line: the credits its last checkpoint reported are known, what it spent after is not.
+  if (p.usd !== null && !ended) markUnknown(rec, "unreported");
   rec.sessionStartTime = a.sessionStartTime;
   rec.turns = turns || null;
   rec.tokens = a.tokens;
@@ -1263,21 +1270,24 @@ export function claudeRunningTotals(version) {
  * that resumes an earlier session is counted as its own share: the total minus the total that session had already
  * reported (in this process, or in its restored transcript or Pendulum's record of it). Turns are per process and stay.
  * Codex's first-turn cache split is that running total too, so it is counted the same way. A Claude Code before 2.1.277
- * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, so its
- * pass's dollars and tokens are unknown (UNKNOWN_WHY `resumed-total`): neither its total nor a share of it is taken.
+ * (claudeRunningTotals; or one whose stream named no version) may restart a resumed session's totals at zero, and a
+ * total below the one already counted is no running total of it: either pass's dollars and tokens are unknown
+ * (UNKNOWN_WHY `resumed-total`), neither its total nor a share of it taken.
  */
 export function sinceSession(rec, prior) {
   if (!rec || !prior || prior.usd === null || prior.usd === undefined) return rec;
-  if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) {
-    const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, models: undefined, basis: `unknown: ${UNKNOWN_WHY["resumed-total"]} (${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "no version named"})` };
+  // No running total: the pass's dollars and tokens are unknown, neither its total nor a share of it taken.
+  const notRunning = (why) => {
+    const out = { ...rec, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: ${why}` };
     delete out.models;
     return markUnknown(out, "resumed-total");
-  }
+  };
+  if (rec.harness === "claude" && !claudeRunningTotals(rec.harnessVersion)) return notRunning(`a resumed Claude session on ${rec.harnessVersion ? `Claude Code ${rec.harnessVersion}` : "a Claude Code that named no version"}, whose totals may restart at zero before 2.1.277`);
   // Copilot: only a total from the same session start is a running total of the one subtracted (Copilot keeps the
   // start time across --resume); anything else is counted as reported.
   if (rec.harness === "copilot" && (!rec.sessionStartTime || rec.sessionStartTime !== prior.sessionStartTime)) return rec;
-  // A total below the one already seen is not a running total (the session's cost state was never written): as reported.
-  if (rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return rec;
+  // A total below the one already counted is no running total of it: unknown, neither it nor a share of it taken.
+  if (rec.usd !== null && rec.usd !== undefined && rec.usd < prior.usd) return notRunning(`the resumed session reported $${rec.usd}, below the $${prior.usd} already counted for it`);
   const models = rec.models
     ? Object.fromEntries(Object.entries(rec.models).map(([name, m]) => {
         const p = prior.models?.[name] ?? {};

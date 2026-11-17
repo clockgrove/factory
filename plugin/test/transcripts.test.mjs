@@ -113,7 +113,7 @@ test("a public repository's work job uploads the usage record and a sealed file,
   assert.ok(existsSync(join(usageDir, "events.jsonl")), "the stage's own directory is left as it was");
   // The sealed body is ciphertext, not the gzipped tar it seals.
   const sealed = up[SEALED_FILE];
-  assert.equal(sealed.subarray(0, 8).toString(), "PNDSEAL1");
+  assert.equal(sealed.subarray(0, 8).toString(), "PNDSEAL2");
   assert.ok(!(sealed[0] === 0x1f && sealed[1] === 0x8b) && !(sealed[20] === 0x1f && sealed[21] === 0x8b), "no gzip header in the clear");
   // A schedule's event carries no repository: the repository is read with the job token, and its `private` decides.
   const reads = [];
@@ -210,6 +210,125 @@ test("a later stage resumes the session from a public repository's sealed artifa
     else process.env[k] = v;
     server.close();
   }
+});
+
+/**
+ * GitHub for a resume on Actions: the Objective's work artifact (`pendulum-usage-7`, of run 42), the run as `run()`
+ * answers it (null: a 404), and `gh run download` putting FAKE_ARTIFACT's files where the restore asks. `restore(key,
+ * policy, artifact)` runs the real restoreTranscript under that seal with a fresh CODEX_HOME; `reads` lists GitHub's
+ * requests and `downloads` the downloads.
+ */
+async function resumeOnActions(t, run = () => null) {
+  const reads = [];
+  const server = createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    reads.push(u.pathname);
+    const name = u.searchParams.get("name");
+    res.setHeader("content-type", "application/json");
+    if (u.pathname === `/repos/${REPO}/actions/runs/42`) {
+      const r = run();
+      res.statusCode = r ? 200 : 404;
+      return res.end(JSON.stringify(r ?? { message: "Not Found" }));
+    }
+    res.end(JSON.stringify({ artifacts: u.pathname === `/repos/${REPO}/actions/artifacts` && name === "pendulum-usage-7" ? [{ id: 11, name, expired: false, created_at: "2026-11-16T01:00:00Z", workflow_run: { id: 42 } }] : [] }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const bin = mkdtempSync(join(tmpdir(), "gh-"));
+  const log = join(bin, "downloads");
+  writeFileSync(log, "");
+  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" >> "${log}"\nwhile [ $# -gt 0 ]; do [ "$1" = -D ] && dir="$2"; shift; done\nmkdir -p "$dir" && cp -R "$FAKE_ARTIFACT"/. "$dir"\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, GITHUB_API_URL: process.env.GITHUB_API_URL, CODEX_HOME: process.env.CODEX_HOME, FAKE_ARTIFACT: process.env.FAKE_ARTIFACT, GITHUB_WORKFLOW_REF: process.env.GITHUB_WORKFLOW_REF };
+  Object.assign(process.env, { PATH: `${bin}:${saved.PATH}`, GITHUB_API_URL: `http://127.0.0.1:${server.address().port}` });
+  delete process.env.GITHUB_WORKFLOW_REF;
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+    server.close();
+  });
+  const restore = async (key, policy, artifact) => {
+    const home = mkdtempSync(join(tmpdir(), "codex-"));
+    Object.assign(process.env, { CODEX_HOME: home, FAKE_ARTIFACT: artifact });
+    const r = await restoreTranscript({ repo: repoOf(REPO), issue: 7, token: "t", checkout: "/c", workDir: mkdtempSync(join(tmpdir(), "ws-")), harness: "codex", seal: { key, policy: async () => policy } });
+    return { ...r, home };
+  };
+  return { restore, reads, downloads: () => readFileSync(log, "utf8").split("\n").filter(Boolean) };
+}
+
+test("a sealed session binds the whole usage record it resumes from: an altered sessionTotal or session.files refuses the resume, with the reason (#505)", async (t) => {
+  const { uploaded, rel } = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM } });
+  const { restore } = await resumeOnActions(t);
+  const key = sealKey(PEM, REPO);
+  const record = JSON.parse(readFileSync(join(uploaded, "result.json"), "utf8"));
+  assert.equal(record.session.id, THREAD);
+  assert.deepEqual(record.session.files, [rel]);
+  assert.equal(typeof record.usd, "number");
+  /** The uploaded artifact with its record changed by `change`, the sealed file untouched. */
+  const altered = (change) => {
+    const dir = mkdtempSync(join(tmpdir(), "altered-"));
+    cpSync(uploaded, dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify(change(structuredClone(record))));
+    return dir;
+  };
+  // The record as uploaded, and the same record written out another way (its keys reordered, no indent): it resumes.
+  const same = await restore(key, "sealed", uploaded);
+  assert.equal(same.id, THREAD, same.reason);
+  assert.match(readFileSync(join(same.home, "sessions", rel), "utf8"), new RegExp(READ));
+  const reordered = altered((r) => Object.fromEntries(Object.entries(r).reverse().map(([k, v]) => [k, k === "session" ? Object.fromEntries(Object.entries(v).reverse()) : v])));
+  assert.equal((await restore(key, "sealed", reordered)).id, THREAD, "the canonical form, not the bytes, is bound");
+  // A cost seed raised or lowered, or one put where there was none; the stage's own total changed; the session's files
+  // listed otherwise: each refuses the resume, saying why.
+  const changes = {
+    "a sessionTotal changed": (r) => ({ ...r, sessionTotal: { ...(r.sessionTotal ?? {}), usd: 0, tokens: { input: 0, output: 0 } } }),
+    "a sessionTotal removed": (r) => ({ ...r, sessionTotal: r.sessionTotal ? undefined : { usd: 999 } }),
+    // The stage's own totals: a Copilot seed falls back to them when there is no sessionTotal (usage.mjs clampTotal).
+    "the record's top-level usd changed": (r) => ({ ...r, usd: r.usd + 1 }),
+    "session.files listing another name": (r) => ({ ...r, session: { ...r.session, files: [rel.split("/").slice(0, 2).join("/")] } }),
+    "session.files with a name added": (r) => ({ ...r, session: { ...r.session, files: [...r.session.files, "2026"] } }),
+  };
+  for (const [what, change] of Object.entries(changes)) {
+    const r = await restore(key, "sealed", altered(change));
+    assert.equal(r.id, null, `${what}: refused`);
+    assert.match(r.reason, /did not open: .*an altered usage record \(its session or sessionTotal\)/, what);
+    assert.ok(!existsSync(join(r.home, "sessions")), `${what}: nothing put back`);
+  }
+});
+
+test("with publish_transcripts on, a resume takes a readable session only from a run of this repository's Pendulum workflow (#505)", async (t) => {
+  const published = await workJob({ payload: { repository: { private: false } }, given: { app_private_key: PEM }, job: { PENDULUM_PUBLISH_TRANSCRIPTS: "true" } });
+  assert.ok(existsSync(join(published.uploaded, "transcript", published.rel)), "uploaded readable");
+  const repository = { id: 1001, full_name: REPO };
+  let run = { id: 42, path: ".github/workflows/pendulum.yml", event: "issues", repository, head_repository: repository };
+  const { restore, reads, downloads } = await resumeOnActions(t, () => run);
+  const key = sealKey(PEM, REPO);
+  // A run of .github/workflows/pendulum.yml in this repository: resumed.
+  const ok = await restore(key, "published", published.uploaded);
+  assert.equal(ok.id, THREAD, ok.reason);
+  assert.ok(reads.includes(`/repos/${REPO}/actions/runs/42`), "the artifact's run is read");
+  assert.equal(downloads().length, 1);
+  // The same artifact's files from any other run: refused before anything of it is downloaded.
+  const refused = {
+    "another workflow file": [{ ...run, path: ".github/workflows/other.yml" }, /the artifact's run is of \.github\/workflows\/other\.yml: with publish_transcripts on, a resume takes a session only from a run of \.github\/workflows\/pendulum\.yml in this repository/],
+    "a fork's pull request, its own pendulum.yml": [{ ...run, event: "pull_request", head_repository: { id: 2002, full_name: "mallory/app" } }, /the artifact's run is on a fork's pull request \(mallory\/app\)/],
+    "another repository's run": [{ ...run, repository: { id: 3003, full_name: "acme/other" }, head_repository: { id: 3003, full_name: "acme/other" } }, /the artifact's run is in acme\/other/],
+    "a run that cannot be read": [null, /the artifact's run could not be read/],
+  };
+  for (const [what, [r, reason]] of Object.entries(refused)) {
+    run = r;
+    const got = await restore(key, "published", published.uploaded);
+    assert.equal(got.id, null, what);
+    assert.match(got.reason, reason, what);
+    assert.ok(!existsSync(join(got.home, "sessions")), `${what}: nothing put back`);
+  }
+  assert.equal(downloads().length, 1, "no refused artifact was downloaded");
+  // The running workflow names the file: a Pendulum workflow written to another path is its own.
+  run = { id: 42, path: ".github/workflows/agents.yml", event: "schedule", repository, head_repository: repository };
+  process.env.GITHUB_WORKFLOW_REF = `${REPO}/.github/workflows/agents.yml@refs/heads/main`;
+  assert.equal((await restore(key, "published", published.uploaded)).id, THREAD);
+  // The sealed and private policies read no run: the seal, or the repository's own access, vouches for the session.
+  const before = reads.length;
+  run = { ...run, path: ".github/workflows/other.yml" };
+  assert.equal((await restore(key, "private", published.uploaded)).id, THREAD);
+  assert.ok(!reads.slice(before).includes(`/repos/${REPO}/actions/runs/42`));
 });
 
 test("publish_transcripts on, or a private repository: the stream and sessions are uploaded readable; doctor warns only for a public one (#490)", async () => {

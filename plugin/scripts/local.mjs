@@ -4010,7 +4010,7 @@ async function deliver(issue, flags) {
     await planSync(repo, issue, opts, planRecord)(files["plan.md"]);
     await postNote(repo, issue, files["note.md"], opts);
     await applyExit(repo, { issue, pr: asking, exit: "question", reason: planNeeds, notify: inputs.notify, stage: "work", askOnIssue: true }, opts);
-    // A `--here` run is unmetered (skills/pendulum-score): its comment carries no spend line.
+    // A `--here` run is not counted (skills/pendulum-score): its comment carries no spend line.
     if (needs.repos.length) await progressReporter(repo, issue, opts, { stage: "work", soFar: null }).planAsked(needs.repos);
     log(`#${issue}: question at plan time (${planNeeds}); nothing pushed`);
     return 1;

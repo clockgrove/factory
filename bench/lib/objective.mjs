@@ -26,7 +26,7 @@
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
 import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
-import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 
 export const ROW_VERSION = 1;
@@ -735,7 +735,8 @@ export const objectiveAccounts = (usage) => [...new Set((usage || []).map((r) =>
 
 /**
  * Each account's share of an Objective (#266), in the order first seen: `stages` (the stages that ran on it), `usd`
- * (their dollars, null when none was metered) and `limitPauses` (the stages a usage limit paused on it: a result.json
+ * (their known dollars, null when none was reported), `unknown` (their runs of unknown cost, plugin usage.mjs
+ * UNKNOWN_WHY) and `limitPauses` (the stages a usage limit paused on it: a result.json
  * that ended `paused` with its `usageLimit`, or `waiting` with it to go on on another account on GitHub Actions and the
  * cloud sandbox, #268; or a spend line's `limitPaused`). From records that name their account; empty where none does.
  */
@@ -743,9 +744,10 @@ export function accountUse(usage) {
   const by = new Map();
   for (const r of usage || []) {
     if (typeof r?.account !== "string" || !ACCOUNT.test(r.account)) continue;
-    const a = by.get(r.account) ?? { account: r.account, stages: 0, usd: null, limitPauses: 0 };
+    const a = by.get(r.account) ?? { account: r.account, stages: 0, usd: null, unknown: 0, limitPauses: 0 };
     a.stages += 1;
     if (typeof r.usd === "number" && Number.isFinite(r.usd)) a.usd = Math.round(((a.usd ?? 0) + r.usd) * 1e4) / 1e4;
+    a.unknown += unknownRuns(r);
     // What its dollars are (plugin usage.mjs BILLING), when the records name it.
     const billed = addBilling(a.usdByBilling, r.usdByBilling);
     if (Object.keys(billed).length) a.usdByBilling = billed;
@@ -767,8 +769,8 @@ export const withLines = (records = [], lines = []) => {
   return [...records, ...lines.filter((l) => !named.has(l.progressRun) && !unmatched.has(l.account))];
 };
 
-/** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20, 1 limit pause)". */
-const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${u.usd === null ? "unknown" : `$${u.usd.toFixed(2)}${billingText(u.usd, u.usdByBilling)}`}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
+/** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20 plus 1 run of unknown cost, 1 limit pause)". */
+const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${spendText({ usd: u.usd, unknown: u.unknown ?? 0, byBilling: u.usdByBilling })}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
 
 /** The scorecard's Harness cell: the harness, the worker model, the sub-agent and reviewer models, the local accounts (each with its share, accountUse), and the labels that chose them. */
 export function harnessCell(r) {
@@ -833,11 +835,13 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
     const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
     // The vendor comment's own figure (plugin logic.mjs vendorBody): with no figure, the vendor reported no usage.
     const booking = own ? spend : bookedSpend;
-    const sandbox = booking && Object.hasOwn(booking, "vendorUsd") ? { usd: num(booking.vendorUsd) } : vendor !== null ? { usd: vendor } : null;
+    // A sandbox whose usage the vendor did not report: no figure, or its spend line names the sandbox as unknown.
+    const sandboxUnknown = !!booking && Object.hasOwn(booking, "vendorUsd") && (num(booking.vendorUsd) === null || (Array.isArray(booking.usdUnknownWhy) && booking.usdUnknownWhy.includes("sandbox")));
+    const sandbox = booking && Object.hasOwn(booking, "vendorUsd") ? { usd: num(booking.vendorUsd), ...(sandboxUnknown ? { usdUnknown: 1 } : {}) } : vendor !== null ? { usd: vendor } : null;
     // The model's runs of unknown cost: the progress line's; a vendor comment standing alone counts the sandbox's own in
     // its line too (vendorBody), which `vendor` above carries, so that one is not counted twice.
     const lineUnknown = unknownIn(spend);
-    const modelUnknown = own && lineUnknown.usdUnknown && sandbox?.usd === null ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
+    const modelUnknown = own && lineUnknown.usdUnknown && sandboxUnknown ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
     // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
     const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
     out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling), ...(billingCode(spend.billing) ? { billing: spend.billing } : {}) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });

@@ -14,7 +14,8 @@ export const STOP_POLL_MS = 60_000;
 export const STOP_SETTLE_MS = 30_000;
 /**
  * The longest a stopping stage takes before it exits anyway: past it, what is left of its end is written at once,
- * synchronously (the usage, a lower bound; the spend line as the stop signal writes it), and the process exits.
+ * synchronously (the usage, each pass still running a run of unknown cost; the spend line as the stop signal writes it),
+ * and the process exits.
  */
 export const STOP_EXIT_MS = 120_000;
 /** How long a stopped stage gives its GitHub tidy (applyStop), its usage already written: the dispatcher finishes the rest. */

@@ -710,6 +710,13 @@ const raisedOn = (before, id, path, line, body) => ({ ...root(id, path, line, bo
 const testLine = (file) => `node scripts/test.mjs '${file}'`;
 const fixedWith = (id, ...args) => ({ id, body: "Fixed; the test shows it.", fixed: true, test: { command: "node scripts/test.mjs", args } });
 
+/**
+ * A moment between answer rounds. A round is recorded by its time to the millisecond, and two taken in the same one are
+ * one (readAnswerRounds: two routes may record the same round); real rounds are review stages apart, while a fast
+ * runner can take two here within one millisecond, as CI did.
+ */
+const apart = () => new Promise((r) => setTimeout(r, 3));
+
 /** `beforeGreen` for a runner: the commits known green (the stage's validated marker on them, no held red there). */
 const greenAt = (...shas) => async (sha) => shas.includes(sha);
 
@@ -772,6 +779,7 @@ test("#516: a named test that fails on the head keeps the finding open with no d
     for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
       const d = await openFindingsExit(exitFor(1), { ...ctx, open, found: out.found }, { token: "t" });
       assert.equal(d.reason, `1 reviewer finding(s) still open after the answer pass (src/store.mjs:9 (${note})); the review runs again to answer them (round ${round} of ${ANSWER_ROUNDS})`);
+      await apart();
     }
     const blocked = await openFindingsExit(exitFor(1), { ...ctx, open, found: out.found }, { token: "t" });
     assert.equal(blocked.exit, "blocked");
@@ -807,7 +815,10 @@ test("#516: a named test that is no evidence (passes without the fix too, names 
       assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note }] }, pre);
       assert.equal(fake.asked.length, 1, "the decision model judges it");
       atHeadClean(r);
-      for (let round = 1; round <= ANSWER_ROUNDS; round += 1) await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: out.found }, { token: "t" });
+      for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
+        await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: out.found }, { token: "t" });
+        await apart();
+      }
       const blocked = await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: out.found }, { token: "t" });
       assert.ok(blocked.reason.includes(`src/guard.mjs:1 (${note})`), blocked.reason);
     });
@@ -871,7 +882,10 @@ test("#516: a decision model's fixed resolves a reply with no test at the floor,
     const note = `judged not fixed: fixed ${below.toFixed(2)} (under default floor ${MIN_CONFIDENCE}: open) (fake/decider)`;
     assert.deepEqual(under, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "not-fixed", note }] });
     assert.equal(evidenceOf(gh).has(200), false);
-    for (let round = 1; round <= ANSWER_ROUNDS; round += 1) await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: under.found }, { token: "t" });
+    for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
+        await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: under.found }, { token: "t" });
+        await apart();
+      }
     const blocked = await openFindingsExit(exitFor(1), { ...ctx, open: await list(), found: under.found }, { token: "t" });
     assert.ok(blocked.reason.includes(`src/b.ts:9 (${note})`), blocked.reason);
   });

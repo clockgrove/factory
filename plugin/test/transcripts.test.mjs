@@ -296,7 +296,7 @@ test("a sandbox stage's usage that fails to come out leaves nothing of it for th
   }
 });
 
-test("the seal key derives from a PEM pasted without its newlines, as the App's token does; doctor FAILs a key that does not parse (#490)", async () => {
+test("the seal key derives from a PEM pasted without its newlines, as the App's token does; doctor FAILs a key given that does not parse (#490)", async () => {
   const { sealKeyCheck } = await import("../scripts/doctor.mjs");
   const oneLine = PEM.trim().replace(/\n/g, " ");
   assert.ok(sealKey(PEM, REPO));
@@ -307,6 +307,5 @@ test("the seal key derives from a PEM pasted without its newlines, as the App's 
   const bad = sealKeyCheck({ appPrivateKey: "pasted wrong", repoFull: REPO });
   assert.equal(bad.status, "FAIL");
   assert.match(bad.detail, /did not parse/);
-  assert.equal(sealKeyCheck({ appPrivateKey: "", repoFull: REPO, job: true }).status, "FAIL");
-  assert.equal(sealKeyCheck({ appPrivateKey: "", repoFull: REPO }), null, "a laptop without the key: nothing to check");
+  assert.equal(sealKeyCheck({ appPrivateKey: "", repoFull: REPO }), null, "no key to try (a laptop, an App token, a sandbox stage): nothing to check");
 });

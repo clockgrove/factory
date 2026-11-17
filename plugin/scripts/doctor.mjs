@@ -702,7 +702,7 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   }
   // Local mode uploads no usage artifact; every other route does. In a job its own setting, else the workflow file's.
   if (!local) out.push(transcriptCheck(repoData, job ? inputs.publishTranscripts : publishOn(workflowValue(text, "PENDULUM_PUBLISH_TRANSCRIPTS"))));
-  const sealRow = local ? null : sealKeyCheck({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full, job });
+  const sealRow = local ? null : sealKeyCheck({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full });
   if (sealRow) out.push(sealRow);
   out.push(...(await workflowTokenChecks({ repo, token: inputs.githubToken || token })));
 
@@ -1231,11 +1231,12 @@ export function transcriptCheck(repoData, publish) {
 
 /**
  * Whether the usage artifacts' seal key derives from the App's private key (lib/seal.mjs sealKey): a key given that
- * does not parse FAILs, as does none in a job (a public repository's stages would then upload their usage without the
- * transcript and the stream, and no resume could open one). Null outside a job with no key to try.
+ * does not parse FAILs (a public repository's stages would then upload their usage without the transcript and the
+ * stream, and no resume could open one). Null with no key to try: a laptop, a job given an App token, a sandbox stage
+ * (handed the derived key, never the App's).
  */
-export function sealKeyCheck({ appPrivateKey, repoFull, job = false }) {
-  if (!appPrivateKey && !job) return null;
+export function sealKeyCheck({ appPrivateKey, repoFull }) {
+  if (!appPrivateKey) return null;
   const key = sealKey(appPrivateKey, repoFull);
   if (key) return PASS("seal key", "the usage artifacts' seal key derives from the App's private key");
   return FAIL("seal key", `${sealKeyProblem(appPrivateKey, key)}: a public repository's usage artifacts go up without the agent's event stream and sessions, and no fix-passes resume opens one`, "save the App's private key, the whole PEM file, as PENDULUM_APP_PRIVATE_KEY (gh secret set PENDULUM_APP_PRIVATE_KEY < key.pem)");

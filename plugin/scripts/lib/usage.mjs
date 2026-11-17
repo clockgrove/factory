@@ -71,8 +71,9 @@ export const UNKNOWN_WHY = {
   // `pendulum report`'s: a stage of Pendulum's own with no spend line in its progress comment and no usage record read
   // for it (its artifact expired, was not readable, or was never uploaded).
   "no-record": "the stage's progress comment has no spend line and no usage record of it was read (expired, unreadable or never uploaded)",
-  // `pendulum report`'s: its call budget (--max-calls) ran out before the stage's usage record was read.
-  stopped: "the report's call budget ran out before the stage's usage record was read",
+  // `pendulum report`'s: its call budget (--max-calls) ran out before the stage's usage record, or the rest of its
+  // Objective's comments, was read.
+  stopped: "the report's call budget ran out before the stage's usage record, or the rest of its Objective's comments, was read",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */

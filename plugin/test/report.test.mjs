@@ -401,7 +401,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.totals), ["cost", "objectives", "passes", "stages", "tokens"]);
   const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
-  assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs"]);
+  assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs", "stages"]);
   assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
   assert.deepEqual(keys(r.unknown.items[0]), ["issue", "runs", "stage", "why"]);
   assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
@@ -414,7 +414,8 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "appWhy", "logins"]);
   assert.deepEqual(keys(r.source.calls), ["byKind", "made", "planned", "plannedAtLeast"]);
   assert.deepEqual(keys(r.source.read), ["artifacts", "comments", "ignoredComments", "issues", "localRecords", "pendulumComments", "pulls", "summaries", "unattributedComments"]);
-  assert.deepEqual(keys(r.source.missing[0]), ["code", "count", "issues", "text"]);
+  assert.deepEqual(keys(r.source.missing[0]), ["code", "count", "counts", "issues", "text"]);
+  assert.deepEqual(keys(r.source.missing[0].counts), ["objectives", "stages"]);
   // The documented schema names every top-level field and the version (docs/REPORT.md).
   const doc = readFileSync(join(import.meta.dirname, "..", "..", "docs", "REPORT.md"), "utf8");
   assert.ok(doc.includes(REPORT_SCHEMA));
@@ -817,7 +818,7 @@ function copilotLinedWorld() {
 
 test("report (#539): a Copilot stage with a spend line is under its usage record's model; its dollars stay the line's; a Claude stage's model is its harness line's", async () => {
   const { json: r } = await report(copilotLinedWorld(), { issue: 3 });
-  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5.5", 2, 0.519812]]);
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5-5", 2, 0.519812]]);
   assert.deepEqual(usd(byIssue(r, 3)), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "the spend lines' dollars, once");
   // A local stage's record in the clone names it the same way.
   const clone = mkdtempSync(join(tmpdir(), "clone-"));
@@ -828,7 +829,7 @@ test("report (#539): a Copilot stage with a spend line is under its usage record
   }
   const fake = fakeGitHub(w);
   const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
-  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => [x.key, x.stages]), [["claude-sonnet-5.5", 2]]);
+  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => [x.key, x.stages]), [["claude-sonnet-5-5", 2]]);
   // Claude, unchanged: each stage under its harness line's model, whatever its record names.
   const claude = linedWorld();
   for (const list of Object.values(claude.artifacts)) for (const a of list) a.record = { ...a.record, model: "claude-sonnet-5.5" };
@@ -1261,7 +1262,7 @@ test("report (#559): a stage whose lines name no model is under its own usage re
   const work = modellessWorld("claude-sonnet-5.5").comments.find((c) => c.body.startsWith("<!-- pendulum:3:progress:work:"));
   assert.equal(ledgerOfComment(work.body).model, null, "its ledger line names no model");
   const stages = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3 });
-  assert.deepEqual(stages.json.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5.5", 1, 0.35637], ["claude-fable-5-2", 1, 0.163442]]);
+  assert.deepEqual(stages.json.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5-5", 1, 0.35637], ["claude-fable-5-2", 1, 0.163442]]);
   assert.deepEqual(stages.json.source.missing, []);
   // Its finish card reads the same record for it (modellessStages): the two paths agree on every figure.
   const w = modellessWorld("claude-sonnet-5.5");
@@ -1285,7 +1286,7 @@ test("report (#559): the usage record read for a stage's model is planned: the c
   const fake = fakeGitHub(w);
   const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
   assert.deepEqual(artifactCalls(fake.calls), []);
-  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => x.key), ["claude-sonnet-5.5", "claude-fable-5-2"]);
+  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => x.key), ["claude-sonnet-5-5", "claude-fable-5-2"]);
 });
 
 test("report (#559): a stage no record of its own names a model for is under no model, with the reason in source.missing, on both paths", async () => {
@@ -1301,4 +1302,179 @@ test("report (#559): a stage no record of its own names a model for is under no 
   const { json: stopped } = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3, "max-calls": 4 });
   assert.deepEqual(stopped.breakdowns.model.map((x) => [x.key, x.stages]), [[null, 1], ["claude-fable-5-2", 1]]);
   assert.deepEqual(stopped.source.missing.find((m) => m.code === "model-stopped")?.issues, [3]);
+});
+
+// ------------------------------------------------------------------ #566: the report validation's correctness batch
+
+/** A repository with nothing in it, for one case at a time. */
+const blank = () => ({ comments: [], issues: [], pulls: [], artifacts: {}, recs: {} });
+const objectiveIssue = (number, { state = "closed", labels = [], created = "2026-11-17T01:00:00Z" } = {}) => ({ number, title: `Objective ${number}`, state, labels: ["pendulum:objective", ...labels].map((name) => ({ name })), created_at: created, user: ME });
+const ownPull = (n, { number = n + 1000, created, updated = created, merged = null, ref = `pendulum/${n}` }) => ({ number, head: { ref, repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: created, updated_at: updated, merged_at: merged, state: "closed" });
+/** One pass of a per-pass ledger, as a usage record holds it. */
+const ledgerPass = (label, usd, started, ended, { billing = "api", tokens = { input: 1000, output: 100, cached: 0, written: 0 } } = {}) => ({ label, model: "claude-opus-5-5", effort: "medium", started, ended, usd, usdUnknown: 0, usdUnknownWhy: [], billing, usdByBilling: { [billing]: usd }, tokens });
+
+test("report (#566 S3): a merged Objective whose PR lies past the PR list's early stop is read from its own branch's PRs, not reported closed unmerged", async () => {
+  // The synthetic seed defect-pulls-early-stop: #1 merged before the period, a decision-spend line dated in it, and a full
+  // first page of PRs updated since the period's start but its last one, so the list stops before #1's PR.
+  const w = blank();
+  w.issues.push(objectiveIssue(1, { created: "2026-09-01T00:00:00Z" }), objectiveIssue(2, { created: "2026-11-16T00:00:00Z" }));
+  w.comments.push(comment(1, `<!-- pendulum:1:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 2, usd: 0.03 })}`, { user: ME, at: "2026-11-17T01:00:00Z" }));
+  w.comments.push(comment(2, `<!-- pendulum:2:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 0.01 })}`, { user: ME, at: "2026-11-17T02:00:00Z" }));
+  // Newest updated first, as GitHub answers `sort=updated&direction=desc`: #2's merged PR on the first page.
+  w.pulls.push(ownPull(2, { created: "2026-11-16T05:00:00Z", merged: "2026-11-16T06:00:00Z", updated: "2026-11-17T00:00:00Z" }));
+  for (let i = 0; i < 98; i += 1) w.pulls.push(ownPull(500 + i, { created: "2026-11-15T00:00:00Z", updated: `2026-11-1${i % 2 ? 6 : 5}T12:00:00Z` }));
+  w.pulls.push(ownPull(700, { created: "2026-10-20T00:00:00Z", updated: "2026-10-21T00:00:00Z" }));
+  w.pulls.push(ownPull(1, { created: "2026-09-02T00:00:00Z", merged: "2026-09-02T01:00:00Z" }));
+  // An older closed Objective with only a stranger's paste of a marker in the period: it counts nothing, so no PR is read for it.
+  w.issues.push(objectiveIssue(3, { created: "2026-09-01T00:00:00Z" }));
+  w.comments.push(comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 1, usd: 9 })}`, { user: { login: "stranger", type: "User" }, association: "NONE", at: "2026-11-17T03:00:00Z" }));
+  const { json: r, calls } = await report(w, { since: "2026-11-01" });
+  assert.deepEqual(r.objectives.map((o) => [o.issue, o.outcome]), [[1, "merged"], [2, "merged"]]);
+  assert.deepEqual(r.hotSpots.blockedOrUnmergedSpend.items, []);
+  // #1 was created before the stop, so its branch's PRs are read; #2's PR was created since it and is on the list.
+  const heads = calls.filter((c) => c.includes("/pulls?") && c.includes("head="));
+  assert.deepEqual(heads, [`GET /pulls?state=all&head=${encodeURIComponent("acme:pendulum/1")}&per_page=100&page=1`]);
+  assert.ok(!calls.some((c) => c.includes("/pulls?state=all&sort=updated") && c.includes("page=2")), "the list still stops early");
+  // The call budget stopped before #1's branch was read: its end is unknown, never closed unmerged.
+  const stopped = await report(w, { since: "2026-11-01", "max-calls": r.source.calls.made - 1 });
+  assert.deepEqual([byIssue(stopped.json, 1).outcome, stopped.json.source.stoppedAt], [null, "pulls"]);
+});
+
+test("report (#566 R3/S8): a local stage whose ledger did not fit its comment takes its tokens from the clone's own record of it, with its passes", async () => {
+  // The synthetic seed defect-local-record-tokens; real cases: assetgrove #404, raccoon-world #142 and #152.
+  const w = blank();
+  w.issues.push(objectiveIssue(41));
+  const body = progress(41, "work", "local-c1", { user: ME, spend: { usd: 1.5, parts: { usdByBilling: { subscription: 1.5 }, billing: "subscription" } } }).body;
+  w.comments.push(comment(41, `${body}\nPer-pass ledger: 5 passes, over the 6000-character bound of its line; the stage's usage record holds it.\n<!-- pendulum:ledger {"cut":5} -->`, { user: ME }));
+  const tokens = { input: 17_001_148, output: 40_000, cached: 16_000_000, written: 500_000 };
+  const passes = [1, 2, 3, 4, 5].map((i) => ledgerPass(`work-${i}`, 0.3, `2026-11-17T03:0${i}:00Z`, `2026-11-17T03:0${i}:30Z`, { billing: "subscription", tokens: { input: 3_400_229 + (i === 1 ? 1 : 0), output: 8000, cached: 3_200_000, written: 100_000 } }));
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  mkdirSync(join(clone, ".pendulum", "41", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "41", "usage-work-1", "result.json"), JSON.stringify({ harness: "claude", model: "claude-opus-5-5", usd: 1.5, tokens, progressRun: "local-c1", ledger: passes, ran: { pendulum: PENDULUM_VERSION } }));
+  const fake = fakeGitHub(w);
+  // Built while the token's login is known: the local stage's comment is Pendulum's own by that login.
+  const r = await over(fake, async () => buildReport(await readReport(REPO, reportScope({ issue: ["41"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }), { now: new Date(NOW).toISOString() }));
+  assert.deepEqual(artifactCalls(fake.calls), [], "no artifact read: the clone's record holds the ledger");
+  assert.deepEqual(byIssue(r, 41).passes, { total: 5, answer: 0, fix: 0 });
+  assert.deepEqual(byIssue(r, 41).tokens, tokens);
+  assert.deepEqual(r.totals.tokens, tokens);
+});
+
+test("report (#566 S5): a usage record whose dollars the cost join withholds as unmatched puts none of its passes in the pass breakdown", async () => {
+  // The synthetic seed defect-unmatched-pass-dollars: an older Actions record with no `progressRun`, of a run with no
+  // comment, beside a local stage's comment with dollars of the same stage kind.
+  const w = blank();
+  w.issues.push(objectiveIssue(40));
+  w.pulls.push(ownPull(40, { created: "2026-11-17T04:00:00Z", merged: "2026-11-17T05:00:00Z" }));
+  const local = [ledgerPass("work-1", 0.5, "2026-11-17T03:00:00Z", "2026-11-17T03:10:00Z", { billing: "subscription" })];
+  w.comments.push(progress(40, "work", "local-w1", { user: ME, at: "2026-11-17T03:00:00Z", spend: { usd: 0.5, parts: { usdByBilling: { subscription: 0.5 }, billing: "subscription" } } }));
+  w.comments.at(-1).body += `\n${ledgerMarker(local, { model: "claude-opus-5-5", version: PENDULUM_VERSION, published: ["claude-opus-5-5"] })}`;
+  // A review stage with no ledger line and no local record: the Objective's usage artifacts are read.
+  w.comments.push(progress(40, "review", "local-r1", { user: ME, at: "2026-11-17T04:30:00Z", spend: { usd: 0.2, parts: { usdByBilling: { subscription: 0.2 }, billing: "subscription" } } }));
+  const ghost = { harness: "claude", model: "claude-opus-5-5", usd: 0.7, runs: 1, exit: "delivered", usdByBilling: { api: 0.7 }, billing: "api", tokens: { input: 5000, output: 500, cached: 0, written: 0 }, started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:20:00Z", ledger: [ledgerPass("work-1", 0.7, "2026-11-17T02:00:00Z", "2026-11-17T02:20:00Z")] };
+  w.artifacts["pendulum-usage-40"] = [{ id: 4001, name: "pendulum-usage-40", expired: false, created_at: "2026-11-17T02:21:00Z", workflow_run: { id: 81001, repository_id: 1, head_repository_id: 1 }, record: ghost }];
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  const forty = byIssue(r, 40);
+  assert.deepEqual(forty.stages, { work: 2, rebase: 0, review: 1 }, "the record still counts as a stage");
+  assert.ok(forty.cost.unknownWhy.includes("unmatched"));
+  assert.equal(forty.cost.usd.api, 0, "its dollars withheld");
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api, x.cost.usd.subscription]), [["work", 1, 0, 0.5]]);
+  assert.equal(r.totals.passes, 1);
+});
+
+test("report (#566 S6): a vendor comment standing alone with no model dollars and no model run of unknown cost is one run of unknown cost, as on the finish card, never a known $0", async () => {
+  // The synthetic seed defect-vendor-only-bare (launch.mjs bookVendor when the stage's usage record could not be read).
+  const { objectiveStages, pendulumOwn } = await import("../scripts/lib/finish-card.mjs");
+  const w = blank();
+  w.issues.push(objectiveIssue(42, { state: "open", labels: ["pendulum:blocked"] }));
+  w.comments.push(comment(42, ["<!-- pendulum:42:vendor:work:9001-abcdef012345 -->", "Pendulum's sandbox cost for this stage:", "- sandbox stopped", spendMarker(0.04, { vendorUsd: 0.04 })].join("\n")));
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  assert.deepEqual(byIssue(r, 42).cost, { usd: { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0.04 }, unknownRuns: 1, unknownWhy: ["unreported"] });
+  assert.deepEqual(r.unknown.items, [{ issue: 42, stage: "work", runs: 1, why: ["unreported"] }]);
+  const card = objectiveStages({ issue: 42, comments: w.comments, mine: pendulumOwn(APP.id) });
+  assert.deepEqual(card.stages.map((s) => [s.usd, s.unknown, s.why]), [[null, 1, ["unreported"]]]);
+});
+
+test("report (#566 S7): an artifact downloaded with no result.json leaves its stage of unknown cost `unreported`, not `no-record`", async () => {
+  // The synthetic seed defect-noresult-reason; real case: pendulum-scratch #12.
+  const w = blank();
+  w.issues.push(objectiveIssue(43, { state: "open", labels: ["pendulum:blocked"] }));
+  w.comments.push(progress(43, "work", "71001"));
+  w.artifacts["pendulum-usage-43"] = [{ id: 4301, name: "pendulum-usage-43", expired: false, created_at: "2026-11-17T03:30:00Z", workflow_run: { id: 71001, repository_id: 1, head_repository_id: 1 } }];
+  const { json: r, calls } = await report(w, { since: "2026-11-17" });
+  assert.ok(calls.includes("DOWNLOAD 4301"));
+  assert.deepEqual(byIssue(r, 43).cost.unknownWhy, ["unreported"]);
+  assert.deepEqual(r.unknown.reasons.map((x) => [x.code, x.stages, x.runs]), [["unreported", 1, 1]]);
+  assert.ok(!r.source.missing.some((m) => m.code === "no-record"), "its record was read");
+  assert.equal(r.source.read.artifacts.noResult, 1);
+});
+
+test("report (#566 S9): a stage with a ledger line takes its passes from it on the stage path, as its finish card does, when another stage's usage record is read", async () => {
+  // The synthetic seed defect-card-vs-stage-minutes: #3's build has no spend line (its usage record is read, by the card
+  // too), and its review has a spend line and a ledger line (to the second) beside a usage record timed to the millisecond.
+  const make = () => {
+    const w = world();
+    const review = w.artifacts["pendulum-usage-3-review"][0];
+    review.record = { ...review.record, ledger: review.record.ledger.map((p) => ({ ...p, started: "2026-11-17T02:26:27.400Z", ended: "2026-11-17T02:26:38.900Z" })) };
+    w.recs.review = review.record;
+    const lines = stageSpendLine(review.record);
+    w.comments = w.comments.map((c) => (c.user === BOT && c.body.startsWith("<!-- pendulum:3:progress:review:44002920873 -->") ? { ...c, body: `${c.body}\n${spendMarker(0.163442, { usdByBilling: { api: 0.163442 }, billing: "api" })}\n${lines.ledger}` } : c));
+    return w;
+  };
+  const stages = await report(make(), { issue: 3 });
+  assert.ok(stages.calls.includes("DOWNLOAD 302"), "the review stage's record is read, beside the build's");
+  assert.equal(stages.json.breakdowns.pass.find((x) => x.key === "review").modelMinutes, 0.18, "11 s, from the ledger line");
+  const w = make();
+  w.comments.push(await finishCard3(w));
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(figures(card.json), figures(stages.json));
+});
+
+test("report (#566 R8, R9): each missing entry gives its Objectives and the stages among them; the Markdown names the unrecorded Objectives and the stages of unknown cost", async () => {
+  const w = world();
+  // A stage that names two reasons for its one run of unknown cost: two reasons, one stage.
+  w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:8:progress:review:local-u1 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:spend [^\n]*$/m, spendMarker(0, { usdUnknown: 1, usdUnknownWhy: ["failed-request", "unreported"] })) } : c));
+  // A vendor comment with no stage of its own, by a member who is not Pendulum: a run of unknown cost, but no stage.
+  w.comments.push(comment(7, ["<!-- pendulum:7:vendor:work:777-abcdef012345 -->", "Pendulum's sandbox cost for this stage:", spendMarker(0.01, { vendorUsd: 0.01 })].join("\n"), { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T04:55:00Z" }));
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  const entry = (code) => r.source.missing.find((m) => m.code === code);
+  // #5 (two local stages), #7 (its Actions build's older record and two local stages) and #8 (its expired Actions build
+  // and a local stage): no ledger.
+  assert.deepEqual([entry("no-ledger").issues, entry("no-ledger").counts], [[5, 7, 8], { objectives: 3, stages: 7 }]);
+  assert.deepEqual([entry("no-record").issues, entry("no-record").counts], [[8], { objectives: 1, stages: 1 }]);
+  assert.deepEqual(entry("unattributed").counts, { objectives: 1, stages: 1 });
+  for (const m of r.source.missing) assert.deepEqual(Object.keys(m.counts), ["objectives", "stages"], m.code);
+  const md = renderReport(r);
+  const runs = r.unknown.runs;
+  // The vendor comment with no stage is an item but no stage.
+  const stagesWithUnknown = r.unknown.items.length - 1;
+  assert.equal(r.unknown.stages, stagesWithUnknown);
+  assert.equal(r.unknown.reasons.reduce((t, x) => t + x.stages, 0), r.unknown.items.length + 1, "a stage with two reasons is under each");
+  assert.match(md, new RegExp(`^- Runs of unknown cost: ${runs} in ${stagesWithUnknown} stage\\(s\\) and 1 record\\(s\\) outside a stage \\(decision calls, or a vendor comment with no stage\\)\\. By reason \\(a stage that names two is under each\\): `, "m"));
+  assert.match(md, new RegExp(`^\\*\\*Answer and fix passes\\*\\*: [^\\n]*; not recorded \\(a stage with no per-pass ledger\\): ${r.hotSpots.answerAndFixPasses.unrecorded.map((n) => `#${n}`).join(", ")}$`, "m"));
+  assert.match(md, /^- Missing: stages with no per-pass ledger[^\n]* \(3 Objective\(s\), 7 stage\(s\): #5, #7, #8\)$/m);
+});
+
+test("report (#566): one name per model: a Claude model's Copilot catalog id is its Anthropic API id by the table, and an OpenAI id is the price table's row, through its aliases and provider prefix", async () => {
+  const { modelName } = await import("../scripts/lib/report.mjs");
+  const prices = loadPrices();
+  assert.deepEqual(
+    ["claude-sonnet-5.5", "claude-sonnet-5-5", "claude-opus-5.5", "claude-2.1", "claude-3.5-sonnet-20241022", "claude-fable-5-2", "openai/gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null].map((m) => modelName(m, prices)),
+    ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-2.1", "claude-3.5-sonnet-20241022", "claude-fable-5-2", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-luna-2026-08-07", "openai/gpt-7-nova", "gpt-5-mini", "us.anthropic.claude-sonnet-5.5-v1:0", "Claude-Sonnet-5.5", "decisions", null],
+  );
+  // Every row of the table names an API id the report keeps as it is.
+  const { CLAUDE_MODELS } = await import("../scripts/lib/report.mjs");
+  for (const [from, to] of Object.entries(CLAUDE_MODELS.aliases)) assert.deepEqual([modelName(from, prices), modelName(to, prices)], [to, to], from);
+  const w = blank();
+  const stage = (n, h, model, usd) => {
+    w.issues.push(objectiveIssue(n));
+    w.comments.push(progress(n, "work", `local-${n}`, { user: ME, h, model, spend: { usd, parts: { usdByBilling: { api: usd }, billing: "api" } } }));
+  };
+  stage(60, "copilot", "claude-sonnet-5.5", 0.1);
+  stage(61, "claude", "claude-sonnet-5-5", 0.2);
+  stage(62, "codex", "openai/gpt-6.1-sol", 0.3);
+  stage(63, "codex", "gpt-6.1-sol", 0.4);
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  assert.deepEqual(r.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5-5", 2, 0.3], ["gpt-6.1-sol", 2, 0.7]]);
 });

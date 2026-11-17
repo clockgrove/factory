@@ -158,13 +158,14 @@ export const appIdWhyText = (v) => (v.from === "forbidden" ? "could not be read"
  * fallback's), or why there is no id: `unset` (a 404 to the last token that read it, or a value that is no App id:
  * `notId`) or `forbidden` (403 to the last token that read it). The first read's rate limit or other failure throws; the
  * second's never does (a refused gh login, its rate limit: said through `log`, and the first read's reason stands),
- * unless `isStop(e)` (the call budget's stop), which is thrown with `appFirst`, the first read's reason.
+ * unless `isStop(e)` (the call budget's stop), which is thrown with `appFirst`, the first read's reason. `read`: options
+ * for each read (github.mjs rest: `noRateWait`, `deadlineAt`, `signal`), for a caller that must not wait on GitHub.
  */
-export async function readAppIdVariable(repo, { token, fallback = null, take = () => {}, plan = () => {}, isStop = () => false, log = () => {} } = {}) {
+export async function readAppIdVariable(repo, { token, fallback = null, take = () => {}, plan = () => {}, isStop = () => false, log = () => {}, read = {} } = {}) {
   const once = async (t) => {
     take();
     try {
-      const v = await rest(`repos/${repo.full}/actions/variables/${APP_ID_VARIABLE}`, { token: t });
+      const v = await rest(`repos/${repo.full}/actions/variables/${APP_ID_VARIABLE}`, { ...read, token: t });
       const id = appIdOf(v?.value);
       return id === null ? { id: null, from: "unset", notId: true } : { id, from: "variable" };
     } catch (e) {
@@ -195,9 +196,9 @@ export async function readAppIdVariable(repo, { token, fallback = null, take = (
  * token (`fallback`), unless that is `token` itself, which was refused. Returns {id, from, notId, file, copy, saved,
  * problem}: `from` as readAppIdVariable's (`variable`, `variable-gh`, `unset`, `forbidden`), `copy` the local copy's id
  * when the variable gave none, and `problem` the copy's place refused (appIdPlaceProblem) or its save's failure. Throws
- * what the gh login's read throws.
+ * what the gh login's read throws; `read` is that read's options (readAppIdVariable).
  */
-export async function learnAppId(repo, { listed, token = null, fallback = ghLoginToken, home = homedir() } = {}) {
+export async function learnAppId(repo, { listed, token = null, fallback = ghLoginToken, home = homedir(), read = {} } = {}) {
   const copy = readLocalAppId(repo.full, home);
   let v;
   if (listed?.vars) {
@@ -205,7 +206,7 @@ export async function learnAppId(repo, { listed, token = null, fallback = ghLogi
     v = id !== null ? { id, from: "variable" } : { id: null, from: "unset", notId: Object.hasOwn(listed.vars, APP_ID_VARIABLE) };
   } else {
     const t = fallback?.() ?? null;
-    v = t && t !== token ? await readAppIdVariable(repo, { token: t }).then((r) => (r.from === "variable" ? { ...r, from: "variable-gh" } : r)) : { id: null, from: "forbidden" };
+    v = t && t !== token ? await readAppIdVariable(repo, { token: t, read }).then((r) => (r.from === "variable" ? { ...r, from: "variable-gh" } : r)) : { id: null, from: "forbidden" };
   }
   if (v.id === null) return { ...v, file: copy.file, copy: copy.id, saved: false, problem: copy.problem ?? null };
   try {

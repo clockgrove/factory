@@ -1564,8 +1564,10 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   // A pass with no result line (killed, crashed) reports no total, and a resumed Claude Code before 2.1.277 no running
   // one (usage.mjs sinceSession); the session's last good one stays, with every thread counted so far, so a later stage
   // counts neither the session nor its threads again, and counts what this pass spent. A Codex total is its tokens
-  // (usage.mjs sinceSession prices each pass's share), kept whether or not this table could price them.
-  if (RUNNING_TOTALS.has(harness) && reported.sessionId && (reported.usd !== null || (harness === "codex" && runningTokens(reported.tokens))) && !rec.usdUnknownWhy?.includes("resumed-total")) {
+  // (usage.mjs sinceSession prices each pass's share), kept whether or not this table could price them. A total below
+  // the one counted before (sinceSession `newBase`) is no running total of it, so the pass is unknown, but the session's
+  // later totals run on from it: it is the session's total from here.
+  if (RUNNING_TOTALS.has(harness) && reported.sessionId && (reported.usd !== null || (harness === "codex" && runningTokens(reported.tokens))) && (!rec.usdUnknownWhy?.includes("resumed-total") || rec.newBase === true)) {
     const total = withChildren({ usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime });
     SESSION_TOTALS.set(reported.sessionId, total);
     // The session's running total as Pendulum read it (for Copilot the larger of the usage file and the stream), kept in

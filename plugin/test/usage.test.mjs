@@ -8,7 +8,7 @@ import { SHELL_SECRET_KEYS, VENDOR_TELEMETRY_OFF, credentialEnv, finalText, harn
 import { AGENT_SHELL_TELEMETRY_OFF, localSandbox } from "../scripts/lib/local.mjs";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES, cacheSummary, copilotSessionTotal, mergeUsage, parseClaude, parseCodex, parseCopilot, parseUsage, priceCodex, sinceSession } from "../scripts/lib/usage.mjs";
-import { capReached, copilotCount, decideExit, sumSpend } from "../scripts/lib/logic.mjs";
+import { capReached, copilotCount, decideExit, harnessActivity, sumSpend } from "../scripts/lib/logic.mjs";
 import { clampTotal } from "../scripts/lib/usage.mjs";
 import { copilotCreditUsd } from "../scripts/lib/harness.mjs";
 import { exec } from "../scripts/lib/proc.mjs";
@@ -62,7 +62,7 @@ test("codex: a stream error (a dropped stream it reconnected) is a run of unknow
   assert.deepEqual([failed.usd, failed.usdUnknown, failed.usdUnknownWhy], [null, 1, ["failed-request", "unreported"]]);
 });
 
-test("codex: JSONL turn.completed usage summed and priced from the table", () => {
+test("codex: JSONL turn.completed usage, the thread's running total, read at its last event and priced from the table", () => {
   const rec = parseCodex(fixture("codex-events.jsonl"), "gpt-6.1-sol");
   assert.equal(rec.ok, true);
   assert.equal(rec.turns, 2);
@@ -75,6 +75,33 @@ test("codex: JSONL turn.completed usage summed and priced from the table", () =>
   assert.equal(rec.usd, expected);
   assert.match(rec.basis, new RegExp(`priced at OpenAI's Standard rates from table dated ${CODEX_PRICES.date}`));
   assert.equal(finalText("codex", fixture("codex-events.jsonl")).split("\n")[0], "Plan posted.");
+});
+
+test("#480: Codex's turn.completed totals are cumulative within one process, so they are never summed; the live line counts the same", () => {
+  const ev = (o) => JSON.stringify(o);
+  const turn = (input, output) => ev({ type: "turn.completed", usage: { input_tokens: input, cached_input_tokens: 0, output_tokens: output } });
+  const stream = [ev({ type: "thread.started", thread_id: "t1" }), turn(1_000_000, 10_000), turn(1_500_000, 20_000)];
+  const rec = parseCodex(stream.join("\n"), "gpt-6.1-sol");
+  assert.deepEqual([rec.tokens.input, rec.tokens.output, rec.turns], [1_500_000, 20_000, 2], "1.0M then 1.5M is 1.5M, not 2.5M");
+  assert.equal(rec.usd, priceCodex("gpt-6.1-sol", { input: 1_500_000, cached: 0, output: 20_000 }));
+  // A turn.completed with no usage, or one that reports no count, leaves the last total.
+  assert.equal(parseCodex([...stream, ev({ type: "turn.completed" })].join("\n"), "gpt-6.1-sol").tokens.input, 1_500_000);
+  const counts = (r) => (({ input, output, cached, written }) => ({ input, output, cached, written }))(r.tokens);
+  assert.deepEqual(counts(parseCodex([...stream, ev({ type: "turn.completed", usage: {} })].join("\n"), "gpt-6.1-sol")), { input: 1_500_000, output: 20_000, cached: 0, written: null });
+  // One that reports some counts only: each count it leaves out keeps its value before it.
+  const partial = ev({ type: "turn.completed", usage: { input_tokens: 1_600_000 } });
+  assert.deepEqual(counts(parseCodex([...stream, partial].join("\n"), "gpt-6.1-sol")), { input: 1_600_000, output: 20_000, cached: 0, written: null });
+  const some = harnessActivity(() => 0);
+  for (const line of [...stream, partial]) some.feed(line);
+  assert.deepEqual(some.snapshot().tokens, { input: 1_600_000, output: 20_000, written: 0 }, "the live line keeps the output it had");
+  const empty = harnessActivity(() => 0);
+  for (const line of [...stream.slice(0, 2), ev({ type: "turn.completed", usage: {} }), stream[2]]) empty.feed(line);
+  assert.deepEqual(empty.snapshot().tokens, { input: 1_500_000, output: 20_000, written: 0 }, "the live line counts from the last total, not from an empty one");
+  // The progress comment's live status: the same reading, from the prior total of a resumed thread on.
+  const live = harnessActivity(() => 0);
+  live.since("t1", { tokens: { input: 400_000, output: 4_000 } });
+  for (const line of stream) live.feed(line);
+  assert.deepEqual(live.snapshot().tokens, { input: 1_100_000, output: 16_000, written: 0 });
 });
 
 test("codex: a model with no price row is a run of unknown cost, never zero", () => {
@@ -440,7 +467,6 @@ test("a session restored from an earlier job counts its own share: the transcrip
 test("a resumed Codex pass counts its own share, in this process and from an earlier stage; output is priced once", async () => {
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   const { restoreTranscript } = await import("../scripts/lib/session.mjs");
-  const { harnessActivity } = await import("../scripts/lib/logic.mjs");
   // Real Codex 0.167.0 streams: `codex exec`, then `codex exec resume` on its thread at high effort. turn.completed
   // carries the thread's running total; the rollout's own last_token_usage for the resumed turn was input 22888,
   // cached 12288, output 50 of which reasoning 43 (total_tokens 22938 = input + output).

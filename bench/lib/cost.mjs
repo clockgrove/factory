@@ -282,7 +282,11 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.priceTableDate = null;
     out.note = null;
     out.basis = priced.length ? `pendulum:spend lines in ${stageParts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
-  } else if (stageParts.length > 1) out.basis += `; ${stageParts.length} artifacts summed (worker + review)`;
+  } else if (stageParts.length > 1) {
+    // A mixed-route Objective: its artifacts' stages and its local stages' spend lines, each stage once, each source's basis named.
+    const lines = stageParts.filter((r) => r.source === "spend").length;
+    out.basis = lines ? `artifacts: ${out.basis}; spend lines: the worker's own pricing, in ${lines} progress comment(s); ${stageParts.length - lines} artifact(s) and ${lines} spend line(s) summed` : `${out.basis}; ${stageParts.length} artifacts summed (worker + review)`;
+  }
   if (outside.length) {
     const usd = outside.reduce((s, r) => s + (num(r.usd) ?? 0), 0);
     out.basis += `; includes ${round4(usd)} USD of decision calls outside a stage (the AI Gateway's cost, ${outside.length} comment(s))`;

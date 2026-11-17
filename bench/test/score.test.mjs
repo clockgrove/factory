@@ -14,7 +14,7 @@ import { bySelf, dispatchLatency, pendulumLogin, failedStartsOf, lastWrite, laun
 import { noWait, waitedRecorded, waitedUnrecorded } from "./fixtures/sandbox-drill.mjs";
 import { blocked, cleanMerge, humanPush, localMerge, OPERATOR, questionAnswered, REPO, snapshotOf, withHandover } from "./fixtures/github.mjs";
 import { CODEX_NO_TOKENS, mergeUsage, parseUsage } from "../../plugin/scripts/lib/usage.mjs";
-import { usdText } from "../../plugin/scripts/lib/logic.mjs";
+import { harnessMarker, usdText } from "../../plugin/scripts/lib/logic.mjs";
 import { handoverLine } from "../../plugin/scripts/lib/handover.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
@@ -1217,6 +1217,15 @@ test("#479 cost: decision calls outside a stage (the decision-spend lines in Pen
   assert.deepEqual(row.cost.usdUnknownWhy, ["decision"]);
   assert.ok(Math.abs((row.cost.usdByBilling?.api ?? 0) - 0.0031) < 1e-9, "billed to the gateway key: `api`");
   assert.match(row.cost.basis, /includes 0\.0031 USD of decision calls outside a stage \(the AI Gateway's cost, 2 comment\(s\)\)/);
+  // With usage artifacts too (#506's withLines matches records to spend lines): the decision calls stay rows of their own,
+  // never a stand-in and never matched to a stage's record or line, counted once.
+  const claudeArtifact = { harness: "claude", model: "claude-opus-5-5", artifact: "pendulum-usage-63/result.json", usd: 1.5, tokens: { input: 1, output: 1, cached: 0, written: 0 }, runs: 1, basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)" };
+  const plain = { ...localMerge(63), usage: [claudeArtifact] };
+  const withDecisions = { ...local, usage: [claudeArtifact] };
+  const base = scoreObjective(plain, { prices, now: NOW }).cost;
+  const both = scoreObjective(withDecisions, { prices, now: NOW }).cost;
+  assert.ok(Math.abs(both.usd - base.usd - 0.0031) < 1e-9, "the decision calls once, beside the stages");
+  assert.equal(both.parts.filter((p) => p.harness === null && /decision calls outside a stage/.test(p.basis ?? "")).length, 2);
   // On Actions the stage dollars are the artifacts', and the comment still adds its own.
   const artifact = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-63/result.json", usd: 0.2, gatewayDecisionUsd: 0.0042, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };
   const priced = costOf([{ ...artifact, gatewayDecisionUsd: undefined }], prices).usd;
@@ -1234,4 +1243,204 @@ test("cost: a Codex run killed before any turn completed stays a run of unknown 
   assert.match(cost.basis, /^tokens priced at OpenAI's Standard rates from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
   const row = scoreObjective(cleanMerge(62, [priced, killed]), { prices, now: NOW });
   assert.match(markdownTable([row]), /\$0\.18 plus 1 run of unknown cost \(/);
+});
+
+/**
+ * #480: a mixed-route Objective, its work on GitHub Actions (a progress comment with no spend line, its usage artifact
+ * naming the comment) and its review run locally (a spend line only). `review` is the local review's spend line.
+ */
+function mixedRoute(number, { review = { usd: 3 }, work = null, workKey = "5551", reviewKey = "1700000002", artifact = {} } = {}) {
+  const c = cleanMerge(number);
+  const app = c.issueComments[0].user;
+  const progress = (kind, key, spend, created) => ({ user: app, created_at: created, body: `<!-- pendulum:${number}:progress:${kind}:${key} -->\nPendulum ${kind} run ${key}\n- 01:02Z harness claude (claude-opus-5-5) attempt 1${spend ? `\n<!-- pendulum:spend ${JSON.stringify(spend)} -->` : ""}` });
+  // `review: false`: no review stage at all.
+  c.issueComments.push(progress("work", workKey, work, "2031-03-02T01:02:00Z"), ...(review === false ? [] : [progress("review", reviewKey, review, "2031-03-02T02:20:00Z")]));
+  // A field given as undefined is left out: a record from before records named their comment has no `progressRun` at all.
+  const rec = { harness: "claude", model: "claude-opus-5-5", artifact: `pendulum-usage-${number}/result.json`, progressRun: workKey, usd: 8, runs: 1, tokens: { input: 1, output: 1, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)", ...artifact };
+  c.usage = [Object.fromEntries(Object.entries(rec).filter(([, v]) => v !== undefined))];
+  c.harness = "claude";
+  return c;
+}
+
+test("#480: a mixed-route Objective's dollars are its Actions artifacts' and its local stages' spend lines together: $8 + $3 = $11", () => {
+  const row = scoreObjective(mixedRoute(70), { prices, now: NOW });
+  assert.equal(row.cost.usd, 11);
+  assert.equal(row.cost.usdUnknown, undefined, "the Actions stage's comment, which its artifact names, is no run of unknown cost");
+  assert.deepEqual(row.cost.parts.map((p) => p.usd), [8, 3]);
+  assert.match(row.cost.basis, /; 1 artifact\(s\) and 1 spend line\(s\) summed$/);
+  assert.match(markdownTable([row]), /\| \$11\.00 \(/);
+  assert.deepEqual([row.activity.workRuns, row.activity.reviewRuns], [1, 1]);
+});
+
+test("#480: a stage seen in both its usage artifact and its progress comment's spend line counts once, whatever its comment's key", () => {
+  // A cloud sandbox stage: its spend line and its artifact (uploaded at its end) hold the same $8; its key is `<run>-<claim>`.
+  const sandbox = mixedRoute(71, { workKey: "5552-abcdef012345", work: { usd: 8 } });
+  const row = scoreObjective(sandbox, { prices, now: NOW });
+  assert.equal(row.cost.usd, 11, "$8 once, plus the local review's $3");
+  assert.deepEqual(row.cost.parts.map((p) => p.artifact), ["pendulum-usage-71/result.json", "spend/review/1700000002"]);
+});
+
+test("#480: a local stage of unknown cost, and an Actions stage whose artifact expired, carry through beside the known dollars", () => {
+  const unknown = mixedRoute(73, { review: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  const row = scoreObjective(unknown, { prices, now: NOW });
+  assert.deepEqual([row.cost.usd, row.cost.usdUnknown, row.cost.usdUnknownWhy], [8, 1, ["unreported"]]);
+  assert.match(markdownTable([row]), /\| \$8\.00 plus 1 run of unknown cost \(/);
+  // Work and review both on Actions; the work's artifact expired (not downloaded), the review's names its comment: the
+  // work stage's comment, with no spend line, is a run of unknown cost.
+  const expired = mixedRoute(74, { review: null, artifact: { artifact: "pendulum-usage-74-review/result.json", progressRun: "1700000002", usd: 3 } });
+  const e = scoreObjective(expired, { prices, now: NOW });
+  assert.deepEqual([e.cost.usd, e.cost.usdUnknown], [3, 1]);
+  assert.match(markdownTable([e]), /\| \$3\.00 plus 1 run of unknown cost \(/);
+});
+
+test("#506 review: a record stands for the comments of its own stage it names exactly: an Actions re-run's key, an old sandbox claim, never a comment it does not name", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // An artifact from before `progressRun`, uploaded by run 5553, whose work comment is its second attempt's.
+  const rerun = mixedRoute(80, { workKey: "5553-2", artifact: { progressRun: undefined, workflowRun: 5553 } });
+  assert.deepEqual([score(rerun).cost.usd, score(rerun).cost.usdUnknown], [11, undefined], "the artifact is that comment's stage; the local review's $3 still counts");
+  // Another run's artifact names neither comment: both count (its comment is a run of unknown cost beside it).
+  const other = mixedRoute(81, { workKey: "5553-2", artifact: { progressRun: undefined, workflowRun: 6000 } });
+  assert.deepEqual([score(other).cost.usd, score(other).cost.usdUnknown], [11, 1]);
+  // An old sandbox artifact (no `progressRun`), matched to its comment `<run>-<claim>` by its claim: $8 and the vendor once.
+  const sandbox = mixedRoute(82, { workKey: "5552-abcdef012345", work: { usd: 8 }, artifact: { progressRun: undefined, vendor: { claim: "abcdef012345", usd: 0.6 } } });
+  const s = score(sandbox);
+  assert.deepEqual([s.cost.usd, s.cost.vendorUsd, s.cost.usdUnknown], [11, 0.6, undefined]);
+  // A review artifact keyed as the work's comment (one run for both jobs) stands for the review's comment only: the work's
+  // artifact expired, so its comment is a run of unknown cost.
+  const shared = mixedRoute(83, { review: null, reviewKey: "5551", artifact: { artifact: "pendulum-usage-83-review/result.json", progressRun: "5551", usd: 3 } });
+  assert.deepEqual([score(shared).cost.usd, score(shared).cost.usdUnknown], [3, 1]);
+  // An artifact with no result.json and no run to match (read from --usage): it stands for no comment, so the local
+  // review's line still counts beside it.
+  assert.equal(score(mixedRoute(84, { artifact: { progressRun: undefined, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] } })).cost.usd, 3);
+});
+
+test("#506 review: a stand-in record gives way to its stage's progress comment, which keeps the stand-in's sandbox cost when it has none", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // A sandbox stage its launcher ended: the stand-in carries the comment's last figure; the comment counts, once.
+  const killed = mixedRoute(85, { workKey: "5552-abcdef012345", work: { usd: 4.1, usdUnknown: 1, usdUnknownWhy: ["unreported"] }, artifact: { progressRun: "5552-abcdef012345", standIn: true, usd: 4.1, usdUnknown: 1, usdUnknownWhy: ["unreported"], vendor: { claim: "abcdef012345", usd: 0.6 } } });
+  const k = score(killed);
+  assert.deepEqual([k.cost.usd, k.cost.usdUnknown, k.cost.vendorUsd], [7.1, 1, 0.6], "never $4.10 twice and 2 runs of unknown cost");
+  assert.deepEqual(k.cost.parts.map((p) => p.artifact), ["spend/work/5552-abcdef012345", "spend/review/1700000002"]);
+  // An Actions artifact with no result.json, uploaded by the stage's run: one run of unknown cost, not two.
+  const noResult = mixedRoute(86, { artifact: { progressRun: undefined, workflowRun: 5551, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  assert.deepEqual([score(noResult).cost.usd, score(noResult).cost.usdUnknown], [3, 1]);
+});
+
+test("#506 review: a mixed Codex row's basis names both sources, the price table for the artifacts and the worker's own pricing for the spend lines", () => {
+  const c = mixedRoute(87, { artifact: { harness: "codex", model: "gpt-6.1-sol", usd: null, tokens: { input: 150000, output: 10000, cached: 115000, written: null } } });
+  c.harness = "codex";
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.equal(row.cost.usd, 3.1815);
+  assert.match(row.cost.basis, /^artifacts: tokens priced [^;]*codex-prices\.json dated [^;]+; spend lines: the worker's own pricing, in 1 progress comment\(s\); 1 artifact\(s\) and 1 spend line\(s\) summed$/);
+});
+
+test("#506 review F2: a stage's usage directory is read for its result.json and stream only, never its session totals", () => {
+  const dir = mkdtempSync(join(tmpdir(), "score-stage-dir-"));
+  try {
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ harness: "claude", model: "claude-opus-5-5", usd: 18, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 2 }));
+    writeFileSync(join(dir, "session-totals.json"), JSON.stringify({ harness: "claude", sessions: { s1: { usd: 18 } }, spend: { usd: 18, unknown: 1 } }));
+    const records = usageFromDir(dir, { readdir: (p) => readdirSync(p), read: (p) => readFileSync(p, "utf8"), isDir: (p) => statSync(p).isDirectory() });
+    assert.deepEqual(records.map((r) => r.artifact), ["result.json"]);
+    const cost = costOf(records, prices, { harness: "claude" });
+    assert.deepEqual([cost.usd, cost.usdUnknown], [18, 1], "$18 plus 1 run of unknown cost, never 2");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#506 review B1: the records' order never changes the row: a stand-in and its stage's own record, a sandbox stub or one on an account", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  const both = (c, recs) => [recs, [...recs].reverse()].map((usage) => {
+    const row = score({ ...c, usage });
+    return [row.cost.usd, row.cost.usdUnknown, row.cost.vendorUsd];
+  });
+  // The launcher's collection failed, so bookVendor wrote its stub (the stage's key, the vendor); a later run uploaded the
+  // stage's own result.json (the same key, no vendor). The stage's comment shows $4.
+  const c = mixedRoute(90, { workKey: "5552-abcdef012345", work: { usd: 4 }, review: false });
+  const stub = { artifact: "pendulum-usage-90/result.json", harness: "claude", progressRun: "5552-abcdef012345", standIn: true, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1, vendor: { claim: "abcdef012345", usd: 0.6 } };
+  const own = { artifact: "pendulum-usage-90/result.json", harness: "claude", progressRun: "5552-abcdef012345", usd: 4, runs: 1, tokens: { input: 1, output: 1, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd" };
+  assert.deepEqual(both(c, [stub, own]), [[4, undefined, 0.6], [4, undefined, 0.6]], "$4 once and the sandbox's $0.60, in either order");
+  // A stand-in on an account (no progressRun field) beside the stage's own record on that account and its comment ($7).
+  const local = mixedRoute(91, { workKey: "1700000001", work: { usd: 7 }, review: false });
+  local.issueComments.at(-1).body += `\n${harnessMarker("claude", "claude-opus-5-5", { harness: "claude", worker: "claude-opus-5-5", account: "alpha" })}`;
+  const standIn = { artifact: "usage-work-1/result.json", harness: "claude", account: "alpha", standIn: true, usd: 5, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1 };
+  const ownLocal = { artifact: "usage-work-2/result.json", harness: "claude", account: "alpha", progressRun: "1700000001", usd: 7, runs: 1, tokens: { input: 1, output: 1, cached: 0, written: 0 } };
+  assert.deepEqual(both(local, [standIn, ownLocal]), [[7, undefined, null], [7, undefined, null]], "never $12 for $7");
+});
+
+
+test("#506 review S1: a local stage's record with no progress comment (progressRun null) takes none of its account's comments", async () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  const account = (body) => `${body}\n${harnessMarker("claude", "claude-opus-5-5", { harness: "claude", worker: "claude-opus-5-5", account: "alpha" })}`;
+  const { earlyOutageEnd } = await import("../../plugin/scripts/lib/session.mjs");
+  // S1: a local stage the network ended before its comment: its record says it had none (progressRun null) on alpha; the
+  // Objective's $5 work comment on alpha still counts.
+  const dir = mkdtempSync(join(tmpdir(), "score-early-"));
+  const saved = Object.fromEntries(["GITHUB_RUN_ID", "PENDULUM_PROGRESS_RUN", "PENDULUM_STAGE_ACCOUNT", "GITHUB_OUTPUT"].map((k) => [k, process.env[k]]));
+  delete process.env.GITHUB_RUN_ID;
+  delete process.env.PENDULUM_PROGRESS_RUN;
+  Object.assign(process.env, { PENDULUM_STAGE_ACCOUNT: "alpha", GITHUB_OUTPUT: join(dir, "out") });
+  try {
+    await earlyOutageEnd({ origin: "https://api.github.com", since: Date.now(), code: "ECONNRESET" }, { local: true, usageDir: join(dir, "usage-work-1"), harness: "claude", model: null });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  const early = JSON.parse(readFileSync(join(dir, "usage-work-1", "result.json"), "utf8"));
+  assert.deepEqual([early.progressRun, early.account], [null, "alpha"]);
+  const s1 = mixedRoute(92, { workKey: "1700000001", work: { usd: 5 }, review: false });
+  s1.issueComments[s1.issueComments.length - 1].body = account(s1.issueComments.at(-1).body);
+  s1.usage = [{ ...early, artifact: "usage-work-1/result.json" }];
+  assert.equal(score(s1).cost.usd, 5, "the comment's $5, never taken by a record that had no comment");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("#506 review S2: a record from before progressRun on an account takes that account's comments of its own stage only", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  const account = (body) => `${body}\n${harnessMarker("claude", "claude-opus-5-5", { harness: "claude", worker: "claude-opus-5-5", account: "alpha" })}`;
+  // S2: a local work record from before records named their comment (on alpha, no progressRun field) takes alpha's work
+  // comments only: alpha's $3 review comment still counts.
+  const s2 = mixedRoute(93, { workKey: "1700000001", work: { usd: 5 }, artifact: { artifact: "usage-work-1/result.json", progressRun: undefined, account: "alpha", usd: 5 } });
+  s2.issueComments = s2.issueComments.map((x) => (/:progress:/.test(x.body) ? { ...x, body: account(x.body) } : x));
+  assert.deepEqual([score(s2).cost.usd, score(s2).cost.usdUnknown], [8, undefined]);
+});
+
+test("#506 review S3: a record that cannot say which comment is its own never doubles a figure: its dollars are unknown beside an unnamed comment of its stage", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // S3: a local result.json from before #266 (no progressRun field, no account) beside its stage's $5 comment that no record
+  // names: it may be that stage, so its $5 is unknown there, never $10.
+  const s3 = mixedRoute(94, { workKey: "1700000001", work: { usd: 5 }, review: false, artifact: { artifact: "usage-work-1/result.json", progressRun: undefined, usd: 5 } });
+  const r3 = score(s3);
+  assert.deepEqual([r3.cost.usd, r3.cost.usdUnknown, r3.cost.usdUnknownWhy], [5, 1, ["unmatched"]]);
+  // An artifact with no result.json and no run to match (read from --usage): it stands for no comment, so the local
+  // review's line still counts beside it.
+  const unread = mixedRoute(96, { artifact: { progressRun: undefined, standIn: true, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  // Its stage's comment (no spend line, as on Actions) is a run of unknown cost too: the trade-off of a record that names
+  // nothing is one more unknown run, never a known figure twice.
+  assert.deepEqual([score(unread).cost.usd, score(unread).cost.usdUnknown], [3, 2]);
+});
+
+test("#506 review N2: an Actions run's artifact never takes a sandbox comment whose claim is all digits", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  // An all-digit claim never reads as a re-run's attempt: run 5551's artifact is not the sandbox stage 5551-123456789012.
+  const digits = mixedRoute(88, { workKey: "5551-123456789012", work: { usd: 4 }, artifact: { progressRun: undefined, workflowRun: 5551 } });
+  // It names no comment, so beside the unnamed $4 work comment its $8 may be that stage's: unknown there, never added.
+  assert.deepEqual([score(digits).cost.usd, score(digits).cost.usdUnknown, score(digits).cost.usdUnknownWhy], [7, 1, ["unmatched"]]);
+});
+
+test("#506 review N3: the row's accounts come from the records and the comments they stand for", () => {
+  const score = (c) => scoreObjective(c, { prices, now: NOW });
+  const account = (body) => `${body}\n${harnessMarker("claude", "claude-opus-5-5", { harness: "claude", worker: "claude-opus-5-5", account: "alpha" })}`;
+  // N3: a record that names its comment but no account: the row's accounts come from that comment's harness line too.
+  const n3 = mixedRoute(95, { review: false });
+  n3.issueComments[n3.issueComments.length - 1].body = account(n3.issueComments.at(-1).body);
+  assert.deepEqual(score(n3).accounts, ["alpha"]);
+});
+
+test("#506 re-check: a record that is no stand-in takes the sandbox cost of the comment it stands for when it has none", () => {
+  // Probe: the stage's own result.json ($4, no vendor) and its comment, whose vendor comment booked the sandbox's $0.60.
+  const c = mixedRoute(97, { workKey: "5552-abcdef012345", work: { usd: 4 }, review: false, artifact: { progressRun: "5552-abcdef012345", usd: 4 } });
+  const app = c.issueComments[0].user;
+  c.issueComments.push({ user: app, created_at: "2031-03-02T02:00:00Z", body: "<!-- pendulum:97:vendor:work:5552-abcdef012345 -->\nSandbox cost.\n<!-- pendulum:spend {\"usd\":0.6,\"vendorUsd\":0.6} -->" });
+  const row = scoreObjective(c, { prices, now: NOW });
+  assert.deepEqual([row.cost.usd, row.cost.vendorUsd, row.cost.totalUsd, row.cost.usdUnknown], [4, 0.6, 4.6, undefined]);
 });

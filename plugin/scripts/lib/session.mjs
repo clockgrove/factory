@@ -85,6 +85,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
+import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
@@ -883,6 +884,12 @@ export function scopeTurnResult({ first, out, verdict = null, rec, exitBefore, e
 export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
   /^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") ? env.PENDULUM_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
+/**
+ * The progress comment key this stage's environment names (progressRunId), for a usage record Pendulum writes outside
+ * the stage's own progress reporter: null when neither the launcher's key nor a workflow run is set (a local stage keys
+ * its comment on its start time, which only its reporter knows).
+ */
+export const stageProgressRun = (env = process.env) => (/^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") || env.GITHUB_RUN_ID ? progressRunId(env) : null);
 /** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
@@ -2026,7 +2033,7 @@ export function gatewayDecisionFields(records) {
   return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
 }
 
-export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
+export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
   // rollout): the provider's structured refusal on a pass (usage.mjs noResetLimit), never its prose. Automatic account
@@ -2048,8 +2055,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
     // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
     ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
-    // The local account the stage ran on (accounts.mjs), by name only; none on Actions or in a cloud sandbox.
-    ...(ran?.account ? { account: ran.account } : {}),
+    // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
+    // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
+    ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),
     usd: merged.usd === null && !kb.extra ? null : Math.round(((merged.usd ?? 0) + kb.extra) * 1e6) / 1e6,
     tokens: merged.tokens,
     models: merged.models ?? null,
@@ -2079,8 +2087,12 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // Until when (ms) the stage's prompt cache stays warm (cacheWarmUntil): automatic account choice prefers this account
     // for the Objective's next stage until then.
     ...(warm !== null ? { cacheWarmUntil: warm } : {}),
-    // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once.
-    ...(progressRun ? { progressRun } : {}),
+    // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once;
+    // null when the stage had none (a stage the network ended before its comment, a local key only its reporter knows).
+    progressRun: typeof progressRun === "string" && progressRun ? progressRun : null,
+    // A record Pendulum wrote for a stage whose own process wrote none (killed before it could): the stage's progress
+    // comment, when there is one, is the better record of it, and a scorer given both keeps the comment's (withLines).
+    ...(standIn ? { standIn: true } : {}),
     // How the stage's session started: {resumed, from, reason}; null when it ended before deciding.
     reentry,
     credential: credentialBasis,
@@ -2458,7 +2470,7 @@ export async function earlyOutageEnd(e, { local, usageDir = null, harness, model
     if (Number.isFinite(lost.resetAt)) await afterReset(lost, deadlineAt);
     await block(end.reason, end.cause).catch((x) => log(`the outage's Block could not be written: ${String(x?.message || x).slice(0, 120)}`));
   }
-  if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason: end.reason, outage, credentialBasis: "none" });
+  if (usageDir) writeUsage(usageDir, { harness, model, records: stagePasses(), passes: 0, exit, reason: end.reason, outage, credentialBasis: "none", progressRun: stageProgressRun(), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null });
   setOutput("exit", exit);
   setOutput("reason", end.reason);
 }

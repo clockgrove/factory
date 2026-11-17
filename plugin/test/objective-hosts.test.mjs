@@ -38,7 +38,7 @@ test("host labels: each names one host a sandbox enforces as written, lower case
     assert.match(r.reason, /names no host Pendulum's sandboxes can allow/, bad);
     assert.match(r.fix, /`pendulum:host:example\.com`/);
   }
-  assert.equal(LABEL_MAX - HOST_PREFIX.length, 37, "the room USAGE.md states");
+  assert.equal(LABEL_MAX - HOST_PREFIX.length, 36, "the room USAGE.md states");
   // A host label is no harness or model choice: the harness label still reads, whatever host labels sit beside it.
   assert.deepEqual(choiceOf(["pendulum:harness:codex", HF, "pendulum:host:1.2.3.4"]).choice, { harness: "codex" });
   assert.deepEqual(choiceLabels(["pendulum:objective", HF, "pendulum:model:m"]), ["pendulum:host:huggingface.co", "pendulum:model:m"], "the set the plan's record and the trust check cover");

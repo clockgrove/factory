@@ -15,7 +15,7 @@ import { costOf } from "../../bench/lib/cost.mjs";
 // Real codex-cli 0.167 rollouts, trimmed to the lines codex-threads.mjs reads (ids, sources, models, token counts):
 // - a local Pendulum worker thread that spawned an implementer (`spawn-parent`) and that implementer's own rollout
 //   (`spawn-child`), as Codex wrote them side by side under CODEX_HOME/sessions;
-// - the pendulum-scratch #129 worker's thread on the AI Gateway (`spawn-gateway-parent`, from the v0.9.10 gate's
+// - the scratch repository's #129 worker's thread on the AI Gateway (`spawn-gateway-parent`, from the v0.9.10 gate's
 //   artifact), whose implementer's rollout was never saved;
 // - a forked sub-agent (`spawn-forked-child`) whose rollout starts with a copy of its parent's history.
 const fixture = (f) => readFileSync(join(import.meta.dirname, "fixtures", f), "utf8");

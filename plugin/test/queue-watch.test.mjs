@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// #2683: pendulum-scratch PR #468's queue commit hung in CI's setup step; the queue dropped it with checks_timed_out, and
+// #2683: in the scratch repository, PR #468's queue commit hung in CI's setup step; the queue dropped it with checks_timed_out, and
 // the `dequeued` run that would re-enqueue it was held for approval (its actor, github-merge-queue[bot], is an outside
 // contributor under all_external_contributors). Recovery must come from the queue watch, which no approval holds.
 

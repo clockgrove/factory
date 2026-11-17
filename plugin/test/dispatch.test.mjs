@@ -309,7 +309,7 @@ test("jobStall: a job is stalled only when its current step runs past max(3 x it
     ...extra,
   });
   const at = (m) => ({ now: t0 + m * min, fallbackMs: QUEUE_HUNG_MS });
-  // Tonight's case (pendulum-scratch run 42759031247): setup.sh normally about a minute, running 15.
+  // Tonight's case (the scratch repository's run 42759031247): setup.sh normally about a minute, running 15.
   const setup = job("Run scripts/ci/setup.sh");
   // Stalled past max(3 x baseline, baseline + 15 min): 16 minutes for a 1-minute step.
   assert.equal(jobStall(setup, { ...at(15.1), baselineMs: 1 * min }), null, "15 minutes of a normal 1: not yet");

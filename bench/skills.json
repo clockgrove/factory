@@ -41,7 +41,7 @@
       "words": 689,
       "files": {
         "reference.md": {
-          "sha256": "02c26ad273d823092ac5e413ac71f7066e5a61ab756b28521671539a34855a59",
+          "sha256": "21449e12653255762f5661ff04e4aa19dc4bb8f459dd0c70a84b3b456ece4e50",
           "lines": 35,
           "words": 506
         }
@@ -181,7 +181,7 @@
       "words": 688,
       "files": {
         "local.md": {
-          "sha256": "4ab98f88ef4f84a811d755895e5e7f1738dc9738f06d5a55e95e4467b73cfa83",
+          "sha256": "63a6a2f3b22066422d3046cb76b1baff6801703f5310f0d5df2e252ecc510844",
           "lines": 36,
           "words": 669
         },

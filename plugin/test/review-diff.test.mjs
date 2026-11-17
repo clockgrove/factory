@@ -300,7 +300,7 @@ const comments7 = [
   { path: "big.json", line: 10, side: "RIGHT", body: "no patch" },
 ];
 const review7 = { body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass, 2 comment(s).", comments: comments7, commitId: "c".repeat(40) };
-// GitHub's answer to a line comment on a file it lists without a patch (clockgrove/pendulum-scratch#238).
+// GitHub's answer to a line comment on a file it lists without a patch (the scratch repository's #238).
 const tooLarge = [422, { message: "Unprocessable Entity", errors: ["Diff entry big.json diff is too large"] }];
 const refusesBig = (n, b) => (b.comments.some((c) => c.path === "big.json") ? tooLarge : [200, { id: n }]);
 

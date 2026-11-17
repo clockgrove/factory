@@ -293,7 +293,7 @@ test("local triage: on with the key file, the key in no stage env; off says so o
 
 test("no secret input reaches a child under either name input() reads it by", () => {
   const env = scrubbedEnv({ AI_GATEWAY_API_KEY: "k", PENDULUM_INPUT_TRIAGE_MODEL: "m", PENDULUM_TRIAGE_MODEL: "m", PATH: "/usr/bin" });
-  assert.deepEqual(Object.keys(env).sort(), ["PENDULUM_INPUT_TRIAGE_MODEL", "PENDULUM_TRIAGE_MODEL", "PATH"]);
+  assert.deepEqual(Object.keys(env).sort(), ["PATH", "PENDULUM_INPUT_TRIAGE_MODEL", "PENDULUM_TRIAGE_MODEL"]);
   for (const name of SECRET_INPUTS) {
     const upper = name.toUpperCase();
     const left = scrubbedEnv({ [`PENDULUM_INPUT_${upper}`]: "s1", [`PENDULUM_${upper}`]: "s2" });

@@ -657,7 +657,7 @@ No sandbox can read it; it must be a regular file of yours, with one link, that 
 ```
 
 - **An account** is a Claude Code config folder (`CLAUDE_CONFIG_DIR`), a Codex home (`CODEX_HOME`) or a Copilot token file.
-  Its name is lowercase letters, digits and hyphens, starting with a letter or digit, at most 34 characters (it fits a `pendulum:account:<name>` label), and unique on the machine; it may not be another harness's name (`claude`, `codex`, `copilot`).
+  Its name is lowercase letters, digits and hyphens, starting with a letter or digit, at most 33 characters (it fits a `pendulum:account:<name>` label), and unique on the machine; it may not be another harness's name (`claude`, `codex`, `copilot`).
   A harness's first account is its default, and its stages run on it, unless automatic choice is on (below).
 - **Nothing declared:** each harness has one account, named after it (`claude`, `codex`, `copilot`), and runs on the login `serve`'s shell names (How the sandbox protects you, Logins and credential stores).
 - **Used in place:** a stage uses its account's folder or token where it is and never copies it (OpenAI allows one `auth.json` per machine).

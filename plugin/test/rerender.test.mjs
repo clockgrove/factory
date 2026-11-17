@@ -55,8 +55,8 @@ test("a re-render with no options keeps every setting a custom render states, on
   }
 });
 
-test("the real case: pendulum-scratch's pendulum.yml at 96ce800 keeps its validation, setup, checks, notify, plan credential, caps and timeout", () => {
-  const text = readFileSync(join(PLUGIN, "test/fixtures/pendulum-scratch-96ce800.yml"), "utf8");
+test("the real case: the scratch repository's workflow at 96ce800 keeps its validation, setup, checks, notify, plan credential, caps and timeout", () => {
+  const text = readFileSync(join(PLUGIN, "test/fixtures/scratch-96ce800.yml"), "utf8");
   const r = render({}, { text });
   // Every setting the file states stays; one the template gained since the file was written comes in at its default.
   assert.deepEqual(r.after.env, { ...r.before.env, PENDULUM_IMAGE_MAX_AGE_DAYS: "7" });

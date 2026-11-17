@@ -156,7 +156,7 @@ async function sweepOne({ issue, record, sandbox, card = null, hooks = () => ({}
 test("sweep: a Block for a vanished stage stops its running sandbox, books its cost and records it stopped; a live lease is left alone", async () => {
   const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
   const blocked = { state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:blocked" }] };
-  // #502's record (pendulum-scratch, 2026-11-11): started, then died; the lease ran out and the dispatcher Blocked it.
+  // #502's record (the scratch repository, 2026-11-11): started, then died; the lease ran out and the dispatcher Blocked it.
   const started = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "pendulum-aaa", state: "running", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(60) }], meter: { base: null, created: true, ceilingUsd: 0.603515, stored: { ms: 0, bytes: null }, vcpus: 2 }, sessionEnd: ago(-45) };
 
   const v = await sweepOne({ issue: blocked, record: started });
@@ -187,7 +187,7 @@ test("sweep: a Block for a vanished stage stops its running sandbox, books its c
 
 test("sweep: a Question whose card sits in In review is stopped and booked like a Block, then destroyed after its idle days (#57)", async () => {
   const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
-  // pendulum-scratch #372/#397: pendulum:question, no pendulum:in-review, the card still In review (applyExit puts a Question there).
+  // the scratch repository's #372/#397: pendulum:question, no pendulum:in-review, the card still In review (applyExit puts a Question there).
   const question = { state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:question" }] };
   const ended = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "pendulum-aaa", state: "ended", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(90) }], meter: { base: null, created: true, ceilingUsd: 0.603515, stored: { ms: 0, bytes: null }, vcpus: 2 }, sessionEnd: ago(-45) };
 

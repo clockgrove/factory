@@ -89,7 +89,7 @@ The plugin follows Pendulum's `main` branch. The workflow it writes for your rep
 
 > Set up Clockgrove Pendulum for this repository.
 
-Use the full name in requests like this one: it is what Pendulum's skills answer to, and it keeps your agent from picking up another product called Pendulum.
+Use the full name in requests like this one: it is what Pendulum's skills answer to, and a bare "Pendulum" can mean something else to your agent, such as the Python date-time library of that name.
 
 The session follows Pendulum's `pendulum-setup` skill. It asks a few questions first; the ones that matter on day one are the cost caps and auto-merge, and the defaults are fine for the rest. Then it shows each change and waits for your yes. It:
 

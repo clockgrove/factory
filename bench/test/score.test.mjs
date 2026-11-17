@@ -295,7 +295,7 @@ test("cost: Codex tokens are priced from the Codex price table, with its date in
 });
 
 test("cost: a Codex stage with no completed turn says so, in the worker's record, its exit line and the scorecard alike; never a missing price", () => {
-  // clockgrove/pendulum-scratch#498: three gpt-6.1-sol calls, each refused before any turn completed (events.jsonl, one run's lines).
+  // the scratch repository's #498: three gpt-6.1-sol calls, each refused before any turn completed (events.jsonl, one run's lines).
   const events = read(join(import.meta.dirname, "..", "..", "plugin", "test", "fixtures", "codex-0.167-refused-400.jsonl"));
   const worker = mergeUsage([1, 2, 3].map(() => parseUsage("codex", events, "gpt-6.1-sol", 1)));
   assert.equal(worker.usd, null, "spend unknown, not zero: a cut turn may have spent tokens");

@@ -93,7 +93,7 @@ test("#263: a bad declaration is refused for each account, naming the account al
   const one = (claude) => problems(h, { claude });
   assert.deepEqual(one([{ name: "Bad_Name", home: g.claude[0].home }]), [["claude account 1", `its name must be lowercase letters, digits and hyphens, starting with a letter or digit, at most ${ACCOUNT_NAME_MAX} characters`]]);
   assert.equal(one([{ name: "a".repeat(ACCOUNT_NAME_MAX + 1), home: g.claude[0].home }])[0][0], "claude account 1", "longer than a pendulum:account: label allows");
-  assert.equal(ACCOUNT_NAME_MAX, 34);
+  assert.equal(ACCOUNT_NAME_MAX, 33);
   assert.deepEqual(problems(h, { claude: [g.claude[0]], codex: [{ name: "alpha", home: g.codex[0].home }] }), [["alpha", "the name is declared twice"]]);
   const missing = join(h, "work", "claude-gone");
   assert.deepEqual(one([{ name: "gone", home: missing }]), [["gone", "its folder does not exist; Pendulum never makes one"]]);

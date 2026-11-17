@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { SHARED_TMP, pendulumKeyDir, gatewayKeyFile, harnessLogins, keyDirExposedBy } from "./local.mjs";
 
 export const ACCOUNT_HARNESSES = ["claude", "codex", "copilot"];
-/** The label a person moves a stage to an account with (#265): GitHub caps a label at 50 characters, so a name gets 34. */
+/** The label a person moves a stage to an account with (#265): GitHub caps a label at 50 characters, so a name gets 33. */
 export const ACCOUNT_LABEL_PREFIX = "pendulum:account:";
 export const ACCOUNT_NAME_MAX = 50 - ACCOUNT_LABEL_PREFIX.length;
 const NAME = /^[a-z0-9][a-z0-9-]*$/;

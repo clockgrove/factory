@@ -25,7 +25,7 @@ const OWNER = { login: "maintainer", type: "User" };
 const run = (id, over = {}) => ({ id, event: "workflow_dispatch", attempt: 1, created_at: "2031-03-02T03:00:00Z", run_started_at: "2031-03-02T03:00:00Z", by: OWNER, issues: [], ...over });
 
 test("the adopter drill's own dispatch, recorded on the Objective it filed, is not input; a person's dispatch or re-run still is", () => {
-  // As drill.mjs --dispatch leaves it on clockgrove/pendulum-scratch#498: the issue's author files it, dispatches run
+  // As drill.mjs --dispatch leaves it on the scratch repository's #498: the issue's author files it, dispatches run
   // 42936119353 two seconds after the label, and records that run on the issue.
   const WRITER = cleanMerge(42).issue.user;
   const drilled = (runs, by = WRITER) => {

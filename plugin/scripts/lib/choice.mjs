@@ -33,7 +33,7 @@ const tick = (s) => `\`${s}\``;
 
 /**
  * The prefix of a host label: `pendulum:host:huggingface.co` lets this Objective's sandboxes reach huggingface.co, and
- * `pendulum:host:*.hf.co` its subdomains. A host fits in LABEL_MAX less the prefix (37 characters).
+ * `pendulum:host:*.hf.co` its subdomains. A host fits in LABEL_MAX less the prefix (36 characters).
  */
 export const HOST_PREFIX = "pendulum:host:";
 const kindOf = (name) => Object.entries(CHOICE_PREFIXES).find(([, p]) => String(name ?? "").toLowerCase().startsWith(p))?.[0] ?? null;

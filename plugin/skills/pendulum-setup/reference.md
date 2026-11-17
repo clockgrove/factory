@@ -12,6 +12,15 @@ The workflow does nothing until `.github/workflows/pendulum.yml` is on the defau
 
 A re-render on an upgrade lands the same way, on a branch `upgrade-pendulum`, with the release notes linked in the body.
 
+## The App by hand
+
+When the user declines `--apply app` or it fails:
+
+1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Pendulum (<repo>)`, uncheck webhooks, and grant exactly the permissions SKILL.md names. Projects is under Organization permissions, and a repository a user owns needs none (no App reaches a personal board); the rest are Repository permissions.
+2. Create it, generate a private key, note the App ID.
+3. Install it on this repository only.
+4. The user saves the two secrets: `gh secret set PENDULUM_APP_ID` and `gh secret set PENDULUM_APP_PRIVATE_KEY < path.pem`, the path given as text.
+
 ## Claude on a subscription
 
 When the user picks Claude and has no Anthropic API key, offer `--credential plan`: stages run on their Claude subscription (Pro, Max, Ultra, Team or Enterprise) through a `CLAUDE_CODE_OAUTH_TOKEN` secret. Say plainly: it is for their own repository only, never for a product; Pendulum does not check whose repository it is, every Objective in it runs on their subscription, and doctor warns of this on every check.

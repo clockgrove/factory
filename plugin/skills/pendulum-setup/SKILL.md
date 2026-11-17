@@ -5,7 +5,7 @@ description: "Install Clockgrove Pendulum in the current repository, one step at
 
 # /pendulum:pendulum-setup
 
-Each step changes the repository or its settings: say what it does and wait for a yes. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. The plugin's setup script does the work: `node "<plugin root>/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes`, one consented step at a time; `<step>` is `workflow`, `labels`, `project` or `protection`. Without `--yes` it only previews: show that before asking.
+Each step changes the repository or its settings: say what it does and wait for a yes. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. The plugin's setup script does the work: `node "<plugin root>/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes`, one consented step at a time; `<step>` is `workflow`, `app`, `labels`, `project` or `protection`. Without `--yes` it only previews: show that before asking.
 
 ## 1. The workflow file (`--apply workflow`)
 
@@ -15,12 +15,7 @@ Ask once for the template's flags: `--harness` (claude, codex, copilot), `--mode
 
 ## 2. The GitHub App
 
-Walk it; never read, print or copy the key.
-
-1. Open `https://github.com/settings/apps/new` (an organization's: `/organizations/<org>/settings/apps/new`). Name it `Pendulum (<repo>)`, uncheck webhooks, grant exactly these permissions: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. Projects is under Organization permissions, and a repository a user owns needs none (no App reaches a personal board); the rest are Repository permissions.
-2. Create it, generate a private key, note the App ID.
-3. Install it on this repository only.
-4. The user saves the two secrets: `gh secret set PENDULUM_APP_ID` and `gh secret set PENDULUM_APP_PRIVATE_KEY < path.pem`, the path given as text.
+Never read, print or copy the key. Offer `--apply app` first (`--secret-scope org`: organization secrets for this repository only). It waits up to 30 minutes, so run it in the background where you can, and give the user the 127.0.0.1 address it prints and opens. That page posts a pre-filled App, `Pendulum (<repo>)`, webhook off, with exactly: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. The user clicks Create; setup saves `PENDULUM_APP_ID` and `PENDULUM_APP_PRIVATE_KEY` and opens the install page: this repository only. If the browser cannot then load 127.0.0.1, `curl` the address it shows from setup's shell. Declined or failed: [reference.md](reference.md), The App by hand.
 
 Then the user's model credential (`gh secret set`): `ANTHROPIC_API_KEY` (`CLAUDE_CODE_OAUTH_TOKEN` with `plan`; none for federation), `PENDULUM_CODEX_GATEWAY_KEY` (an AI Gateway key) or `CODEX_API_KEY`, or `COPILOT_GITHUB_TOKEN` (only the Copilot Requests permission; doctor fails without it).
 

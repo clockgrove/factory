@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
-import { appIdSetLine, readAppIdVariable } from "./app-id.mjs";
+import { appIdSetLine, appIdWhyText, readAppIdVariable } from "./app-id.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, codexRow, longShare, sumLong } from "./usage.mjs";
@@ -406,17 +406,33 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
     if (app === null) {
       // The variable, read again with the gh login's token when this one gets a 403 (app-id.mjs readAppIdVariable); then
       // the local copy, then local mode's notice App. With none, appFrom says why: `unset` or `forbidden`.
-      const v = await readAppIdVariable(repo, { token, fallback, take: () => budget.take("app id"), plan: () => budget.plan(1, "the App id variable again, with the gh login's token (the token got HTTP 403)") });
+      // A budget stop on the second read keeps the first's reason, and the copy and env below still apply.
+      let v;
+      let stop = null;
+      try {
+        v = await readAppIdVariable(repo, { token, fallback, take: () => budget.take("app id"), plan: () => budget.plan(1, "the App id variable again, with the gh login's token (the token got HTTP 403 or 404)"), isStop: (e) => e instanceof BudgetStop, log: (line) => log(`pendulum report: ${line}`) });
+      } catch (e) {
+        if (!(e instanceof BudgetStop) || !e.appFirst) throw e;
+        stop = e;
+        v = { id: null, from: e.appFirst };
+      }
       app = v.id;
       source.appFrom = v.from;
+      // Why the variable gave no id, kept when the copy or the env stands in for it.
+      source.appWhy = v.id === null ? v.from : null;
+      source.appNotId = !!v.notId;
+      const why = `the repository variable PENDULUM_APP_ID ${appIdWhyText(v)}`;
       if (app === null && localCopy?.id) {
         app = localCopy.id;
         source.appFrom = "local-copy";
+        log(`pendulum report: the App id is the local copy's, ${app} (${localCopy.file}), unverified: ${why}`);
       } else if (app === null && localCopy?.problem) log(`pendulum report: the local copy of the App id is not taken: ${localCopy.problem}`);
       if (app === null && envAppId !== null) {
         app = envAppId;
         source.appFrom = "env";
+        log(`pendulum report: the App id is PENDULUM_LOCAL_APP_ID's, ${app}, unverified: ${why}`);
       }
+      if (stop) throw stop;
     }
     const mine = ownPredicate(app, self);
     const isIssue = (i) => i && !i.pull_request && Number.isSafeInteger(i.number);
@@ -1248,7 +1264,7 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   // No App id, whether or not a comment through an App was read (#564): unreadable (403) apart from not set (404).
   const unattributed = `so comments through a GitHub App or by another login that can push are not attributed to Pendulum (the count: those read, ${trust.vouched})`;
   if (read.appId === null && source.appFrom === "forbidden") out.push({ code: "app-unreadable", count: trust.vouched, issues: [], text: `the repository variable PENDULUM_APP_ID could not be read (HTTP 403: the token may not read the repository's variables, and no gh login could either) and no App id was given (--app), ${unattributed}; give the token Variables: read, log in with gh, or pass --app ID` });
-  if (read.appId === null && source.appFrom === "unset") out.push({ code: "app-not-given", count: trust.vouched, issues: [], text: `the repository variable PENDULUM_APP_ID is not set and no App id was given (--app), ${unattributed}; set it once: ${appIdSetLine(read.repo?.full ?? "OWNER/NAME")}` });
+  if (read.appId === null && source.appFrom === "unset") out.push({ code: "app-not-given", count: trust.vouched, issues: [], text: `the repository variable PENDULUM_APP_ID ${source.appNotId ? "is no App id (a number)" : "is not set"} and no App id was given (--app), ${unattributed}; set it once: ${appIdSetLine(read.repo?.full ?? "OWNER/NAME")}` });
   add("unattributed", missing.unattributed, UNKNOWN_WHY.unattributed);
   add("no-record", missing.noRecord, UNKNOWN_WHY["no-record"]);
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
@@ -1275,8 +1291,9 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
     calls: { planned: calls.planned, plannedAtLeast: !!calls.open, made: calls.made, byKind: { ...calls.byKind } },
     // Whose markers were taken as Pendulum's: the token's own login, the logins --self named (each only on a comment by
     // someone who can push) and the App, with where its id came from (`flag`, `variable`, `variable-gh`, `local-copy`,
-    // `env`) or why there is none (`unset`, `forbidden`; null when the call budget stopped before the read).
-    trusted: { logins: [...new Set([source.login, ...(read.self ?? [])].filter(Boolean))], app: read.appId ?? null, appFrom: source.appFrom ?? null },
+    // `env`) or why there is none (`unset`, `forbidden`; null when the call budget stopped before the read); `appWhy`,
+    // why the variable gave no id (`unset`, `forbidden`), kept when the local copy or the env stands in for it.
+    trusted: { logins: [...new Set([source.login, ...(read.self ?? [])].filter(Boolean))], app: read.appId ?? null, appFrom: source.appFrom ?? null, appWhy: source.appWhy ?? null },
     read: { comments: source.comments, pendulumComments: trust.own, unattributedComments: trust.vouched, ignoredComments: trust.ignored, issues: read.issues?.size ?? 0, pulls: read.pulls?.length ?? 0, artifacts: { ...source.artifacts }, localRecords: source.localRecords, summaries },
     missing: out,
   };

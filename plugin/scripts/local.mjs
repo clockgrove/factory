@@ -38,7 +38,7 @@ const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
 import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportModels, reportScope } from "./lib/report.mjs";
-import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
+import { ghLoginToken, activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
 import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, readSocketDirRecord } from "./lib/worker-relay.mjs";
@@ -58,7 +58,7 @@ import { scrubbedEnv } from "./lib/harness.mjs";
 import { choiceOf } from "./lib/choice.mjs";
 import { bwrapShim, claudeEnvText, localTools, stageCommands } from "./lib/copilot-runner.mjs";
 import { noticeMinter, serveNotices } from "./lib/app-token.mjs";
-import { appIdSetLine, ghLoginToken, learnAppId, readLocalAppId } from "./lib/app-id.mjs";
+import { appIdSetLine, appIdWhyText, learnAppId, readLocalAppId } from "./lib/app-id.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf } from "./lib/one-repo.mjs";
 import { localDatabaseChecks, noticeAppCheck, pluginVersionCheck } from "./doctor.mjs";
 import { RELEASES_URL, checkoutProblem, markInUse, pinDecision, releaseCheckout, runningPendulum, runningName, startProblem } from "./lib/release.mjs";
@@ -3335,19 +3335,19 @@ export class Local {
 
   /**
    * serve's start (#564): Pendulum's App id from the repository variable as the start's list read it, or, when the list
-   * was refused and no local copy is there yet, read alone with the gh login's token; saved as its local copy for
-   * `pendulum report` (lib/app-id.mjs learnAppId). A variable that is not set is said with the line that sets it.
-   * Nothing here stops serve.
+   * was refused, read alone with the gh login's token (unless it is the local token), so a copy of a replaced App is
+   * brought up to date; saved as its local copy for `pendulum report` (lib/app-id.mjs learnAppId). A variable that is not
+   * set is said with the line that sets it. Nothing here stops serve.
    */
   async keepAppId({ fallback = ghLoginToken } = {}) {
     if (!this.repo || (!this.variables && !this.variablesRefused)) return null;
     const listed = this.variablesRefused ? { refused: this.variablesRefused } : { vars: this.variables };
     try {
-      const r = await learnAppId(this.repo, { listed, fallback, retry: false });
+      const r = await learnAppId(this.repo, { listed, token: this.token, fallback });
       if (r.saved) log(`saved Pendulum's App id ${r.id} (the repository variable ${r.from === "variable-gh" ? "as the gh login reads it" : "PENDULUM_APP_ID"}) for \`pendulum report\` to ${r.file}`);
       if (r.problem) log(`the local copy of Pendulum's App id for \`pendulum report\`: ${r.problem}`);
-      if (r.from === "unset") log(`the repository variable PENDULUM_APP_ID is not set, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's${r.copy ? ` (it takes the local copy, ${r.copy}, meanwhile)` : ""}; set it once: ${appIdSetLine(this.repoFull)}`);
-      if (r.from === "forbidden") log("the repository variable PENDULUM_APP_ID could not be read (the local token may not read variables, and no gh login could either), so no local copy of Pendulum's App id was saved for `pendulum report`; log in with gh, or give the token Variables: read");
+      if (r.from === "unset") log(`the repository variable PENDULUM_APP_ID ${appIdWhyText(r)}, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's${r.copy ? ` (it takes the local copy, ${r.copy}, meanwhile)` : ""}; set it once: ${appIdSetLine(this.repoFull)}`);
+      if (r.from === "forbidden") log(`the repository variable PENDULUM_APP_ID could not be read (the local token may not read variables, and no gh login could either), so ${r.copy ? `\`pendulum report\` takes the local copy, ${r.copy}, unverified` : "no local copy of Pendulum's App id was saved for `pendulum report`"}; log in with gh, or give the token Variables: read`);
       return r;
     } catch (e) {
       log(`Pendulum's App id was not read (${String(e?.message || e).slice(0, 160)}); \`pendulum report\` reads it itself`);
@@ -3914,13 +3914,9 @@ export async function holdCommand(flags, { home = homedir(), now = Date.now(), o
  * developer's gh login. These commands run no model, so the writes are Pendulum's, made on the developer's behalf.
  */
 function sessionToken(repoFull) {
-  const t = localToken(repoFull);
+  const t = localToken(repoFull) || ghLoginToken();
   if (t) return t;
-  try {
-    return sh("gh", ["auth", "token"]);
-  } catch {
-    throw new Error(`no token: save one for local mode with \`pendulum token set\` (${tokenFile(repoFull)}), or log in with gh`);
-  }
+  throw new Error(`no token: save one for local mode with \`pendulum token set\` (${tokenFile(repoFull)}), or log in with gh`);
 }
 
 /** The clone a session command (`issue`, `deliver`, `post-review`) runs in: its top directory, repository and token. */

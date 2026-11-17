@@ -39,9 +39,9 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
    Save it with `pendulum token set` in the clone: it asks for the token without echoing it (or reads it from stdin) and writes it, owner-only, to `~/.config/pendulum/tokens/OWNER/NAME`, where local mode reads it; or export `PENDULUM_LOCAL_TOKEN`.
 
-   Pendulum's App id, which `pendulum report` needs to tell the App's comments from another App's, is no secret, so it is kept apart from the token: setup's app step, and the first `serve` or `doctor` here that reads the repository variable `PENDULUM_APP_ID`, save it to `~/.config/pendulum/repos/OWNER/NAME.json` (`{"appId": N}`, readable, mode 644, in owner-only folders).
-   When the local token may not read variables, they read that one variable with your `gh` login's token instead (`gh auth token`, never printed); doctor brings the copy up to date and warns when the variable is not set, naming its `gh variable set` line.
-   The report takes the copy only when the variable cannot be read, and never one behind a symbolic link, of another user, or that others may write.
+   Pendulum's App id, which `pendulum report` needs to tell the App's comments from another App's, is no secret, so it is kept apart from the token: setup's app step, and each `serve` start and `doctor` run here that reads the repository variable `PENDULUM_APP_ID`, save it (or bring it up to date) to `~/.config/pendulum/repos/OWNER/NAME.json` (`{"appId": N}`, readable, mode 644, in owner-only folders).
+   When the local token may not read variables, they read that one variable with your `gh` login's token instead (`gh auth token`, never printed; not when it is the local token itself); doctor warns when the variable is not set, naming its `gh variable set` line.
+   The report takes the copy only when the variable gives no id, says on stderr that it is unverified, and never takes one behind a symbolic link, of another user, or that others may write, or in a folder others may write.
 
    `~/.config/pendulum` is the one key folder the sandboxes hide. While the key folder of the product's previous name is still in `~/.config`, no sandbox hides it, so `pendulum serve`, `pendulum run` and doctor refuse to start and print the `mv` that fixes it: move that folder to `~/.config/pendulum`, never copy it.
 

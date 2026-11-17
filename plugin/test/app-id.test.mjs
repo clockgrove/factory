@@ -75,6 +75,17 @@ test("the App id's local copy: readable, written by its owner alone, never throu
     chmodSync(copyFile(), 0o664);
     assert.match(readLocalAppId("o/r").problem, /r\.json is writable by others \(mode 664\); chmod go-w /);
     assert.throws(() => saveLocalAppId("o/r", 7), /writable by others .*the App id was not saved/);
+    // The owner's folder writable by others: the file in it could be swapped, so it is not read.
+    chmodSync(copyFile(), 0o644);
+    chmodSync(join(copyFile(), ".."), 0o777);
+    assert.match(readLocalAppId("o/r").problem, /repos\/o is writable by others \(mode 777\)/);
+    chmodSync(join(copyFile(), ".."), 0o700);
+    // The file itself a link: never followed.
+    rmSync(copyFile());
+    const target = join(mkdtempSync(join(tmpdir(), "target-")), "r.json");
+    writeFileSync(target, JSON.stringify({ appId: 99 }), { mode: 0o644 });
+    symlinkSync(target, copyFile());
+    assert.match(readLocalAppId("o/r").problem, /r\.json is a symbolic link/);
     // A link in place of the owner's folder: neither read nor written through.
     dropCopies();
     const elsewhere = mkdtempSync(join(tmpdir(), "elsewhere-"));
@@ -105,15 +116,26 @@ test("serve's start saves the App id's local copy: from the variables list, else
     assert.match(said, /saved Pendulum's App id 5487746 \(the repository variable as the gh login reads it\) for `pendulum report` to \S+\/\.config\/pendulum\/repos\/o\/r\.json/);
     assert.ok(!said.includes("gho_login"), "the gh token is never printed");
     assert.deepEqual(gh.asked, ["/repos/o/r/actions/variables local", "/repos/o/r/actions/variables/PENDULUM_APP_ID gho_login"]);
-    // A later start with the copy there and the list still refused: no gh read.
-    gh.asked.length = 0;
+    // A later start with the copy there and the list still refused reads it again, so a replaced App's id is taken.
+    gh.close();
+    gh = await host({ list: () => ({ status: 403 }), one: (t) => (t === "gho_login" ? 6000001 : { status: 403 }) });
     const again = start();
     const later = await around(gh.url, "gho_login", async () => {
       await again.readVariables();
       return again.keepAppId();
     });
-    assert.equal(later.value.from, "local-copy");
-    assert.deepEqual(gh.asked, ["/repos/o/r/actions/variables local"]);
+    assert.deepEqual([later.value.id, later.value.from, later.value.saved], [6000001, "variable-gh", true]);
+    assert.equal(readLocalAppId("o/r").id, 6000001);
+    // A gh login whose token is the local token itself, which was refused: no second read.
+    gh.asked.length = 0;
+    const same = Object.assign(start(), { token: "gho_login" });
+    const skipped = await around(gh.url, "gho_login", async () => {
+      await same.readVariables();
+      return same.keepAppId();
+    });
+    assert.equal(skipped.value.from, "forbidden");
+    assert.deepEqual(gh.asked, ["/repos/o/r/actions/variables gho_login"]);
+    assert.match(skipped.said, /could not be read .*`pendulum report` takes the local copy, 6000001, unverified/);
   } finally {
     dropCopies();
     await gh.close();
@@ -160,7 +182,13 @@ test("doctor in local mode: the App id variable not set is a WARN naming its gh 
     assert.match(unset.fix, /^gh variable set PENDULUM_APP_ID --repo o\/r --body </);
     assert.equal(readLocalAppId("o/r").id, null);
 
-    const { value: read } = await around(gh.url, "gho_login", () => localAppIdCheck({ repo: REPO, listed: { refused: 403 } }));
+    // The gh login is the refused token itself: not read again.
+    const { value: same } = await around(gh.url, "gho_login", () => localAppIdCheck({ repo: REPO, listed: { refused: 403 }, token: "gho_login" }));
+    assert.equal(same.status, "WARN");
+    assert.equal(gh.asked.length, 0);
+    const notId = await localAppIdCheck({ repo: REPO, listed: { vars: { PENDULUM_APP_ID: "pendulum" } }, fallback: () => null });
+    assert.match(notId.detail, /PENDULUM_APP_ID is no App id \(a number\)/);
+    const { value: read } = await around(gh.url, "gho_login", () => localAppIdCheck({ repo: REPO, listed: { refused: 403 }, token: "local" }));
     assert.equal(read.status, "PASS");
     assert.match(read.detail, /^PENDULUM_APP_ID is 5487746 \(read with the gh login: the local token may not read it\); its local copy for `pendulum report` is \S+r\.json \(saved now\)$/);
     assert.deepEqual(readLocalAppId("o/r"), { id: 5487746, file: copyFile() });

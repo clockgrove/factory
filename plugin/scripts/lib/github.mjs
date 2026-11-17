@@ -48,18 +48,20 @@ export const transientError = (e) => !!e && (e.transport === true || e.rateLimit
  * GitHub would read it as a bad credential (#405).
  */
 let LOGIN = undefined;
+/** The gh login's token (`gh auth token`), else null: no gh, no login, or no answer in 20 s. Never printed or logged. */
+export function ghLoginToken({ env = process.env } = {}) {
+  try {
+    return execFileSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 20_000, env }).trim() || null;
+  } catch {
+    return null;
+  }
+}
 const tokenOf = (token) => {
   const t = typeof token === "function" ? token() : token;
   if (t && typeof t !== "string") throw new TypeError(`a GitHub call's token must be a string or a function giving one, not ${Array.isArray(t) ? "an array" : typeof t}`);
   if (t) return t;
   if (process.env.GITHUB_ACTIONS) return null;
-  if (LOGIN === undefined) {
-    try {
-      LOGIN = execFileSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 20_000 }).trim() || null;
-    } catch {
-      LOGIN = null;
-    }
-  }
+  if (LOGIN === undefined) LOGIN = ghLoginToken();
   return LOGIN;
 };
 const API = () => (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");

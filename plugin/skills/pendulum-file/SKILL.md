@@ -1,6 +1,6 @@
 ---
 name: pendulum-file
-description: "Write, refine and start Clockgrove Pendulum Objectives: turn what the user wants built into a GitHub issue with a goal and acceptance entries, created on the user's yes started (pendulum:objective) or as a draft (pendulum:draft); or, by issue number, refine or start a draft. Use when the user asks to file, draft, refine, keep working on or start a Clockgrove Pendulum Objective, or asks Clockgrove Pendulum to build something. Not for starting over one that already ran (pendulum-restart), resuming a Blocked one (pendulum-status) or running one on this machine (pendulum-run)."
+description: "Write, refine and start Pendulum Objectives: turn what the user wants built into a GitHub issue with a goal and acceptance entries, created on the user's yes started (pendulum:objective) or as a draft (pendulum:draft); or, by issue number, refine or start a draft. Use when the user asks to file, draft, refine, keep working on or start a Pendulum Objective, or asks Pendulum to build something. Not for starting over one that already ran (pendulum-restart), resuming a Blocked one (pendulum-status) or running one on this machine (pendulum-run)."
 ---
 
 # /pendulum:pendulum-file [issue]
@@ -42,4 +42,4 @@ Run `gh issue view <issue> --repo OWNER/NAME --json number,title,body,state,labe
 
 ## After
 
-Print the issue's URL. Started: one comment on the issue shows its progress until it merges, Blocks or asks a Question; pendulum-status says where it stands. A draft: "Let's keep working on Clockgrove Pendulum Objective <number>" or "Start Clockgrove Pendulum Objective <number>" comes back here.
+Print the issue's URL. Started: one comment on the issue shows its progress until it merges, Blocks or asks a Question; pendulum-status says where it stands. A draft: "Let's keep working on Pendulum Objective <number>" or "Start Pendulum Objective <number>" comes back here.

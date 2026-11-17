@@ -1,6 +1,6 @@
 ---
 name: pendulum-deliver-pr
-description: "Internal: the last stage of a Clockgrove Pendulum worker run, after pendulum-prove-acceptance, loaded only when a Pendulum task card or answer pass names it. Rebases on the default branch, writes the one PR's title and body, answers each reviewer comment once, writes the exit record and stops; Clockgrove Pendulum pushes, opens the PR and posts the replies."
+description: "Internal: the last stage of a Pendulum worker run on an Objective, after pendulum-prove-acceptance, loaded only when a Pendulum task card or answer pass names it. Rebases on the default branch, writes the one PR's title and body, answers each reviewer comment once, writes the exit record and stops; Pendulum pushes, opens the PR and posts the replies."
 user-invocable: false
 ---
 

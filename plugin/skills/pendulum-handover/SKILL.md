@@ -1,6 +1,6 @@
 ---
 name: pendulum-handover
-description: "Apply the workflow change Clockgrove Pendulum handed over on an Objective (the pendulum:handover label, Pendulum's hand-over comment): put it on a new branch with `pendulum handover <issue>`, show the user the diff, and only once they have read it and said yes, commit, push and open its pull request with `--push`. Use when the user asks to apply, take or push a Clockgrove Pendulum workflow hand-over. Not for the Objective's own PR, which Pendulum delivers itself."
+description: "Apply the workflow change Pendulum handed over on an Objective (the pendulum:handover label, Pendulum's hand-over comment): put it on a new branch with `pendulum handover <issue>`, show the user the diff, and only once they have read it and said yes, commit, push and open its pull request with `--push`. Use when the user asks to apply, take or push a Pendulum workflow hand-over. Not for the Objective's own PR, which Pendulum delivers itself."
 ---
 
 # /pendulum:pendulum-handover <issue>

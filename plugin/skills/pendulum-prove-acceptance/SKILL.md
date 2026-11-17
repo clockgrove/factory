@@ -1,6 +1,6 @@
 ---
 name: pendulum-prove-acceptance
-description: "Internal: the third stage of a Clockgrove Pendulum worker run, after pendulum-implement-split and before pendulum-deliver-pr, loaded only when a Pendulum task card names it. Proves every acceptance entry through the repository's real path per its testing guide, runs the validation and test-budget commands, applies the base-failure rule and iterates locally before the hand-off."
+description: "Internal: the third stage of a Pendulum worker run on an Objective, after pendulum-implement-split and before pendulum-deliver-pr, loaded only when a Pendulum task card names it. Proves every acceptance entry through the repository's real path per its testing guide, runs the validation and test-budget commands, applies the base-failure rule and iterates locally before the hand-off."
 user-invocable: false
 ---
 

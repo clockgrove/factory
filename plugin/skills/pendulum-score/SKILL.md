@@ -1,6 +1,6 @@
 ---
 name: pendulum-score
-description: "Build or print the Clockgrove Pendulum scorecard: one row per Objective with the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective), read from the issue, the PR, the job log and the uploaded usage artifact; its reference says how each is measured, its unit and basis per harness. Use when the user asks for the scorecard, the cost of an Objective, whether an Objective walked away clean, or how Clockgrove Pendulum runs are scored. Not for what an Objective is doing now or why it is Blocked (pendulum-status)."
+description: "Build or print the Pendulum scorecard: one row per Objective with the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective), read from the issue, the PR, the job log and the uploaded usage artifact; its reference says how each is measured, its unit and basis per harness. Use when the user asks for the scorecard, the cost of an Objective, whether an Objective walked away clean, or how Pendulum runs are scored. Not for what an Objective is doing now or why it is Blocked (pendulum-status)."
 ---
 
 # /pendulum:pendulum-score

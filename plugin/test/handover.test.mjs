@@ -185,7 +185,7 @@ test("hand-over: published in Pendulum's comment on the issue, with the label; t
     assert.ok(comment, "Pendulum's hand-over comment");
     assert.equal(handoverOf(comment.body), r.patch);
     assert.match(comment.body, /^<!-- pendulum:7:handover -->\nPendulum: the workflow hand-over for #7: `\.github\/workflows\/ci\.yml`, `\.github\/workflows\/release\.yml`\./);
-    assert.match(comment.body, /after PR #70 merges\*\*, in a clone of this repository, with Clockgrove Pendulum's command `pendulum handover 7`/, "the new PR's number, once known");
+    assert.match(comment.body, /after PR #70 merges\*\*, in a clone of this repository, with Pendulum's command `pendulum handover 7`/, "the new PR's number, once known");
     assert.deepEqual(api.writes.find((w) => w.path === "/issues/7/labels").body, { labels: [HANDOVER_LABEL] });
     const lines = out.body.split("\n");
     assert.equal(lines[0], "<!-- pendulum:7:handover-line -->", "Pendulum's line comes first");

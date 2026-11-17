@@ -1,7 +1,7 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
 
 const plugin = join(import.meta.dirname, "..");
@@ -50,4 +50,18 @@ test("every manifest and marketplace entry lists the plugin with one description
   assert.equal(new Set(Object.values(descriptions)).size, 1, JSON.stringify(descriptions, null, 1));
   const keywords = Object.fromEntries(Object.entries(listings).map(([p, m]) => [p, JSON.stringify(m.keywords)]));
   assert.equal(new Set(Object.values(keywords)).size, 1, JSON.stringify(keywords, null, 1));
+});
+
+test("the plugin folder's README: the plugin directory's listing has 40 or more words outside code blocks, and links only to full URLs or files the plugin ships", () => {
+  const text = readFileSync(join(plugin, "README.md"), "utf8");
+  const prose = text.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, " ").replace(/\]\([^)]*\)/g, "] ");
+  const words = prose.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  assert.ok(words.length >= 40, `${words.length} prose words`);
+  const targets = [...text.matchAll(/\]\(\s*<?([^)\s>]+)/g), ...text.matchAll(/\b(?:href|src)\s*=\s*["']([^"']+)/g)].map((m) => m[1]);
+  assert.ok(targets.length > 0, "the README links to the repository's docs");
+  const outside = targets.filter((t) => !/^https?:\/\//.test(t)).filter((t) => {
+    const path = resolve(plugin, t.replace(/[#?].*$/, ""));
+    return t.startsWith("#") ? false : !(path.startsWith(plugin + sep) && existsSync(path));
+  });
+  assert.deepEqual(outside, [], "an installed plugin holds plugin/ alone: link the repository's pages by full URL");
 });

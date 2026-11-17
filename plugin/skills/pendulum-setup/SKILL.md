@@ -1,40 +1,49 @@
 ---
 name: pendulum-setup
-description: "Install Clockgrove Pendulum in the current repository, one step at a time on the user's yes: add .github/workflows/pendulum.yml through a pull request, walk the GitHub App creation, and apply the merge queue, branch protection, labels and Project board; or set up local mode on the user's own machine. Use when the user asks to set up, install or configure Clockgrove Pendulum for a repository. Not for checking whether it is set up (pendulum-doctor)."
+description: "Install Clockgrove Pendulum in the current repository, one step at a time on the user's yes: add .github/workflows/pendulum.yml through a pull request, create the GitHub App, and apply the merge queue, labels, Project board and a read-only default workflow token; or set up local mode on the user's machine. Use when the user asks to set up, install or configure Clockgrove Pendulum for a repository. Not for checking whether it is set up (pendulum-doctor)."
 ---
 
 # /pendulum:pendulum-setup
 
-Each step changes the repository or its settings: say what it does and wait for a yes. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. The plugin's setup script does the work: `node "<plugin root>/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes`, one consented step at a time; `<step>` is `workflow`, `app`, `labels`, `project` or `protection`. Without `--yes` it only previews: show that before asking.
+Each step changes the repository or its settings: say what it does and wait for a yes. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. The plugin's setup script does the work: `node "<plugin root>/scripts/setup.mjs" --repo OWNER/NAME --apply <step> --yes`, one consented step at a time; `<step>` is `workflow`, `app`, `labels`, `project`, `protection` or `default-token`. Without `--yes` it only previews: show that before asking.
 
 ## 1. The workflow file (`--apply workflow`)
 
-Ask once for the template's flags: `--harness` (claude, codex, copilot), `--model`, `--subagent-model`, `--reviewer-model`, `--max-concurrent`, `--daily-usd`, `--max-usd`, `--timeout-minutes` (under 360 on hosted runners), `--auto-merge` (default `true`: code lands unread, gated by CI, the reviewer and the merge queue), `--publish-transcripts` (reference.md), `--credential` (`api`; offer `plan` when Claude has no key: [reference.md](reference.md)), `--notify`, `--runs-on` (default: the CI's runner), `--setup`, `--validation`, `--budget-command`, `--protected-paths`, `--ci-checks`. Show the rendered file; on yes, write it (After lands it). A re-render keeps the file's settings: pass only changes (`--name=` clears one); show the kept and changed lines. It never triggers from a fork.
+On a first setup (no `.github/workflows/pendulum.yml` yet) ask only these three, together:
 
-`--sandbox vercel` writes the cloud-sandbox jobs instead: [reference.md](reference.md), Cloud sandbox.
+1. **The coding agent and its credential:** `--harness` (`claude`, `codex` or `copilot`) and `--credential` (`api`, or `plan` for Claude without a key); [reference.md](reference.md), Model credentials, names the secret.
+2. **The spending caps:** `--max-usd` per job and `--daily-usd` per day.
+3. **Auto-merge:** `--auto-merge` on or off.
+
+For a first run, recommend `--preset first-run` as the answer to the caps and auto-merge (it leaves `daily_usd` at $100), one line each:
+
+- `max_usd` 5: a job stops at about $5, so a wrong turn costs little.
+- `max_concurrent` 1: one Objective at a time, so each one can be followed.
+- `auto_merge` false: Pendulum's pull requests wait for the user's merge, so they read each first.
+
+A flag beside the preset wins; everything else takes its default. Show the rendered file; on yes, write it (After lands it). Then list the defaults it took as "You can change these later", with where, from [reference.md](reference.md), Workflow settings (also re-renders and the cloud sandbox).
 
 ## 2. The GitHub App
 
-Never read, print or copy the key. Offer `--apply app` first (`--secret-scope org`: organization secrets for this repository only). It waits up to 30 minutes, so run it in the background where you can, and give the user the 127.0.0.1 address it prints and opens. That page posts a pre-filled App, `Pendulum (<repo>)`, webhook off, with exactly: contents, pull requests, issues, projects: write; checks, commit statuses: read; actions: read, optional (cloud-sandbox logs and session restore); nothing else, never workflows. The user clicks Create; setup saves `PENDULUM_APP_ID` and `PENDULUM_APP_PRIVATE_KEY` and opens the install page: this repository only. If the browser cannot then load 127.0.0.1, `curl` the address it shows from setup's shell. Declined or failed: [reference.md](reference.md), The App by hand.
-
-Then the user's model credential (`gh secret set`): `ANTHROPIC_API_KEY` (`CLAUDE_CODE_OAUTH_TOKEN` with `plan`; none for federation), `PENDULUM_CODEX_GATEWAY_KEY` (an AI Gateway key) or `CODEX_API_KEY`, or `COPILOT_GITHUB_TOKEN` (only the Copilot Requests permission; doctor fails without it).
+Never read, print or copy the key. Offer `--apply app`, in the background where you can (it waits up to 30 minutes), and give the user the 127.0.0.1 address it prints; [reference.md](reference.md), The App, has its permissions, `--secret-scope org` and a browser that cannot load the address. The user clicks Create (setup saves `PENDULUM_APP_ID` and `PENDULUM_APP_PRIVATE_KEY`), then installs it on this repository only. Declined or failed: [reference.md](reference.md), The App by hand. Then the user saves the model credential with `gh secret set`.
 
 ## 3. GitHub settings
 
-- **Labels** (`--apply labels`) and **Project board** (`--apply project`): as the App when the user exported `PENDULUM_APP_TOKEN`, or `PENDULUM_APP_ID` and `PENDULUM_APP_PRIVATE_KEY="$(cat <path>.pem)"`, else as their `gh` login; never read the key.
-- **Merge queue and branch protection** (`--apply protection`): the `pendulum` ruleset on the default branch (a merge queue where GitHub offers one, required checks from `--ci-checks`, no deletion or force push) and squash commits from the PR's title and body. It needs admin: it runs as the user's `gh` login. If the CI workflow lacks `merge_group:` under `on:`, offer to add it.
+- **Labels** (`--apply labels`) and **Project board** (`--apply project`): as the App when its credentials are exported ([reference.md](reference.md), Labels and board), else as the user's `gh` login.
+- **Merge queue and branch protection** (`--apply protection`): the `pendulum` ruleset on the default branch (a merge queue where GitHub offers one; required checks: the branch's own, else none), as the user's `gh` login (admin). Show its candidate checks and marks; pass exactly those the user accepts as `--ci-checks`. If the CI workflow lacks `merge_group:` under `on:`, offer to add it.
+- **A read-only default workflow token** (`--apply default-token`, never part of `all`): doctor fails while the default `GITHUB_TOKEN` can write. Show the preview: the workflows that would get a read-only token, any called workflow among them that asks for write (it would then fail), and those left alone. One that writes with `GITHUB_TOKEN` needs `permissions:` first: ask. It changes no file.
 
 ## 4. Skills in the repository
 
-Committed copies of the skills workers load and the agents, for vendors' cloud sessions only: offer them per [reference.md](reference.md).
+For vendors' cloud sessions only: offer committed copies per [reference.md](reference.md).
 
-## Local mode, instead of or beside the Action
+## Local mode
 
-On the user's machine, walk [local.md](local.md) instead of steps 1 to 3: no App, no model secret, and WSL2 only on Windows. The user creates and saves the tokens with its commands; never ask for or read them. Then offer `pendulum serve --once` from the clone: it lists anything missing and creates the `pendulum:local` label. Objectives with that label, and every one where no Action is active, are the local loop's.
+Instead of or beside the Action, on the user's machine: walk [local.md](local.md) in place of steps 1 to 3; never ask for or read the tokens. Then offer `pendulum serve --once` from the clone: it lists anything missing and creates the `pendulum:local` label.
 
 ## Several accounts
 
-Several subscriptions or keys of one harness: offer them as accounts; automatic choice spreads stages across their quota ([reference.md](reference.md)).
+Several subscriptions or keys of one harness: [reference.md](reference.md).
 
 ## After
 

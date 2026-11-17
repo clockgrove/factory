@@ -125,6 +125,27 @@ export function wordScan(text) {
 const pathLooking = (v) => v.includes("/") || /\.[A-Za-z0-9]+$/.test(v);
 
 /**
+ * Whether `command` is one simple command whose last word is its own last argument, so words appended to it are that
+ * command's arguments: it parses with no error into one statement, a plain command (no pipeline, `&&`/`||` list,
+ * subshell, group or background job), with no redirection and nothing after it (a comment).
+ */
+export function simpleCommand(command) {
+  const text = String(command ?? "");
+  let tree;
+  try {
+    tree = parse(text);
+  } catch {
+    return false;
+  }
+  if (tree?.errors?.length || tree?.shebang || tree?.commands?.length !== 1) return false;
+  const [st] = tree.commands;
+  const c = st.command;
+  if (st.background || c?.type !== "Command" || !c.name) return false;
+  if ([...(c.prefix || []), ...(c.suffix || [])].some((w) => w.type === "Redirect")) return false;
+  return text.slice(st.end).trim() === "";
+}
+
+/**
  * What a shell command refers to in the repository, read from its bash syntax tree. `ctx`: `cwd` (from the root, where
  * it runs), `errexit` (it runs under `bash -e`, as setup and install do; a package.json script does not), `env` (the
  * environment it starts with) and `roots` (absolute directories that are the repository: an absolute path under one is

@@ -86,7 +86,14 @@ test("#480: Codex's turn.completed totals are cumulative within one process, so 
   assert.equal(rec.usd, priceCodex("gpt-6.1-sol", { input: 1_500_000, cached: 0, output: 20_000 }));
   // A turn.completed with no usage, or one that reports no count, leaves the last total.
   assert.equal(parseCodex([...stream, ev({ type: "turn.completed" })].join("\n"), "gpt-6.1-sol").tokens.input, 1_500_000);
-  assert.deepEqual(parseCodex([...stream, ev({ type: "turn.completed", usage: {} })].join("\n"), "gpt-6.1-sol").tokens, { input: 1_500_000, output: 20_000, cached: 0, written: null });
+  const counts = (r) => (({ input, output, cached, written }) => ({ input, output, cached, written }))(r.tokens);
+  assert.deepEqual(counts(parseCodex([...stream, ev({ type: "turn.completed", usage: {} })].join("\n"), "gpt-6.1-sol")), { input: 1_500_000, output: 20_000, cached: 0, written: null });
+  // One that reports some counts only: each count it leaves out keeps its value before it.
+  const partial = ev({ type: "turn.completed", usage: { input_tokens: 1_600_000 } });
+  assert.deepEqual(counts(parseCodex([...stream, partial].join("\n"), "gpt-6.1-sol")), { input: 1_600_000, output: 20_000, cached: 0, written: null });
+  const some = harnessActivity(() => 0);
+  for (const line of [...stream, partial]) some.feed(line);
+  assert.deepEqual(some.snapshot().tokens, { input: 1_600_000, output: 20_000, written: 0 }, "the live line keeps the output it had");
   const empty = harnessActivity(() => 0);
   for (const line of [...stream.slice(0, 2), ev({ type: "turn.completed", usage: {} }), stream[2]]) empty.feed(line);
   assert.deepEqual(empty.snapshot().tokens, { input: 1_500_000, output: 20_000, written: 0 }, "the live line counts from the last total, not from an empty one");

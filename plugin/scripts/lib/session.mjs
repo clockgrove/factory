@@ -2048,8 +2048,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // Until when (ms) the stage's prompt cache stays warm (cacheWarmUntil): automatic account choice prefers this account
     // for the Objective's next stage until then.
     ...(warm !== null ? { cacheWarmUntil: warm } : {}),
-    // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once.
-    ...(progressRun ? { progressRun } : {}),
+    // The stage's progress comment's key (its run id), so a scorer given this record and the comment counts the stage once;
+    // null when the stage had none (a stage the network ended before its comment, a local key only its reporter knows).
+    progressRun: typeof progressRun === "string" && progressRun ? progressRun : null,
     // A record Pendulum wrote for a stage whose own process wrote none (killed before it could): the stage's progress
     // comment, when there is one, is the better record of it, and a scorer given both keeps the comment's (withLines).
     ...(standIn ? { standIn: true } : {}),

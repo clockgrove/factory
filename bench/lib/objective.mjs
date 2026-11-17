@@ -755,17 +755,21 @@ export function accountUse(usage) {
 }
 
 /**
- * The usage records given and the stages' progress-line records (spendRecords) together, each stage once. A record
- * stands for the progress comments of its own stage (work or review, stageOf) that it names exactly:
- * - its `progressRun`, the comment's key (plugin session.mjs writeUsage);
+ * The usage records given and the stages' progress-line records (spendRecords) together, each stage once, whatever
+ * order the records come in. A record stands for the progress comments of its own stage (work or review, stageOf) that
+ * it names exactly:
+ * - its `progressRun`, the comment's key (plugin session.mjs writeUsage; null: the stage had no comment);
  * - else, a cloud sandbox stage's record (its `vendor.claim`): the comment keyed `<claim>` or `<run>-<claim>`
  *   (plugin launch.mjs stageProgressKey);
  * - else, a GitHub Actions artifact (its `workflowRun`, collect.mjs): the comments keyed `<run>` or `<run>-<attempt>`
  *   (plugin session.mjs progressRunId);
- * - else, a record on an account (a local result.json from before `progressRun`): every comment on that account.
- * A record that names none of these stands for no comment, and both count. A stand-in (`standIn`: Pendulum's record for
- * a stage whose own process wrote none) gives way to the comment it stands for, which takes the stand-in's sandbox cost
- * when it carries none of its own.
+ * - else, a record with no `progressRun` field at all (written before records named their comment) on an account:
+ *   that account's comments.
+ * A stand-in (`standIn`: Pendulum's record for a stage whose own process wrote none) gives way to the comments it stands
+ * for, the first taking its sandbox cost when it has none; when another record stands for them all, its sandbox cost goes
+ * to that record (when it has none) and it is dropped. A record that names no comment counts beside the comments, but a
+ * figure is never counted twice: a record with no `progressRun` field beside an unnamed comment of its stage with
+ * dollars may be that stage, so its dollars are unknown there (UNKNOWN_WHY `unmatched`).
  */
 export const withLines = (records = [], lines = []) => {
   const claimOf = (r) => (typeof r?.vendor?.claim === "string" && /^[0-9a-f]{12}$/.test(r.vendor.claim) ? r.vendor.claim : null);
@@ -775,19 +779,35 @@ export const withLines = (records = [], lines = []) => {
     if (typeof r.progressRun === "string") return (l) => key(l) === r.progressRun;
     const claim = claimOf(r);
     if (claim) return (l) => key(l) === claim || !!key(l)?.endsWith(`-${claim}`);
-    if (Number.isInteger(r.workflowRun)) return (l) => key(l) === String(r.workflowRun) || new RegExp(`^${r.workflowRun}-\\d+$`).test(key(l) ?? "");
-    if (typeof r.account === "string") return (l) => l.account === r.account;
+    if (Number.isInteger(r.workflowRun)) return (l) => key(l) === String(r.workflowRun) || new RegExp(`^${r.workflowRun}-\\d{1,4}$`).test(key(l) ?? "");
+    if (!Object.hasOwn(r, "progressRun") && typeof r.account === "string") return (l) => key(l) !== null && l.account === r.account;
     return () => false;
   };
-  const taken = new Set();
-  const out = [];
-  for (const r of records.filter(Boolean)) {
+  const all = records.filter(Boolean);
+  // Who counts each comment: a record that is no stand-in first, then the stand-ins in turn.
+  const owner = new Map();
+  const out = all.filter((r) => !r.standIn).map((r) => ({ ...r }));
+  out.forEach((r) => lines.filter(covers(r)).forEach((l) => owner.set(l, owner.get(l) ?? r)));
+  for (const r of all.filter((x) => x.standIn)) {
     const mine = lines.filter(covers(r));
-    if (r.standIn && mine.length) out.push(...mine.filter((l) => !taken.has(l)).map((l, i) => (i === 0 && r.vendor && !l.vendor ? { ...l, vendor: r.vendor } : l)));
-    else out.push(r);
-    for (const l of mine) taken.add(l);
+    const free = mine.filter((l) => !owner.has(l));
+    if (free.length) {
+      free.forEach((l, i) => {
+        const line = i === 0 && r.vendor && !l.vendor ? { ...l, vendor: r.vendor } : { ...l };
+        owner.set(l, line);
+        out.push(line);
+      });
+    } else if (mine.length) {
+      const taker = owner.get(mine[0]);
+      if (r.vendor && !taker.vendor) taker.vendor = r.vendor;
+    } else out.push({ ...r });
   }
-  return [...out, ...lines.filter((l) => !taken.has(l))];
+  const rest = lines.filter((l) => !owner.has(l));
+  // A record that cannot say which comment is its own, beside an unnamed comment of its stage with dollars: unknown there.
+  const unsure = (r) => !Object.hasOwn(r, "progressRun") && !lines.some(covers(r)) && rest.some((l) => stageOf(l) === stageOf(r) && typeof l.usd === "number" && l.usd > 0);
+  const known = (r) => r.runs !== 0 && ((typeof r.usd === "number" && r.usd > 0) || (r.harness === "codex" && (r.tokens?.input ?? null) !== null));
+  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])] } : r));
+  return [...counted, ...rest];
 };
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20 plus 1 run of unknown cost, 1 limit pause)". */
@@ -1104,7 +1124,7 @@ export function scoreObjective(collected, opts = {}) {
     models: objectiveModels(usage, cost),
     // The accounts from both: a stage run locally (`pendulum review`) on an Objective whose work ran on Actions is only in
     // its progress line.
-    accounts: objectiveAccounts(usage),
+    accounts: objectiveAccounts([...usage, ...spendRecords(collected, { app, all: true })]),
     // Per account: the usage given (a local stage's own result.json names its account) and every local stage's progress
     // line, dollars or none, but a line whose stage a given record names (its `progressRun`) counts once, as the record.
     accountUse: accountUse(withLines(artifacts, spendRecords(collected, { app, all: true }))),

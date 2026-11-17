@@ -336,6 +336,12 @@ test("#506 review F1: a resumed total below the one counted is unknown, and the 
     got.push([r.usd === null ? null : Math.round(r.usd * 100) / 100, r.usdUnknownWhy ?? []]);
   }
   assert.deepEqual(got, [[null, ["resumed-total"]], [1, []], [1, []]], "unknown, then $1.00 and $1.00 from the $1.50 base: never $0.50 against the old $3");
+  // A Claude Code before 2.1.277 reports no running total at all: its figure is no base, and the session's stays.
+  seedSessionTotal("s-old", { usd: 3, tokens: { input: 1, output: 1, cached: 0, written: 0 } });
+  const old = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-old", version: "2.1.276", usd: 1.5, session: "s-old" });
+  assert.deepEqual([old.usd, old.usdUnknownWhy], [null, ["resumed-total"]]);
+  const next = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-old", version: "2.1.325", usd: 3.5, session: "s-old" });
+  assert.ok(Math.abs(next.usd - 0.5) < 1e-9, `$0.50 against the $3 still counted, never $2.00 against the old version's $1.50: ${next.usd}`);
 });
 
 test("#506 review: every result.json Pendulum writes for a stage whose own process wrote none names the stage's progress comment and account, and says it stands in", async () => {

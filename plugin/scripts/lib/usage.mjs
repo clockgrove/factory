@@ -57,6 +57,10 @@ export const UNKNOWN_WHY = {
   relay: "calls through the relayed gateway key whose cost the gateway did not report",
   // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
   sandbox: "the sandbox vendor did not report the stage's usage",
+  // The scorer's: a usage record from before records named their progress comment, beside a comment of its stage with
+  // dollars that no record names; it may be that comment's stage, so its figure is not added to the comment's
+  // (bench objective.mjs withLines).
+  unmatched: "a usage record that names no progress comment, beside one of its stage that may be the same stage",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
@@ -992,9 +996,12 @@ export function parseCodex(stdout, model, { rollout = null, since = null, reques
       const u = e.usage || {};
       // Codex reports usage per turn, not per request; cache writes where the provider bills them (the AI Gateway does).
       if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
-      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's. One
-      // that reports no count keeps the total before it.
-      if ([u.input_tokens, u.output_tokens, u.cached_input_tokens, u.cache_write_input_tokens].some((v) => num(v) !== null)) [input, output, cached, written] = [num(u.input_tokens), num(u.output_tokens), num(u.cached_input_tokens), num(u.cache_write_input_tokens)];
+      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's. A
+      // count it does not report keeps its value before it.
+      input = num(u.input_tokens) ?? input;
+      output = num(u.output_tokens) ?? output;
+      cached = num(u.cached_input_tokens) ?? cached;
+      written = num(u.cache_write_input_tokens) ?? written;
     }
     if (e.type === "turn.failed" || e.type === "error") {
       failed = e.error?.message || e.message || e.type;

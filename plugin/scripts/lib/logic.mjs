@@ -1271,7 +1271,9 @@ export function harnessActivity(now = () => Date.now()) {
     } else if (e.type === "turn.started") s.turns += 1;
     else if (e.type === "turn.completed" && e.usage && ["input_tokens", "output_tokens", "cache_write_input_tokens"].some((k) => typeof e.usage[k] === "number")) {
       const from = seen ?? base;
-      const total = { input: e.usage.input_tokens || 0, output: e.usage.output_tokens || 0, written: e.usage.cache_write_input_tokens || 0 };
+      // A count the event does not report keeps its value before it.
+      const field = { input: "input_tokens", output: "output_tokens", written: "cache_write_input_tokens" };
+      const total = Object.fromEntries(Object.entries(field).map(([k, f]) => [k, typeof e.usage[f] === "number" ? e.usage[f] : (from?.[k] ?? 0)]));
       for (const k of ["input", "output", "written"]) s.tokens[k] += Math.max(0, total[k] - (from?.[k] ?? 0));
       seen = total;
     } else if (e.type === "item.started" && e.item) {

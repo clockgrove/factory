@@ -70,6 +70,9 @@ export const DEFAULTS = {
   ci_checks: "",
   third_party_reviewers: "", // reviewer logins outside Pendulum (`greptile-apps[bot]`) whose review the review stage waits for and answers (lib/third-party-review.mjs); empty: none
   third_party_wait_minutes: "20", // how long the review stage waits for their review of the head (lib/third-party-review.mjs)
+  cross_os_workflow: "", // the repository's CI workflow file the work stage runs on the branch for its macOS and Windows legs (lib/cross-os.mjs); empty: off
+  cross_os_checks: "", // the check names of those legs, one per line; empty: off
+  cross_os_wait_minutes: "60", // how long the work stage waits for those legs on a head (lib/cross-os.mjs)
   harness_version: "latest",
   allowed_domains: "", // The harness's sandbox (Claude Code, Codex, Copilot) on Actions and in a cloud sandbox: hosts its commands may reach beyond GitHub and the npm and Yarn registries (local.mjs runnerDomains)
   node_version: "22",
@@ -216,6 +219,7 @@ export const WORKFLOW_ONLY_SETTINGS = new Set(
   [
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
     ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
+    ...["CROSS_OS_WORKFLOW", "CROSS_OS_CHECKS", "CROSS_OS_WAIT_MINUTES"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
     ...["PUBLISH_TRANSCRIPTS"],
   ].map((n) => `PENDULUM_${n}`),
@@ -257,6 +261,8 @@ export function variableSettings(vars = {}) {
 
 /** The longest third-party wait (third_party_wait_minutes), and the most a wait record's `minutes` is taken as. */
 export const THIRD_PARTY_WAIT_MAX_MINUTES = 24 * 60;
+/** The longest cross-OS wait on one head (cross_os_wait_minutes). */
+export const CROSS_OS_WAIT_MAX_MINUTES = 24 * 60;
 /** The longest step of the no-reset guess (guess_hours): the longest hold a record keeps (holds.mjs HOLD_MAX_MS). */
 export const GUESS_MAX_HOURS = HOLD_MAX_MS / 3600_000;
 /** Whether `hours` (numbers) is a usable guess: at least one step, each above 0 and at most GUESS_MAX_HOURS. */
@@ -339,6 +345,7 @@ const VALUE_RULES = (() => {
     PENDULUM_SWEEP_MAX_DESTROYS: atLeast0,
     PENDULUM_TIMEOUT_MINUTES: above0,
     PENDULUM_THIRD_PARTY_WAIT_MINUTES: [(v) => number(v) && Number(v) > 0 && Number(v) <= THIRD_PARTY_WAIT_MAX_MINUTES, `a number above 0, at most ${THIRD_PARTY_WAIT_MAX_MINUTES} (24 hours)`],
+    PENDULUM_CROSS_OS_WAIT_MINUTES: [(v) => number(v) && Number(v) > 0 && Number(v) <= CROSS_OS_WAIT_MAX_MINUTES, `a number above 0, at most ${CROSS_OS_WAIT_MAX_MINUTES} (24 hours)`],
     PENDULUM_GUESS_HOURS: [(v) => guessHoursMs(v) !== null, `a list of hours, each a number above 0, at most ${GUESS_MAX_HOURS}`],
     PENDULUM_COPILOT_CREDIT_USD: above0,
     PENDULUM_TRIAGE_MIN_CONFIDENCE: [(v) => confidenceValue(v) !== null, "a number from 0 to 1"],
@@ -663,6 +670,11 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     ciChecks: list(get("ci_checks")),
     thirdPartyReviewers: list(get("third_party_reviewers")),
     thirdPartyWaitMs: ((m) => (m <= THIRD_PARTY_WAIT_MAX_MINUTES ? m : 20))(above0(get("third_party_wait_minutes"), 20)) * 60_000,
+    // Cross-OS CI (lib/cross-os.mjs crossOs): the workflow file as given, its legs' check names one per line (a matrix
+    // leg's name holds commas), and the wait on a head.
+    crossOsWorkflow: get("cross_os_workflow").trim(),
+    crossOsChecks: String(get("cross_os_checks") || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+    crossOsWaitMs: ((m) => (m <= CROSS_OS_WAIT_MAX_MINUTES ? m : 60))(above0(get("cross_os_wait_minutes"), 60)) * 60_000,
     harnessVersion: get("harness_version"),
     objectiveLabel: get("objective_label"),
     mode: get("mode"),

@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, workValidation, writeUsage } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -45,6 +45,7 @@ import { CALL_LOG, stageBlockCause, stageBlockReason } from "./lib/gateway-relay
 import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openFenceCheck } from "./lib/fence-check.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
+import { crossOs, crossOsChecks } from "./lib/cross-os.mjs";
 import { openKeptCheck } from "./lib/kept.mjs";
 import { answerAtStart, openAnswerCheck, reopenQuestion } from "./lib/answer-check.mjs";
 import { answeredRepos, declaredQuestion, planNeeds as planNeedsOf, plannedRepos } from "./lib/one-repo.mjs";
@@ -1002,7 +1003,15 @@ async function main() {
   // Hard stops only; a harness that errored but left commits still gets Pendulum's validation pass.
   const early = decideExit({ harness: { ok: true, died, timedOut: rec.timedOut, budgetExceeded: rec.budgetExceeded, refusal: rec.refusal }, pr: pr ? { exists: true, draft: pr.draft, body: pr.body } : null, commits: delta.count, protectedHits: hits, unresolved, sessionCap: sessionCapNote(process.env.PENDULUM_STAGE_SESSION_CAP) });
   if (early.exit !== "blocked" && !planNeeds) {
-    validation = await validationLoop({
+    // Cross-OS CI (lib/cross-os.mjs), when the repository turned it on and there is a PR: its legs on each head this stage
+    // validates, once the repository's other validation is green or handed off (session.mjs workValidation). Not on a
+    // send-back's clean rebase, which changes no line of the branch's own (the merge queue runs the repository's CI on the
+    // integrated head).
+    const crossSet = crossOs(inputs);
+    const cross = pr && !(rebaseMode && !rebaseConflict) && (crossSet.setting || crossSet.problem)
+      ? { problem: crossSet.problem, checks: crossSet.setting ? crossOsChecks({ setting: crossSet.setting, repo, issue, prNumber: pr.number, branch, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall }) : null }
+      : null;
+    validation = await workValidation({
       onPhase: progress,
       progress,
       checks: inputs.ciChecks.length && pr ? { repo, issue, prNumber: pr.number, names: inputs.ciChecks, token: token.token, actionsToken: inputs.githubToken || token.token, stall: inputs.stall } : null,
@@ -1031,7 +1040,7 @@ async function main() {
       // send-back's rebase waits here as before (a reviewed head merges on it), as does a pass whose harness erred
       // (green checks are what outweigh its error).
       handOff: !!rec.ok && !rebaseMode && !!pr,
-    });
+    }, cross);
     records.push(...validation.usage);
     passes = validation.passes;
     if (validation.died) died += 1;

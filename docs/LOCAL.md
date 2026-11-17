@@ -32,7 +32,7 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
      That profile takes every capability from what bubblewrap starts, and srt's sandbox, which Claude Code's is built on, needs some there.
 2. Create a fine-grained token on GitHub (Settings, Developer settings, Fine-grained tokens):
    - **Repository access:** this one repository only.
-   - **Permissions:** Contents, Issues and Pull requests read and write; Actions read (read and write if you use red-check triage, step 4, which reruns failed CI jobs); Variables read, for the repository's `PENDULUM_*` variables (INSTALL.md, Settings in layers).
+   - **Permissions:** Contents, Issues and Pull requests read and write; Actions read (read and write if you use red-check triage, step 4, which reruns failed CI jobs, or cross-OS CI, which dispatches the repository's CI workflow on the branch: INSTALL.md, Cross-OS CI); Variables read, for the repository's `PENDULUM_*` variables (INSTALL.md, Settings in layers).
      A token without Variables read still runs: `serve` and doctor warn once, naming the fix, and the workflow's values stand.
    - **Optional, for the Project board:** when the repository belongs to an organization, make the organization the token's resource owner and add Organization permissions → Projects: Read and write.
      Local runs then move board cards the way the Action does; without it, labels carry the state and doctor says so.

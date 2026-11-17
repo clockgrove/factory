@@ -14,7 +14,7 @@ export const HARNESSES = ["claude", "codex", "copilot"];
 export const CHOICE_PREFIXES = Object.freeze({ harness: "pendulum:harness:", model: "pendulum:model:", subagent_model: "pendulum:subagent-model:", reviewer_model: "pendulum:reviewer-model:" });
 /**
  * GitHub's limit on a label name's length, which it enforces itself when the label is made: an id fits in 50 less its
- * prefix (34 for a harness, 36 for a worker model, 27 for a sub-agent or reviewer model). USAGE.md says so.
+ * prefix (33 for a harness, 35 for a worker model, 26 for a sub-agent or reviewer model). USAGE.md says so.
  */
 export const LABEL_MAX = 50;
 /**

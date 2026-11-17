@@ -33,7 +33,7 @@ import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRep
 import { DEFAULTS, PENDULUM_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
-import { ciRunner, ciWorkflowTriggers, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
+import { ciRunner, ciWorkflowTriggers, pinRow, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef } from "./lib/accounts.mjs";
 
@@ -598,9 +598,10 @@ export function recordedProject(path) {
   }
 }
 
-async function latestRelease() {
+export async function latestRelease() {
   const tag = await rest("repos/clockgrove/pendulum/releases/latest", {}).then((r) => r?.tag_name, () => null);
-  return /^v\d+\.\d+\.\d+$/.test(tag || "") ? tag : `v${PENDULUM_VERSION}`;
+  // A tag before the first Pendulum release is the product under its previous name (doctor.mjs pinRow): never pinned.
+  return /^v\d+\.\d+\.\d+$/.test(tag || "") && pinRow(tag).status === "PASS" ? tag : `v${PENDULUM_VERSION}`;
 }
 
 /** setup's steps, in the order it runs them. */

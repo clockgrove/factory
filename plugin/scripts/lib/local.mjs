@@ -185,6 +185,20 @@ export async function dropClaim(repo, issue, holder, opts) {
 /** ~/.config/pendulum: the literal path every sandbox denies, where local mode's key files sit. */
 export const pendulumKeyDir = (home = homedir()) => join(home, ".config", "pendulum");
 
+// The product's previous name (clockgrove/pendulum#465), kept only to refuse its key folder (previousKeyDirProblem).
+export const PREVIOUS_NAME = "factory";
+
+/**
+ * Why local mode cannot start, or null: the key folder under the previous name, ~/.config/<previous>, is still there.
+ * No sandbox denies it, so the App key, the AI Gateway key and the tokens a copy left in it are readable by every stage.
+ * serve, run and doctor refuse until it is moved to ~/.config/pendulum (moved, not copied). lstat: a link counts.
+ */
+export function previousKeyDirProblem(home = homedir()) {
+  const old = join(home, ".config", PREVIOUS_NAME);
+  if (!lstatSync(old, { throwIfNoEntry: false })) return null;
+  return `${old} exists and no sandbox denies it, so any key or token in it is readable by every stage; move it, never copy it: mv ${old} ${pendulumKeyDir(home)} (with ${pendulumKeyDir(home)} already there, move each file across, then remove ${old})`;
+}
+
 /** The AI Gateway key's file in local mode (the decision calls, decider.mjs deciderKeyState). */
 export const gatewayKeyFile = (home = homedir()) => join(pendulumKeyDir(home), "ai-gateway-key");
 
@@ -674,7 +688,7 @@ export function harnessGitEnv(submodules = []) {
 /**
  * Where a stage's private temp directory is made: a 700 directory of the user's own, never /tmp itself, which some
  * harness sandboxes mount read-write (Copilot's), so one stage could reach another's temp files and sockets. On Linux
- * it is under the home. On macOS it is /private/tmp/fct-<uid>: Claude Code keeps its sockets in
+ * it is under the home. On macOS it is /private/tmp/pnd-<uid>: Claude Code keeps its sockets in
  * `$CLAUDE_CODE_TMPDIR/claude-<uid>`, and when that path is over 44 bytes its commands get the box-wide
  * /tmp/claude-<uid> as TMPDIR instead (on Linux they keep the stage's), and a macOS home path is too long for that.
  */
@@ -685,7 +699,7 @@ export const stageTmpBase = (home = homedir(), os = osPlatform()) => {
     chmodSync(dir, 0o700);
     return dir;
   }
-  const dir = `/private/tmp/fct-${process.getuid()}`;
+  const dir = `/private/tmp/pnd-${process.getuid()}`;
   mkdirSync(dir, { mode: 0o700, recursive: true });
   // Anyone may make a directory in /tmp: one this user does not own, or a link, is refused, not used.
   const st = lstatSync(dir);

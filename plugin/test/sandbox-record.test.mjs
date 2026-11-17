@@ -46,7 +46,7 @@ async function started(o) {
     },
   };
   const launch = startEntry({ stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, cue: o.cue });
-  const result = await startInSandbox({ adapter, repo: { owner: "clockgrove", name: "pendulum-scratch", full: "clockgrove/pendulum-scratch" }, repoId: "1", issue: o.n, recordedId: null, image: Promise.resolve(IMAGE), baseImage: "node24", claim: o.claim, env: { PENDULUM_TIMEOUT_MINUTES: "40" }, budgetMs: 55 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, maxUsd: 20, handoff: { progress: stageProgressKey(RUN, o.claim), launch } });
+  const result = await startInSandbox({ adapter, repo: { owner: "acme", name: "widgets", full: "acme/widgets" }, repoId: "1", issue: o.n, recordedId: null, image: Promise.resolve(IMAGE), baseImage: "node24", claim: o.claim, env: { PENDULUM_TIMEOUT_MINUTES: "40" }, budgetMs: 55 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, maxUsd: 20, handoff: { progress: stageProgressKey(RUN, o.claim), launch } });
   // What the stage reads at its start (PENDULUM_STAGE_COMMAND_MS is what START printed).
   const fields = startedFields(env.PENDULUM_STAGE_RECORD, String(o.commandMs), env.PENDULUM_TIMEOUT_MINUTES);
   return { result, launch, fields, stageLaunch: startedLaunch(env.PENDULUM_STAGE_RECORD, fields) };

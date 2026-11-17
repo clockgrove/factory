@@ -1,6 +1,6 @@
 # Contributing
 
-Issues are welcome: bugs, questions and ideas. Pendulum takes no outside pull requests until its owner says otherwise, through 0.9.x and 1.0 alike; only maintainers open them.
+Issues are welcome: bugs, questions and ideas. Pendulum takes no outside pull requests until its owner says otherwise, through 0.10.x and 1.0 alike; only maintainers open them.
 
 ## Reporting a bug
 

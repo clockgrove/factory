@@ -845,7 +845,7 @@ test("image edits (#129): the recorded multipart and JSON requests pass byte for
   const looked = { gen_EDITREPORTED01: 0.05, gen_EDITHEADER0002: 0.04, gen_EDITTOPLEVEL03: 0.06 };
   let next = 0;
   const gw = await fakeGateway({ [EDITS]: () => answers[next++] ?? { body: image }, "/v1/generation": (_b, req) => ({ body: { data: { total_cost: looked[new URL(req.url, "http://x").searchParams.get("id")] } } }) });
-  const dir = mkdtempSync(join(tmpdir(), "relay-edits-"));
+  const dir = mkdtempSync(join(tmpdir(), "re-"));
   const relay = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5] });
   try {
     relay.beginPass(100);
@@ -899,7 +899,7 @@ test("image edits (#129): 128 MB at most (a real 38.5 MiB turnaround passes), re
   // The gateway answers an edit after `answerMs`.
   let answerMs = 0;
   const gw = await fakeGateway({ [EDITS]: () => new Promise((r) => setTimeout(() => r(priced), answerMs)), "/v1/generation": { body: { data: { total_cost: 0.01 } } } });
-  const dir = mkdtempSync(join(tmpdir(), "relay-edits-big-"));
+  const dir = mkdtempSync(join(tmpdir(), "re-big-"));
   const opened = [];
   const open = async (sub, extra = {}) => {
     const r = await openRelay({ key: KEY, dir: join(dir, sub), maxUsd: 100, origin: gw.origin, lookupDelaysMs: [5], ...extra });

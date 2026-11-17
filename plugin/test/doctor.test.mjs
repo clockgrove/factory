@@ -280,7 +280,7 @@ test("doctor without --checkout takes the settings from the default branch's wor
 });
 
 test("doctor and serve warn when the installed plugin is older than the release the workflow pins, and say how to update (#299)", async () => {
-  const { githubChecks, pluginVersionCheck } = await import("../scripts/doctor.mjs");
+  const { githubChecks, pinRow, pluginVersionCheck } = await import("../scripts/doctor.mjs");
   const { committedWorkflowEnv } = await import("../scripts/lib/local.mjs");
   const { pluginLine } = await import("../scripts/local.mjs");
   const { PENDULUM_VERSION } = await import("../scripts/lib/inputs.mjs");
@@ -318,7 +318,10 @@ test("doctor and serve warn when the installed plugin is older than the release 
       flowText = text;
       return (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "pendulum-app", missing: [], extra: [] }, env, job: true })).filter((c) => c.name === "pendulum pin");
     };
-    assert.deepEqual((await pinRow(`# - uses: clockgrove/pendulum@v0.7.1\n${flow("v0.9.30")}`)).map((c) => c.status), ["PASS"], "a commented-out old pin fails nothing");
+    assert.deepEqual((await pinRow(`# - uses: clockgrove/pendulum@v0.7.1\n${flow("v0.10.3")}`)).map((c) => c.status), ["PASS"], "a commented-out old pin fails nothing");
+    const [before] = await pinRow(flow("v0.9.37"));
+    assert.equal(before.status, "FAIL");
+    assert.match(before.detail, /a tag before v0\.10\.0: tags before v0\.10\.0 are the product under its previous name/);
     assert.deepEqual((await pinRow(flow("v0.7.1").replace("clockgrove/pendulum@v0.7.1", "'clockgrove/pendulum@v0.7.1'"))).map((c) => c.status), ["FAIL"], "a quoted old pin is read");
     flowText = null;
   } finally {
@@ -326,6 +329,10 @@ test("doctor and serve warn when the installed plugin is older than the release 
     if (before === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = before;
   }
+  // #465: every tag before the first Pendulum release fails, a floating one of an earlier line too; a branch is no release.
+  for (const ref of ["v0.9.37", "v0.9", "v0.7.1"]) assert.equal(pinRow(ref).status, "FAIL", ref);
+  for (const ref of ["v0.10.0", "v0.10", "v0", "v0.11.2", "v1"]) assert.equal(pinRow(ref).status, "PASS", ref);
+  assert.equal(pinRow("main"), null);
   // By the numbers, not the text: v0.9.30 is newer than v0.9.4; a commit or a floating tag is no release to compare.
   assert.equal(pluginVersionCheck(flow("v0.9.30"), "0.9.4").status, "WARN");
   assert.equal(pluginVersionCheck(flow("v0.9.4"), "0.9.30").status, "PASS");

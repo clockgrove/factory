@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { TOKEN_LINK_FIX, repoFromRemote, tokenFile } from "../scripts/lib/local.mjs";
+import { PREVIOUS_NAME, TOKEN_LINK_FIX, previousKeyDirProblem, repoFromRemote, tokenFile } from "../scripts/lib/local.mjs";
 import { whichSync } from "../scripts/lib/proc.mjs";
 
 // The `pendulum` command's first use (#457), as a newcomer meets it: the real front (plugin/bin/pendulum) in its own
@@ -375,5 +375,44 @@ test("#457: a running serve keeps its token while the file sits behind a link, s
   } finally {
     process.stdout.write = write;
     process.env.HOME = before;
+  }
+});
+
+test("#465: serve, run and doctor refuse while the key folder under the previous name is in ~/.config, naming the mv; none once it is moved", async () => {
+  const fx = fixture();
+  const old = join(fx.home, ".config", PREVIOUS_NAME);
+  const now = join(fx.home, ".config", "pendulum");
+  assert.equal(previousKeyDirProblem(fx.home), null, "nothing there");
+  mkdirSync(join(old, "tokens", "acme"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(old, "tokens", "acme", "widget"), "github_pat_left_behind", { mode: 0o600 });
+  const why = previousKeyDirProblem(fx.home);
+  assert.ok(why.includes(`mv ${old} ${now}`), why);
+  const gh = await fakeGithub(() => [200, { total_count: 0, variables: [] }]);
+  try {
+    const env = { ...fx.env, PATH: gitOnly(fx.root), GITHUB_API_URL: gh.url, GITHUB_GRAPHQL_URL: `${gh.url}/graphql`, PENDULUM_LOCAL_TOKEN: "github_pat_x" };
+    for (const args of [["serve", "--once"], ["run", "5"]]) {
+      const r = await pendulum(args, { cwd: fx.clone, env });
+      assert.equal(r.status, 1, args.join(" "));
+      assert.ok(r.stderr.includes(`\n- ${why}`), `${args.join(" ")}:\n${r.stderr}`);
+    }
+    // GitHub as far as doctor's rows need it: the repository, and nothing else found.
+    const none = await fakeGithub((path) => (path === `/repos/${REPO}` ? [200, { id: 1, full_name: REPO, default_branch: "main", private: false, permissions: { admin: true, push: true } }] : path.endsWith("/rulesets") ? [200, []] : [404, { message: "Not Found" }]));
+    const d = await pendulum(["doctor", "--json"], { cwd: fx.clone, env: { ...env, GITHUB_API_URL: none.url, GITHUB_GRAPHQL_URL: `${none.url}/graphql` } });
+    await none.close();
+    assert.ok(d.stdout.includes("{\n"), `${d.stdout}\n${d.stderr}`);
+    const report = JSON.parse(d.stdout.slice(d.stdout.indexOf("{\n")));
+    const row = report.checks.find((c) => c.name === "key folder");
+    assert.deepEqual([row?.status, row?.detail, row?.fix], ["FAIL", why, `mv ${old} ${now}`], JSON.stringify(row));
+    assert.ok(!(d.stdout + d.stderr).includes("github_pat_left_behind"));
+    // A link under the old name counts too; moved away, nothing is refused.
+    renameSync(old, now);
+    symlinkSync(now, old);
+    assert.ok(previousKeyDirProblem(fx.home));
+    rmSync(old);
+    assert.equal(previousKeyDirProblem(fx.home), null);
+    const after = await pendulum(["serve", "--once"], { cwd: fx.clone, env });
+    assert.ok(!after.stderr.includes(old), after.stderr);
+  } finally {
+    await gh.close();
   }
 });

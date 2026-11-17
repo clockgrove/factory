@@ -27,7 +27,7 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, TOKEN_LINK_FIX, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -533,6 +533,22 @@ export function pendulumRef(text) {
 /** A `vX.Y.Z` release's numbers, or null for any other ref (a commit, a floating vX.Y, a branch). */
 export const releaseOf = (ref) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(ref || ""))?.slice(1).map(Number) ?? null;
 
+/** The first Pendulum release: every earlier tag is the product under its previous name, which reads none of Pendulum's names. */
+export const FIRST_RELEASE = [0, 10, 0];
+
+/**
+ * The `pendulum pin` row for the ref the workflow calls (pendulumRef): FAIL on a release, or a floating vX / vX.Y tag,
+ * before FIRST_RELEASE; PASS on a later one; null for a branch or a commit, which is no release to compare.
+ */
+export function pinRow(ref) {
+  const parts = /^v(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(String(ref || ""))?.slice(1).filter((n) => n !== undefined).map(Number);
+  if (!parts) return null;
+  const i = parts.findIndex((n, k) => n !== FIRST_RELEASE[k]);
+  const first = `v${FIRST_RELEASE.join(".")}`;
+  if (i >= 0 && parts[i] < FIRST_RELEASE[i]) return FAIL("pendulum pin", `the workflow calls clockgrove/pendulum@${ref}, a tag before ${first}: tags before ${first} are the product under its previous name, which reads none of Pendulum's labels, settings or markers`, `pin ${first} or later: re-render the workflow with setup --apply workflow`);
+  return PASS("pendulum pin", `clockgrove/pendulum@${ref}`);
+}
+
 /** Update commands for the plugin, per harness: each marketplace is named `clockgrove` (README, Install). */
 export const PLUGIN_UPDATE =
   "update the plugin, then start a new session: Claude Code `claude plugin marketplace update clockgrove && claude plugin update pendulum@clockgrove`; Codex `codex plugin marketplace upgrade clockgrove && codex plugin add pendulum@clockgrove`; Copilot `copilot plugin update pendulum@clockgrove`";
@@ -649,13 +665,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   // The job token: read-only on code. Visible only inside Actions, through the workflow file.
   if (text !== null) {
     out.push(jobTokenCheck(text));
-    // A pin older than local mode does not know pendulum:local, so its jobs would also run Objectives a local loop holds.
-    const pin = releaseOf(pendulumRef(text));
-    if (pin) {
-      const [maj, min, pat] = pin;
-      const old = maj === 0 && (min < 7 || (min === 7 && pat < 14));
-      out.push(old ? FAIL("pendulum pin", `the workflow calls clockgrove/pendulum@v${pin.join(".")}, older than v0.7.14`, "pin the latest release; older Actions run Objectives labelled pendulum:local too") : PASS("pendulum pin", `clockgrove/pendulum@v${pin.join(".")}`));
-    }
+    const pin = pinRow(pendulumRef(text));
+    if (pin) out.push(pin);
     // A session's skills and scripts are the installed plugin's, not the Action's: in a job they are the same tree.
     const plugin = job ? null : pluginVersionCheck(text);
     if (plugin) out.push(plugin);
@@ -2285,6 +2296,8 @@ async function main() {
   // A token file reached through a symbolic link is not read (lib/local.mjs tokenPlaceProblem): a FAIL row with its fix.
   let linked = null;
   let ownToken = "";
+  // Local mode's key folder under the product's previous name: no sandbox denies it (lib/local.mjs previousKeyDirProblem).
+  const previous = local ? previousKeyDirProblem(homedir()) : null;
   if (local) {
     try {
       ownToken = localToken(repo.full);
@@ -2295,7 +2308,7 @@ async function main() {
   }
   const varsToken = ownToken || token;
   const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
+  const results = [defaultsCheck(inputs), ...(previous ? [FAIL("key folder", previous, `mv ${join(homedir(), ".config", PREVIOUS_NAME)} ${pendulumKeyDir(homedir())}`)] : []), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

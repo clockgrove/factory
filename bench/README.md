@@ -47,8 +47,8 @@ The row's `walkAway.bucket` is `walk-away`, `external` or `miss`, with `walkAway
 ## The streak
 
 ```sh
-node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0 [--append scorecard.json]
-node bench/score.mjs --streak --repo OWNER/A --repo OWNER/B --repo OWNER/C --since v0.9.0 [--out pooled.json]
+node bench/score.mjs --streak --repo OWNER/NAME --since v0.10.0 [--append scorecard.json]
+node bench/score.mjs --streak --repo OWNER/A --repo OWNER/B --repo OWNER/C --since v0.10.0 [--out pooled.json]
 ```
 
 Consecutive walk-away merges per harness from a Pendulum tag (its Release's time, read from `--pendulum`, default `clockgrove/pendulum`): the Objectives whose clock started at or after it, in the order they ended. A walk-away merge with no P1 escape and every input source read extends the harness's streak, one with a workflow hand-over's owner step included (Workflow hand-over, above); any human input, a Blocked card, a stall, an unmerged end, a P1 escape in `quality.escapes`, or an input source the scorer could not read (`walkAway.unseen`: the workflow runs without Actions read, or more than GitHub's 1,000 in the window; the body edits without GraphQL) resets it, and the sequence says which. The harness is the usage artifact's, else the `<!-- pendulum:harness -->` line or the `harness <name>` start line in Pendulum's own progress comments; a row with none, or with two (a relabel that switched harness), is listed as `unknown`: it extends no harness's streak, and when it breaks, it breaks every harness's. In local mode a re-run by the operator's login on a head Pendulum's triage record names is Pendulum's own. A re-run of a run created before the first label is not listed. An External Objective is listed in the sequence as `skipped`: it neither extends nor resets the streak and is not counted in `finished` (`external` counts it), unless a P1 escape is later found in its merge, which breaks it. Objectives still running are listed as in flight; ones whose clock started before the tag are left out by number. The adopter's pin is not read: score a repository only while it is pinned to the tag.

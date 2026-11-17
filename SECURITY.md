@@ -4,4 +4,4 @@ Report a suspected vulnerability privately through GitHub's [private vulnerabili
 
 ## Supported versions
 
-The latest 0.9.x release gets security fixes; older tags do not. Upgrade to the latest release to take a fix.
+The latest 0.10.x release gets security fixes; older tags do not. Upgrade to the latest release to take a fix.

@@ -385,3 +385,22 @@ test("setup's project step skips the board on a repository a user owns: no GitHu
     else process.env.GITHUB_API_URL = saved;
   }
 });
+
+test("#465: setup never pins a latest release from before the first Pendulum release; a later one it pins", async () => {
+  const { latestRelease } = await import("../scripts/setup.mjs");
+  const { PENDULUM_VERSION } = await import("../scripts/lib/inputs.mjs");
+  const realFetch = globalThis.fetch;
+  const before = process.env.GITHUB_API_URL;
+  process.env.GITHUB_API_URL = "https://github.test";
+  let tag = "v0.9.37";
+  globalThis.fetch = async (url) => (new URL(String(url)).pathname === "/repos/clockgrove/pendulum/releases/latest" ? new Response(JSON.stringify({ tag_name: tag }), { status: 200, headers: { "content-type": "application/json" } }) : new Response("{}", { status: 404 }));
+  try {
+    assert.equal(await latestRelease(), `v${PENDULUM_VERSION}`, "the old-name product's tag is never the pin");
+    tag = "v0.10.4";
+    assert.equal(await latestRelease(), "v0.10.4");
+  } finally {
+    globalThis.fetch = realFetch;
+    if (before === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = before;
+  }
+});

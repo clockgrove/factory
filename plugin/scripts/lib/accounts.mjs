@@ -99,7 +99,7 @@ const real = (p) => {
  * (its `.pendulum` holds every Objective's clone, caches and stage directories), the stages' temp directories
  * (local.mjs stageTmpBase) and srt's and Claude Code's shared scratch directory (local.mjs SHARED_TMP).
  */
-export const sandboxRoots = (dev, home = homedir(), os = osPlatform()) => [...(dev ? [dev] : []), os === "darwin" ? `/private/tmp/fct-${process.getuid?.() ?? 0}` : join(home, ".cache", "pendulum", "s"), ...SHARED_TMP];
+export const sandboxRoots = (dev, home = homedir(), os = osPlatform()) => [...(dev ? [dev] : []), os === "darwin" ? `/private/tmp/pnd-${process.getuid?.() ?? 0}` : join(home, ".cache", "pendulum", "s"), ...SHARED_TMP];
 
 /**
  * Every account this machine declares, checked: {ok: true, declared, accounts: {claude: [...], codex: [...], copilot:

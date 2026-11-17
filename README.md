@@ -10,7 +10,7 @@ Pendulum turns an issue into a merged pull request with no one watching. You wri
 
 > **Free and open source (MIT).** Pendulum charges nothing and has no paid tier or hosted service. What you pay for is your own: the model your coding agent uses, your CI runners, and a cloud sandbox if you choose one.
 
-> **Status:** 0.9.x, the release candidate for 1.0. Run it on real work; there is no stability promise until 1.0 ([Versioning](#versioning)).
+> **Status:** 0.10.x, the release candidate for 1.0. Run it on real work; there is no stability promise until 1.0 ([Versioning](#versioning)).
 
 ## How it works
 
@@ -198,11 +198,11 @@ Wherever it runs, Pendulum keeps each Objective's state in GitHub: the branch, t
 
 ## Versioning
 
-Pendulum is at 0.9.x, the release candidate for 1.0: run it on real work, but there is no stability promise until 1.0.
+Pendulum is at 0.10.x, the release candidate for 1.0: run it on real work, but there is no stability promise until 1.0.
 
 - **Pin an exact tag** (`clockgrove/pendulum@vX.Y.Z`); setup does this for you. Pendulum publishes no floating tag (no `v0`, no `v1`), and release tags cannot be moved or deleted, so what your workflow runs does not change until you upgrade. The plugin in your coding agent follows `main` instead, and with it the setup, doctor and file skills.
-- **Names may still change before 1.0.** A 0.9.x release may rename an input, a label or a job as the exception, and its release notes call the change out. [docs/PLAN.md](docs/PLAN.md) (The 1.0 bar) lists what freezes at 1.0 and what Pendulum must prove to get there.
-- **Supported:** the latest 0.9.x release gets security fixes; older tags do not.
+- **Names may still change before 1.0.** A 0.10.x release may rename an input, a label or a job as the exception, and its release notes call the change out. [docs/PLAN.md](docs/PLAN.md) (The 1.0 bar) lists what freezes at 1.0 and what Pendulum must prove to get there.
+- **Supported:** the latest 0.10.x release gets security fixes; older tags do not.
 
 ## Help and contributing
 

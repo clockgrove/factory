@@ -51,9 +51,9 @@ Job one: file an Objective, walk away, and come back to correct, merged work at 
 
 The standing scorecard is one row per Objective, kept by the bench (`bench/score.mjs`, `/pendulum:pendulum-score`).
 
-## 0.9.x releases
+## 0.10.x releases
 
-Pendulum is at 0.9.x, the release candidate for 1.0, run on real work: its surface is expected to hold and its releases to be fixes underneath, with no stability promise until 1.0. Later 0.9.x releases are batched fixes that ship on CI and the review. 0.9.0 itself was tagged once one frozen candidate tag met this bar:
+Pendulum is at 0.10.x, the release candidate for 1.0, run on real work: its surface is expected to hold and its releases to be fixes underneath, with no stability promise until 1.0. 0.10.x releases are batched fixes that ship on CI and the review. A candidate tag on the scratch drill meets this bar:
 
 - **Five in a row per harness.** Claude Code, Codex and Copilot each merge five consecutive Objectives of the scratch medium set (`bench/drill.mjs --set medium`) as walk-aways.
 - **Every route covered.** Together those runs cover the Actions, local and cloud-sandbox routes.
@@ -72,12 +72,12 @@ Counting rules:
 
 - **Real adopters only:** `clockgrove/clockgrove`, `clockgrove/assetgrove` and `clockgrove/raccoon-world` together, never the scratch drill repositories.
 - **One pooled streak:** the Objectives of all three, ordered by when each ended, on any harness (Claude Code, Codex or Copilot). Any miss on any of them resets it.
-- **It spans 0.9.x releases:** the streak counts from v0.9.0 and keeps counting when the adopters move to a later 0.9.x release; only a miss resets it.
+- **It spans 0.10.x releases:** the count before the rename to Pendulum is recorded on clockgrove/pendulum#465, and the streak goes on from it, counted from v0.10.0 (`--since v0.10.0`); it keeps counting when the adopters move to a later 0.10.x release, and only a miss resets it.
 - **The same counting rules as above:** any human input (an answer, un-block, hand-started run or re-run by anyone, an owner's agent session included), a Blocked card, a stall, an unmerged end, an input source the scorer could not read, or a P1 defect found later in a counted merge breaks the streak; an External Objective is skipped. The owner reads the counted diffs.
 
-Counting it: `node bench/score.mjs --streak --since v0.9.0 --repo <adopter> --repo <adopter> --repo <adopter>` prints each adopter's streak per harness, then the pooled streak and the sequence it counted: every finished Objective of the three, ordered by when it ended, on any harness, each a walk-away (`yes`), skipped as External, or the miss that reset it. Five is the bar. An Objective in flight has not ended and does not count yet. A parked Objective (its label removed while it waits on other work) is still scored: it counts once it ends, and a Blocked one is a miss. `--out` writes the rows and both streaks (bench/README.md, The streak).
+Counting it: `node bench/score.mjs --streak --since v0.10.0 --repo <adopter> --repo <adopter> --repo <adopter>` prints each adopter's streak per harness, then the pooled streak and the sequence it counted: every finished Objective of the three, ordered by when it ended, on any harness, each a walk-away (`yes`), skipped as External, or the miss that reset it. Five is the bar. An Objective in flight has not ended and does not count yet. A parked Objective (its label removed while it waits on other work) is still scored: it counts once it ends, and a Blocked one is a miss. `--out` writes the rows and both streaks (bench/README.md, The streak).
 
-**What freezes at 1.0 (proposed):** the Action's input names, the labels (`pendulum:objective`, `pendulum:running`, `pendulum:in-review`, `pendulum:question`, `pendulum:blocked`, `pendulum:review`, `pendulum:restart`, `pendulum:draft`, `pendulum:handover`, `pendulum:local`, `pendulum:image`, `P0` to `P2`), the markers Pendulum writes on issues and PRs, the App's permission set (docs/INSTALL.md, Install footprint) and the workflow template's jobs (`dispatch`, `queue-watch`, `work`, `review`; on the sandbox route `launch`, `launch-gate`, `launch-event`, `launch-tick`, `image`, `sweep`). From 1.0, a 1.x release renames or removes none of them and asks the App for no new permission; it may add an optional input. Before 1.0, a 0.9.x release may still change one of them as the exception, and its release notes call the change out.
+**What freezes at 1.0 (proposed):** the Action's input names, the labels (`pendulum:objective`, `pendulum:running`, `pendulum:in-review`, `pendulum:question`, `pendulum:blocked`, `pendulum:review`, `pendulum:restart`, `pendulum:draft`, `pendulum:handover`, `pendulum:local`, `pendulum:image`, `P0` to `P2`), the markers Pendulum writes on issues and PRs, the App's permission set (docs/INSTALL.md, Install footprint) and the workflow template's jobs (`dispatch`, `queue-watch`, `work`, `review`; on the sandbox route `launch`, `launch-gate`, `launch-event`, `launch-tick`, `image`, `sweep`). From 1.0, a 1.x release renames or removes none of them and asks the App for no new permission; it may add an optional input. Before 1.0, a 0.10.x release may still change one of them as the exception, and its release notes call the change out.
 
 What 0.9 claims beyond the candidate bar:
 

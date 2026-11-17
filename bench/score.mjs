@@ -7,8 +7,8 @@
  *   node bench/score.mjs --repo OWNER/NAME --issue N [--issue M ...]
  *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed pendulum:objective issue
  *
- *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0     consecutive walk-away merges per harness from a tag
- *   node bench/score.mjs --streak --repo A/X --repo B/Y --since v0.9.0  each repository's streak, then the pooled streak
+ *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.10.0    consecutive walk-away merges per harness from a tag
+ *   node bench/score.mjs --streak --repo A/X --repo B/Y --since v0.10.0 each repository's streak, then the pooled streak
  *                                                                        across them (any harness, in the order they ended)
  *
  *   --since DATE|TAG       a date, or a Pendulum tag (its Release's time, read from --pendulum)
@@ -155,7 +155,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (issues.some((n) => !Number.isSafeInteger(n) || n <= 0)) usage("--issue takes issue numbers");
   if (!issues.length && !values.since) usage("Give --issue N (one or more) or --since DATE");
   const sinceTag = values.since && /^v\d+(\.\d+){0,2}$/.test(values.since) ? values.since : null;
-  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Pendulum tag, such as v0.9.0");
+  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Pendulum tag, such as v0.10.0");
   if (values.streak && !values.since) usage("--streak needs --since TAG (or a date): the streak counts from there");
   const pendulumRepo = values.pendulum ?? "clockgrove/pendulum";
   if (!/^[^/]+\/[^/]+$/.test(pendulumRepo)) usage("--pendulum takes OWNER/NAME");

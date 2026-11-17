@@ -39,6 +39,8 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 
    Save it with `pendulum token set` in the clone: it asks for the token without echoing it (or reads it from stdin) and writes it, owner-only, to `~/.config/pendulum/tokens/OWNER/NAME`, where local mode reads it; or export `PENDULUM_LOCAL_TOKEN`.
 
+   `~/.config/pendulum` is the one key folder the sandboxes hide. While the key folder of the product's previous name is still in `~/.config`, no sandbox hides it, so `pendulum serve`, `pendulum run` and doctor refuse to start and print the `mv` that fixes it: move that folder to `~/.config/pendulum`, never copy it.
+
    Local mode checks the token's reach before it uses it:
    - It refuses a classic token or `gh` login, and refuses a token that can write to any other repository.
    - A token that lists any other private repository is refused outright, since a fine-grained token lists one only when granted it.
@@ -880,7 +882,7 @@ Claude Code's sandbox holds the same bar on Actions and in a cloud sandbox (PLAN
 Commands may write the Objective's clone, the stage's temp directory and its own package caches (npm, pnpm, Bun, Yarn, Corepack) only.
 - **Read-only in the clone:** its `.git/hooks`, `.git/config`, `.git/info/attributes`, its harness configuration (`.claude`, `.codex`, `.agents`, `.github/hooks`, `.github/copilot`, `.github/agents`, `.github/skills`, `.mcp.json`) and the stage's usage directory (Pendulum's record, event log and helpers).
 - **Pendulum's own files:** Pendulum keeps its own temporary files in a 700 directory under `.pendulum/<issue>/.private`, which no sandbox can reach, and holds validation output in memory.
-- **Temp directories:** `TMPDIR` and `XDG_RUNTIME_DIR` point at the stage's private temp directory, in a mode-700 directory of your own: `~/.cache/pendulum/s` on Linux, `/private/tmp/fct-<uid>` on macOS (Claude Code keeps its sockets there and needs that path short).
+- **Temp directories:** `TMPDIR` and `XDG_RUNTIME_DIR` point at the stage's private temp directory, in a mode-700 directory of your own: `~/.cache/pendulum/s` on Linux, `/private/tmp/pnd-<uid>` on macOS (Claude Code keeps its sockets there and needs that path short).
   No stage can write another's, and the sandboxes' `/tmp/claude` is read-only.
   Both temp directories are removed when the stage ends.
   One a killed loop left (its holder's pid, recorded beside it, is gone) is removed by the next stage that makes one there, and a live stage's never is.

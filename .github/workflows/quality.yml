@@ -26,7 +26,7 @@ jobs:
           paths="$(git ls-files -- . ':!plugin/vendor' | grep -i 'f[a]ctory' || true)"
           if [ -n "$paths" ]; then echo "::error::the old product name is in these paths:"; echo "$paths"; exit 1; fi
           allowed="$(grep -v -e '^#' -e '^$' tools/old-name-allowlist.txt || true)"
-          lines="$(git grep -nIi -e 'f[a]ctory' -- . ':!plugin/vendor' ':!tools/old-name-allowlist.txt' | sed -E 's/^([^:]+):[0-9]+:/\1:/' | grep -vxF -f <(printf '%s\n' "$allowed") || true)"
+          lines="$(git grep -nai -e 'f[a]ctory' -- . ':!plugin/vendor' ':!tools/old-name-allowlist.txt' | sed -E 's/^([^:]+):[0-9]+:/\1:/' | grep -vxF -f <(printf '%s\n' "$allowed") || true)"
           if [ -n "$lines" ]; then echo "::error::the old product name is in these lines (path:text), and tools/old-name-allowlist.txt does not list them:"; echo "$lines"; exit 1; fi
       - name: The vendored libraries match their lockfile
         run: |

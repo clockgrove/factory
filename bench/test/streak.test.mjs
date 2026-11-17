@@ -15,6 +15,7 @@ import { pooledStreak, pooledTable, streaks, streakTable, tagTime, verdict } fro
 import { appendScorecard } from "../score.mjs";
 import { harnessMarker } from "../../plugin/scripts/lib/logic.mjs";
 import { progressTail } from "../../plugin/scripts/lib/session.mjs";
+import { PREVIOUS_NAME } from "../../plugin/scripts/lib/local.mjs";
 import { blocked, cleanMerge, localMerge, OPERATOR, questionAnswered, REPO, withHandover } from "./fixtures/github.mjs";
 
 const BENCH = join(import.meta.dirname, "..");
@@ -619,4 +620,22 @@ test("a restart (pendulum:restart) is a human action on every route; Pendulum's 
   local.issueTimeline.push({ event: "labeled", label: { name: "pendulum:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:00Z" }, { event: "unlabeled", label: { name: "pendulum:restart" }, actor: OPERATOR, created_at: "2031-03-02T01:30:20Z" });
   const kinds = humanActions(local, "2031-03-02T01:00:00Z").map((a) => a.kind);
   assert.deepEqual(kinds, ["labeled pendulum:restart"]);
+});
+
+test("#465: an Objective from before the rename (its events and markers under the previous name, its label renamed in place) is left out of a --since v0.10.0 streak, never a miss", () => {
+  const tag = "2031-03-04T00:00:00Z";
+  const old = (c) => {
+    const o = JSON.parse(JSON.stringify(c).replaceAll("pendulum:", `${PREVIOUS_NAME}:`));
+    o.issue.labels = [{ name: "pendulum:objective" }];
+    return o;
+  };
+  // As GitHub may list the label events: under the name each label had then, or under its current name.
+  const before = [old(cleanMerge(45)), cleanMerge(46)].map(score);
+  assert.ok(before[0].walkAway.since < tag && before[1].walkAway.since < tag);
+  // One labelled after the tag, all its times moved past it.
+  const shifted = JSON.parse(JSON.stringify(cleanMerge(47)), (k, v) => (typeof v === "string" && /^2031-03-0[1-3]T/.test(v) ? v.replace(/^2031-03-0[1-3]/, "2031-03-05") : v));
+  const s = streaks([...before, score(shifted)], { from: tag });
+  assert.deepEqual(s.before, [45, 46]);
+  const all = Object.values(s.harnesses).flatMap((h) => h.sequence);
+  assert.deepEqual(all.map((e) => [e.issue, e.ok]), [[47, true]]);
 });

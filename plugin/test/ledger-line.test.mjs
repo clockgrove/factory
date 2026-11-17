@@ -80,18 +80,18 @@ test("ledger line (#543): the stage's end writes its usage record's per-pass led
   const read = ledgerOfComment(body);
   assert.equal(read.model, "claude-opus-5-5");
   assert.equal(read.version, PENDULUM_VERSION);
-  // Each entry as passLedger wrote it: dollars to a millionth (the spend line's precision), times to the second, the
-  // first request's cache read and write.
+  // Each entry as passLedger wrote it: dollars to a millionth (the spend line's precision), times to the millisecond
+  // (#569: the card path and the stage path then agree with the usage record's exactly), the first request's cache read
+  // and write.
   const want = usage.ledger.map((e) => ({
     ...e,
     usd: e.usd === null ? null : Math.round(e.usd * 1e6) / 1e6,
     usdByBilling: Object.fromEntries(Object.entries(e.usdByBilling).map(([k, v]) => [k, Math.round(v * 1e6) / 1e6])),
-    started: e.started.replace(/\.\d{3}Z$/, "Z"),
-    ended: e.ended.replace(/\.\d{3}Z$/, "Z"),
+    started: new Date(Date.parse(e.started)).toISOString(),
+    ended: new Date(Date.parse(e.ended)).toISOString(),
     firstCache: e.firstCache ? { cached: e.firstCache.cached, written: e.firstCache.written } : null,
   }));
-  want[0].started = "2026-11-17T08:00:00Z";
-  want[0].ended = "2026-11-17T08:12:30Z";
+  assert.deepEqual([want[0].started, want[0].ended], ["2026-11-17T08:00:00.250Z", "2026-11-17T08:12:30.900Z"]);
   // The decision record's model is not one the stage's harness line names: it reads as none.
   want[4].model = null;
   assert.equal(read.ledger.length, 5);
@@ -101,13 +101,27 @@ test("ledger line (#543): the stage's end writes its usage record's per-pass led
   assert.doesNotMatch(line, /reason|basis|Block|harness-reported|CLAUDE_CODE|\/tmp|ledger-usage/);
   const v = JSON.parse(line);
   assert.deepEqual(Object.keys(v).sort(), ["b", "m", "p", "v"]);
-  const allowed = new Set(["l", "d", "m", "b", "e", "t", "u", "q", "w", "y", "k", "n", "r", "c"]);
+  const allowed = new Set(["l", "d", "m", "b", "e", "ms", "u", "q", "w", "y", "k", "n", "r", "c"]);
   for (const e of v.p) for (const [k, x] of Object.entries(e)) assert.ok(allowed.has(k) && (typeof x !== "string" || /^[A-Za-z0-9._:/-]{1,80}$/.test(x)), `${k}: ${JSON.stringify(x)}`);
   for (const e of v.p) for (const w of e.w ?? []) assert.ok(Object.hasOwn(UNKNOWN_WHY, w));
   for (const e of v.p) if (e.b !== undefined && e.b !== null) assert.ok(BILLING.includes(e.b));
   // A string that is no label of its kind is not written.
   const odd = ledgerOfComment(ledgerMarker([{ label: "work-1\n<script>", model: "a model with spaces", effort: "--high", usd: 1, usdByBilling: {}, tokens: {} }], { model: "x y", version: "not a version" }));
   assert.deepEqual([odd.model, odd.version, odd.ledger[0].label, odd.ledger[0].model, odd.ledger[0].effort], [null, null, null, null, null]);
+});
+
+test("ledger line (#569): pass times are written in Unix milliseconds (`ms`); a line written before them, with `t` in Unix seconds, still reads, to the second", () => {
+  const e = { label: "review", model: "claude-opus-5-5", usd: 0.1, usdByBilling: { api: 0.1 }, billing: "api", started: "2026-11-17T02:26:27.400Z", ended: "2026-11-17T02:26:38.900Z", tokens: {} };
+  const line = ledgerMarker([e], { model: "claude-opus-5-5", published: ["claude-opus-5-5"] });
+  const p = JSON.parse(/^<!-- pendulum:ledger (\{.*\}) -->$/.exec(line)[1]).p[0];
+  assert.deepEqual([p.ms, p.t], [[Date.parse(e.started), Date.parse(e.ended)], undefined]);
+  // 11.5 s, as the usage record has it: an 8-second pass no longer moves by up to a second (about 12%).
+  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment(line).ledger[0][k]), [e.started, e.ended]);
+  // A line from an earlier release, in seconds: read as written.
+  const old = '<!-- pendulum:ledger {"m":"claude-opus-5-5","b":"api","p":[{"l":"review","t":[1794882387,1794882398],"u":0.1}]} -->';
+  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment(old).ledger[0][k]), ["2026-11-17T02:26:27Z", "2026-11-17T02:26:38Z"]);
+  // A time no date can hold reads as none, never a throw.
+  assert.deepEqual(["started", "ended"].map((k) => ledgerOfComment('<!-- pendulum:ledger {"p":[{"l":"work-1","ms":[1e17,1794882398000]}]} -->').ledger[0][k]), [null, "2026-11-17T02:26:38.000Z"]);
 });
 
 test("ledger line (#543): bounded at LEDGER_MAX characters; a ledger that does not fit is not written, and the comment says so", async () => {

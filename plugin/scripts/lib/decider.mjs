@@ -1,8 +1,8 @@
-// The one decision interface (docs/ADAPTERS.md, Decision model). Every typed question Factory asks a model (red-check
+// The one decision interface (docs/ADAPTERS.md, Decision model). Every typed question Pendulum asks a model (red-check
 // triage, the drift advisory, and each judgement built on them) opens its decider here: with an AI Gateway key, the
 // gateway's decision model answers (adapters/decider-ai-gateway.mjs); without one, the stage's own harness on the login
 // the stage runs on (adapters/decider-harness.mjs). Both answer `decide(input, question)` the same way, so a caller
-// never knows which. This runs in Factory's own process, never in a harness: the key stays here, and scrubbedEnv
+// never knows which. This runs in Pendulum's own process, never in a harness: the key stays here, and scrubbedEnv
 // (harness.mjs) keeps it out of every child.
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -13,11 +13,11 @@ import { gatewayKeyFile, keyDirExposedBy } from "./local.mjs";
 
 /**
  * The AI Gateway key, or why there is none (a code). On Actions the `ai_gateway_api_key` input only; off Actions the file
- * ~/.config/factory/ai-gateway-key only, which Factory's own process reads and no sandbox can (the sandboxes deny that
+ * ~/.config/pendulum/ai-gateway-key only, which Pendulum's own process reads and no sandbox can (the sandboxes deny that
  * literal path), so the key is in no process's environment. The file is held to local mode's rules for key files
- * (lib/local.mjs localApp): ~/.config/factory a real directory, the key a regular file (no symlink) with one link and
+ * (lib/local.mjs localApp): ~/.config/pendulum a real directory, the key a regular file (no symlink) with one link and
  * no group or world bits, and no home of the harness (`inputs.harness`, which the outer sandbox leaves readable) equals
- * or holds ~/.config/factory. Codes: no-key, key-dir-exposed, key-dir-symlink, key-file-not-regular, key-file-links,
+ * or holds ~/.config/pendulum. Codes: no-key, key-dir-exposed, key-dir-symlink, key-file-not-regular, key-file-links,
  * key-file-mode, key-file-empty, key-file-<errno> (any other fs error, for example key-file-eacces).
  */
 export function deciderKeyState({ inputs = {}, env = process.env, home = homedir() } = {}) {
@@ -127,14 +127,14 @@ export function openDecider({ inputs = {}, env = process.env, home = homedir(), 
       name: "ai-gateway",
       model,
       off: null,
-      // Who answers now: the gateway, or after it refused Factory's key or credits, the stage's harness.
+      // Who answers now: the gateway, or after it refused Pendulum's key or credits, the stage's harness.
       asked: () => (state.gatewayRefused ? { name: "harness", model: harnessLabel } : { name: "ai-gateway", model }),
       limited,
       decide: async (input, question, opts) => {
         if (state.gatewayRefused) return harnessDecide(input, question, opts);
         const a = await gateway(input, question, opts);
         if (!GATEWAY_REFUSED.has(a.error)) return a;
-        if (!state.gatewayRefused) log(`decision calls: the AI Gateway refused Factory's key (${a.error}); the stage's own harness (${stage.harness}) answers them for the rest of this stage`);
+        if (!state.gatewayRefused) log(`decision calls: the AI Gateway refused Pendulum's key (${a.error}); the stage's own harness (${stage.harness}) answers them for the rest of this stage`);
         state.gatewayRefused = a.error;
         return harnessDecide(input, question, opts);
       },

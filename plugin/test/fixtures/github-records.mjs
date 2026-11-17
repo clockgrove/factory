@@ -7,7 +7,7 @@
 // `hideNew` reads: a newly posted comment is missing from the list for that many reads.
 import { createHash } from "node:crypto";
 
-export const BOT = { login: "factory-app[bot]", type: "Bot" };
+export const BOT = { login: "pendulum-app[bot]", type: "Bot" };
 export const REPO = { owner: "acme", name: "widgets", full: "acme/widgets" };
 export const BASE = { repositoryId: "R_1", tree: "t".repeat(40) };
 const ZERO = "0".repeat(40);

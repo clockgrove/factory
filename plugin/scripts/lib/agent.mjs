@@ -1,14 +1,14 @@
-// The agent uid on Actions. The harness, the install and the validation run as `factory-agent`, a user with no groups
-// beyond its own and no sudo, in its own 700 home: a different uid cannot read Factory's /proc/<pid>/environ, the
-// runner's home (where the workspace and the action live) or Factory's temp directory. The agent gets a read-only
-// installation token, in its own home; the write token stays in Factory's memory. In local mode there is no agent uid:
-// the harness and Factory's commands run in the per-harness sandboxes and hold no GitHub token at all.
+// The agent uid on Actions. The harness, the install and the validation run as `pendulum-agent`, a user with no groups
+// beyond its own and no sudo, in its own 700 home: a different uid cannot read Pendulum's /proc/<pid>/environ, the
+// runner's home (where the workspace and the action live) or Pendulum's temp directory. The agent gets a read-only
+// installation token, in its own home; the write token stays in Pendulum's memory. In local mode there is no agent uid:
+// the harness and Pendulum's commands run in the per-harness sandboxes and hold no GitHub token at all.
 import { AGENT_CGROUP, exec, setAgent } from "./proc.mjs";
 import { existsSync } from "node:fs";
 
-export const AGENT_USER = "factory-agent";
+export const AGENT_USER = "pendulum-agent";
 /** The agent's home, fixed: it is wiped before every job, so it is never a path read from the system. */
-export const AGENT_HOME = "/home/factory-agent";
+export const AGENT_HOME = "/home/pendulum-agent";
 const ALLOW = new Set();
 
 /** Names the repository's own setup wrote (GITHUB_ENV), which the agent's commands may see beside the allowlist. */
@@ -40,7 +40,7 @@ export async function prepareAgent(env = process.env) {
   // nor a unit, nor a file in its home. The home is removed by its exact path: a symlink there is removed, not followed.
   if (exists) {
     if (launcher === "namespace") await exec("/usr/bin/sudo", ["-n", "/bin/sh", "-c", `echo 1 > ${AGENT_CGROUP}/cgroup.kill`], { env: { PATH: SAFE } });
-    else await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "factory-agent-*"], { env: { PATH: SAFE } });
+    else await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "pendulum-agent-*"], { env: { PATH: SAFE } });
     await exec("/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-u", AGENT_USER], { env: { PATH: SAFE } });
   }
   await sudo(["/usr/bin/rm", "-rf", "--one-file-system", "--", home]);
@@ -49,7 +49,7 @@ export async function prepareAgent(env = process.env) {
   // Nothing the agent starts may outlive its unit: no cron or at job, no lingering user manager.
   await sudo(["/bin/sh", "-c", `for f in /etc/cron.deny /etc/at.deny; do grep -qx ${AGENT_USER} "$f" 2>/dev/null || echo ${AGENT_USER} >> "$f"; done`]);
   await exec("/usr/bin/sudo", ["-n", "/usr/bin/loginctl", "disable-linger", AGENT_USER], { env: { PATH: SAFE } });
-  // The runner's own directories: the workspace, the action, its temp directory (Factory's mirror and logs).
+  // The runner's own directories: the workspace, the action, its temp directory (Pendulum's mirror and logs).
   for (const dir of [env.HOME, env.RUNNER_TEMP].filter(Boolean)) await exec("/usr/bin/chmod", ["700", dir]);
   const agent = { user: AGENT_USER, home, tmp: `${home}/tmp`, allow: ALLOW, launcher };
   setAgent(agent);
@@ -60,7 +60,7 @@ export async function prepareAgent(env = process.env) {
 const SAFE = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /**
- * A `factory-agent` user that already exists with a home other than AGENT_HOME is not Factory's: what is wrong, and
+ * A `pendulum-agent` user that already exists with a home other than AGENT_HOME is not Pendulum's: what is wrong, and
  * nothing is wiped. Null when there is no such user or its home is AGENT_HOME.
  */
 export async function agentHomeProblem() {
@@ -80,7 +80,7 @@ export async function agentPrereqs() {
   const home = await agentHomeProblem();
   if (home) return fail("agent home", home, "remove that user or give it that home");
   const s = await exec("/usr/bin/sudo", ["-n", "/usr/bin/true"], { env: { PATH: SAFE } }).catch(() => ({ code: 1 }));
-  if (s.code !== 0) return fail("sudo", "sudo -n fails on this runner", "give the runner's user passwordless sudo: Factory runs the harness as its own uid, factory-agent");
+  if (s.code !== 0) return fail("sudo", "sudo -n fails on this runner", "give the runner's user passwordless sudo: Pendulum runs the harness as its own uid, pendulum-agent");
   if (!(await agentLauncher())) return fail("agent launcher", "neither systemd-run nor unshare with a cgroup v2 hierarchy on this machine", "run the stage on a runner with systemd, or with unshare, setpriv and a cgroup v2 hierarchy: the harness runs in a transient systemd unit or in its own namespaces");
   return null;
 }
@@ -101,10 +101,10 @@ export async function agentLauncher() {
  * github.com only, and gh's hosts.yml. Rewritten whenever the token is re-minted (it lives an hour).
  */
 export function readTokenFiles(home, token) {
-  const helper = `!f() { echo username=x-access-token; echo "password=$(cat ${home}/.factory/read-token)"; }; f`;
+  const helper = `!f() { echo username=x-access-token; echo "password=$(cat ${home}/.pendulum/read-token)"; }; f`;
   return {
     files: {
-      ".factory/read-token": `${token}\n`,
+      ".pendulum/read-token": `${token}\n`,
       ".gitconfig": `[credential]\n\thelper =\n[credential "https://github.com"]\n\thelper = ${helper.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/^/, '"').replace(/$/, '"')}\n`,
       ".config/gh/hosts.yml": `github.com:\n    users:\n        x-access-token:\n            oauth_token: ${token}\n    git_protocol: https\n    oauth_token: ${token}\n    user: x-access-token\n`,
       ".config/gh/config.yml": 'version: "1"\n',

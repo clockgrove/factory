@@ -16,7 +16,7 @@ const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
 /** An origin with main, a clone the agent works in, and a second clone for someone else's pushes. */
 function repos() {
-  const root = mkdtempSync(join(tmpdir(), "factory-outbox-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-outbox-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
   const other = join(root, "other");
@@ -32,13 +32,13 @@ function repos() {
   run(work, "commit", "-q", "-m", "base");
   run(work, "push", "-q", "origin", "HEAD:main");
   execFileSync("git", ["clone", "-q", origin, other], { env: { ...process.env, ...quiet } });
-  run(work, "checkout", "-q", "-b", "factory/1");
+  run(work, "checkout", "-q", "-b", "pendulum/1");
   return { root, origin, work, other, run, put };
 }
 
-const open = (r, extra = {}) => openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [".github/"], base: r.root, ...extra });
+const open = (r, extra = {}) => openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [".github/"], base: r.root, ...extra });
 
-test("outbox: the branch goes from the agent's checkout through Factory's mirror to the remote, leased and read back", async () => {
+test("outbox: the branch goes from the agent's checkout through Pendulum's mirror to the remote, leased and read back", async () => {
   const r = repos();
   const box = await open(r);
   assert.equal(box.expected(), "", "a new branch: the lease says it must not exist yet");
@@ -46,7 +46,7 @@ test("outbox: the branch goes from the agent's checkout through Factory's mirror
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box.push(), true, box.error);
   const head = r.run(r.work, "rev-parse", "HEAD");
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), head);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), head);
   assert.equal(box.expected(), head);
   assert.deepEqual(await box.delta(), { count: 1, files: ["app.txt"], head });
   // Nothing new: nothing pushed, still true.
@@ -57,26 +57,26 @@ test("outbox: the branch goes from the agent's checkout through Factory's mirror
   assert.equal(await box.push(), true, box.error);
   r.run(r.work, "reset", "-q", "--hard", head);
   assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), head);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), head);
 });
 
-test("outbox: someone else's push since Factory's last one is never overwritten; the refusal is sticky", async () => {
+test("outbox: someone else's push since Pendulum's last one is never overwritten; the refusal is sticky", async () => {
   const r = repos();
   const box = await open(r);
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box.push(), true, box.error);
-  r.run(r.other, "fetch", "-q", "origin", "factory/1");
-  r.run(r.other, "checkout", "-q", "-b", "factory/1", "origin/factory/1");
+  r.run(r.other, "fetch", "-q", "origin", "pendulum/1");
+  r.run(r.other, "checkout", "-q", "-b", "pendulum/1", "origin/pendulum/1");
   r.put(r.other, "other.txt", "x\n");
   r.run(r.other, "commit", "-q", "-m", "someone else");
-  r.run(r.other, "push", "-q", "origin", "factory/1");
+  r.run(r.other, "push", "-q", "origin", "pendulum/1");
   const theirs = r.run(r.other, "rev-parse", "HEAD");
   r.put(r.work, "app.txt", "v3\n");
   r.run(r.work, "commit", "-q", "--amend", "-m", "rewritten");
   assert.equal(await box.push(), false);
   assert.match(box.error, /^push rejected: .*stale info|^push rejected: /);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), theirs, "their commit stays");
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), theirs, "their commit stays");
   assert.equal(await box.push(), false, "a rejected push Blocks the stage: no retry");
 });
 
@@ -94,10 +94,10 @@ test("outbox: a protected path or a plain blob LFS should hold is refused before
   assert.equal(await box.push(), true, box.error);
   r.put(r.work, ".github/workflows/ci.yml", "on: [push, pull_request]\n");
   r.run(r.work, "commit", "-q", "-m", "widen ci");
-  const before = r.run(r.origin, "rev-parse", "factory/1");
+  const before = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(await box.push(), false);
-  assert.equal(box.error, "touched protected path .github/workflows/ci.yml; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun");
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), before);
+  assert.equal(box.error, "touched protected path .github/workflows/ci.yml; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so re-apply the label to rerun");
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), before);
 
   const r2 = repos();
   r2.put(r2.work, ".gitattributes", "assets/** filter=lfs diff=lfs merge=lfs -text\n");
@@ -141,17 +141,17 @@ test("outbox: a fix pass's toolchain change outside its fence is refused; put ba
   r.put(r.work, "package-lock.json", "{\"v\":2}\n");
   r.put(r.work, ".nvmrc", "18\n");
   r.run(r.work, "commit", "-q", "-m", "second fix");
-  const before = r.run(r.origin, "rev-parse", "factory/1");
+  const before = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(await box.push(), false);
   assert.match(box.error, /^a fix pass changed \.nvmrc \(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names/);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), before, "nothing of the refused pass reaches GitHub");
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), before, "nothing of the refused pass reaches GitHub");
   assert.equal(await box.push(), false, "refused for good: the stage Blocks");
 
   // What the default branch changed since the branch was cut, taken in by the fix pass, is not the pass's.
   const r2 = repos();
   r2.put(r2.work, "app.txt", "v2\n");
   r2.run(r2.work, "commit", "-q", "-m", "work");
-  r2.run(r2.work, "push", "-q", "origin", "HEAD:factory/1");
+  r2.run(r2.work, "push", "-q", "origin", "HEAD:pendulum/1");
   r2.put(r2.other, "yarn.lock", "lock\n");
   r2.run(r2.other, "commit", "-q", "-m", "lock on main");
   r2.run(r2.other, "push", "-q", "origin", "HEAD:main");
@@ -188,10 +188,10 @@ test("outbox: a fix pass that adds a dependency pushes each manifest with its ow
   r.put(r.work, "api/yarn.lock", "# yarn\nleft-pad@1\n");
   r.run(r.work, "commit", "-q", "-m", "relock api");
   assert.deepEqual(await box.outside(), ["api/yarn.lock"]);
-  const before = r.run(r.origin, "rev-parse", "factory/1");
+  const before = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(await box.push(), false);
   assert.match(box.error, /^a fix pass changed api\/yarn\.lock \(toolchain, lockfile or CI configuration\)/);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), before);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), before);
 });
 
 test("outbox: a fix pass that adds a dependency to a workspace member pushes the root lockfile; the declaration counts as it stood at the fence", async () => {
@@ -271,7 +271,7 @@ test("outbox: the setup command's script is toolchain to a fix pass; a fence tha
   assert.equal(await box.push(), false);
   assert.match(box.error, /^a fix pass changed scripts\/setup\.sh /);
 
-  // Factory's mirror cannot read the branch when the fence is set: closed, not open.
+  // Pendulum's mirror cannot read the branch when the fence is set: closed, not open.
   const r2 = repos();
   const box2 = await open(r2);
   r2.put(r2.work, "app.txt", "v2\n");
@@ -381,10 +381,10 @@ test("outbox: a script the default branch has fixed since the branch left no lon
       place({ "package.json": fixed });
       r.run(r.work, "commit", "-q", "-m", "fix");
       r.run(r.work, "push", "-q", "origin", "HEAD:main");
-      r.run(r.work, "checkout", "-q", "factory/1");
+      r.run(r.work, "checkout", "-q", "pendulum/1");
       place({ "package.json": fixed });
       r.run(r.work, "commit", "-q", "-m", "same fix");
-      r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+      r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
     },
   });
   assert.equal(moved.ok, true, moved.error);
@@ -419,10 +419,10 @@ test("outbox: what setup runs beyond the files it names is refused on push: a sc
   assert.equal(member.ok, true, member.error);
   const unknown = await push({ "app.txt": "v2\n" }, "bash $SETUP");
   assert.equal(unknown.ok, false);
-  assert.match(unknown.error, /^the setup command runs \$SETUP .*which Factory cannot resolve/);
+  assert.match(unknown.error, /^the setup command runs \$SETUP .*which Pendulum cannot resolve/);
 });
 
-test("outbox: a fix pass may not change the install command's package.json script, and with a command Factory cannot resolve, no file out of scope (#387)", async () => {
+test("outbox: a fix pass may not change the install command's package.json script, and with a command Pendulum cannot resolve, no file out of scope (#387)", async () => {
   const r = repos();
   r.put(r.work, "package.json", '{"scripts":{"deps":"node deps.mjs"}}\n');
   r.run(r.work, "commit", "-q", "-m", "package");
@@ -443,15 +443,15 @@ test("outbox: a fix pass may not change the install command's package.json scrip
   r2.run(r2.work, "commit", "-q", "-m", "fix, and a file setup may run");
   assert.deepEqual(await box2.outside(), ["lib/util.sh"]);
   assert.equal(await box2.push(), false);
-  assert.match(box2.error, /The setup or install command runs \$SETUP .*which Factory cannot resolve/);
+  assert.match(box2.error, /The setup or install command runs \$SETUP .*which Pendulum cannot resolve/);
 });
 
-test("outbox: a pack Factory's object check stops reading early is a refused push, never a crash", async () => {
+test("outbox: a pack Pendulum's object check stops reading early is a refused push, never a crash", async () => {
   const r = repos();
   const box = await open(r);
   // A pack far bigger than a pipe buffer, so index-pack exits while the bundle is still being written to it.
   // An unrelated history, so the bundle has no prerequisite to check first and goes straight to index-pack.
-  r.run(r.work, "checkout", "-q", "--orphan", "factory/1-new");
+  r.run(r.work, "checkout", "-q", "--orphan", "pendulum/1-new");
   r.put(r.work, "blob.bin", randomBytes(24 * 1024 * 1024).toString("base64"));
   r.run(r.work, "commit", "-q", "-m", "big");
   const mirror = join(r.root, readdirSync(r.root).find((d) => d.startsWith("mirror-")));
@@ -482,24 +482,24 @@ test("outbox: Git LFS media is taken from the agent's store only when its bytes 
   const box = await open(r);
   assert.equal(await box.push(), false);
   assert.match(box.error, /^Git LFS objects missing from the checkout's store, or not matching their pointers: /);
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"));
+  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"));
   // Over the local cap: refused with the size, before any upload.
   writeFileSync(join(store, oid), bytes);
-  process.env.FACTORY_LOCAL_MEDIA_MAX_MB = "0.001";
+  process.env.PENDULUM_LOCAL_MEDIA_MAX_MB = "0.001";
   try {
     const box2 = await open(r, { local: true });
     assert.equal(await box2.push(), false);
     assert.match(box2.error, /^the branch's Git LFS media is 0\.0 MB \(1 object\(s\)\), over the local limit of 0\.001 MB/);
   } finally {
-    delete process.env.FACTORY_LOCAL_MEDIA_MAX_MB;
+    delete process.env.PENDULUM_LOCAL_MEDIA_MAX_MB;
   }
-  // A path remote has no https LFS endpoint: Factory will not upload media anywhere but the repository's own.
+  // A path remote has no https LFS endpoint: Pendulum will not upload media anywhere but the repository's own.
   const box3 = await open(r);
   assert.equal(await box3.push(), false);
   assert.equal(box3.error, "the remote has no https Git LFS endpoint to pin the media upload to");
 });
 
-test("outbox: the checkout gets the default branch as a bundle; Factory's own clean rebase is the commit pushed; a conflict is left to the harness", async () => {
+test("outbox: the checkout gets the default branch as a bundle; Pendulum's own clean rebase is the commit pushed; a conflict is left to the harness", async () => {
   const r = repos();
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
@@ -513,33 +513,33 @@ test("outbox: the checkout gets the default branch as a bundle; Factory's own cl
   const box2 = await open(r);
   assert.equal(await box2.behind(), 1);
   assert.equal(await box2.feed(), main);
-  assert.equal(r.run(r.work, "rev-parse", "refs/remotes/origin/main"), main, "handed over, not fetched by Factory in the checkout");
-  const sha = await box2.rebase({ name: "factory", email: "f@f" });
+  assert.equal(r.run(r.work, "rev-parse", "refs/remotes/origin/main"), main, "handed over, not fetched by Pendulum in the checkout");
+  const sha = await box2.rebase({ name: "pendulum", email: "f@f" });
   assert.match(sha, /^[0-9a-f]{40}$/);
   assert.equal(await box2.push({ sha }), true, box2.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), sha);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1^"), main);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), sha);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1^"), main);
   // A conflicting rebase: null, nothing pushed.
   r.put(r.other, "app.txt", "theirs\n");
   r.run(r.other, "commit", "-q", "-m", "conflicting sibling");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box3 = await open(r);
-  assert.equal(await box3.rebase({ name: "factory", email: "f@f" }), null);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), sha);
+  assert.equal(await box3.rebase({ name: "pendulum", email: "f@f" }), null);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), sha);
 });
 
-test("outbox: a malformed object in the agent's bundle is refused by Factory's own object check", async () => {
+test("outbox: a malformed object in the agent's bundle is refused by Pendulum's own object check", async () => {
   const r = repos();
   const tree = r.run(r.work, "write-tree");
   const parent = r.run(r.work, "rev-parse", "HEAD");
   const bad = execFileSync("git", ["-C", r.work, "hash-object", "-t", "commit", "-w", "--literally", "--stdin"], { input: `tree ${tree}\nparent ${parent}\nauthor nobody\ncommitter nobody\n\nbad\n`, encoding: "utf8" }).trim();
-  r.run(r.work, "update-ref", "refs/heads/factory/1", bad);
+  r.run(r.work, "update-ref", "refs/heads/pendulum/1", bad);
   const box = await open(r);
   assert.equal(await box.push(), false);
   // #318: git's cause, and no path on this machine (index-pack can name the mirror's pack).
-  assert.match(box.error, /^the agent's bundle failed Factory's object check \(exit \d+\): .*fatal: fsck error in packed object; (this machine's|the job) log has its output$/);
+  assert.match(box.error, /^the agent's bundle failed Pendulum's object check \(exit \d+\): .*fatal: fsck error in packed object; (this machine's|the job) log has its output$/);
   assert.ok(!box.error.includes(r.root), box.error);
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"));
+  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"));
 });
 
 test("mergeTree: the tree of a clean merge, null on a conflict", async () => {
@@ -547,7 +547,7 @@ test("mergeTree: the tree of a clean merge, null on a conflict", async () => {
   const r = repos();
   r.put(r.work, "a.txt", "a\n");
   r.run(r.work, "commit", "-q", "-m", "ours");
-  r.run(r.work, "push", "-q", "origin", "HEAD:refs/heads/factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:refs/heads/pendulum/1");
   const ours = r.run(r.work, "rev-parse", "HEAD");
   r.put(r.other, "b.txt", "b\n");
   r.run(r.other, "commit", "-q", "-m", "theirs");
@@ -587,11 +587,11 @@ done
 }
 
 /**
- * A proc-receive hook on the test origin for refs/heads/factory/*: it refuses every update with `reason`, which git then
+ * A proc-receive hook on the test origin for refs/heads/pendulum/*: it refuses every update with `reason`, which git then
  * prints on the ref's own porcelain line, as GitHub does for a workflow file a token may not write.
  */
 function refuseRefLine(r, reason) {
-  r.run(r.origin, "config", "receive.procReceiveRefs", "refs/heads/factory");
+  r.run(r.origin, "config", "receive.procReceiveRefs", "refs/heads/pendulum");
   writeFileSync(
     join(r.origin, "hooks", "proc-receive"),
     `#!${process.execPath}
@@ -621,25 +621,25 @@ async function withWorkflow(r, extra = {}) {
   return open(r, extra);
 }
 
-test("outbox: a default branch that changed a workflow file during the run is merged in by Factory before the push (#2579)", async () => {
+test("outbox: a default branch that changed a workflow file during the run is merged in by Pendulum before the push (#2579)", async () => {
   const r = repos();
   const box = await withWorkflow(r);
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   const work = r.run(r.work, "rev-parse", "HEAD");
-  // Mid-run: the default branch changes the workflow file (a Factory pin bump, say).
+  // Mid-run: the default branch changes the workflow file (a Pendulum pin bump, say).
   r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
   r.run(r.other, "commit", "-q", "-m", "ci v2");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const main = r.run(r.other, "rev-parse", "HEAD");
   refuseWorkflowVersions(r);
   assert.throws(() => r.run(r.work, "push", "-q", "origin", "HEAD:refs/heads/probe"), /workflow/, "the branch as it is would be refused");
-  box.author = { name: "factory[bot]", email: "1+factory[bot]@users.noreply.github.com" };
+  box.author = { name: "pendulum[bot]", email: "1+pendulum[bot]@users.noreply.github.com" };
   assert.equal(await box.push(), true, box.error);
-  const head = r.run(r.origin, "rev-parse", "factory/1");
-  assert.deepEqual(r.run(r.origin, "rev-list", "--parents", "-n", "1", head).split(" ").slice(1), [work, main], "Factory's merge: the agent's head, then the default branch");
+  const head = r.run(r.origin, "rev-parse", "pendulum/1");
+  assert.deepEqual(r.run(r.origin, "rev-list", "--parents", "-n", "1", head).split(" ").slice(1), [work, main], "Pendulum's merge: the agent's head, then the default branch");
   assert.equal(r.run(r.origin, "rev-parse", `${head}:.github/workflows/ci.yml`), r.run(r.origin, "rev-parse", `${main}:.github/workflows/ci.yml`));
-  assert.equal(r.run(r.origin, "log", "-1", "--format=%an <%ae>", head), "factory[bot] <1+factory[bot]@users.noreply.github.com>");
+  assert.equal(r.run(r.origin, "log", "-1", "--format=%an <%ae>", head), "pendulum[bot] <1+pendulum[bot]@users.noreply.github.com>");
   assert.deepEqual(box.merged, { default: main, paths: [".github/workflows/ci.yml"] });
   assert.equal(box.base, main);
   // The checkout took the merge, so the next commit builds on it and needs no second merge.
@@ -652,16 +652,16 @@ test("outbox: a default branch that changed a workflow file during the run is me
   r.run(r.work, "commit", "-q", "-m", "more");
   assert.equal(await box.push(), true, box.error);
   assert.equal(box.merged, null);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1^"), head);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1^"), head);
   // The merged-in workflow change is not the stage's: no protected-path refusal, and the delta counts from the new base.
   assert.deepEqual((await box.delta()).files, ["app.txt"]);
 });
 
-test("outbox: Factory records its own catch-up merge, and a red on it goes on to a fix pass (#10)", async () => {
+test("outbox: Pendulum records its own catch-up merge, and a red on it goes on to a fix pass (#10)", async () => {
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const r = repos();
   const box = await withWorkflow(r);
-  box.author = { name: "factory[bot]", email: "1+factory[bot]@users.noreply.github.com" };
+  box.author = { name: "pendulum[bot]", email: "1+pendulum[bot]@users.noreply.github.com" };
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   const work = r.run(r.work, "rev-parse", "HEAD");
@@ -669,28 +669,28 @@ test("outbox: Factory records its own catch-up merge, and a red on it goes on to
   r.run(r.other, "commit", "-q", "-m", "ci v2");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   assert.equal(await box.push(), true, box.error);
-  const merge = r.run(r.origin, "rev-parse", "factory/1");
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), merge, "the checkout took Factory's merge");
-  assert.equal(box.caughtUp(merge), true, "Factory recorded its own merge");
-  assert.equal(box.caughtUp(work), false, "the agent's head is not Factory's merge");
+  const merge = r.run(r.origin, "rev-parse", "pendulum/1");
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), merge, "the checkout took Pendulum's merge");
+  assert.equal(box.caughtUp(merge), true, "Pendulum recorded its own merge");
+  assert.equal(box.caughtUp(work), false, "the agent's head is not Pendulum's merge");
   // The red on the merge goes on to its fix run. Under a minute left, the fix run is reached but never started (the
   // loop returns the time cap instead of running a harness). That such a red is never judged for progress: triage.test.mjs.
   const onMerge = await validationLoop({ checkout: r.work, commands: ["false"], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: { ...process.env, ...quiet }, deadlineAt: Date.now() + 30_000, outbox: box });
   assert.deepEqual(onMerge.harness, { timedOut: true }, "the red on the catch-up merge went on to a fix run");
   assert.equal(onMerge.passes, 1);
-  // The agent's own commit on top of the merge is the change's, not Factory's merge.
+  // The agent's own commit on top of the merge is the change's, not Pendulum's merge.
   r.put(r.work, "app.txt", "v3\n");
   r.run(r.work, "commit", "-q", "-m", "fix");
   assert.equal(await box.push(), true, box.error);
-  const fix = r.run(r.origin, "rev-parse", "factory/1");
+  const fix = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(box.merged, null);
   assert.equal(box.caughtUp(fix), false);
 });
 
-test("outbox: a checkout that cannot take Factory's merge keeps the branch on it; later pushes only move it forward", async () => {
+test("outbox: a checkout that cannot take Pendulum's merge keeps the branch on it; later pushes only move it forward", async () => {
   const r = repos();
   const box = await withWorkflow(r);
-  box.author = { name: "factory[bot]", email: "1+factory[bot]@users.noreply.github.com" };
+  box.author = { name: "pendulum[bot]", email: "1+pendulum[bot]@users.noreply.github.com" };
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   const work = r.run(r.work, "rev-parse", "HEAD");
@@ -700,46 +700,46 @@ test("outbox: a checkout that cannot take Factory's merge keeps the branch on it
   // Uncommitted edits in the way of the fast-forward.
   writeFileSync(join(r.work, ".github/workflows/ci.yml"), "on: push # local edit\n");
   assert.equal(await box.push(), true, box.error);
-  const merge = r.run(r.origin, "rev-parse", "factory/1");
+  const merge = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.equal(box.synced, false);
   assert.equal(r.run(r.work, "rev-parse", "HEAD"), work, "the checkout stayed on the agent's head");
-  // Nothing new: the branch stays on Factory's merge, never a fresh merge replacing it.
+  // Nothing new: the branch stays on Pendulum's merge, never a fresh merge replacing it.
   assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), merge);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), merge);
   assert.equal(box.merged, null);
-  // New commits: merged onto Factory's merge, so the push is a fast-forward of it.
+  // New commits: merged onto Pendulum's merge, so the push is a fast-forward of it.
   r.put(r.work, "more.txt", "x\n");
   r.run(r.work, "commit", "-q", "-m", "more");
   const more = r.run(r.work, "rev-parse", "HEAD");
   assert.equal(await box.push(), true, box.error);
-  const next = r.run(r.origin, "rev-parse", "factory/1");
+  const next = r.run(r.origin, "rev-parse", "pendulum/1");
   assert.deepEqual(r.run(r.origin, "rev-list", "--parents", "-n", "1", next).split(" ").slice(1), [merge, more]);
-  assert.equal(r.run(r.origin, "log", "-1", "--format=%an", next), "factory[bot]");
+  assert.equal(r.run(r.origin, "log", "-1", "--format=%an", next), "pendulum[bot]");
   assert.equal(r.run(r.origin, "show", `${next}:more.txt`), "x");
   assert.equal(box.synced, false, "the edits are still in the way");
   // The edits gone, the next push puts the checkout on the branch.
   r.run(r.work, "checkout", "-q", "--", ".github/workflows/ci.yml");
   assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), next);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), next);
   assert.equal(box.synced, true);
   assert.equal(r.run(r.work, "rev-parse", "HEAD"), next);
 });
 
-test("outbox: a commit Factory made (its rebase) is merged the same way, and the checkout is left to the caller", async () => {
+test("outbox: a commit Pendulum made (its rebase) is merged the same way, and the checkout is left to the caller", async () => {
   const r = repos();
   const box = await withWorkflow(r);
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   const work = r.run(r.work, "rev-parse", "HEAD");
-  // Stands in for Factory's rebase: a commit in the mirror the push names by sha.
-  assert.equal((await box.git(["fetch", "-q", r.work, "HEAD:refs/factory/made"])).code, 0);
+  // Stands in for Pendulum's rebase: a commit in the mirror the push names by sha.
+  assert.equal((await box.git(["fetch", "-q", r.work, "HEAD:refs/pendulum/made"])).code, 0);
   r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
   r.run(r.other, "commit", "-q", "-m", "ci v2");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const main = r.run(r.other, "rev-parse", "HEAD");
   assert.equal(await box.push({ sha: work }), true, box.error);
   assert.deepEqual(box.merged, { default: main, paths: [".github/workflows/ci.yml"] });
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1^2"), main);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1^2"), main);
   assert.equal(r.run(r.work, "rev-parse", "HEAD"), work, "the checkout is not merged into: the caller re-points it");
   assert.equal(box.synced, true);
 });
@@ -753,17 +753,17 @@ test("outbox: a run with no commits of its own pushes nothing, even when the def
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   refuseWorkflowVersions(r);
   assert.equal(await box.push(), true, box.error);
-  assert.equal(box.merged, null, "no merge of Factory's own");
+  assert.equal(box.merged, null, "no merge of Pendulum's own");
   assert.equal(box.conflict, null);
   assert.equal(box.failed, false);
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"), "no branch on the remote, so no PR");
+  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"), "no branch on the remote, so no PR");
   assert.equal(box.expected(), "");
   assert.equal((await box.delta()).count, 0, "the run reads as one that left no commits");
   // Nor without a workflow change: a new branch that is only a default-branch commit never goes out.
   const r2 = repos();
   const box2 = await open(r2);
   assert.equal(await box2.push(), true, box2.error);
-  assert.throws(() => r2.run(r2.origin, "rev-parse", "--verify", "factory/1"));
+  assert.throws(() => r2.run(r2.origin, "rev-parse", "--verify", "pendulum/1"));
   assert.equal((await box2.delta()).count, 0);
 });
 
@@ -777,7 +777,7 @@ test("outbox: a default branch that moved without a workflow change is not merge
   r.run(r.other, "commit", "-q", "-m", "sibling");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), work);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), work);
   assert.equal(box.merged, null);
 });
 
@@ -794,7 +794,7 @@ test("outbox: a new branch that conflicts with the moved default is not pushed; 
   assert.equal(await box.push(), false);
   assert.equal(box.failed, false, "not sticky: the harness gets the conflict");
   assert.deepEqual(box.conflict, { default: main, paths: [".github/workflows/ci.yml"] });
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"), "nothing pushed");
+  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"), "nothing pushed");
   // The conflict pass: the default branch handed over, the branch rebased onto it with the clash resolved.
   assert.equal(await box.feed(), main);
   assert.throws(() => r.run(r.work, "rebase", "-q", "origin/main"));
@@ -802,7 +802,7 @@ test("outbox: a new branch that conflicts with the moved default is not pushed; 
   r.run(r.work, "-c", "core.editor=true", "rebase", "--continue");
   assert.equal(await box.push(), true, box.error);
   assert.equal(box.merged, null, "already on the default branch: no merge");
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1^"), main);
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1^"), main);
 
   // Left unresolved, the second push is refused and stays refused.
   const r2 = repos();
@@ -816,7 +816,7 @@ test("outbox: a new branch that conflicts with the moved default is not pushed; 
   assert.equal(await box2.push(), false);
   assert.equal(await box2.push(), false);
   assert.equal(box2.failed, true);
-  assert.match(box2.error, /^factory\/1 conflicts with main, which changed \.github\/workflows\/ci\.yml/);
+  assert.match(box2.error, /^pendulum\/1 conflicts with main, which changed \.github\/workflows\/ci\.yml/);
 });
 
 test("outbox: an existing branch that conflicts with the moved default is pushed as it is (its PR takes the send-back)", async () => {
@@ -832,7 +832,7 @@ test("outbox: an existing branch that conflicts with the moved default is pushed
   r.put(r.work, "more.txt", "x\n");
   r.run(r.work, "commit", "-q", "-m", "more");
   assert.equal(await box.push(), true, box.error);
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), r.run(r.work, "rev-parse", "HEAD"));
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
   assert.equal(box.conflict, null, "no conflict pass for an existing branch");
   assert.equal(box.merged, null);
 });
@@ -855,20 +855,20 @@ test("outbox: a rebase or merge left in progress in the checkout is named; a cle
   r.run(r.work, "merge", "--abort");
   assert.deepEqual(await box.inProgress(), { ops: [] });
   // The caller refuses the branch: every later push is refused with its reason.
-  box.block("the conflict pass left a rebase in progress in the checkout; factory/1 was not pushed");
+  box.block("the conflict pass left a rebase in progress in the checkout; pendulum/1 was not pushed");
   assert.equal(await box.push(), false);
   assert.match(box.error, /^the conflict pass left a rebase in progress/);
-  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "factory/1"), "nothing pushed");
+  assert.throws(() => r.run(r.origin, "rev-parse", "--verify", "pendulum/1"), "nothing pushed");
 });
 
-test("outbox: a refused push's reason is Factory's fixed text; the remote's own text goes to the job log only", async () => {
+test("outbox: a refused push's reason is Pendulum's fixed text; the remote's own text goes to the job log only", async () => {
   const r = repos();
   const box = await open(r);
-  writeFileSync(join(r.origin, "hooks", "pre-receive"), `#!/bin/sh\necho "GH013: rule violations for refs/heads/factory/1 at secret-path" >&2\nexit 1\n`, { mode: 0o755 });
+  writeFileSync(join(r.origin, "hooks", "pre-receive"), `#!/bin/sh\necho "GH013: rule violations for refs/heads/pendulum/1 at secret-path" >&2\nexit 1\n`, { mode: 0o755 });
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box.push(), false);
-  assert.equal(box.error, "push rejected: GitHub refused refs/heads/factory/1 (remote rejected, exit 1); its message is in the job log");
+  assert.equal(box.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
   assert.doesNotMatch(box.error, /GH013|secret-path|origin\.git/);
   assert.match(box.detail, /remote rejected/);
 });
@@ -880,7 +880,7 @@ test("outbox: GitHub's refusal of a workflow file is named with its cause, and i
   r.put(r.work, ".github/workflows/ci.yml", "on: push # the agent's\n");
   r.run(r.work, "commit", "-q", "-m", "widen ci");
   assert.equal(await box.push(), false);
-  assert.match(box.error, /^push rejected \(workflow scope\): GitHub refused factory\/1 because it changes \.github\/workflows\/ci\.yml, and Factory's token may not create or update workflow files/);
+  assert.match(box.error, /^push rejected \(workflow scope\): GitHub refused pendulum\/1 because it changes \.github\/workflows\/ci\.yml, and Pendulum's token may not create or update workflow files/);
   assert.doesNotMatch(box.error, /Personal Access Token/);
   assert.match(box.detail, /refusing to allow a Personal Access Token/);
 });
@@ -893,7 +893,7 @@ test("outbox: a refusal that only mentions a workflow (a remote: line, another r
   r.put(r.work, ".github/workflows/ci.yml", "on: push # the agent's\n");
   r.run(r.work, "commit", "-q", "-m", "widen ci");
   assert.equal(await box.push(), false);
-  assert.equal(box.error, "push rejected: GitHub refused refs/heads/factory/1 (remote rejected, exit 1); its message is in the job log");
+  assert.equal(box.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
   // Another reason on the ref's line that names a workflow.
   const r2 = repos();
   const box2 = await withWorkflow(r2, { protectedList: [] });
@@ -901,7 +901,7 @@ test("outbox: a refusal that only mentions a workflow (a remote: line, another r
   r2.put(r2.work, "app.txt", "v2\n");
   r2.run(r2.work, "commit", "-q", "-m", "work");
   assert.equal(await box2.push(), false);
-  assert.equal(box2.error, "push rejected: GitHub refused refs/heads/factory/1 (remote rejected, exit 1); its message is in the job log");
+  assert.equal(box2.error, "push rejected: GitHub refused refs/heads/pendulum/1 (remote rejected, exit 1); its message is in the job log");
 });
 
 test("outbox: a resumed run puts a reused checkout on the branch even when an earlier run left changes the branch now tracks", async () => {
@@ -909,7 +909,7 @@ test("outbox: a resumed run puts a reused checkout on the branch even when an ea
   // The first run: the branch from main, one commit, pushed.
   const box1 = await open(r);
   await box1.feed();
-  assert.equal((await box1.agentGit(["checkout", "-q", "-B", "factory/1", "refs/remotes/origin/main"])).code, 0);
+  assert.equal((await box1.agentGit(["checkout", "-q", "-B", "pendulum/1", "refs/remotes/origin/main"])).code, 0);
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box1.push(), true, box1.error);
@@ -922,21 +922,21 @@ test("outbox: a resumed run puts a reused checkout on the branch even when an ea
   r.put(r.other, "gen/out.txt", "generated\n");
   r.run(r.other, "commit", "-q", "-m", "main adds a generated file");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  r.run(r.other, "fetch", "-q", "origin", "factory/1");
-  r.run(r.other, "checkout", "-q", "-b", "factory/1", "origin/factory/1");
+  r.run(r.other, "fetch", "-q", "origin", "pendulum/1");
+  r.run(r.other, "checkout", "-q", "-b", "pendulum/1", "origin/pendulum/1");
   r.run(r.other, "merge", "-q", "--no-edit", "main");
   r.put(r.other, "app.txt", "v3\n");
   r.run(r.other, "commit", "-q", "-m", "more");
-  r.run(r.other, "push", "-q", "origin", "factory/1");
+  r.run(r.other, "push", "-q", "origin", "pendulum/1");
   const head = r.run(r.other, "rev-parse", "HEAD");
   // The resumed run, in the same checkout.
   const box2 = await open(r);
   assert.equal(box2.resumed, true);
   await box2.feed();
-  const on = await box2.putOn("refs/remotes/origin/factory/1");
+  const on = await box2.putOn("refs/remotes/origin/pendulum/1");
   assert.deepEqual(on, { code: 0, error: "" });
   assert.equal(r.run(r.work, "rev-parse", "HEAD"), head);
-  assert.equal(r.run(r.work, "symbolic-ref", "--short", "HEAD"), "factory/1");
+  assert.equal(r.run(r.work, "symbolic-ref", "--short", "HEAD"), "pendulum/1");
   assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "", "the tracked tree is the branch's");
   assert.equal(r.run(r.work, "show", "HEAD:gen/out.txt"), "generated");
   assert.equal(r.run(r.work, "ls-files", "staged.txt"), "", "the staged leftover is gone");
@@ -978,7 +978,7 @@ test("#318: a failed git command Blocks with git's cause, every absolute path on
   const outside = join(mkdtempSync(join(tmpdir(), "srv-")), "checkout");
   let missing, denied, gone;
   try {
-    missing = commandFailed("git fetch in Factory's mirror failed", await exec("git", ["-C", r.work, "fetch", "-q", "origin", "refs/heads/nope"], { env })).message;
+    missing = commandFailed("git fetch in Pendulum's mirror failed", await exec("git", ["-C", r.work, "fetch", "-q", "origin", "refs/heads/nope"], { env })).message;
     denied = commandFailed("the branch on GitHub could not be read", await exec("git", ["-c", "credential.helper=", "ls-remote", `http://x-access-token:not-a-real-token@127.0.0.1:${server.address().port}/acme/app.git`], { env })).message;
     gone = commandFailed("git status in the checkout failed", await exec("git", ["-C", outside, "status"], { env })).message;
   } finally {
@@ -986,7 +986,7 @@ test("#318: a failed git command Blocks with git's cause, every absolute path on
     server.close();
   }
   const pointer = "; (this machine's|the job) log has its output$";
-  assert.match(missing, new RegExp(`^git fetch in Factory's mirror failed \\(exit 128\\): fatal: couldn't find remote ref refs/heads/nope${pointer}`), "a missing ref keeps its cause");
+  assert.match(missing, new RegExp(`^git fetch in Pendulum's mirror failed \\(exit 128\\): fatal: couldn't find remote ref refs/heads/nope${pointer}`), "a missing ref keeps its cause");
   assert.match(denied, new RegExp(`^the branch on GitHub could not be read \\(exit 128\\): fatal: Authentication failed for 'http://127\\.0\\.0\\.1:\\d+/acme/app\\.git/'${pointer}`), "an auth failure keeps its cause");
   assert.doesNotMatch(denied, /not-a-real-token/);
   assert.match(gone, new RegExp(`fatal: cannot change to '<path>': No such file or directory${pointer}`), "a path outside the home is replaced");
@@ -999,7 +999,7 @@ test("#318: a failed git command Blocks with git's cause, every absolute path on
   assert.equal(withoutLocalPaths("error: /srv/a/x.txt, /srv/b/y.txt and gen/a.png"), "error: <path>, <path> and gen/a.png");
   assert.equal(withoutLocalPaths("fatal: repository 'file:///home/kirk/work/mirror/' not found"), "fatal: repository '<path>' not found");
   assert.equal(withoutLocalPaths("fetch file:///srv/m.git failed"), "fetch <path> failed");
-  assert.equal(logName({ FACTORY_LOCAL: "1", GITHUB_ACTIONS: "true" }), "this machine's log");
+  assert.equal(logName({ PENDULUM_LOCAL: "1", GITHUB_ACTIONS: "true" }), "this machine's log");
   assert.equal(logName({ GITHUB_ACTIONS: "true" }), "the job log");
 });
 
@@ -1055,36 +1055,36 @@ test("outbox: a resumed checkout with Git LFS filters is put on a branch that ga
   r.run(r.work, "commit", "-q", "-m", "work");
   assert.equal(await box1.push(), true, box1.error);
   // Meanwhile the branch gains media whose object the checkout's store lacks.
-  const bytes = media("factory/1", "assets/a.bin");
+  const bytes = media("pendulum/1", "assets/a.bin");
   const head = r.run(r.other, "rev-parse", "HEAD");
-  // The resumed run: Factory's checkout leaves a pointer file and asks LFS storage for nothing.
+  // The resumed run: Pendulum's checkout leaves a pointer file and asks LFS storage for nothing.
   const box2 = await open(r);
   await box2.feed();
-  assert.deepEqual(await box2.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.deepEqual(await box2.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
   assert.equal(r.run(r.work, "rev-parse", "HEAD"), head);
   assert.match(readFileSync(join(r.work, "assets/a.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
   if (!real) return;
-  // Then the hand-over: the object from Factory's mirror, the real file in the checkout, nothing shown as changed.
+  // Then the hand-over: the object from Pendulum's mirror, the real file in the checkout, nothing shown as changed.
   assert.deepEqual(await box2.lfsSetup(box2.expected()), { used: true, ok: true, reason: "", warning: "" });
   assert.deepEqual(readFileSync(join(r.work, "assets/a.bin")), bytes);
   assert.equal(r.run(r.work, "status", "--porcelain", "--untracked-files=no"), "");
 });
 
-test("outbox: the checkout takes Factory's catch-up merge of a default branch that gained Git LFS media, then the media (#73)", async () => {
+test("outbox: the checkout takes Pendulum's catch-up merge of a default branch that gained Git LFS media, then the media (#73)", async () => {
   const r = repos();
   const { real, media } = await lfsCheckout(r);
   const box = await withWorkflow(r);
   r.put(r.work, "app.txt", "v2\n");
   r.run(r.work, "commit", "-q", "-m", "work");
-  // Mid-run: the default branch gains media and changes the workflow file, so Factory merges it in before the push.
+  // Mid-run: the default branch gains media and changes the workflow file, so Pendulum merges it in before the push.
   const bytes = media("main", "assets/b.bin");
   r.put(r.other, ".github/workflows/ci.yml", "on: push # v2\n");
   r.run(r.other, "commit", "-q", "-m", "ci v2");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   assert.equal(await box.push(), true, box.error);
-  assert.ok(box.merged, "Factory merged the default branch");
+  assert.ok(box.merged, "Pendulum merged the default branch");
   assert.equal(box.synced, true, "the checkout took the merge");
-  assert.equal(r.run(r.work, "rev-parse", "HEAD"), r.run(r.origin, "rev-parse", "factory/1"));
+  assert.equal(r.run(r.work, "rev-parse", "HEAD"), r.run(r.origin, "rev-parse", "pendulum/1"));
   assert.equal(box.lfsWarning, "");
   if (real) assert.deepEqual(readFileSync(join(r.work, "assets/b.bin")), bytes);
   else assert.match(readFileSync(join(r.work, "assets/b.bin"), "utf8"), /^version https:\/\/git-lfs\.github\.com\/spec\/v1\n/);
@@ -1110,7 +1110,7 @@ const failing = (r, ...a) => {
   assert.fail(`git ${a.join(" ")} succeeded`);
 };
 
-/** The first stage on factory/1: the branch from main, one commit of app.txt, pushed. */
+/** The first stage on pendulum/1: the branch from main, one commit of app.txt, pushed. */
 async function firstStage(r) {
   const box = await open(r);
   await box.feed();
@@ -1120,19 +1120,19 @@ async function firstStage(r) {
   assert.equal(await box.push(), true, box.error);
 }
 
-test("outbox: rebase mode puts the checkout on Factory's rebase with the default branch's new media (#76)", async (t) => {
+test("outbox: rebase mode puts the checkout on Pendulum's rebase with the default branch's new media (#76)", async (t) => {
   if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
   const r = repos();
   const { media } = await lfsCheckout(r);
   await firstStage(r);
-  // The resumed stage starts, then the default branch gains media (a sibling merged) and Factory rebases onto it.
+  // The resumed stage starts, then the default branch gains media (a sibling merged) and Pendulum rebases onto it.
   const box = await open(r);
   await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
   assert.equal((await box.lfsSetup(box.expected())).warning, "");
   const bytes = media("main", "assets/b.bin");
   await box.refresh();
-  const sha = await box.rebase({ name: "factory", email: "f@f" });
+  const sha = await box.rebase({ name: "pendulum", email: "f@f" });
   assert.equal(await box.push({ sha }), true, box.error);
   const on = await box.putOnRebased(sha);
   assert.deepEqual(on, { code: 0, error: "", warning: "" });
@@ -1147,10 +1147,10 @@ test("outbox: lfsHandOver does nothing without LFS routing, and says so when rou
   // Neither the branch nor the default branch routes anything through LFS: nothing to do, nothing to say.
   const box = await open(r);
   await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
   assert.deepEqual(await box.lfsSetup(box.expected()), { used: false, ok: true, reason: "", warning: "" });
   assert.deepEqual(await box.lfsHandOver(box.expected()), { used: false, warning: "" });
-  // Mid-stage the default branch starts routing media through LFS; Factory's rebase brings it in.
+  // Mid-stage the default branch starts routing media through LFS; Pendulum's rebase brings it in.
   const bytes = randomBytes(3000);
   const oid = createHash("sha256").update(bytes).digest("hex");
   mkdirSync(join(r.origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
@@ -1161,7 +1161,7 @@ test("outbox: lfsHandOver does nothing without LFS routing, and says so when rou
   r.run(r.other, "commit", "-q", "--no-verify", "-m", "lfs media");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   await box.refresh();
-  const sha = await box.rebase({ name: "factory", email: "f@f" });
+  const sha = await box.rebase({ name: "pendulum", email: "f@f" });
   assert.equal(await box.push({ sha }), true, box.error);
   const config = readFileSync(join(r.work, ".git", "config"), "utf8");
   if (await lfsVersion()) {
@@ -1172,7 +1172,7 @@ test("outbox: lfsHandOver does nothing without LFS routing, and says so when rou
     assert.ok(isPointer(r, "assets/c.bin"));
     assert.ok(inStore(r, bytes), "the object is delivered to the checkout's store");
   }
-  // No git-lfs where Factory runs: said, not silent.
+  // No git-lfs where Pendulum runs: said, not silent.
   const bin = mkdtempSync(join(r.root, "bin-"));
   symlinkSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
   const path = process.env.PATH;
@@ -1193,19 +1193,19 @@ test("outbox: a conflict pass's own rebase onto a default branch with new media 
   const { media } = await lfsCheckout(r);
   await firstStage(r);
   // Someone else's commits on the branch change its media twice: a rebase replays the first version too.
-  const v1 = media("factory/1", "assets/a.bin");
-  const v2 = media("factory/1", "assets/a.bin");
+  const v1 = media("pendulum/1", "assets/a.bin");
+  const v2 = media("pendulum/1", "assets/a.bin");
   // The default branch gains media and a change of app.txt that conflicts with the branch's.
   const b = media("main", "assets/b.bin");
   r.put(r.other, "app.txt", "main\n");
   r.run(r.other, "commit", "-q", "-m", "main's app");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  // The send-back stage: Factory's rebase conflicts, so the harness rebases in the checkout itself.
+  // The send-back stage: Pendulum's rebase conflicts, so the harness rebases in the checkout itself.
   const box = await open(r);
   await box.feed();
-  assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+  assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
   assert.equal((await box.lfsSetup(box.expected())).warning, "");
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's rebase conflicts");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's rebase conflicts");
   assert.ok(inStore(r, v1) && inStore(r, v2) && inStore(r, b), "every object the rebase can check out is in the store");
   // The harness's git, as it would run it: no credential, LFS storage out of reach (lfsCheckout), filters required.
   const said = failing(r, "rebase", "refs/remotes/origin/main");
@@ -1233,7 +1233,7 @@ test("outbox: a catch-up merge that conflicts leaves the default branch's media 
   r.run(r.other, "commit", "-q", "-m", "ci v2, main's app");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   assert.equal(await box.push(), false);
-  assert.ok(box.conflict, "Factory's merge conflicts: the harness resolves it");
+  assert.ok(box.conflict, "Pendulum's merge conflicts: the harness resolves it");
   assert.equal(box.lfsWarning, "");
   assert.ok(inStore(r, bytes));
   // The conflict pass: the default branch handed over, the harness merges it in the checkout.
@@ -1252,12 +1252,12 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   const r = repos();
   const { media } = await lfsCheckout(r);
   await firstStage(r);
-  const a = media("factory/1", "assets/a.bin");
-  const b = media("factory/1", "assets/b.bin");
+  const a = media("pendulum/1", "assets/a.bin");
+  const b = media("pendulum/1", "assets/b.bin");
   const stage = async (extra = {}) => {
     const box = await open(r, extra);
     await box.feed();
-    assert.deepEqual(await box.putOn("refs/remotes/origin/factory/1"), { code: 0, error: "" });
+    assert.deepEqual(await box.putOn("refs/remotes/origin/pendulum/1"), { code: 0, error: "" });
     return box;
   };
   const box1 = await stage();
@@ -1268,7 +1268,7 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   // replaced, not taken by its name.
   const oid = (bytes) => createHash("sha256").update(bytes).digest("hex");
   rmSync(join(r.origin, "lfs", "objects", oid(a).slice(0, 2), oid(a).slice(2, 4), oid(a)));
-  const c = media("factory/1", "assets/c.bin");
+  const c = media("pendulum/1", "assets/c.bin");
   mkdirSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4)), { recursive: true });
   writeFileSync(join(r.work, ".git", "lfs", "objects", oid(c).slice(0, 2), oid(c).slice(2, 4), oid(c)), c.subarray(0, 100));
   const box2 = await stage();
@@ -1279,7 +1279,7 @@ test("outbox: the hand-over downloads only what the checkout's store lacks by oi
   assert.match((await box2.lfsHandOver(box2.expected(), { timeoutMs: 1 })).warning, /no time was left in the stage for git lfs checkout; the files stay pointers$/);
 });
 
-test("outbox: a large working set is handed over whole: FACTORY_LOCAL_MEDIA_MAX_MB caps what a branch pushes, not what a stage downloads (#79)", async (t) => {
+test("outbox: a large working set is handed over whole: PENDULUM_LOCAL_MEDIA_MAX_MB caps what a branch pushes, not what a stage downloads (#79)", async (t) => {
   if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
   const r = repos();
   await lfsCheckout(r);
@@ -1296,7 +1296,7 @@ test("outbox: a large working set is handed over whole: FACTORY_LOCAL_MEDIA_MAX_
   }
   r.run(r.other, "commit", "-q", "--no-verify", "-m", "much media");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
-  process.env.FACTORY_LOCAL_MEDIA_MAX_MB = "0.001";
+  process.env.PENDULUM_LOCAL_MEDIA_MAX_MB = "0.001";
   try {
     const box = await open(r, { local: true });
     await box.feed();
@@ -1304,7 +1304,7 @@ test("outbox: a large working set is handed over whole: FACTORY_LOCAL_MEDIA_MAX_
     assert.deepEqual(await box.lfsSetup(box.base), { used: true, ok: true, reason: "", warning: "" });
     for (const [f, bytes] of files) assert.deepEqual(readFileSync(join(r.work, f)), bytes, f);
   } finally {
-    delete process.env.FACTORY_LOCAL_MEDIA_MAX_MB;
+    delete process.env.PENDULUM_LOCAL_MEDIA_MAX_MB;
   }
 });
 
@@ -1328,7 +1328,7 @@ test("outbox: a branch's lfs.fetchinclude does not filter the hand-over's downlo
   await box.feed();
   assert.deepEqual(await box.putOn("refs/remotes/origin/main"), { code: 0, error: "" });
   assert.equal((await box.lfsSetup(box.base)).warning, "");
-  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Factory's mirror reads it from its HEAD.
+  // The branch's .lfsconfig limits fetches to paths no media has; once pushed, Pendulum's mirror reads it from its HEAD.
   r.put(r.work, ".lfsconfig", "[lfs]\n\tfetchinclude = nothing/**\n");
   r.run(r.work, "commit", "-q", "-m", "fetch filter");
   assert.equal(await box.push(), true, box.error);
@@ -1351,7 +1351,7 @@ async function conflictPass(pass, judge = null) {
   r.run(r.work, "commit", "-q", "-m", "c2");
   r.put(r.work, "c.txt", "same\n");
   r.run(r.work, "commit", "-q", "-m", "c3");
-  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
   r.put(r.other, "app.txt", "theirs\n");
   r.put(r.other, "b.txt", "theirs-b\n");
   r.put(r.other, "c.txt", "same\n");
@@ -1359,7 +1359,7 @@ async function conflictPass(pass, judge = null) {
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r);
   const from = box.expected();
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's own rebase conflicts");
   const onto = box.base;
   r.run(r.work, "fetch", "-q", "origin", "main");
   assert.throws(() => r.run(r.work, "rebase", "-q", "origin/main"), "the conflict pass meets the conflict on c1");
@@ -1440,7 +1440,7 @@ test("outbox: rebaseLeft reads what a send-back's conflict pass left: resolved, 
   assert.equal(skipped.left, `the branch it left drops the Objective's change to 1 path(s): app.txt (${c1}): hunk 1 of 1 (@@ -1 +1 @@): the decision model (fake/model) judged it lost at 0.90`);
   // With no key, the commit match names c1 as before.
   const keyless = await conflictPass(skip);
-  assert.match(keyless.left, /^the branch it left drops 1 of the Objective's commit\(s\) \([0-9a-f]{7}\); with an AI Gateway key Factory decides this on content$/);
+  assert.match(keyless.left, /^the branch it left drops 1 of the Objective's commit\(s\) \([0-9a-f]{7}\); with an AI Gateway key Pendulum decides this on content$/);
 });
 
 test("outbox: rebaseLeft checks the base the rebase was onto, not one the default branch moved to since (a catch-up merge) (#243)", async () => {
@@ -1475,13 +1475,13 @@ test("outbox: rebaseLeft counts a dropped commit as upstream only when its patch
   r.run(r.work, "commit", "-q", "-m", "c2");
   r.put(r.work, "app.txt", "v1\n");
   r.run(r.work, "commit", "-q", "-m", "c3 undoes c1");
-  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
   r.put(r.other, "doc.txt", "theirs-doc\n");
   r.run(r.other, "commit", "-q", "-m", "sibling");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r);
   const from = box.expected();
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null);
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null);
   const onto = box.base;
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
   go("fetch", "-q", "origin", "main");
@@ -1539,7 +1539,7 @@ async function rebasedBranch(pass, judge = null, { confOnMain = true } = {}) {
   r.run(r.work, "commit", "-q", "-m", "c1");
   r.run(r.work, "rm", "-q", "old.txt");
   r.run(r.work, "commit", "-q", "-m", "c2 removes old.txt");
-  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
   r.put(r.other, "app.txt", lines(3, "L3 main"));
   r.put(r.other, "old.txt", "old, edited\n");
   r.put(r.other, "registry.txt", "old.txt\n");
@@ -1548,7 +1548,7 @@ async function rebasedBranch(pass, judge = null, { confOnMain = true } = {}) {
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r);
   const from = box.expected();
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's own rebase conflicts");
   const onto = box.base;
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
   go("fetch", "-q", "origin", "main");
@@ -1573,7 +1573,7 @@ test("outbox: a squashed rebase that keeps the Objective's work, with a commit j
   assert.equal(done.left, "", done.left);
   assert.deepEqual(asked, [], "every change is in the head as written: no decision model call");
   assert.equal(await done.box.push(), true, done.box.error);
-  assert.equal(done.r.run(done.r.origin, "rev-parse", "factory/1"), done.r.run(done.r.work, "rev-parse", "HEAD"));
+  assert.equal(done.r.run(done.r.origin, "rev-parse", "pendulum/1"), done.r.run(done.r.work, "rev-parse", "HEAD"));
   // No key: decided on content all the same, before any commit match.
   assert.equal((await rebasedBranch(squash, null, { confOnMain: false })).left, "");
 });
@@ -1603,7 +1603,7 @@ test("outbox: a resolution that keeps a commit but takes main's side of its conf
   const why = await sendBackGuard({ outbox: lost.box, onto: { from: lost.from, base: lost.onto, files: ["conf.txt", "old.txt"] }, defaultBranch: "main", judge });
   assert.ok(why.endsWith(`: ${lost.left}; nothing of it was pushed`), why);
   assert.equal(await lost.box.push(), false);
-  assert.equal(lost.r.run(lost.r.origin, "rev-parse", "factory/1"), lost.from, "the branch on GitHub is as it was");
+  assert.equal(lost.r.run(lost.r.origin, "rev-parse", "pendulum/1"), lost.from, "the branch on GitHub is as it was");
 });
 
 test("outbox: a path the conflict reshaped goes to the decision model: kept at the floor or more is delivered, anything else is named (#362)", async () => {
@@ -1635,7 +1635,7 @@ test("outbox: a path the conflict reshaped goes to the decision model: kept at t
 });
 
 /**
- * #362: main renames a.txt to b.txt and edits the line the branch's c1 edits, so Factory's rebase conflicts; with
+ * #362: main renames a.txt to b.txt and edits the line the branch's c1 edits, so Pendulum's rebase conflicts; with
  * `two`, the branch's c2 edits another line of it too. The worker skips c1.
  */
 async function renamedUnder(two, judge) {
@@ -1651,14 +1651,14 @@ async function renamedUnder(two, judge) {
     r.put(r.work, "a.txt", text({ 2: "objective 2", 10: "objective 10" }));
     r.run(r.work, "commit", "-q", "-m", "c2");
   }
-  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
   r.run(r.other, "mv", "a.txt", "b.txt");
   r.put(r.other, "b.txt", text({ 2: "main 2" }));
   r.run(r.other, "commit", "-q", "-m", "main renames a.txt");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r);
   const from = box.expected();
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's own rebase conflicts");
   const onto = box.base;
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
   go("fetch", "-q", "origin", "main");
@@ -1696,13 +1696,13 @@ test("outbox: a binary file the conflict left is decided exactly, never by the d
     r.run(r.other, "pull", "-q", "origin", "main");
     r.put(r.work, "img.bin", bin("objective"));
     r.run(r.work, "commit", "-q", "-m", "c1");
-    r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+    r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
     r.put(r.other, "img.bin", bin("main"));
     r.run(r.other, "commit", "-q", "-m", "main");
     r.run(r.other, "push", "-q", "origin", "HEAD:main");
     const box = await open(r);
     const from = box.expected();
-    assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null);
+    assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null);
     const onto = box.base;
     const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
     go("fetch", "-q", "origin", "main");
@@ -1743,13 +1743,13 @@ async function sentBack({ base, commits, main, outbox = {} }) {
     apply(r.work, c);
     r.run(r.work, "commit", "-q", "-m", `c${i + 1}`);
   });
-  r.run(r.work, "push", "-q", "origin", "HEAD:factory/1");
+  r.run(r.work, "push", "-q", "origin", "HEAD:pendulum/1");
   apply(r.other, main);
   r.run(r.other, "commit", "-q", "-m", "main");
   r.run(r.other, "push", "-q", "origin", "HEAD:main");
   const box = await open(r, outbox);
   const from = box.expected();
-  assert.equal(await box.rebase({ name: "factory", email: "f@f" }), null, "Factory's own rebase conflicts");
+  assert.equal(await box.rebase({ name: "pendulum", email: "f@f" }), null, "Pendulum's own rebase conflicts");
   const go = (...a) => execFileSync("git", ["-C", r.work, "-c", "user.email=w@w", "-c", "user.name=w", ...a], { encoding: "utf8", env: { ...process.env, ...quiet, GIT_EDITOR: "true" }, stdio: "pipe" });
   go("fetch", "-q", "origin", "main");
   return { r, box, from, onto: box.base, go };
@@ -1975,7 +1975,7 @@ test("outbox: a git with no merge-tree --merge-base: named in the Block with a d
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
-    assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto, judge }), "Factory could not compare the rebased branch with the branch before it: git 2.34.1 has no `git merge-tree --merge-base` (git 2.40 or later)");
+    assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto, judge }), "Pendulum could not compare the rebased branch with the branch before it: git 2.34.1 has no `git merge-tree --merge-base` (git 2.40 or later)");
     assert.equal(await done.box.rebaseLeft({ from: done.from, onto: done.onto }), "", "key-less, the commits still match");
   } finally {
     process.env.PATH = path;
@@ -1991,7 +1991,7 @@ test("worker: a send-back's conflict pass ended by a cap mid-rebase pushes nothi
   const unresolved = await sendBackGuard({ outbox: box, onto: { from, base: onto, files: ["app.txt"] }, defaultBranch: "main" });
   assert.match(unresolved, /in `app\.txt`: the conflict pass left a rebase in progress; nothing of it was pushed$/);
   assert.equal(await box.push(), false, "nothing goes out");
-  assert.equal(r.run(r.origin, "rev-parse", "factory/1"), from, "the branch on GitHub is as it was");
+  assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), from, "the branch on GitHub is as it was");
   const pr = { exists: true, draft: false, body: "Closes #1" };
   assert.equal(decideExit({ harness: { ok: false, timedOut: true }, pr, commits: 0, unresolved, pushRejected: box.error !== unresolved ? box.error : "" }).reason, "time cap reached");
   // The worker calls the guard for every send-back conflict, caps or not.
@@ -2075,7 +2075,7 @@ test("#452: a conflict pass that keeps the branch's change and adapts it to main
   assert.match(input, /^File:\n<<<BEGIN [0-9a-f]{16}>>>\nsrc\/stale\.ts\n<<<END [0-9a-f]{16}>>>\n\nHunk 1 of 2 of the branch's change to the file:\n<<<BEGIN [0-9a-f]{16}>>>\n@@ [^\n]*\n-const TTL = 60;\n\+const TTL = 300;\n[\s\S]*\n\nHunk 2 of 2 of the branch's change to the file:\n[\s\S]*\+export function markStale/);
   assert.match(input, /\n\nThe whole file as the rebased branch has it:\n<<<BEGIN [0-9a-f]{16}>>>\nconst TTL = 300;\n[\s\S]*export function touch[\s\S]*items = items\.map\(\(i\) => touch\(i, now\)\);\n {2}return items\.filter\(\(i\) => isStale\(i, now, TTL\)\)[\s\S]*\n<<<END [0-9a-f]{16}>>>$/);
   assert.equal(await t.box.push(), true, t.box.error);
-  assert.equal(t.r.run(t.r.origin, "rev-parse", "factory/1"), t.r.run(t.r.work, "rev-parse", "HEAD"));
+  assert.equal(t.r.run(t.r.origin, "rev-parse", "pendulum/1"), t.r.run(t.r.work, "rev-parse", "HEAD"));
 });
 
 test("#452: a conflict pass that drops the branch's addition, or keeps main's line where the branch changed it, is still Blocked, naming the hunk asked alone", async () => {
@@ -2193,35 +2193,35 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
     const why = await sendBackGuard({ outbox: t.box, onto: { from: t.from, base: t.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, say).judge, issue: 1 });
     assert.ok(
       why.endsWith(
-        `; nothing of it was pushed; the conflict pass's result is kept as ${head} on the branch \`factory/1-conflict-pass\` of the Objective's local clone (\`.factory/1/repo\`). To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Factory's push checks did not run on it), then run \`git push --force-with-lease origin factory/1-conflict-pass:factory/1\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`,
+        `; nothing of it was pushed; the conflict pass's result is kept as ${head} on the branch \`pendulum/1-conflict-pass\` of the Objective's local clone (\`.pendulum/1/repo\`). To deliver it, first check that it keeps the Objective's change and touches no secret or protected path (Pendulum's push checks did not run on it), then run \`git push --force-with-lease origin pendulum/1-conflict-pass:pendulum/1\` in that clone and re-apply the Objective's label: the stages after it validate and review that head like any other`,
       ),
       why,
     );
     assert.equal(await t.box.push(), false);
-    assert.equal(t.r.run(t.r.origin, "rev-parse", "factory/1"), t.from, "the branch on GitHub is as it was");
+    assert.equal(t.r.run(t.r.origin, "rev-parse", "pendulum/1"), t.from, "the branch on GitHub is as it was");
     // The next stage puts the clone back on the branch as GitHub has it; the conflict pass's head stays on its branch.
-    t.r.run(t.r.work, "fetch", "-q", "origin", "factory/1:refs/remotes/origin/factory/1");
-    assert.equal((await t.box.putOn("refs/remotes/origin/factory/1")).code, 0);
+    t.r.run(t.r.work, "fetch", "-q", "origin", "pendulum/1:refs/remotes/origin/pendulum/1");
+    assert.equal((await t.box.putOn("refs/remotes/origin/pendulum/1")).code, 0);
     assert.equal(t.r.run(t.r.work, "rev-parse", "HEAD"), t.from);
-    assert.equal(t.r.run(t.r.work, "rev-parse", "factory/1-conflict-pass"), head);
+    assert.equal(t.r.run(t.r.work, "rev-parse", "pendulum/1-conflict-pass"), head);
     if (say !== "error") continue;
     // A later stage's push supersedes it: the branch goes.
     const later = await open(t.r, { local: true });
     t.r.put(t.r.work, "more.txt", "more\n");
     t.r.run(t.r.work, "commit", "-q", "-m", "more");
     assert.equal(await later.push(), true, later.error);
-    assert.throws(() => t.r.run(t.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
+    assert.throws(() => t.r.run(t.r.work, "rev-parse", "--verify", "-q", "pendulum/1-conflict-pass"));
   }
   // The branch checked out elsewhere: git cannot move it, and the Block says the result was not kept.
   const busy = await staleConflict(staleFile(300, touch, markStale), { adapt: true, outbox: { local: true } });
-  busy.r.run(busy.r.work, "branch", "factory/1-conflict-pass", busy.from);
-  busy.r.run(busy.r.work, "worktree", "add", "-q", join(busy.r.root, "wt"), "factory/1-conflict-pass");
+  busy.r.run(busy.r.work, "branch", "pendulum/1-conflict-pass", busy.from);
+  busy.r.run(busy.r.work, "worktree", "add", "-q", join(busy.r.root, "wt"), "pendulum/1-conflict-pass");
   const why2 = await sendBackGuard({ outbox: busy.box, onto: { from: busy.from, base: busy.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge, issue: 1 });
-  assert.ok(why2.endsWith("; nothing of it was pushed; its result could not be kept on a branch of the Objective's local clone (`.factory/1/repo`) (the local loop's log says why)"), why2);
+  assert.ok(why2.endsWith("; nothing of it was pushed; its result could not be kept on a branch of the Objective's local clone (`.pendulum/1/repo`) (the local loop's log says why)"), why2);
   // Nothing to keep (a merge left in progress): an earlier kept branch is removed, so none stands for this Block, which
   // says so.
   const stuck = await staleConflict(staleFile(300, touch, markStale), { outbox: { local: true } });
-  stuck.r.run(stuck.r.work, "branch", "factory/1-conflict-pass", stuck.from);
+  stuck.r.run(stuck.r.work, "branch", "pendulum/1-conflict-pass", stuck.from);
   stuck.go("checkout", "-q", "-b", "side", "HEAD~1");
   writeFileSync(join(stuck.r.work, "x.txt"), "x\n");
   stuck.go("add", "x.txt");
@@ -2231,13 +2231,13 @@ test("#452: in local mode a conflict pass the check cannot pass is kept on a bra
   stuck.go("add", "x.txt");
   stuck.go("commit", "-q", "-m", "y");
   assert.throws(() => stuck.go("merge", "side"));
-  assert.match(await sendBackGuard({ outbox: stuck.box, onto: { from: stuck.from, base: stuck.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge().judge, issue: 1 }), /: the conflict pass left a merge in progress; nothing of it was pushed; this pass left nothing to keep, so the result of an earlier one kept on the branch `factory\/1-conflict-pass` of the Objective's local clone \(`\.factory\/1\/repo`\) was removed$/);
-  assert.throws(() => stuck.r.run(stuck.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
+  assert.match(await sendBackGuard({ outbox: stuck.box, onto: { from: stuck.from, base: stuck.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge().judge, issue: 1 }), /: the conflict pass left a merge in progress; nothing of it was pushed; this pass left nothing to keep, so the result of an earlier one kept on the branch `pendulum\/1-conflict-pass` of the Objective's local clone \(`\.pendulum\/1\/repo`\) was removed$/);
+  assert.throws(() => stuck.r.run(stuck.r.work, "rev-parse", "--verify", "-q", "pendulum/1-conflict-pass"));
   // On Actions the runner keeps nothing: no branch, and the Block says only that nothing was pushed.
   const a = await staleConflict(staleFile(300, touch, markStale), { adapt: true });
   const why = await sendBackGuard({ outbox: a.box, onto: { from: a.from, base: a.onto, files: ["src/stale.ts"] }, defaultBranch: "main", judge: fakeJudge({}, 0.23).judge });
   assert.ok(why.endsWith("; nothing of it was pushed"), why);
-  assert.throws(() => a.r.run(a.r.work, "rev-parse", "--verify", "-q", "factory/1-conflict-pass"));
+  assert.throws(() => a.r.run(a.r.work, "rev-parse", "--verify", "-q", "pendulum/1-conflict-pass"));
 });
 
 /** #452: a decider that answers the whole path's question with `whole` and each hunk asked alone with `alone`. */

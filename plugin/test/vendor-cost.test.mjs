@@ -62,8 +62,8 @@ test("ceiling: every vCPU busy for the whole session plus its memory, so compute
 
 test("vendor comment: the vendor line carries state, seconds, size and dated rates; its spend line the vendor's dollars", () => {
   const cost = stageVendorCost(R, { before: { wallMs: 0, activeCpuMs: 0 }, after: { wallMs: 212_000, activeCpuMs: 41_200, memoryMb: 4096, vcpus: 2 }, stored: { ms: 3 * H, bytes: 1.2e9 } });
-  const line = vendorLine({ id: "factory-a0dd", state: "stopped", cost, rates: R, at: "2026-11-09T01:16:30Z" });
-  assert.match(line, /^- 01:16Z sandbox `factory-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
+  const line = vendorLine({ id: "pendulum-a0dd", state: "stopped", cost, rates: R, at: "2026-11-09T01:16:30Z" });
+  assert.match(line, /^- 01:16Z sandbox `pendulum-a0dd` stopped: 41\.2 s active CPU in 212\.0 s, 2 vCPU \/ 4 GB; vercel Pro list rates \(iad1, read 2026-11-08\): \$0\.1280\/CPU-hour, \$0\.0212\/GB-hour, \$0\.0800\/GB-month stored; vendor \$0\.\d{4} this stage; stopped 3\.0 h before it with 1\.20 GB saved: \$0\.\d{4}$/);
   const body = vendorBody({ line, vendorUsd: cost.usd });
   assert.ok(body.includes(line));
   close(spendOf(body), cost.usd, "daily_usd adds the vendor's dollars to the progress comment's model dollars");
@@ -73,35 +73,35 @@ test("vendor comment: the vendor line carries state, seconds, size and dated rat
   close(spendOf(alone), 2.01, "model from the usage record");
   close(spendParts(alone).modelUsd, 2);
   // An upper bound says so; nothing but codes and numbers reaches the comment.
-  const bound = vendorLine({ id: "factory-a0dd", state: "running", cost: stageVendorCost(R, { before: null, after: null, ceilingUsd: 0.2 }), rates: R, error: "unavailable" });
+  const bound = vendorLine({ id: "pendulum-a0dd", state: "running", cost: stageVendorCost(R, { before: null, after: null, ceilingUsd: 0.2 }), rates: R, error: "unavailable" });
   assert.match(bound, /running: usage not settled \(unavailable\), counted at the session's ceiling, .* vendor at most \$0\.2000 this stage/);
-  assert.match(vendorLine({ id: "factory-x", state: "stopped", cost, rates: R, error: "vercel: <b>secret text</b>" }), /\(\?\)|stopped/);
-  assert.ok(!vendorLine({ id: "factory-x", state: "stopped", cost: { ...cost, upperBound: true }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
+  assert.match(vendorLine({ id: "pendulum-x", state: "stopped", cost, rates: R, error: "vercel: <b>secret text</b>" }), /\(\?\)|stopped/);
+  assert.ok(!vendorLine({ id: "pendulum-x", state: "stopped", cost: { ...cost, upperBound: true }, rates: R, error: "vercel: secret text" }).includes("secret"), "a vendor message never reaches the comment");
 });
 
 test("progress key: the launcher names the stage's comment, so the end finds it; the record shows the stage's sandbox cost", () => {
   assert.equal(stageProgressKey("42544172935", "f75ee5806153"), "42544172935-f75ee5806153");
   assert.equal(stageProgressKey("", "f75ee5806153"), "f75ee5806153", "a stage started outside an Actions run has no run id");
-  assert.equal(progressRunId({ FACTORY_PROGRESS_RUN: "7-abc", GITHUB_RUN_ID: "7" }), "7-abc");
+  assert.equal(progressRunId({ PENDULUM_PROGRESS_RUN: "7-abc", GITHUB_RUN_ID: "7" }), "7-abc");
   // The end finds the comment by the stage's claim alone (the record's other fields can be lost to a race).
-  setSelf("factory-app[bot]");
-  const bot = { login: "factory-app[bot]", type: "Bot" };
+  setSelf("pendulum-app[bot]");
+  const bot = { login: "pendulum-app[bot]", type: "Bot" };
   const claim = "2f176ca16e06";
   const comments = [
-    { id: 1, user: bot, body: `<!-- factory:240:progress:work:42564473403-${claim} -->\nFactory work` },
-    { id: 2, user: { login: "someone", type: "User" }, body: `<!-- factory:240:progress:review:${claim} -->\nforged` },
-    { id: 3, user: bot, body: `<!-- factory:240:progress:review:${claim} -->\nFactory review` },
+    { id: 1, user: bot, body: `<!-- pendulum:240:progress:work:42564473403-${claim} -->\nPendulum work` },
+    { id: 2, user: { login: "someone", type: "User" }, body: `<!-- pendulum:240:progress:review:${claim} -->\nforged` },
+    { id: 3, user: bot, body: `<!-- pendulum:240:progress:review:${claim} -->\nPendulum review` },
   ];
   assert.equal(stageProgressComment(comments, 240, "work", claim)?.id, 1);
-  assert.equal(stageProgressComment(comments, 240, "review", claim)?.id, 3, "only Factory's own");
+  assert.equal(stageProgressComment(comments, 240, "review", claim)?.id, 3, "only Pendulum's own");
   assert.equal(stageProgressComment(comments, 240, "work", "000000000000"), null);
   assert.equal(stageProgressComment(comments, 24, "work", claim), null, "another Objective's number does not match");
-  assert.equal(progressRunId({ FACTORY_PROGRESS_RUN: "bad key!", GITHUB_RUN_ID: "7" }), "7");
+  assert.equal(progressRunId({ PENDULUM_PROGRESS_RUN: "bad key!", GITHUB_RUN_ID: "7" }), "7");
   const env = stageEnvironment({ inputs: { harness: "claude", model: "m" }, env: {}, stage: "work", issue: 3, claim: "abc", tokens: { write: "w" }, runId: "9" });
-  assert.equal(env.FACTORY_PROGRESS_RUN, "9-abc");
-  assert.match(recordBody({ id: "factory-a", vendor: "vercel", stage: "work", state: "stopped", exitCode: 0, vendorUsd: 0.0123 }), /sandbox stopped; sandbox cost \$0\.0123 this stage/);
+  assert.equal(env.PENDULUM_PROGRESS_RUN, "9-abc");
+  assert.match(recordBody({ id: "pendulum-a", vendor: "vercel", stage: "work", state: "stopped", exitCode: 0, vendorUsd: 0.0123 }), /sandbox stopped; sandbox cost \$0\.0123 this stage/);
   // The start's readings live under `meter`: the record's `vendor` is the vendor's name, and stays so (found live).
-  assert.match(recordBody({ id: "factory-a", vendor: "vercel", meter: { ceilingUsd: 0.25 }, stage: "work", state: "running" }), /`factory-a` \(vercel\)/);
+  assert.match(recordBody({ id: "pendulum-a", vendor: "vercel", meter: { ceilingUsd: 0.25 }, stage: "work", state: "running" }), /`pendulum-a` \(vercel\)/);
 });
 
 const fakeAdapter = (over = {}) => {
@@ -109,7 +109,7 @@ const fakeAdapter = (over = {}) => {
   const adapter = {
     rates: R,
     calls,
-    list: async () => [{ id: "factory-abc", state: "stopped", tags: { factory: "objective", "factory-repo": "1", "factory-issue": "7" } }],
+    list: async () => [{ id: "pendulum-abc", state: "stopped", tags: { pendulum: "objective", "pendulum-repo": "1", "pendulum-issue": "7" } }],
     usage: async () => (calls.push("usage"), { wallMs: 600_000, activeCpuMs: 90_000, memoryMb: 4096, vcpus: 2, storedBytes: 1.5e9 }),
     resume: async () => (calls.push("resume"), { expiresAt: new Date(Date.now() + 45 * 60_000).toISOString() }),
     extend: async () => {
@@ -118,7 +118,7 @@ const fakeAdapter = (over = {}) => {
     stop: async () => calls.push("stop"),
     writeFiles: async () => {},
     run: async (id, spec) => {
-      if (spec.argv.includes("factory-probe")) spec.onStdout("/vercel\nhave\n");
+      if (spec.argv.includes("pendulum-probe")) spec.onStdout("/vercel\nhave\n");
       else {
         adapter.startEnv = spec.env;
         spec.onStdout(`${Date.now()}\n`);
@@ -129,7 +129,7 @@ const fakeAdapter = (over = {}) => {
   };
   return adapter;
 };
-const start = (adapter, extra) => startInSandbox({ adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: "factory-abc", baseImage: "base", claim: "c1", env: { FACTORY_TIMEOUT_MINUTES: "30", FACTORY_MAX_USD: "20" }, budgetMs: 46 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, ...extra });
+const start = (adapter, extra) => startInSandbox({ adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: "pendulum-abc", baseImage: "base", claim: "c1", env: { PENDULUM_TIMEOUT_MINUTES: "30", PENDULUM_MAX_USD: "20" }, budgetMs: 46 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, ...extra });
 
 test("start: the totals are read before the resume, the stopped stretch is priced, and the harness gets max_usd less the vendor's most", async () => {
   const adapter = fakeAdapter();
@@ -141,19 +141,19 @@ test("start: the totals are read before the resume, the stopped stretch is price
   assert.equal(r.meter.created, false);
   assert.ok(Math.abs(r.meter.stored.ms - 2 * H) < 5000 && r.meter.stored.bytes === 1.5e9, "two hours of a 1.5 GB stop snapshot");
   const storage = storedUsd(R, r.meter.stored);
-  const budget = Number(adapter.startEnv.FACTORY_MAX_USD);
+  const budget = Number(adapter.startEnv.PENDULUM_MAX_USD);
   assert.ok(budget < 20 && budget > 19, `the harness's budget leaves room for the sandbox (${budget})`);
   assert.ok(budget + r.meter.ceilingUsd + storage <= 20, "model and vendor together stay under max_usd");
   assert.equal(r.meter.harnessUsd, budget);
   // The stage gets the record's start fields and writes them with every beat (a beat can land over the launcher's write).
-  assert.deepEqual(startedFields(adapter.startEnv.FACTORY_STAGE_RECORD), { id: "factory-abc", home: "/vercel", meter: r.meter, image: null, sessionEnd: r.sessionEnd });
+  assert.deepEqual(startedFields(adapter.startEnv.PENDULUM_STAGE_RECORD), { id: "pendulum-abc", home: "/vercel", meter: r.meter, image: null, sessionEnd: r.sessionEnd });
   assert.deepEqual(startedFields(JSON.stringify({ id: "x; rm", home: "rel", meter: { ceilingUsd: "1" } })), {}, "only plain shapes pass");
   assert.deepEqual(startedFields("not json"), {});
 
   // No cap set: nothing taken off, nothing passed.
   const free = fakeAdapter();
   await start(free, { maxUsd: 0 });
-  assert.equal(free.startEnv.FACTORY_MAX_USD, "20", "the setting as it was (0 means no cap; this env's value is the fake's)");
+  assert.equal(free.startEnv.PENDULUM_MAX_USD, "20", "the setting as it was (0 means no cap; this env's value is the fake's)");
 
   // A cap the session's ceiling eats starts nothing: the sandbox is stopped and the code is not transient.
   const tight = fakeAdapter();
@@ -167,22 +167,22 @@ test("start: the totals are read before the resume, the stopped stretch is price
 });
 
 test("book: the vendor's cost goes into the usage record beside the model's, or a record of its own when the stage left none", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-vendor-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-vendor-"));
   writeFileSync(join(dir, "result.json"), JSON.stringify({ harness: "claude", usd: 0.4, runs: 1 }));
-  const record = { id: "factory-abc", vendor: "vercel", stage: "work", claim: "c1", meter: { base: { wallMs: 0, activeCpuMs: 0 }, created: false, ceilingUsd: 0.3, stored: { ms: 0, bytes: null }, vcpus: 2 } };
+  const record = { id: "pendulum-abc", vendor: "vercel", stage: "work", claim: "c1", meter: { base: { wallMs: 0, activeCpuMs: 0 }, created: false, ceilingUsd: 0.3, stored: { ms: 0, bytes: null }, vcpus: 2 } };
   const adapter = { rates: R };
   const after = { wallMs: 120_000, activeCpuMs: 30_000, memoryMb: 4096, vcpus: 2 };
-  const r = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record, after, settled: true, state: "stopped", usage: { dir, name: "factory-usage-7" } });
+  const r = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record, after, settled: true, state: "stopped", usage: { dir, name: "pendulum-usage-7" } });
   const rec = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
   assert.equal(rec.usd, 0.4, "the model's dollars are untouched");
   assert.equal(rec.vendor.usd, r.vendor.usd);
   assert.equal(rec.vendor.upperBound, false);
   assert.equal(rec.vendor.rates.date, R.date);
-  assert.equal(rec.vendor.sandbox, "factory-abc");
+  assert.equal(rec.vendor.sandbox, "pendulum-abc");
 
-  process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "factory-vendor-rt-"));
+  process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "pendulum-vendor-rt-"));
   const none = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { ...record, stage: "review" }, after: null, settled: true, state: "stopped", usage: null, harness: "claude", error: "unavailable" });
-  assert.equal(none.usage.name, "factory-usage-7-review");
+  assert.equal(none.usage.name, "pendulum-usage-7-review");
   const own = JSON.parse(readFileSync(join(none.usage.dir, "result.json"), "utf8"));
   assert.equal(own.usd, null, "the model's dollars are unknown, never zero");
   assert.equal(own.spendInProgress, true, "the stage's progress comment carries its spend: daily_usd counts it there, once");
@@ -193,7 +193,7 @@ test("book: the vendor's cost goes into the usage record beside the model's, or 
   const labelled = await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { ...record, claim: "c2", harness: "codex" }, after: null, settled: true, state: "stopped", usage: null, harness: "claude", error: "unavailable" });
   assert.equal(JSON.parse(readFileSync(join(labelled.usage.dir, "result.json"), "utf8")).harness, "codex");
 
-  assert.deepEqual(await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { id: "factory-abc", stage: "work" }, after, settled: true, state: "stopped" }), { usage: null, vendor: null }, "a stage started before vendor costs were recorded books nothing");
+  assert.deepEqual(await bookVendor({ adapter, repo: { full: "o/r" }, n: 7, opts: {}, record: { id: "pendulum-abc", stage: "work" }, after, settled: true, state: "stopped" }), { usage: null, vendor: null }, "a stage started before vendor costs were recorded books nothing");
 });
 
 test("budget: max_usd is split in one place; the harness gets what the vendor's most leaves, or the stage does not start", () => {

@@ -15,8 +15,8 @@ const RUN = "42593022322";
 const IMAGE = { snapshot: "snap_famw7CHNm6PKr7p8K7DiwB2RmaGJ", sha: "a6fcd9f08a0eff2a7b93df6d622d1e8f0204fd30" };
 const EVENT_AT = "2026-11-09T09:23:09.000Z";
 const OBJECTIVES = [
-  { n: 293, claim: "a5e441c92cdf", sandbox: "factory-0d2c41aa7b10", cue: "stint-1794216209", commandMs: Date.parse("2026-11-09T09:23:58.230Z") },
-  { n: 294, claim: "76991fcd4388", sandbox: "factory-cfecde49e990", cue: "stint-1794216211", commandMs: Date.parse("2026-11-09T09:23:59.441Z") },
+  { n: 293, claim: "a5e441c92cdf", sandbox: "pendulum-0d2c41aa7b10", cue: "stint-1794216209", commandMs: Date.parse("2026-11-09T09:23:58.230Z") },
+  { n: 294, claim: "76991fcd4388", sandbox: "pendulum-cfecde49e990", cue: "stint-1794216211", commandMs: Date.parse("2026-11-09T09:23:59.441Z") },
 ];
 setSelf(BOT.login);
 
@@ -37,7 +37,7 @@ async function started(o) {
     stop: async () => {},
     writeFiles: async () => {},
     run: async (id, spec) => {
-      if (spec.argv.includes("factory-probe")) spec.onStdout("/vercel\nmissing\n");
+      if (spec.argv.includes("pendulum-probe")) spec.onStdout("/vercel\nmissing\n");
       else {
         env = spec.env;
         spec.onStdout(`${o.commandMs}\n`);
@@ -46,10 +46,10 @@ async function started(o) {
     },
   };
   const launch = startEntry({ stage: "work", event: "pull_request", eventAt: EVENT_AT, run: RUN, cue: o.cue });
-  const result = await startInSandbox({ adapter, repo: { owner: "clockgrove", name: "factory-scratch", full: "clockgrove/factory-scratch" }, repoId: "1", issue: o.n, recordedId: null, image: Promise.resolve(IMAGE), baseImage: "node24", claim: o.claim, env: { FACTORY_TIMEOUT_MINUTES: "40" }, budgetMs: 55 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, maxUsd: 20, handoff: { progress: stageProgressKey(RUN, o.claim), launch } });
-  // What the stage reads at its start (FACTORY_STAGE_COMMAND_MS is what START printed).
-  const fields = startedFields(env.FACTORY_STAGE_RECORD, String(o.commandMs), env.FACTORY_TIMEOUT_MINUTES);
-  return { result, launch, fields, stageLaunch: startedLaunch(env.FACTORY_STAGE_RECORD, fields) };
+  const result = await startInSandbox({ adapter, repo: { owner: "acme", name: "widgets", full: "acme/widgets" }, repoId: "1", issue: o.n, recordedId: null, image: Promise.resolve(IMAGE), baseImage: "node24", claim: o.claim, env: { PENDULUM_TIMEOUT_MINUTES: "40" }, budgetMs: 55 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") }, maxUsd: 20, handoff: { progress: stageProgressKey(RUN, o.claim), launch } });
+  // What the stage reads at its start (PENDULUM_STAGE_COMMAND_MS is what START printed).
+  const fields = startedFields(env.PENDULUM_STAGE_RECORD, String(o.commandMs), env.PENDULUM_TIMEOUT_MINUTES);
+  return { result, launch, fields, stageLaunch: startedLaunch(env.PENDULUM_STAGE_RECORD, fields) };
 }
 
 /**

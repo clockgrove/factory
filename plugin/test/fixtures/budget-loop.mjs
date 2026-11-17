@@ -4,8 +4,8 @@
 import { Local } from "../../scripts/local.mjs";
 
 const [owner, name] = process.env.LOOP_REPO.split("/");
-process.env.FACTORY_LOCAL = "1";
-process.env.FACTORY_LOCAL_ALL = "1";
+process.env.PENDULUM_LOCAL = "1";
+process.env.PENDULUM_LOCAL_ALL = "1";
 const loop = Object.assign(Object.create(Local.prototype), {
   repo: { owner, name, full: `${owner}/${name}` },
   repoFull: `${owner}/${name}`,
@@ -15,7 +15,7 @@ const loop = Object.assign(Object.create(Local.prototype), {
   opts: { token: "t" },
   children: new Set(),
   machine: { home: process.env.HOME, proc: process.env.LOOP_PROC },
-  baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "9" }),
+  baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1", PENDULUM_INPUT_MAX_CONCURRENT: "9" }),
   cleanup: async () => {},
   pausedHere: async () => [],
   pendingReviews: async () => [],

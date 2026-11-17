@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // The account a work, review or launch job's stage runs on, on GitHub Actions and the cloud sandbox (#267): the Action's
 // `account` mode, a step of its own before the stage's step (workflow-template.yml), run only when the workflow's env
-// block declares accounts (FACTORY_ACCOUNTS, lib/accounts.mjs routeAccounts). It reads the Objective's labels with the
-// App's token, the harness it runs on (its harness label, else the repository's) and its one `factory:account:<name>`
+// block declares accounts (PENDULUM_ACCOUNTS, lib/accounts.mjs routeAccounts). It reads the Objective's labels with the
+// App's token, the harness it runs on (its harness label, else the repository's) and its one `pendulum:account:<name>`
 // label's labeler, and writes `account=<name>` for the next step: its credential inputs name every declared account's
 // secret by its fixed name and pass the one of this account alone (setup.mjs, accounts.mjs routeCredentialRef), and the
 // stage records it. `-` (accounts.mjs NO_ACCOUNT) when none can be picked; empty when the workflow was rendered for other
-// accounts than FACTORY_ACCOUNTS declares now (its `rendered_accounts` input), as its jobs then pass no credential of the
+// accounts than PENDULUM_ACCOUNTS declares now (its `rendered_accounts` input), as its jobs then pass no credential of the
 // declared ones: the stage Blocks asking for a re-render. The stage reads the labels again and Blocks when they pick
 // another account by then (objective-trust.mjs accountGate). Account names only: no secret is read here.
-// With automatic account choice on (FACTORY_AUTO_ACCOUNT, #268) and no pin, it also reads the account holds Factory keeps
+// With automatic account choice on (PENDULUM_AUTO_ACCOUNT, #268) and no pin, it also reads the account holds Pendulum keeps
 // on GitHub (lib/route-holds.mjs) and picks a free account of the harness; a pin still wins.
-//   node scripts/objective-account.mjs --repo OWNER/NAME (--issue N | --branch factory/N)
+//   node scripts/objective-account.mjs --repo OWNER/NAME (--issue N | --branch pendulum/N)
 import { pathToFileURL } from "node:url";
 import { NO_ACCOUNT, routeAccount, routeAccounts, routeAccountsText, routeAutoAccounts, routeTwoLine } from "./lib/accounts.mjs";
 import { mintInstallationToken } from "./lib/app-token.mjs";
@@ -23,10 +23,10 @@ import { labelsVouched, trustedRoutePin } from "./lib/objective-trust.mjs";
 import { pickRouteAccount, readHolds, routeStarts } from "./lib/route-holds.mjs";
 
 /**
- * The account for the stage of `issue` (or of the factory/<issue> `branch`), from the workflow's `accounts` text:
+ * The account for the stage of `issue` (or of the pendulum/<issue> `branch`), from the workflow's `accounts` text:
  * {account, why, auto} (`why` the line logged when no account can be picked; the account is then NO_ACCOUNT, or "" when
  * `rendered`, the declaration setup rendered the jobs for, names other accounts). `harness`: the repository's (the
- * `with:` input, else FACTORY_HARNESS). With automatic choice on (`env`'s FACTORY_AUTO_ACCOUNT, accounts.mjs
+ * `with:` input, else PENDULUM_HARNESS). With automatic choice on (`env`'s PENDULUM_AUTO_ACCOUNT, accounts.mjs
  * routeAutoAccounts) and no pin, the account is route-holds.mjs pickRouteAccount's, and `auto` says why: {held: [{name, until}]} (the accounts it passed over, ISO), `left` (the share of its quota the pick has left by its last reading, #391, when one stands), `until` when every
  * one is held (the stage then runs on the one whose hold ends first, as with one account: the provider's own answer
  * decides, and a reset within the job's time is waited for in place), `unread` when the holds could not be read (it
@@ -39,8 +39,8 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
   const declared = routeAccounts(accounts);
   if (!declared.ok) return none(declared.problem);
   // The jobs pass the secrets of the accounts they were rendered for: with others declared now, no account is passed.
-  if (routeAccountsText(accounts) !== routeAccountsText(rendered)) return { account: "", why: "FACTORY_ACCOUNTS declares other accounts than the workflow's jobs were rendered for, so they pass none of their secrets: re-render the workflow (setup --apply workflow)" };
-  const n = Number(issue) || Number(/^factory\/(\d+)$/.exec(String(branch || ""))?.[1]) || null;
+  if (routeAccountsText(accounts) !== routeAccountsText(rendered)) return { account: "", why: "PENDULUM_ACCOUNTS declares other accounts than the workflow's jobs were rendered for, so they pass none of their secrets: re-render the workflow (setup --apply workflow)" };
+  const n = Number(issue) || Number(/^pendulum\/(\d+)$/.exec(String(branch || ""))?.[1]) || null;
   if (!n) return none("no Objective issue names this stage");
   const labels = ((await (read.issue ?? getIssue)(repo, n, opts))?.labels || []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
   const c = choiceOf(labels);
@@ -49,13 +49,13 @@ export async function stageAccount({ repo, issue = null, branch = "", harness, a
   const h = c.choice.harness || harness;
   // The workflow's pinned maintainers vouch by id; anyone else by their permission, read for that one login.
   setMaintainers(repo.full, maintainers);
-  const vouch = read.vouch ?? ((label) => labelsVouched(repo, n, [label], opts, {}, "Factory does not run the Objective on that account"));
+  const vouch = read.vouch ?? ((label) => labelsVouched(repo, n, [label], opts, {}, "Pendulum does not run the Objective on that account"));
   // With no account label now, a pin whose removal no one who can push made still stands (trustedRoutePin).
   const kept = read.kept ?? (() => trustedRoutePin(repo, n, opts));
   const r = await routeAccount({ declared, harness: h, names: labels, vouch, kept });
   if (!r.account) return none(r.problem || routeTwoLine(r.two));
   // A pin (a label, or one a removal left standing) wins; with none, automatic choice when it is on for this harness.
-  const names = r.label ? null : routeAutoAccounts({ ...env, FACTORY_ACCOUNTS: accounts }, h);
+  const names = r.label ? null : routeAutoAccounts({ ...env, PENDULUM_ACCOUNTS: accounts }, h);
   if (!names) return { account: r.account.name, why: null };
   let store = null;
   let unread = null;
@@ -103,9 +103,9 @@ export async function accountStep({ args, env = process.env }) {
   // Read-only: the issue, its timeline and who can push (the App's own grants, narrowed; nothing new is asked for).
   const app = await mintInstallationToken({ appId: inputs.appId, privateKey: inputs.appPrivateKey, owner: repo.owner, repo: repo.name, narrowTo: { issues: "read", metadata: "read" } });
   mask(app.token);
-  // Factory's own login, whose records alone count (the account holds, lib/route-holds.mjs).
+  // Pendulum's own login, whose records alone count (the account holds, lib/route-holds.mjs).
   if (app.appSlug) setSelf(`${app.appSlug}[bot]`);
-  const r = await stageAccount({ repo, issue: args.issue, branch: args.branch, harness: inputs.harness, accounts: env.FACTORY_ACCOUNTS, rendered: env.FACTORY_RENDERED_ACCOUNTS, opts: { token: app.token }, maintainers: inputs.maintainers, env, models: { model: inputs.model, subagentModel: inputs.subagentModel, reviewerModel: inputs.reviewerModel } });
+  const r = await stageAccount({ repo, issue: args.issue, branch: args.branch, harness: inputs.harness, accounts: env.PENDULUM_ACCOUNTS, rendered: env.PENDULUM_RENDERED_ACCOUNTS, opts: { token: app.token }, maintainers: inputs.maintainers, env, models: { model: inputs.model, subagentModel: inputs.subagentModel, reviewerModel: inputs.reviewerModel } });
   if (r.why) log(`no account is picked for this stage, so no credential reaches it: ${r.why}; the stage Blocks with the reason`);
   else log(r.auto ? autoLine(r) : `this stage runs on account ${r.account}`);
   setOutput("account", r.account, env);

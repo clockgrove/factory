@@ -1,6 +1,6 @@
 // Shell commands (the `setup` and `install` settings, and the package.json scripts they run), read with the `unbash`
 // library (vendored: plugin/vendor/unbash, pinned in tools/deps), which parses GNU Bash's own grammar. The library
-// parses; what a command refers to in the repository is Factory's own reading of that tree, so every rule sits in one
+// parses; what a command refers to in the repository is Pendulum's own reading of that tree, so every rule sits in one
 // place (commandRefs).
 import { posix } from "node:path";
 import { forEachChild, parse } from "../../vendor/unbash/dist/parser.js";
@@ -106,7 +106,7 @@ const assignment = (w) => {
   const parts = [{ type: "Literal", value: segs[0].lit.slice(m[0].length) }, ...segs.slice(1).map((x) => ("lit" in x ? { type: "Literal", value: x.lit } : x.exp))].filter((p) => p.type !== "Literal" || p.value !== "");
   return { name: m[1], value: { type: "Word", text: w.text.slice(w.text.indexOf("=") + 1), value: "", parts } };
 };
-/** The path-looking words of `text`, as Factory read a command before it parsed one: a word with a directory, an extension or a leading `./`. */
+/** The path-looking words of `text`, as Pendulum read a command before it parsed one: a word with a directory, an extension or a leading `./`. */
 export function wordScan(text) {
   const out = [];
   for (const segment of String(text || "").split(/[;&|()<>`\n]+/)) {
@@ -135,7 +135,7 @@ const pathLooking = (v) => v.includes("/") || /\.[A-Za-z0-9]+$/.test(v);
  *   bare or not; any other argument, option value or `NAME=` value that is one fixed path-looking string (a directory,
  *   an extension, `./`); the same inside code the command runs (`bash -c`, `su -c`, `sudo -s`, `eval`, `trap`, `$(…)`, a
  *   here-document fed to a shell). Each in every directory a literal `cd` may leave it in (under `bash -e` a failing `cd`
- *   stops the command, but in an `&&`/`||` list). Every path-looking word of the text, as Factory read it before it
+ *   stops the command, but in an `&&`/`||` list). Every path-looking word of the text, as Pendulum read it before it
  *   parsed commands, counts too, and of a here-document, an assignment's value or inline code of another language. A
  *   variable is each value the command gives it anywhere (a loop's words included).
  * - `guarded`: what the command runs without naming it: a PATH entry in the repository (a directory) and the commands
@@ -284,7 +284,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
   };
   /**
    * Any other argument: a path when it is one, fixed (path-looking, or absolute into the checkout) or computed and
-   * resolved (`$PWD/scripts/x.ts`, `$D/setup.ts`, a glob's fixed directory); a bare word, or a computed word Factory
+   * resolved (`$PWD/scripts/x.ts`, `$D/setup.ts`, a glob's fixed directory); a bare word, or a computed word Pendulum
    * cannot resolve, is data there.
    */
   const argWord = (w, cwds, spec) => {
@@ -430,7 +430,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     if (k < args.length && literal(args[k]) && args[k].value === "--") k += 1;
     const arg = args[k];
     const lost = (what) => {
-      unknown(what, "a directory Factory cannot follow", mode.spec);
+      unknown(what, "a directory Pendulum cannot follow", mode.spec);
       return { ok: null, ko: cwds };
     };
     if (mode.spec) return { ok: cwds, ko: cwds };
@@ -475,7 +475,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     if (nv === "eval" || nv === "trap") {
       const args = nv === "trap" ? words.slice(1, 2) : words.slice(1);
       if (args.every(literal)) code(args.map((w) => w.value).join(" "), cwds, mode);
-      else if (!args.every((w) => literal(w) || externalOutput(w))) unknown(node.args.map((a) => a.text).join(" "), "shell code Factory cannot read", mode.spec);
+      else if (!args.every((w) => literal(w) || externalOutput(w))) unknown(node.args.map((a) => a.text).join(" "), "shell code Pendulum cannot read", mode.spec);
       for (const w of args) if (!literal(w)) feeding(w, cwds, mode);
       return same;
     }
@@ -511,12 +511,12 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           } else if (v === "-C" || v === "--chdir" || v.startsWith("--chdir=")) {
             const dir = v.startsWith("--chdir=") ? v.slice(8) : lv(i + 1);
             if (!v.startsWith("--chdir=")) role.set(at((i += 1)), "skip");
-            if (dir === null || dir.startsWith("/")) unknown(`env ${v}`, "a directory Factory cannot follow", mode.spec);
+            if (dir === null || dir.startsWith("/")) unknown(`env ${v}`, "a directory Pendulum cannot follow", mode.spec);
             else if (cwds) cwds = new Set([...cwds, ...(join(dir, true, cwds) ?? [])]);
           } else if (v === "-S" || v === "--split-string" || v.startsWith("--split-string=")) {
             const str = v.startsWith("--split-string=") ? v.slice(15) : lv(i + 1);
             if (!v.startsWith("--split-string=")) role.set(at((i += 1)), "code");
-            if (str === null) unknown(`env ${v}`, "a command Factory cannot read", mode.spec);
+            if (str === null) unknown(`env ${v}`, "a command Pendulum cannot read", mode.spec);
             else code(str, cwds, mode);
           } else if (!v.startsWith("-")) break;
         }
@@ -542,7 +542,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
             const rest = words.slice(k);
             for (const w of rest) role.set(w, "code");
             if (rest.every(literal)) code(rest.map((w) => w.value).join(" "), cwds, mode);
-            else unknown(rest.map((w) => w.text).join(" "), "shell code Factory cannot read", mode.spec);
+            else unknown(rest.map((w) => w.text).join(" "), "shell code Pendulum cannot read", mode.spec);
             break;
           }
           i = k;
@@ -595,12 +595,12 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           code(operand.value, cwds, mode);
         } else {
           role.set(operand, "code");
-          if (!externalOutput(operand)) unknown(operand.text, "shell code Factory cannot read", mode.spec);
+          if (!externalOutput(operand)) unknown(operand.text, "shell code Pendulum cannot read", mode.spec);
           feeding(operand, cwds, mode);
         }
       } else if (operand) {
         role.set(operand, "named");
-        execWord(operand, cwds, mode.spec, "a script Factory cannot name");
+        execWord(operand, cwds, mode.spec, "a script Pendulum cannot name");
         if (!literal(operand)) feeding(operand, cwds, mode);
       }
       // A shell with no script reads stdin: a here-document is its code; a pipe's is the left side's output, whose
@@ -610,7 +610,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         if (r.type === "HereDoc") code(r.body.text, cwds, mode);
         else if (r.type === "HereString" && r.target) {
           if (literal(r.target)) code(r.target.value, cwds, mode);
-          else if (!externalOutput(r.target)) unknown(r.target.text, "shell code Factory cannot read", mode.spec);
+          else if (!externalOutput(r.target)) unknown(r.target.text, "shell code Pendulum cannot read", mode.spec);
         }
       }
     } else if (cb !== null && SU.has(cb)) {
@@ -618,7 +618,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         if (lv(k) !== null && SHELL_CODE.test(lv(k)) && at(k + 1)) {
           role.set(at(k + 1), "code");
           if (literal(at(k + 1))) code(at(k + 1).value, cwds, mode);
-          else if (!externalOutput(at(k + 1))) unknown(at(k + 1).text, "shell code Factory cannot read", mode.spec);
+          else if (!externalOutput(at(k + 1))) unknown(at(k + 1).text, "shell code Pendulum cannot read", mode.spec);
         }
       }
     } else if (cb !== null && interpreterOf(cb)) {
@@ -633,7 +633,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         // `node --run X`: package.json's scripts.X, from the working directory's package.json or the nearest above.
         role.set(at(k + 1), "skip");
         if (at(k + 1) && literal(at(k + 1))) addScript(packages(cwds ?? []).map((d) => (d ? `${d}/package.json` : "package.json")), lv(k + 1));
-        else unknown(words.map((w) => w.text).join(" "), "a script Factory cannot name", mode.spec);
+        else unknown(words.map((w) => w.text).join(" "), "a script Pendulum cannot name", mode.spec);
         k = words.length;
       }
       let operand = null;
@@ -664,7 +664,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           inline = true;
           const m = v.replace(/^-[A-Za-z]*m/, "") || lv(k + 1);
           if (!v.replace(/^-[A-Za-z]*m/, "")) role.set(at(k + 1), "skip");
-          if (m === null) unknown(words.map((w) => w.text).join(" "), "a module Factory cannot name", mode.spec);
+          if (m === null) unknown(words.map((w) => w.text).join(" "), "a module Pendulum cannot name", mode.spec);
           else module(m, cwds, mode);
           if (m === "pip" || m === "pip3") pip(words, v.replace(/^-[A-Za-z]*m/, "") ? k + 1 : k + 2, cwds, mode, role);
           break;
@@ -682,7 +682,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (!inline && k < words.length && at(k)) operand = at(k);
       if (operand) {
         role.set(operand, "named");
-        execWord(operand, cwds, mode.spec, "a script Factory cannot name");
+        execWord(operand, cwds, mode.spec, "a script Pendulum cannot name");
         if (isNode && literal(operand)) nodeCandidates(operand.value);
       }
       if (inline === "stdin" || (!inline && !operand)) for (const r of redirects) if (r.type === "HereDoc") scan(r.body.text, cwds);
@@ -752,7 +752,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (lv(j) === "--") j += 1;
       if (at(j) && !inline) {
         role.set(at(j), "named");
-        execWord(at(j), cwds, mode.spec, "a script Factory cannot name");
+        execWord(at(j), cwds, mode.spec, "a script Pendulum cannot name");
         if (b.startsWith("node") && literal(at(j)) && !/\.[A-Za-z0-9]+$/.test(lv(j))) for (const ext of NODE_EXTENSIONS) add("guarded", `${lv(j)}${ext}`, true, cwds, mode.spec);
       } else if (at(j) && SHELLS.has(b) && literal(at(j))) {
         role.set(at(j), "code");
@@ -786,7 +786,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         const segs = segments(w);
         const lead = "lit" in (segs[0] ?? {}) ? segs[0].lit : "";
         if (lead.startsWith("-") || NAME_VALUE.test(lead)) {
-          // An option's or NAME='s computed value: a path when Factory resolves it, else data; its fixed text is scanned.
+          // An option's or NAME='s computed value: a path when Pendulum resolves it, else data; its fixed text is scanned.
           const at = lead.indexOf("=");
           if (at >= 0) {
             const value = { type: "Word", text: w.text.slice(w.text.indexOf("=") + 1), parts: [{ type: "Literal", value: lead.slice(at + 1) }, ...segs.slice(1).map((x) => ("lit" in x ? { type: "Literal", value: x.lit } : x.exp))].filter((x) => x.type !== "Literal" || x.value !== "") };
@@ -796,7 +796,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
           continue;
         }
         // Where its output feeds a shell, an argument is what that shell runs; elsewhere a computed word is a path
-        // when Factory resolves it, and data when it cannot.
+        // when Pendulum resolves it, and data when it cannot.
         // Where the command's output is run, every non-option word may be what runs: which options take a value is
         // not guessed, so `-type f`'s `f` is guarded too (harmless), and `ls -1 hooks | bash` keeps `hooks`.
         if (mode.feeds) execWord(w, cwds, mode.spec, "what a shell then runs, not a fixed path");
@@ -895,7 +895,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         // A computed option or option value is data; a computed operand is decided once the subcommand is known.
         const prev = k > 0 && literal(words[k - 1]) ? words[k - 1].value : "";
         const lead = segments(w)[0]?.lit ?? "";
-        // A workspace option Factory cannot read may pick any package.
+        // A workspace option Pendulum cannot read may pick any package.
         if (PM_WORKSPACE.test(lead) || (PM_WORKSPACE.test(prev) && !prev.includes("="))) anyPackage = true;
         if (!lead.startsWith("-") && !(prev.startsWith("-") && !prev.includes("="))) {
           operands.push(w);
@@ -916,7 +916,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
             if (words[k + 1]) role.set(words[k + 1], "skip");
             k += 1;
           }
-          if (value === null) unknown(v, "a package directory Factory cannot follow", mode.spec);
+          if (value === null) unknown(v, "a package directory Pendulum cannot follow", mode.spec);
           else dirs = join(value, true, dirs) ?? [];
         } else if (PM_WORKSPACE.test(v)) anyPackage = true;
         if (PM_VALUED.has(opt) && !v.includes("=")) {
@@ -926,7 +926,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
         continue;
       }
       if ((pm === "yarn" && (v === "workspace" || v === "workspaces")) || (pm === "pnpm" && v === "-r")) anyPackage = true;
-      if (RUN_ALL.has(pm) && /[*?{]/.test(v)) unknown(v, "scripts Factory cannot name", mode.spec);
+      if (RUN_ALL.has(pm) && /[*?{]/.test(v)) unknown(v, "scripts Pendulum cannot name", mode.spec);
       if (first) sub = v;
       if (!RUN_WORDS.has(v) || !first) names.push(v);
       operands.push(w);
@@ -942,7 +942,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
       if (r.spec || r.outside) return;
       const lead = operands[0] && literal(operands[0]) ? operands[0].value : null;
       const scriptPlace = RUN_ALL.has(pm) || pm === "turbo" ? true : i === 0 ? runsByName || pm === "npm" : (i === 1 && lead !== null && (RUN_WORDS.has(lead) || lead === "exec" || lead === "x")) || (i === 2 && pm === "yarn" && lead === "workspace");
-      if (scriptPlace && !global) unknown(w.text, "a script Factory cannot name", mode.spec);
+      if (scriptPlace && !global) unknown(w.text, "a script Pendulum cannot name", mode.spec);
     };
     operands.forEach((w, i) => nameAt(w, i));
     // A global install, or an npm subcommand that runs no package script (config, login, view, …), fences nothing.
@@ -1123,7 +1123,7 @@ export function commandRefs(command, { cwd = "", errexit = true, env = null, roo
     const { node, mode } = deferred.shift();
     run(node, reached, mode);
   }
-  // Every path-looking word of the text, as Factory read a command before it parsed one: never fewer files than that.
+  // Every path-looking word of the text, as Pendulum read a command before it parsed one: never fewer files than that.
   for (const p of wordScan(text)) add("paths", p, true, start, true);
   const scripts = [...out.scripts].map((s) => s.split("\0")).map(([pkg, name, kind]) => (kind ? { pkg, name, lifecycle: kind.slice(10) } : { pkg, name }));
   return { paths: [...out.paths], guarded: [...out.guarded], scripts, unresolved: [...out.unresolved] };

@@ -59,7 +59,7 @@ function store({ beforeSwap = async () => {} } = {}) {
     return { updateRefs: { clientMutationId: null } };
   };
   /** A lock as another process made it, `ageMs` old, or a foreign object. */
-  const plant = (ref, { ageMs = 0, author = { name: "Factory", email: "factory@users.noreply.github.com" }, message = ref, type = "commit" } = {}) => {
+  const plant = (ref, { ageMs = 0, author = { name: "Pendulum", email: "pendulum@users.noreply.github.com" }, message = ref, type = "commit" } = {}) => {
     const sha = (++next).toString(16).padStart(40, "p");
     objects.set(sha, { type, sha, message, author: { ...author, date: new Date(T0 - ageMs).toISOString() } });
     refs.set(ref, sha);
@@ -169,11 +169,11 @@ test("launcher: a second launcher of one stage start, hand-over or end loses the
     };
   };
   const end = stageLock(9, { kind: "stage", want: "ended", claim: "a1b2c3d4e5f6" }, { stage: "work" });
-  assert.equal(end, "refs/factory-launch/9/work-ended-a1b2c3d4e5f6");
+  assert.equal(end, "refs/pendulum-launch/9/work-ended-a1b2c3d4e5f6");
   const first = withLock(run, end, act("first"));
   await new Promise((r) => setImmediate(r));
   const second = await withLock(run, end, act("second"));
-  assert.match(second.reason, /another launcher holds factory-launch\/9\/work-ended-a1b2c3d4e5f6/);
+  assert.match(second.reason, /another launcher holds pendulum-launch\/9\/work-ended-a1b2c3d4e5f6/);
   finish();
   assert.deepEqual(await first, { exit: "done" });
   assert.deepEqual(acted, ["first"], "only the holder acted");
@@ -183,7 +183,7 @@ test("launcher: a second launcher of one stage start, hand-over or end loses the
   assert.equal((await withLock(run, ask, act("token", true))).exit, "done");
   assert.match((await withLock(run, ask, act("token again"))).reason, /another launcher holds/);
   assert.notEqual(stageLock(9, { kind: "stage", want: "token", claim: "a1b2c3d4e5f6", ask: 1794177600 }, { stage: "work" }), ask, "the stage's next request is its own cue");
-  assert.equal(stageLock(9, { kind: "stage", want: "ended", claim: "../x" }, { stage: "work" }), null, "a claim not of Factory's form locks nothing");
+  assert.equal(stageLock(9, { kind: "stage", want: "ended", claim: "../x" }, { stage: "work" }), null, "a claim not of Pendulum's form locks nothing");
   // The work's end starting the review and the PR's labeled event (two Action runs) meet at one cue.
   const review = { pr: 40, labelled: true, since: "2026-11-08T22:00:05Z" };
   const fromEnd = launchCue({ kind: "stage", issue: 9 }, "review", { review });

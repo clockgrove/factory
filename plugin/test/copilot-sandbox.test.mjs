@@ -12,8 +12,8 @@ import { COPILOT_DECOY_LAUNCH, COPILOT_RUNNER_HOME, COPILOT_RUNNER_SESSION_ROOT,
 import { GitRefusal, LOCAL_DOMAINS, copilotLocalSettings, copilotPrivateTmp, gitRefusalReason } from "../scripts/lib/local.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
-const AGENT = { user: "factory-agent", uid: 1002, home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
-const CLONE = "/home/factory-agent/repo";
+const AGENT = { user: "pendulum-agent", uid: 1002, home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
+const CLONE = "/home/pendulum-agent/repo";
 
 /** A throwaway agent home, temp directory and checkout, for the start-up path as this process's user. */
 function fakeRunner() {
@@ -25,8 +25,8 @@ function fakeRunner() {
   return { root, agent, runner: { clone, ...copilotRunnerLayout(agent, join(root, "copilot-home")), domains: LOCAL_DOMAINS } };
 }
 
-test("Copilot on a runner: its own sandbox under Factory's policy, never --allow-all", () => {
-  const runner = copilotRunner({ harness: "copilot", agent: AGENT, clone: CLONE, env: { FACTORY_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
+test("Copilot on a runner: its own sandbox under Pendulum's policy, never --allow-all", () => {
+  const runner = copilotRunner({ harness: "copilot", agent: AGENT, clone: CLONE, env: { PENDULUM_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
   assert.deepEqual(runner.domains, [...LOCAL_DOMAINS, "pypi.org"]);
   assert.equal(runner.home, COPILOT_RUNNER_HOME);
   const { args, env } = harnessCommand({ harness: "copilot", model: "m", prompt: "p", runner });
@@ -34,17 +34,17 @@ test("Copilot on a runner: its own sandbox under Factory's policy, never --allow
   assert.deepEqual(args.slice(0, 8), ["--sandbox", "--allow-all-tools", "--allow-all-urls", "--no-auto-update", "--log-level", "none", "--add-dir", AGENT.tmp], "file tools in the checkout and the agent's temp directory only; no update of itself; no logs in its commands' reach");
   assert.ok(!args.includes("--trust-folder"));
   assert.equal(args.find((a) => a.startsWith("--secret-env-vars=")), `--secret-env-vars=${SHELL_SECRET_KEYS.join(",")}`);
-  assert.equal(env.COPILOT_HOME, `${AGENT.home}/.factory-copilot/home`);
-  assert.equal(env.COPILOT_CACHE_HOME, `${COPILOT_RUNNER_HOME}/cache`, "the release it runs is Factory's, never one the agent could replace");
+  assert.equal(env.COPILOT_HOME, `${AGENT.home}/.pendulum-copilot/home`);
+  assert.equal(env.COPILOT_CACHE_HOME, `${COPILOT_RUNNER_HOME}/cache`, "the release it runs is Pendulum's, never one the agent could replace");
   assert.equal(env.GIT_CONFIG_KEY_0, "core.fsmonitor", "Copilot's own git runs no fsmonitor from the checkout");
   assert.equal(runner.sessions, `${AGENT.home}/${COPILOT_RUNNER_SESSION_ROOT}`);
-  const [cmd, launch] = copilotLaunch(runner, "copilot", ["-p"], "/opt/tool/bin:/home/factory-agent/.local/bin:node_modules/.bin::/usr/bin");
+  const [cmd, launch] = copilotLaunch(runner, "copilot", ["-p"], "/opt/tool/bin:/home/pendulum-agent/.local/bin:node_modules/.bin::/usr/bin");
   assert.equal(cmd, "/bin/sh");
-  assert.deepEqual(launch, ["-c", COPILOT_TMP_LAUNCH, "factory-copilot", COPILOT_TMP, `HOME=${COPILOT_RUNNER_HOME}`, `PATH=${COPILOT_RUNNER_HOME}/bin:/opt/tool/bin:/usr/bin`, "copilot", "-p"], "Factory's HOME and bwrap first, a TMPDIR of its own, nothing of the agent's home and no relative entry on its PATH");
+  assert.deepEqual(launch, ["-c", COPILOT_TMP_LAUNCH, "pendulum-copilot", COPILOT_TMP, `HOME=${COPILOT_RUNNER_HOME}`, `PATH=${COPILOT_RUNNER_HOME}/bin:/opt/tool/bin:/usr/bin`, "copilot", "-p"], "Pendulum's HOME and bwrap first, a TMPDIR of its own, nothing of the agent's home and no relative entry on its PATH");
   assert.ok(!COPILOT_TMP_LAUNCH.includes("${"));
   assert.equal(copilotRunner({ harness: "codex", agent: AGENT, clone: CLONE }), null);
-  assert.equal(copilotRunner({ harness: "copilot", agent: null, clone: CLONE }), null, "no agent uid (a developer's /factory:factory-run): no runner sandbox");
-  assert.equal(copilotRunner({ harness: "copilot", agent: AGENT, clone: CLONE, env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
+  assert.equal(copilotRunner({ harness: "copilot", agent: null, clone: CLONE }), null, "no agent uid (a developer's /pendulum:pendulum-run): no runner sandbox");
+  assert.equal(copilotRunner({ harness: "copilot", agent: AGENT, clone: CLONE, env: { PENDULUM_LOCAL: "1" } }), null, "local mode has its own");
   assert.ok(harnessCommand({ harness: "copilot", prompt: "p" }).args.includes("--allow-all"), "a developer's own session is unchanged");
 });
 
@@ -60,7 +60,7 @@ test("Copilot's runner policy: writes in the checkout, temp directory and caches
   assert.ok(!fs.readwritePaths.includes(runner.agentHome), "never the agent's home");
   for (const p of ["config", "hooks", "commondir", "info", "info/attributes"]) assert.ok(fs.readonlyPaths.includes(join(runner.clone, ".git", p)), `.git/${p}: read-only`);
   for (const p of [".github/hooks", ".github/copilot", ".mcp.json"]) assert.ok(fs.readonlyPaths.includes(join(runner.clone, p)), `${p}: read-only`);
-  for (const p of [".gitconfig", ".config/gh", ".factory"]) assert.ok(fs.readonlyPaths.includes(join(runner.agentHome, p)), `the agent's ${p}: read for its commands`);
+  for (const p of [".gitconfig", ".config/gh", ".pendulum"]) assert.ok(fs.readonlyPaths.includes(join(runner.agentHome, p)), `the agent's ${p}: read for its commands`);
   assert.deepEqual(fs.deniedPaths, [COPILOT_TMP], "Copilot's own TMPDIR (each command's network rules); the agent's login is for its commands");
   assert.deepEqual(settings.userPolicy.network, { allowOutbound: true, allowLocalNetwork: false, allowedHosts: LOCAL_DOMAINS });
   const local = copilotLocalSettings({ clone: "/c", addDirs: ["/c"], home: "/h", platform: "darwin" }).sandbox.userPolicy.filesystem;
@@ -88,23 +88,23 @@ test("Copilot's state is made afresh before every start: a planted setting is go
   assert.equal(readFileSync(join(runner.copilotHome, "mcp-config.json"), "utf8"), '{"mcpServers":{}}\n', "no MCP server");
   assert.ok(!existsSync(join(runner.copilotHome, "hooks")), "nothing planted survives");
   assert.match(readFileSync(join(runner.copilotHome, "config.json"), "utf8"), /firstLaunchAt/);
-  assert.equal(readFileSync(join(runner.sessions, "abc", "events.jsonl"), "utf8"), "{}\n", "Factory's held session is put back");
+  assert.equal(readFileSync(join(runner.sessions, "abc", "events.jsonl"), "utf8"), "{}\n", "Pendulum's held session is put back");
   assert.ok(!existsSync(join(runner.agentTmp, ".github", "hooks")), "an added directory's harness configuration is cleared");
   assert.equal(readFileSync(join(runner.agentTmp, "keep.txt"), "utf8"), "mine", "and nothing else of it");
 });
 
-test("Factory's bwrap: the real one starts with no environment; each command's HOME and TMPDIR become the agent's", () => {
+test("Pendulum's bwrap: the real one starts with no environment; each command's HOME and TMPDIR become the agent's", () => {
   const root = mkdtempSync(join(tmpdir(), "shim-"));
   const real = join(root, "real-bwrap");
   writeFileSync(real, '#!/bin/sh\necho "env=$(env | grep -c .)"\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
   const shim = join(root, "bwrap");
-  writeFileSync(shim, bwrapShim(real, "/home/factory-agent", "/home/factory-agent/tmp"), { mode: 0o755 });
-  const out = execFileSync(shim, ["--clearenv", "--setenv", "HOME", "/var/lib/factory-copilot", "--setenv", "TMPDIR", "/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } });
+  writeFileSync(shim, bwrapShim(real, "/home/pendulum-agent", "/home/pendulum-agent/tmp"), { mode: 0o755 });
+  const out = execFileSync(shim, ["--clearenv", "--setenv", "HOME", "/var/lib/pendulum-copilot", "--setenv", "TMPDIR", "/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin", COPILOT_GITHUB_TOKEN: "github_pat_secret" } });
   const lines = out.trim().split("\n");
   // `env` itself shows PWD at most: nothing the shim was started with.
   assert.ok(Number(lines[0].slice(4)) <= 1, `no environment: ${lines[0]}`);
   assert.ok(!out.includes("github_pat_secret"));
-  assert.deepEqual(lines.slice(1).map((l) => l.slice(4)), ["--clearenv", "--setenv", "HOME", "/home/factory-agent", "--setenv", "TMPDIR", "/home/factory-agent/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], "only bubblewrap's own options change");
+  assert.deepEqual(lines.slice(1).map((l) => l.slice(4)), ["--clearenv", "--setenv", "HOME", "/home/pendulum-agent", "--setenv", "TMPDIR", "/home/pendulum-agent/tmp", "--setenv", "X", "HOME", "--", "sh", "-c", "--setenv", "HOME", "kept"], "only bubblewrap's own options change");
   assert.ok(!bwrapShim("/usr/bin/bwrap", "/h", "/t").includes("${"));
 });
 
@@ -113,7 +113,7 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   const bin = join(root, "bin");
   mkdirSync(bin);
   // A stand-in copilot: reports whether the decoy it was given holds the marker.
-  writeFileSync(join(bin, "copilot"), `#!/bin/sh\necho "args=$*"\ntr '\\0' '\\n' < /proc/$FACTORY_PROBE_DECOY/environ | grep -c '^${PROBE_MARKER}=m9$'\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "copilot"), `#!/bin/sh\necho "args=$*"\ntr '\\0' '\\n' < /proc/$PENDULUM_PROBE_DECOY/environ | grep -c '^${PROBE_MARKER}=m9$'\n`, { mode: 0o755 });
   const got = execFileSync("/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", "--sandbox"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH}`, [PROBE_MARKER]: "m9" } }).split("\n");
   assert.deepEqual(got.slice(0, 2), ["args=--sandbox", "1"]);
   for (const s of [COPILOT_DECOY_LAUNCH, probeDriver({ gitConfig: "/c/.git/config", host: "example.com", marker: "m" })]) assert.ok(!s.includes("${"), "nothing systemd-run would expand");
@@ -122,20 +122,20 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
   const home = join(root, "h");
   mkdirSync(tmp);
   mkdirSync(home);
-  // Copilot's TMPDIR and the system temp directory: paths of the test's own. The host's /tmp/factory-copilot is no
+  // Copilot's TMPDIR and the system temp directory: paths of the test's own. The host's /tmp/pendulum-copilot is no
   // business of the test's, and its /tmp holds the network rules of any Copilot running on this machine (#411).
   const systemTmp = join(root, "system-tmp");
   mkdirSync(systemTmp);
   const driver = probeDriver({ gitConfig: "", host: "", marker: "m5", persist: [home], copilotTmp: join(root, "no-copilot-tmp"), systemTmp });
   const drive = (extra) => {
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m5", ...extra } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m5", ...extra } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   assert.equal(drive({}), "4\nthe credential stand-in is readable in a process environment\n");
-  assert.ok(existsSync(join(home, PROBE_PERSIST)), "unconfined, the home write lands: Factory checks for it from outside");
-  assert.equal(drive({ FACTORY_PROBE_SCRIPT: "" }), "4\nthe probe script is missing\n", "an empty script would exit 0 and pass");
-  assert.equal(drive({ FACTORY_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n", "and an empty decoy would skip its rule");
-  assert.equal(drive({ FACTORY_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
+  assert.ok(existsSync(join(home, PROBE_PERSIST)), "unconfined, the home write lands: Pendulum checks for it from outside");
+  assert.equal(drive({ PENDULUM_PROBE_SCRIPT: "" }), "4\nthe probe script is missing\n", "an empty script would exit 0 and pass");
+  assert.equal(drive({ PENDULUM_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n", "and an empty decoy would skip its rule");
+  assert.equal(drive({ PENDULUM_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
   mkdirSync(join(systemTmp, "mxc-bwrap-proxy-1"));
   assert.equal(drive({}), "4\nCopilot's network rules are visible to commands\n", "rules in the system temp directory, where Copilot would keep them had it ignored its TMPDIR");
   assert.ok(probeDriver({ gitConfig: "", host: "", marker: "m" }).includes(`'/tmp'/mxc-bwrap-proxy-*`), "which is /tmp");
@@ -148,7 +148,7 @@ test("Copilot's probe: the decoy launch holds the marker, the driver writes its 
     const ask = async (input) => (await (await fetch(`${model.env.COPILOT_PROVIDER_BASE_URL}/responses`, { method: "POST", body: JSON.stringify({ input }) })).text()).split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
     const first = (await ask([{ type: "message", role: "user", content: "x" }])).find((e) => e.type === "response.completed").response.output[0];
     assert.equal(first.type, "function_call");
-    assert.deepEqual(JSON.parse(first.arguments).command, 'sh -c "$FACTORY_COPILOT_PROBE"', "no path in the command line: Copilot's path checks would refuse one");
+    assert.deepEqual(JSON.parse(first.arguments).command, 'sh -c "$PENDULUM_COPILOT_PROBE"', "no path in the command line: Copilot's path checks would refuse one");
     const second = (await ask([{ type: "function_call_output", call_id: "call_probe", output: "ok" }])).find((e) => e.type === "response.completed").response.output[0];
     assert.equal(second.type, "message");
     assert.equal(model.env.COPILOT_OFFLINE, "true");
@@ -174,8 +174,8 @@ test("Copilot's sandbox probe runs before every start: its result decides; no re
   assert.ok(call.args.includes(`--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`), "the marker is kept from commands as the token is");
   assert.match(call.env[PROBE_MARKER], /^[0-9a-f]{32}$/);
   assert.equal(call.env.COPILOT_HOME, runner.probeHome, "a COPILOT_HOME of its own");
-  assert.equal(call.env.FACTORY_PROBE_SCRIPT, CONFINEMENT_PROBE);
-  assert.ok(call.env.FACTORY_COPILOT_PROBE.includes(call.env[PROBE_MARKER]));
+  assert.equal(call.env.PENDULUM_PROBE_SCRIPT, CONFINEMENT_PROBE);
+  assert.ok(call.env.PENDULUM_COPILOT_PROBE.includes(call.env[PROBE_MARKER]));
   assert.ok(existsSync(join(runner.probeHome, "settings.json")), "with the run's settings");
   assert.ok(!existsSync(join(runner.agentTmp, PROBE_RESULT)), "the result is consumed");
   calls.length = 0;
@@ -185,13 +185,13 @@ test("Copilot's sandbox probe runs before every start: its result decides; no re
   assert.ok(!existsSync(join(runner.agentHome, PROBE_PERSIST)), "and it is removed");
   await assert.rejects(copilotSandboxCheck(runner, {}, { run: leaving("0\n\n"), model }), (e) => e.rule === "the probe ended without its pass line", "exit 0 alone is no pass");
   mkdirSync(runner.home, { recursive: true });
-  const factoryHome = async (cmd, args, opts) => {
+  const pendulumHome = async (cmd, args, opts) => {
     await leaving(`0\n${PROBE_PASS}\n`)(cmd, args, opts);
     writeFileSync(join(runner.home, PROBE_PERSIST), "");
     return { code: 0, stdout: "", stderr: "" };
   };
-  await assert.rejects(copilotSandboxCheck(runner, {}, { run: factoryHome, model }), (e) => e.rule === "Factory's HOME for Copilot is writable");
-  assert.ok(!existsSync(join(runner.home, PROBE_PERSIST)), "removed by Factory, which owns it");
+  await assert.rejects(copilotSandboxCheck(runner, {}, { run: pendulumHome, model }), (e) => e.rule === "Pendulum's HOME for Copilot is writable");
+  assert.ok(!existsSync(join(runner.home, PROBE_PERSIST)), "removed by Pendulum, which owns it");
   await assert.rejects(copilotSandboxCheck(runner, {}, { run: leaving("4\n<b>planted</b>\n"), model }), (e) => e.rule === "an unknown rule");
   calls.length = 0;
   await assert.rejects(copilotSandboxCheck(runner, {}, { run: leaving(null), model }), (e) => e.code === "sandbox" && !e.rule && /Copilot's sandbox could not start/.test(e.message));
@@ -200,7 +200,7 @@ test("Copilot's sandbox probe runs before every start: its result decides; no re
   assert.match(gitRefusalReason("sandbox", 1, { rule: "the agent home is writable", harness: "copilot" }), /^Copilot's sandbox started but does not confine here/);
 });
 
-test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; the probe runs in the outer sandbox with Copilot's own TMPDIR, without the token, and Blocks a leak", async () => {
+test("local Copilot (#100): Pendulum's bwrap hands commands the stage's TMPDIR; the probe runs in the outer sandbox with Copilot's own TMPDIR, without the token, and Blocks a leak", async () => {
   const root = mkdtempSync(join(tmpdir(), "cpl-"));
   const real = join(root, "real-bwrap");
   writeFileSync(real, '#!/bin/sh\necho "env=$(env | grep -c .)"\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
@@ -217,7 +217,7 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   mkdirSync(ctmp);
   writeFileSync(join(ctmp, "planted"), "");
   const local = { clone, addDirs: [tmp], cacheDirs: [], domains: LOCAL_DOMAINS, bwrapBin: root, copilotTmp: ctmp };
-  const env = { PATH: `${root}:/usr/bin`, TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COPILOT_HOME: chome, COPILOT_GITHUB_TOKEN: "github_pat_secret", MY_SECRET: "s" };
+  const env = { PATH: `${root}:/usr/bin`, TMPDIR: tmp, PENDULUM_USAGE_DIR: usage, COPILOT_HOME: chome, COPILOT_GITHUB_TOKEN: "github_pat_secret", MY_SECRET: "s" };
   const calls = [];
   const leaving = (result) => async (cmd, args, opts) => {
     calls.push({ cmd, args, env: opts.env, settings: readFileSync(join(opts.env.COPILOT_HOME, "settings.json"), "utf8") });
@@ -229,22 +229,22 @@ test("local Copilot (#100): Factory's bwrap hands commands the stage's TMPDIR; t
   assert.equal(call.cmd, "srt");
   assert.deepEqual(call.args.slice(0, 7), ["-s", "/o.json", "--", "env", `TMPDIR=${ctmp}`, process.execPath, COPILOT_PROBE_SCRIPT], "Copilot's own TMPDIR");
   assert.ok(!existsSync(join(ctmp, "planted")), "made afresh before the start");
-  assert.ok(call.env.FACTORY_COPILOT_PROBE.includes(`'${ctmp}'/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-*`), "its rules checked where Copilot and the commands keep temp files");
+  assert.ok(call.env.PENDULUM_COPILOT_PROBE.includes(`'${ctmp}'/mxc-bwrap-proxy-* "$TMPDIR"/mxc-bwrap-proxy-*`), "its rules checked where Copilot and the commands keep temp files");
   assert.ok(call.args.includes(COPILOT_DECOY_LAUNCH) && call.args.includes("--sandbox") && call.args.includes(`--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`));
   assert.ok(!("COPILOT_GITHUB_TOKEN" in call.env) && !("MY_SECRET" in call.env), "never the run's credentials: the marker stands in");
   assert.match(call.env[PROBE_MARKER], /^[0-9a-f]{32}$/);
-  assert.equal(call.env.PATH, env.PATH, "Factory's bwrap first, as the run has it");
+  assert.equal(call.env.PATH, env.PATH, "Pendulum's bwrap first, as the run has it");
   assert.equal(call.env.COPILOT_HOME, join(usage, "harness", "copilot-probe"));
   assert.equal(call.settings, '{"sandbox":{"enabled":true}}\n', "with the stage's policy");
   assert.ok(!existsSync(call.env.COPILOT_HOME), "removed afterwards");
   await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("4\nthe credential stand-in is readable in a process environment\n"), home }), (e) => e instanceof GitRefusal && e.rule === "the credential stand-in is readable in a process environment" && e.local);
   await assert.rejects(copilotLocalCheck(local, "/o.json", env, { run: leaving("0\n\n"), home }), (e) => e.rule === "the probe ended without its pass line" && e.local, "exit 0 alone is no pass");
-  // The driver as local mode gives it (every path under this test's own directory, never the host's /tmp/factory-copilot):
-  // without Factory's bwrap the commands' $TMPDIR is Copilot's own, denied, so the result goes to the stage's by its path
+  // The driver as local mode gives it (every path under this test's own directory, never the host's /tmp/pendulum-copilot):
+  // without Pendulum's bwrap the commands' $TMPDIR is Copilot's own, denied, so the result goes to the stage's by its path
   // and names the broken rule (here, unconfined: Copilot's TMPDIR absent, the marker in this shell's parent).
-  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp"), systemTmp: join(root, "system-tmp") }, "m6", "").FACTORY_COPILOT_PROBE;
-  assert.ok(!driver.includes("/tmp/factory-copilot"));
-  execFileSync("/bin/sh", ["-c", driver], { stdio: "ignore", env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(root, "denied"), FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "1", [PROBE_MARKER]: "m6" } });
+  const driver = probeEnv({ clone, probeHome: join(usage, "p"), cacheHome: join(root, "cache"), agentHome: home, home, agentTmp: tmp, copilotTmp: join(root, "denied-copilot-tmp"), systemTmp: join(root, "system-tmp") }, "m6", "").PENDULUM_COPILOT_PROBE;
+  assert.ok(!driver.includes("/tmp/pendulum-copilot"));
+  execFileSync("/bin/sh", ["-c", driver], { stdio: "ignore", env: { PATH: process.env.PATH, HOME: home, TMPDIR: join(root, "denied"), PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "1", [PROBE_MARKER]: "m6" } });
   assert.equal(readFileSync(join(tmp, PROBE_RESULT), "utf8"), "4\nthe credential stand-in is readable in a process environment\n");
   const denied = copilotLocalSettings({ clone, addDirs: [tmp], alsoDenied: [ctmp], platform: "linux" }).sandbox;
   assert.ok(JSON.stringify(denied).includes(JSON.stringify(ctmp)), "Copilot's own TMPDIR is denied to commands");
@@ -257,15 +257,15 @@ test("doctor: Copilot in a job needs bwrap, slirp4netns and socat, AppArmor for 
   const hosted = { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" };
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async () => true, start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: socat:PASS", "copilot sandbox: start:PASS"]);
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: false, has: async (b) => b !== "slirp4netns", start: async () => ({ ok: true }) })), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:FAIL", "copilot sandbox: socat:PASS"], "no start without its tools");
-  const self = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-bwrap (unconfined)\n", start: async () => ({ ok: false, reason: "Copilot's sandbox does not confine: the decoy outside the sandbox is readable" }) });
+  const self = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "pendulum-bwrap (unconfined)\n", start: async () => ({ ok: false, reason: "Copilot's sandbox does not confine: the decoy outside the sandbox is readable" }) });
   assert.deepEqual(names(self), ["copilot sandbox: bwrap:PASS", "copilot sandbox: slirp4netns:PASS", "copilot sandbox: socat:PASS", "copilot sandbox: apparmor:FAIL", "copilot sandbox: start:FAIL"], "the bwrap profile is not the one: Copilot's namespaces come from unshare");
-  assert.match(self[3].fix, /factory-unshare/);
+  assert.match(self[3].fix, /pendulum-unshare/);
   assert.match(self[4].detail, /decoy/);
-  const both = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-bwrap (unconfined)\nfactory-unshare (unconfined)\n", start: async () => ({ ok: true }) });
+  const both = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "pendulum-bwrap (unconfined)\npendulum-unshare (unconfined)\n", start: async () => ({ ok: true }) });
   assert.equal(both[3].status, "PASS");
-  const unshareOnly = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-unshare (unconfined)\n", start: async () => ({ ok: true }) });
+  const unshareOnly = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "pendulum-unshare (unconfined)\n", start: async () => ({ ok: true }) });
   assert.equal(unshareOnly[3].status, "PASS", "Copilot's bwrap joins unshare's namespaces: the unshare grant is the one it needs");
-  const restricted = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "factory-unshare (unconfined)\nunpriv_unshare (enforce)\n", start: async () => ({ ok: true }) });
+  const restricted = await claudeSandboxChecks({ inputs: copilot, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }, local: false, has: async () => true, read: () => "1\n", profiles: async () => "pendulum-unshare (unconfined)\nunpriv_unshare (enforce)\n", start: async () => ({ ok: true }) });
   assert.equal(restricted[3].status, "FAIL", "Ubuntu's unshare-userns-restrict loaded (25.04 and later)");
   assert.match(restricted[3].fix, /unshare-userns-restrict/);
   assert.deepEqual(await claudeSandboxChecks({ inputs: copilot, env: hosted, local: true, has: async () => false }), [], "local mode checks its own sandboxes");
@@ -286,7 +286,7 @@ test("the probe's last line: a pass line after every rule held; the first proces
   assert.equal(CONFINEMENT_PROBE.split("\n").at(-2), `echo "${PROBE_PASS}"`);
   // Codex's probe gets the marker as an argument, and its sandbox's first process holds the whole command line.
   assert.doesNotMatch(CONFINEMENT_PROBE, /cmdline/);
-  assert.match(probeDriver({ gitConfig: "", host: "", marker: "m7" }), /\/proc\/1\/cmdline[^\n]*grep -qxF -e 'm7' -e 'FACTORY_PROBE_MARKER=m7'/);
+  assert.match(probeDriver({ gitConfig: "", host: "", marker: "m7" }), /\/proc\/1\/cmdline[^\n]*grep -qxF -e 'm7' -e 'PENDULUM_PROBE_MARKER=m7'/);
 });
 
 test("Copilot's allowedHosts take host names only: a host:port or IP entry, which switches its network policy off, never reaches it; doctor warns locally (#106)", async () => {
@@ -297,22 +297,22 @@ test("Copilot's allowedHosts take host names only: a host:port or IP entry, whic
   assert.deepEqual(hosts, [...LOCAL_DOMAINS, "ai-gateway.vercel.sh", "*.example.com"]);
   assert.deepEqual(copilotHosts(given), hosts);
   assert.deepEqual(copilotDroppedHosts(given), ["127.0.0.1:44685", "localhost:8080", "api.example.com:443", "127.0.0.1", "http://x.dev", "localhost"]);
-  const warn = localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh, 127.0.0.1:44685" }, local: true });
+  const warn = localDomainChecks({ inputs: { harness: "copilot" }, env: { PENDULUM_LOCAL_DOMAINS: "ai-gateway.vercel.sh, 127.0.0.1:44685" }, local: true });
   assert.deepEqual(warn.map((c) => c.status), ["WARN"]);
   assert.match(warn[0].detail, /"127\.0\.0\.1:44685"/);
   assert.ok(!warn[0].detail.includes("ai-gateway.vercel.sh"), "a host name is not named");
-  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "ai-gateway.vercel.sh" }, local: true }), []);
-  assert.deepEqual(localDomainChecks({ inputs: { harness: "claude" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: true }), [], "only Codex and Copilot drop them");
-  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { FACTORY_LOCAL_DOMAINS: "127.0.0.1:1" }, local: false }), [], "the runner routes have allowed_domains' own check");
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { PENDULUM_LOCAL_DOMAINS: "ai-gateway.vercel.sh" }, local: true }), []);
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "claude" }, env: { PENDULUM_LOCAL_DOMAINS: "127.0.0.1:1" }, local: true }), [], "only Codex and Copilot drop them");
+  assert.deepEqual(localDomainChecks({ inputs: { harness: "copilot" }, env: { PENDULUM_LOCAL_DOMAINS: "127.0.0.1:1" }, local: false }), [], "the runner routes have allowed_domains' own check");
 });
 
 test("Copilot's commands get the stage's toolchain (#105): each PATH directory its sandbox does not bind, as its install prefix, read-only", async () => {
   const layout = copilotRunnerLayout(AGENT, COPILOT_RUNNER_HOME);
-  const actions = ["/opt/hostedtoolcache/node/22.23.4/x64/bin", "/home/factory-agent/.local/bin", "/opt/pipx_bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/games", "/snap/bin", `${COPILOT_RUNNER_HOME}/bin`, "/tmp/bin", "/home/bin", "/run/x/bin", "/opt/hostedtoolcache/node/22.23.4/x64/lib", "/bin2", "/", "rel/bin"].join(":");
-  assert.deepEqual(toolchainDirs(layout, actions), ["/opt/hostedtoolcache/node/22.23.4/x64", "/opt/pipx_bin", "/usr/local", "/usr/games", "/snap", "/bin2"], "npm's prefix, not only its bin; nothing the sandbox binds itself; never the agent's home, Factory's, Copilot's TMPDIR, /run or a directory above one");
-  // Factory's own directories on the route are never toolchain, nor anything under them.
-  const route = { HOME: "/home/runner", RUNNER_TEMP: "/home/runner/work/_temp", GITHUB_WORKSPACE: "/home/runner/work/r/r", FACTORY_USAGE_DIR: "/u/usage", TMPDIR: "/f/tmp" };
-  assert.deepEqual(toolchainDirs(layout, "/home/runner/work/_temp/x/bin:/home/runner/work/r/r/node_modules/.bin:/u/usage/bin:/f/tmp/t/bin:/u/bin:/opt/t/bin", route), ["/opt/t"], "Factory's home, temp, workspace and usage directories stay out");
+  const actions = ["/opt/hostedtoolcache/node/22.23.4/x64/bin", "/home/pendulum-agent/.local/bin", "/opt/pipx_bin", "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/games", "/snap/bin", `${COPILOT_RUNNER_HOME}/bin`, "/tmp/bin", "/home/bin", "/run/x/bin", "/opt/hostedtoolcache/node/22.23.4/x64/lib", "/bin2", "/", "rel/bin"].join(":");
+  assert.deepEqual(toolchainDirs(layout, actions), ["/opt/hostedtoolcache/node/22.23.4/x64", "/opt/pipx_bin", "/usr/local", "/usr/games", "/snap", "/bin2"], "npm's prefix, not only its bin; nothing the sandbox binds itself; never the agent's home, Pendulum's, Copilot's TMPDIR, /run or a directory above one");
+  // Pendulum's own directories on the route are never toolchain, nor anything under them.
+  const route = { HOME: "/home/runner", RUNNER_TEMP: "/home/runner/work/_temp", GITHUB_WORKSPACE: "/home/runner/work/r/r", PENDULUM_USAGE_DIR: "/u/usage", TMPDIR: "/f/tmp" };
+  assert.deepEqual(toolchainDirs(layout, "/home/runner/work/_temp/x/bin:/home/runner/work/r/r/node_modules/.bin:/u/usage/bin:/f/tmp/t/bin:/u/bin:/opt/t/bin", route), ["/opt/t"], "Pendulum's home, temp, workspace and usage directories stay out");
   // As the agent: a directory it cannot reach, one it owns or can write (it could swap it for a link before bubblewrap
   // binds it), one under a link it could swap, and a link into its home are left out.
   const { root, runner } = fakeRunner();
@@ -326,7 +326,7 @@ test("Copilot's commands get the stage's toolchain (#105): each PATH directory i
   const system = ["/usr/local", "/usr", "/"].every((d) => statSync(d, { throwIfNoEntry: false })?.uid === 0) && process.getuid() !== 0;
   const path = [join(tc, "bin"), join(root, "locked", "bin"), join(root, "linked", "bin"), join(root, "swappable", "bin"), "/usr/local/bin", "/usr/bin"].join(":");
   try {
-    await resetCopilotState(runner, { PATH: path, HOME: "/nonexistent-factory-home" });
+    await resetCopilotState(runner, { PATH: path, HOME: "/nonexistent-pendulum-home" });
     const agentSays = execFileSync("/bin/sh", ["-c", TOOLCHAIN_CHECK, "sh", tc, join(root, "locked"), join(root, "swappable"), "/tmp", "/usr/local"], { encoding: "utf8", env: { HOME: process.env.HOME, PATH: process.env.PATH } });
     if (process.getuid() !== 0) assert.deepEqual(agentSays.trim().split("\n").filter(Boolean).map((l) => l.split("\t")[0]), system ? ["/usr/local"] : [], "not the agent's own, not one it cannot reach, not under a link it could swap, not a directory it can write (/tmp)");
   } finally {
@@ -350,7 +350,7 @@ test("Copilot's probe proves the stage's toolchain runs in a command; a toolchai
   writeFileSync(join(bin, "npm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   const drive = (toolchain) => {
     const driver = probeDriver({ gitConfig: "", host: "", marker: "m7", toolchain, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m7" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   // Unconfined here, so a toolchain that runs goes on to the confinement probe, which names the marker.
@@ -363,7 +363,7 @@ test("Copilot's probe proves the stage's toolchain runs in a command; a toolchai
   const model = async () => ({ env: { COPILOT_OFFLINE: "true" }, close: async () => {} });
   let seen = null;
   const leaving = (result) => async (cmd, args, opts) => {
-    seen = opts.env.FACTORY_COPILOT_PROBE;
+    seen = opts.env.PENDULUM_COPILOT_PROBE;
     writeFileSync(join(runner.agentTmp, PROBE_RESULT), result);
     return { code: 0, stdout: "", stderr: "" };
   };
@@ -379,19 +379,19 @@ test("local Copilot (#111): the stage's node, from a version manager in the home
   const root = mkdtempSync(join(tmpdir(), "cplt-"));
   const home = join(root, "h");
   const prefix = join(home, ".nvm", "versions", "node", "v24");
-  for (const d of [join(prefix, "bin"), join(prefix, "etc"), join(home, ".shims"), join(home, "bin"), join(home, "work", ".factory")]) mkdirSync(d, { recursive: true });
+  for (const d of [join(prefix, "bin"), join(prefix, "etc"), join(home, ".shims"), join(home, "bin"), join(home, "work", ".pendulum")]) mkdirSync(d, { recursive: true });
   for (const f of [join(prefix, "bin", "node"), join(prefix, "bin", "npm"), join(home, "bin", "node"), join(home, "mise")]) writeFileSync(f, "#!/bin/sh\n", { mode: 0o755 });
   symlinkSync(join(home, "mise"), join(home, ".shims", "node"));
   const node = join(prefix, "bin", "node");
-  const off = [join(home, "work"), join(home, "work", ".factory")];
+  const off = [join(home, "work"), join(home, "work", ".pendulum")];
   const got = localToolchain({ path: `rel:${join(prefix, "bin")}:/usr/bin`, off, home });
   assert.deepEqual(got, { bin: join(prefix, "bin"), toolchain: { node, npm: join(prefix, "bin", "npm") }, dirs: [prefix], denied: [join(prefix, "etc")] }, "its install prefix only, its global npmrc denied");
-  assert.deepEqual(localToolchain({ path: `${join(home, ".shims")}:/usr/bin`, off, home, execPath: node }).toolchain.node, node, "a version manager's shim gives way to the node it chose, the one running Factory");
+  assert.deepEqual(localToolchain({ path: `${join(home, ".shims")}:/usr/bin`, off, home, execPath: node }).toolchain.node, node, "a version manager's shim gives way to the node it chose, the one running Pendulum");
   assert.deepEqual(localToolchain({ path: join(home, "bin"), off, home }).dirs, [], "never the home itself");
   assert.deepEqual(localToolchain({ path: join(prefix, "bin"), off: [prefix], home }).dirs, [], "never what a sandbox may write");
   assert.deepEqual(localToolchain({ path: join(prefix, "bin"), off, home: join(prefix, "lib") }).dirs, [], "never above the home");
   assert.equal(localToolchain({ path: "/nowhere", off, home }), null, "no node: nothing to bind or prove");
-  // Factory's bwrap leads each command's PATH with it (after Factory's git), among bubblewrap's own options only.
+  // Pendulum's bwrap leads each command's PATH with it (after Pendulum's git), among bubblewrap's own options only.
   const real = join(root, "real-bwrap");
   writeFileSync(real, '#!/bin/sh\nfor a do echo "arg=$a"; done\n', { mode: 0o755 });
   writeFileSync(join(root, "bwrap"), bwrapShim(real, null, "/s/t", `/u/gitbin:${join(prefix, "bin")}`), { mode: 0o755 });
@@ -400,15 +400,15 @@ test("local Copilot (#111): the stage's node, from a version manager in the home
   assert.deepEqual(out, ["--setenv", "PATH", `/u/gitbin:${join(prefix, "bin")}:/u/bwrapbin:/usr/bin`, "--setenv", "TMPDIR", "/s/t", "--", "sh", "--setenv", "PATH", "kept"]);
   assert.ok(!bwrapShim("/usr/bin/bwrap", "/h", "/t").includes("PATH"), "a runner's shim leaves PATH alone");
   // The stage hands it to the harness process, and the local probe proves it, Blocking with the rule.
-  assert.deepEqual(localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ toolchain: got.toolchain }) }).toolchain, got.toolchain);
+  assert.deepEqual(localSandbox({ PENDULUM_LOCAL_SANDBOX: JSON.stringify({ toolchain: got.toolchain }) }).toolchain, got.toolchain);
   const [tmp, usage, clone, chome] = ["t", "u", "w", "c"].map((d) => join(root, d));
   for (const d of [tmp, join(usage, "harness"), clone, chome]) mkdirSync(d, { recursive: true });
   writeFileSync(join(chome, "settings.json"), "{}\n");
   const local = { clone, addDirs: [tmp], cacheDirs: [], domains: LOCAL_DOMAINS, copilotTmp: copilotPrivateTmp(usage), toolchain: got.toolchain };
-  const env = { PATH: "/usr/bin", TMPDIR: tmp, FACTORY_USAGE_DIR: usage, COPILOT_HOME: chome };
+  const env = { PATH: "/usr/bin", TMPDIR: tmp, PENDULUM_USAGE_DIR: usage, COPILOT_HOME: chome };
   let seen = "";
   const leaving = (result) => async (cmd, args, opts) => {
-    seen = opts.env.FACTORY_COPILOT_PROBE;
+    seen = opts.env.PENDULUM_COPILOT_PROBE;
     writeFileSync(join(tmp, PROBE_RESULT), result);
     return { code: 0, stdout: "", stderr: "" };
   };
@@ -465,7 +465,7 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   assert.deepEqual(claudeLocalSettings({ clone: "/c", home: "/h", readable: [corepack] }).sandbox.filesystem.allowRead, [corepack]);
   assert.ok(!("allowRead" in claudeLocalSettings({ clone: "/c", home: "/h" }).sandbox.filesystem));
   const { args, env } = harnessCommand({ harness: "claude", prompt: "p", local: { clone: "/c", addDirs: [], domains: LOCAL_DOMAINS, readOnly: ["/u"], readable: [corepack], claudeEnv: "/u/claude-env.sh" } });
-  assert.equal(env.CLAUDE_ENV_FILE, "/u/claude-env.sh", "its commands' PATH led by Factory's toolbin");
+  assert.equal(env.CLAUDE_ENV_FILE, "/u/claude-env.sh", "its commands' PATH led by Pendulum's toolbin");
   assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.filesystem.allowRead, [corepack]);
   const [tmp, bin] = [join(root, "t"), join(root, "pmbin")];
   mkdirSync(tmp);
@@ -473,7 +473,7 @@ test("local mode (#137): the repository's package manager, from corepack, its ow
   const drive = (ok) => {
     writeFileSync(join(bin, "pnpm"), `#!/bin/sh\nexit ${ok ? 0 : 1}\n`, { mode: 0o755 });
     const driver = probeDriver({ gitConfig: "", host: "", marker: "m8", toolchain: { pm: "pnpm" }, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m8" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   assert.equal(drive(false), `4\n${TOOLCHAIN_RULE}\n`);

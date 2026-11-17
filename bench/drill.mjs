@@ -7,7 +7,7 @@
  * scores them with bench/score.mjs. Exit 0 when every Objective merged with no human
  * input; 1 otherwise; 64 usage.
  *
- *   --repo OWNER/NAME        the scratch adopter (never Factory's own repository, never a product repository)
+ *   --repo OWNER/NAME        the scratch adopter (never Pendulum's own repository, never a product repository)
  *   --set small|medium|conflict  small: one-function additions over greet (default); conflict: two
  *                            small Objectives that must both add a line at the end of README.md's
  *                            API list, so the second to merge conflicts and is sent back to rebase;
@@ -17,17 +17,17 @@
  *                            unit and database tests, suffixed so repeated runs never collide; every one changes
  *                            the scratch adopter alone
  *   --count N                Objectives to file (default 2 for small, 5 for medium)
- *   --dispatch               dispatch factory.yml after filing (when the opened tick is not trusted); the run's id
+ *   --dispatch               dispatch pendulum.yml after filing (when the opened tick is not trusted); the run's id
  *                            is recorded on each filed Objective, so the scorer reads it as the drill's, not input
- *   --local                  also label each Objective factory:local, so a local loop (plugin/scripts/local.mjs serve)
+ *   --local                  also label each Objective pendulum:local, so a local loop (plugin/scripts/local.mjs serve)
  *                            takes it and the Actions path leaves it alone
- *   --local-dir CLONE        with --local: the developer clone the local loop runs from; its .factory/ usage
+ *   --local-dir CLONE        with --local: the developer clone the local loop runs from; its .pendulum/ usage
  *                            records are scored instead of Actions artifacts
  *   --wait-minutes N         give up after N minutes (default 40)
  *   --usage-wait-minutes N   after an Objective ends (merged, Blocked, Question), wait up to N minutes for the
- *                            usage artifact of each stage Factory ran (lib/collect.mjs usagePending; default 10),
+ *                            usage artifact of each stage Pendulum ran (lib/collect.mjs usagePending; default 10),
  *                            then score it, naming any still missing in the report's `usageMissing`
- *   --stall-minutes N        passed to bench/score.mjs: a merge idle longer than N minutes after Factory's last
+ *   --stall-minutes N        passed to bench/score.mjs: a merge idle longer than N minutes after Pendulum's last
  *                            action is a stall, not a walk-away (default 60)
  *   --type NAME              the native issue type to set (default Feature; "" to skip)
  *   --usage DIR              where to download the usage artifacts for scoring (default a temp dir)
@@ -54,7 +54,7 @@ const usage = (m) => {
   process.exit(64);
 };
 if (!values.repo || !/^[^/]+\/[^/]+$/.test(values.repo)) usage("Give --repo OWNER/NAME");
-if (/^clockgrove\/(factory|clockgrove)$/.test(values.repo)) usage("the drill runs only on a scratch repository");
+if (/^clockgrove\/(pendulum|clockgrove)$/.test(values.repo)) usage("the drill runs only on a scratch repository");
 const repo = values.repo;
 const set = values.set ?? "small";
 if (!["small", "medium", "conflict"].includes(set)) usage("--set is small, medium or conflict");
@@ -95,7 +95,7 @@ A caller can get a transformed greeting: \`${fn}(name)\` ${shape.goal}, and the 
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, conflict set) at ${new Date().toISOString()}. Recorded decision: ${shape.decision}. Another Objective filed with this one adds its own bullet at the same place; keep both when they meet.
+Filed by the Pendulum adopter drill (bench/drill.mjs, conflict set) at ${new Date().toISOString()}. Recorded decision: ${shape.decision}. Another Objective filed with this one adds its own bullet at the same place; keep both when they meet.
 `;
     return { title: `Add ${fn}(name) over greet(name) and list it`, body, fn };
   }
@@ -112,7 +112,7 @@ A caller can get a transformed greeting: \`${fn}(name)\` ${shape.goal}.
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs) at ${new Date().toISOString()}. Keep the change to the two files named above. Recorded decision: ${shape.decision}.
+Filed by the Pendulum adopter drill (bench/drill.mjs) at ${new Date().toISOString()}. Keep the change to the two files named above. Recorded decision: ${shape.decision}.
 `;
   return { title: `Add ${fn}(name) over greet(name)`, body, fn };
 });
@@ -129,12 +129,12 @@ async function setType(number) {
 
 const filed = [];
 for (const o of objectives) {
-  const dir = mkdtempSync(join(tmpdir(), "factory-drill-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-drill-"));
   const file = join(dir, "body.md");
   writeFileSync(file, o.body);
   let url;
   try {
-    url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "factory:objective", "--label", "P1", ...(values.local ? ["--label", "factory:local"] : []));
+    url = await gh("issue", "create", "-R", repo, "--title", o.title, "--body-file", file, "--label", "pendulum:objective", "--label", "P1", ...(values.local ? ["--label", "pendulum:local"] : []));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -149,7 +149,7 @@ for (const o of objectives) {
 let dispatched = null;
 if (values.dispatch) {
   const ref = await gh("api", `repos/${repo}`, "--jq", ".default_branch");
-  const answer = await gh("api", "-X", "POST", `repos/${repo}/actions/workflows/factory.yml/dispatches`, "-f", `ref=${ref}`, "-F", "return_run_details=true");
+  const answer = await gh("api", "-X", "POST", `repos/${repo}/actions/workflows/pendulum.yml/dispatches`, "-f", `ref=${ref}`, "-F", "return_run_details=true");
   let runId = null;
   try {
     runId = JSON.parse(answer || "{}").workflow_run_id ?? null;
@@ -173,17 +173,17 @@ while (Date.now() < deadline && [...state.values()].some((s) => s === "open")) {
     const v = JSON.parse(await gh("issue", "view", String(f.number), "-R", repo, "--json", "state,labels"));
     const labels = v.labels.map((l) => l.name);
     if (v.state === "CLOSED") state.set(f.number, "closed");
-    else if (labels.includes("factory:blocked")) state.set(f.number, "blocked");
-    else if (labels.includes("factory:question")) state.set(f.number, "question");
+    else if (labels.includes("pendulum:blocked")) state.set(f.number, "blocked");
+    else if (labels.includes("pendulum:question")) state.set(f.number, "question");
   }
   process.stderr.write(`${new Date().toISOString().slice(11, 19)} ${filed.map((f) => `#${f.number}:${state.get(f.number)}`).join(" ")}\n`);
 }
 
 /** Score with bench/score.mjs from the uploaded artifacts, or, for a local loop, from its usage records on the box. */
-const usageDir = values.usage ? resolve(values.usage) : mkdtempSync(join(tmpdir(), "factory-drill-usage-"));
+const usageDir = values.usage ? resolve(values.usage) : mkdtempSync(join(tmpdir(), "pendulum-drill-usage-"));
 mkdirSync(usageDir, { recursive: true });
-// A local loop uploads no artifacts: its records sit in <clone>/.factory/<issue>/usage-*/ (plugin/scripts/local.mjs).
-const localDir = values.local && values["local-dir"] ? join(resolve(values["local-dir"]), ".factory") : null;
+// A local loop uploads no artifacts: its records sit in <clone>/.pendulum/<issue>/usage-*/ (plugin/scripts/local.mjs).
+const localDir = values.local && values["local-dir"] ? join(resolve(values["local-dir"]), ".pendulum") : null;
 const localUsage = localDir && existsSync(localDir) ? localDir : localDir ? usageDir : null;
 const usageMissing = {};
 if (!localDir) {

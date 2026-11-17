@@ -1,4 +1,4 @@
-// A foundation Objective's review (#275): `factory:foundation` adds a second reviewer call that checks the shared contracts
+// A foundation Objective's review (#275): `pendulum:foundation` adds a second reviewer call that checks the shared contracts
 // the diff changes against their callers; its comments go up in the same comment-only review, within max_usd.
 import "./temp.mjs";
 import assert from "node:assert/strict";
@@ -15,34 +15,34 @@ import { harnessCommand } from "../scripts/lib/harness.mjs";
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const ROOT = join(import.meta.dirname, "..", "..");
-const ENV = { GITHUB_REPOSITORY: "acme/app", FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_REVIEWER_MODEL: "claude-fable-5-2" };
+const ENV = { GITHUB_REPOSITORY: "acme/app", PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_REVIEWER_MODEL: "claude-fable-5-2" };
 const person = (login, id = 1) => ({ login, id, type: "User" });
 const perms = { kirk: "admin", reader: "read" };
 const timeline = (by, asked = []) => ({ labelers: async (_, n, names) => (asked.push(...names), Object.fromEntries(names.filter((l) => by[l]).map((l) => [l, { at: "2026-11-14T10:00:00Z", actor: by[l] }]))), permission: async (_, login) => perms[login] ?? null });
 
 test("the foundation label is trusted as the choice labels are: only from a person who can push", async () => {
-  assert.equal(foundationLabel([{ name: "factory:objective" }, { name: "Factory:Foundation" }]), "Factory:Foundation");
-  assert.equal(foundationLabel(["factory:objective"]), null);
+  assert.equal(foundationLabel([{ name: "pendulum:objective" }, { name: "Pendulum:Foundation" }]), "Pendulum:Foundation");
+  assert.equal(foundationLabel(["pendulum:objective"]), null);
   const asked = [];
-  const ok = await choiceTrusted(repo, 7, ["factory:objective", FOUNDATION_LABEL], {}, timeline({ [FOUNDATION_LABEL]: person("kirk") }, asked));
+  const ok = await choiceTrusted(repo, 7, ["pendulum:objective", FOUNDATION_LABEL], {}, timeline({ [FOUNDATION_LABEL]: person("kirk") }, asked));
   assert.deepEqual([ok.ok, ok.foundation, ok.labels, ok.choice], [true, true, [], {}], "a foundation, no harness or model choice");
   assert.deepEqual(asked, [FOUNDATION_LABEL], "its labeler read from the timeline");
   const stranger = await choiceTrusted(repo, 7, [FOUNDATION_LABEL], {}, timeline({ [FOUNDATION_LABEL]: person("reader") }));
   assert.equal(stranger.ok, false);
-  assert.match(stranger.reason, /^`factory:foundation` was applied by `reader`, who cannot push to acme\/app/);
+  assert.match(stranger.reason, /^`pendulum:foundation` was applied by `reader`, who cannot push to acme\/app/);
   assert.equal(stranger.fix, CHOICE_FIX);
-  assert.match((await choiceTrusted(repo, 7, [FOUNDATION_LABEL], {}, timeline({}))).reason, /who applied `factory:foundation` could not be read/);
-  const none = await choiceTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no label to vouch for: no timeline read") });
+  assert.match((await choiceTrusted(repo, 7, [FOUNDATION_LABEL], {}, timeline({}))).reason, /who applied `pendulum:foundation` could not be read/);
+  const none = await choiceTrusted(repo, 7, ["pendulum:objective"], {}, { labelers: async () => assert.fail("no label to vouch for: no timeline read") });
   assert.equal(none.foundation, false);
   // With a model label too: both are vouched for in one timeline read.
   const both = [];
-  const mixed = await choiceTrusted(repo, 7, [FOUNDATION_LABEL, "factory:model:claude-sonnet-5-5"], {}, timeline({ [FOUNDATION_LABEL]: person("reader"), "factory:model:claude-sonnet-5-5": person("kirk") }, both));
-  assert.deepEqual([mixed.ok, both], [false, ["factory:model:claude-sonnet-5-5", FOUNDATION_LABEL]]);
+  const mixed = await choiceTrusted(repo, 7, [FOUNDATION_LABEL, "pendulum:model:claude-sonnet-5-5"], {}, timeline({ [FOUNDATION_LABEL]: person("reader"), "pendulum:model:claude-sonnet-5-5": person("kirk") }, both));
+  assert.deepEqual([mixed.ok, both], [false, ["pendulum:model:claude-sonnet-5-5", FOUNDATION_LABEL]]);
 });
 
 test("choiceGate hands the stage the foundation mark, or Blocks before any harness on an untrusted one", async () => {
   const applied = [];
-  const gate = (by) => choiceGate({ repo, issue: 7, labels: ["factory:objective", FOUNDATION_LABEL], env: ENV, pr: { number: 9 }, notify: "boss", opts: {}, apply: async (_, e) => applied.push(e), stage: "review", gh: timeline(by) });
+  const gate = (by) => choiceGate({ repo, issue: 7, labels: ["pendulum:objective", FOUNDATION_LABEL], env: ENV, pr: { number: 9 }, notify: "boss", opts: {}, apply: async (_, e) => applied.push(e), stage: "review", gh: timeline(by) });
   const good = await gate({ [FOUNDATION_LABEL]: person("kirk") });
   assert.deepEqual([good.ok, good.foundation, good.inputs.harness, good.inputs.reviewerModel], [true, true, "claude", "claude-fable-5-2"], "the repository's defaults, foundation on");
   assert.equal(applied.length, 0);
@@ -52,7 +52,7 @@ test("choiceGate hands the stage the foundation mark, or Blocks before any harne
 });
 
 test("the foundation label is no edit: the plan's record does not cover it", () => {
-  assert.equal(objectiveSha("t", "b", ["factory:objective", FOUNDATION_LABEL]), objectiveSha("t", "b", ["factory:objective"]));
+  assert.equal(objectiveSha("t", "b", ["pendulum:objective", FOUNDATION_LABEL]), objectiveSha("t", "b", ["pendulum:objective"]));
 });
 
 /** A reviewer call as runHarness returns it, booked as the review job books it. */
@@ -95,15 +95,15 @@ test("foundationReview: no call starts with max_usd spent or less than a call's 
 test("foundationPrompt: comments only, on the reference's section, with the issue, PR body and diff", () => {
   const p = foundationPrompt({ issue: 5, issueTitle: "Command registry", issueBody: "## Acceptance\n- one", prBody: "the body", diff: "diff --git a/x b/x\n+y\n", harness: "claude" });
   assert.match(p, /foundation pass for the pull request on issue #5: Command registry/);
-  assert.match(p, /`factory:foundation`/);
+  assert.match(p, /`pendulum:foundation`/);
   assert.match(p, /reference\.md section "Foundation review"/);
   assert.match(p, /\{"comments": \[\{"path": "src\/errors\.ts", "line": 12, "entry": "foundation", "body": "foundation review: \.\.\."\}\]\}/);
   assert.doesNotMatch(p, /"acceptance":/, "the first pass judges the entries");
   for (const part of ["## Issue\n## Acceptance\n- one", "## PR body\nthe body", "## Diff\n```diff\ndiff --git a/x b/x\n+y"]) assert.ok(p.includes(part), part);
   assert.match(foundationPrompt({ issue: 5, issueTitle: "t", issueBody: "", prBody: "", diff: "", harness: "codex" }), /Act as the reviewer agent defined in \.codex\/agents\/foundation-reviewer\.toml/);
-  const ref = readFileSync(join(ROOT, "plugin", "skills", "factory-review-pr", "reference.md"), "utf8");
+  const ref = readFileSync(join(ROOT, "plugin", "skills", "pendulum-review-pr", "reference.md"), "utf8");
   assert.match(ref, /\n## Foundation review\n/, "the section the prompt names");
-  assert.match(readFileSync(join(ROOT, "plugin", "skills", "factory-review-pr", "SKILL.md"), "utf8"), /The foundation pass: reference\.md, "Foundation review"\./);
+  assert.match(readFileSync(join(ROOT, "plugin", "skills", "pendulum-review-pr", "SKILL.md"), "utf8"), /The foundation pass: reference\.md, "Foundation review"\./);
 });
 
 test("reviewPost: the foundation pass's comments go up in the same review, counted in its body; without it, as before", () => {
@@ -114,8 +114,8 @@ test("reviewPost: the foundation pass's comments go up in the same review, count
   const post = reviewPost({ issue: 7, review, diff, entries, foundation });
   assert.deepEqual(post.comments.map((c) => [c.path, c.line]), [["src/a.ts", 3], ["src/new.ts", 2]]);
   assert.equal(post.placeholder, false);
-  assert.deepEqual(post.body.split("\n").slice(0, 3), ["<!-- factory:7:review -->", "<!-- factory:7:foundation -->", "Factory reviewer: one comment-only review of two passes, 2 comment(s); the foundation pass checked the shared contracts the diff changes against their callers and raised 1."]);
-  assert.equal(reviewPost({ issue: 7, review, diff, entries }).body.split("\n")[1], "Factory reviewer: one comment-only pass, 1 comment(s).");
+  assert.deepEqual(post.body.split("\n").slice(0, 3), ["<!-- pendulum:7:review -->", "<!-- pendulum:7:foundation -->", "Pendulum reviewer: one comment-only review of two passes, 2 comment(s); the foundation pass checked the shared contracts the diff changes against their callers and raised 1."]);
+  assert.equal(reviewPost({ issue: 7, review, diff, entries }).body.split("\n")[1], "Pendulum reviewer: one comment-only pass, 1 comment(s).");
   // Only foundation findings: no placeholder stands in, the foundation comment is what the answer pass answers.
   const met = { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] };
   const only = reviewPost({ issue: 7, review: met, diff, entries, foundation });
@@ -141,13 +141,13 @@ test("the review job runs the foundation pass on a trusted foundation Objective 
   assert.match(block, /maxUsd: Math\.max\(0, inputs\.maxUsd - sumSpend\(records\)\),/, "each call capped at what is left");
   assert.match(block, /mark\(rec, rec\);\n\s+records\.push\(rec\);/, "each call booked before the next check");
   assert.match(block, /if \(found\.stop === "cap"\) return blockedAtCap\("the foundation pass"\);\n\s+if \(found\.stop === "time"\) return blockedAtTime\("the foundation pass"\);/);
-  assert.match(block, /exit: "blocked", reason, cause: last\.refusal \? refusalCause\(last\.refusal\) : "factory"[\s\S]*await finish\("blocked", reason\);\n\s+return;/, "no answer: nothing posted, Blocked");
+  assert.match(block, /exit: "blocked", reason, cause: last\.refusal \? refusalCause\(last\.refusal\) : "pendulum"[\s\S]*await finish\("blocked", reason\);\n\s+return;/, "no answer: nothing posted, Blocked");
   assert.match(block, /runHarness\(\n\s+foundationCall\(\{\n\s+harness: inputs\.harness,/, "foundationCall's agent and reviewer mark");
 });
 
 test("a session's review: post-review takes the foundation pass under `foundation` on a trusted foundation Objective only", async () => {
-  assert.deepEqual(await foundationTrusted(repo, 7, ["factory:objective"], {}, { labelers: async () => assert.fail("no label: no timeline read") }), { ok: true, foundation: false });
-  assert.deepEqual(await foundationTrusted(repo, 7, [FOUNDATION_LABEL, "factory:model:x"], {}, timeline({ [FOUNDATION_LABEL]: person("kirk") })), { ok: true, foundation: true }, "only the foundation label is vouched for");
+  assert.deepEqual(await foundationTrusted(repo, 7, ["pendulum:objective"], {}, { labelers: async () => assert.fail("no label: no timeline read") }), { ok: true, foundation: false });
+  assert.deepEqual(await foundationTrusted(repo, 7, [FOUNDATION_LABEL, "pendulum:model:x"], {}, timeline({ [FOUNDATION_LABEL]: person("kirk") })), { ok: true, foundation: true }, "only the foundation label is vouched for");
   const refused = await foundationTrusted(repo, 7, [FOUNDATION_LABEL], {}, timeline({ [FOUNDATION_LABEL]: person("reader") }));
   assert.deepEqual([refused.ok, refused.fix], [false, CHOICE_FIX]);
   const { reviewPostFor } = await import("../scripts/local.mjs");
@@ -157,7 +157,7 @@ test("a session's review: post-review takes the foundation pass under `foundatio
   const both = reviewPostFor({ issue: 7, text: `{${first}, "foundation": {"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}}`, file: "f.json", diff, entries, foundation: true });
   assert.deepEqual([both.placeholder, both.comments.map((c) => c.body)], [false, ["foundation review: z"]]);
   assert.match(both.body, /review of two passes, 1 comment\(s\); the foundation pass [^\n]* raised 1\./);
-  assert.throws(() => reviewPostFor({ issue: 7, text: `{${first}}`, file: "f.json", diff, entries, foundation: true }), /f\.json holds no foundation pass \("foundation": \{"comments": \[\.\.\.\]\}\), which #7's factory:foundation label asks for; nothing posted/);
+  assert.throws(() => reviewPostFor({ issue: 7, text: `{${first}}`, file: "f.json", diff, entries, foundation: true }), /f\.json holds no foundation pass \("foundation": \{"comments": \[\.\.\.\]\}\), which #7's pendulum:foundation label asks for; nothing posted/);
   assert.throws(() => reviewPostFor({ issue: 7, text: `{${first}, "foundation": {"comments": []}}`, file: "f.json", diff, entries }), /#7 is not a foundation Objective/);
   assert.match(reviewPostFor({ issue: 7, text: `{${first}}`, file: "f.json", diff, entries }).body, /one comment-only pass/, "any other Objective: as before");
   const src = readFileSync(join(ROOT, "plugin", "scripts", "local.mjs"), "utf8");
@@ -223,17 +223,17 @@ test("a PR reviewed before the foundation label gets the foundation pass alone a
   const bot = (body) => ({ body, author_association: "MEMBER", user: { login: "kirk" } });
   // The first review stage ran before the label: one pass, no foundation marker.
   const plain = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] }, diff, entries });
-  assert.doesNotMatch(plain.body, /factory:7:foundation/);
+  assert.doesNotMatch(plain.body, /pendulum:7:foundation/);
   assert.deepEqual(reviewsCover([bot(plain.body)], 7), { reviewed: true, foundation: false }, "the next stage: reviewed, the foundation pass due");
   // That stage posts the foundation pass alone: its own review, both markers, no acceptance judged again.
   const alone = reviewPost({ issue: 7, review: null, diff, foundation: parseReview('{"comments": [{"path": "src/new.ts", "line": 2, "entry": "foundation", "body": "foundation review: z"}]}') });
-  assert.deepEqual(alone.body.split("\n"), ["<!-- factory:7:review -->", "<!-- factory:7:foundation -->", "Factory reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), 1 comment(s); it checked the shared contracts the diff changes against their callers."]);
+  assert.deepEqual(alone.body.split("\n"), ["<!-- pendulum:7:review -->", "<!-- pendulum:7:foundation -->", "Pendulum reviewer: the foundation pass, after this PR's first review (the Objective was labelled a foundation one since), 1 comment(s); it checked the shared contracts the diff changes against their callers."]);
   assert.deepEqual([alone.placeholder, alone.comments.map((c) => c.body), alone.unjudged], [false, ["foundation review: z"], []]);
   assert.deepEqual(reviewsCover([bot(plain.body), bot(alone.body)], 7), { reviewed: true, foundation: true }, "and the stage after: nothing due");
   const empty = reviewPost({ issue: 7, review: null, diff, foundation: parseReview('{"comments": []}') });
   assert.equal(empty.placeholder, true, "nothing found: the placeholder records the pass");
   assert.deepEqual(reviewsCover([bot(empty.body)], 7).foundation, true);
-  // Markers count only from Factory or someone who can push; another issue's do not.
+  // Markers count only from Pendulum or someone who can push; another issue's do not.
   assert.deepEqual(reviewsCover([{ ...bot(alone.body), author_association: "NONE", user: { login: "stranger" } }], 7), { reviewed: false, foundation: false });
   assert.deepEqual(reviewsCover([bot(alone.body)], 8), { reviewed: false, foundation: false });
   assert.throws(() => reviewPost({ issue: 7, review: null, diff }), /no pass answered/);

@@ -8,35 +8,35 @@ import { decoyLaunch, PROBE_MARKER } from "./codex-runner.mjs";
 import { PROBE_PERSIST, toolchainRules } from "./copilot-runner.mjs";
 
 /** The file the driver leaves its result in, in the stage's temp directory: its exit code, then its last line. */
-export const CLAUDE_PROBE_RESULT = ".factory-claude-probe";
+export const CLAUDE_PROBE_RESULT = ".pendulum-claude-probe";
 
 /** A shell word for `s`: single-quoted. */
 const sq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
 /**
- * The command the probe's model asks Claude Code to run, from its environment (FACTORY_CLAUDE_PROBE), in its sandbox:
+ * The command the probe's model asks Claude Code to run, from its environment (PENDULUM_CLAUDE_PROBE), in its sandbox:
  * refuses to go on without its script or decoy (an empty one would pass unchecked); proves the stage's toolchain
- * (toolchainRules); tries a file in each of `persist` (Factory checks from outside that none was made: Claude Code's
+ * (toolchainRules); tries a file in each of `persist` (Pendulum checks from outside that none was made: Claude Code's
  * sandbox puts a throwaway tmpfs over the home, where a write lands and is gone); then runs CONFINEMENT_PROBE with no
  * home rule. Its result goes to `result` by path: an exit code and a last line, a pass being 0 and PROBE_PASS.
  */
 export const claudeProbeDriver = ({ gitConfig, host, marker, result, tmp, persist = [], toolchain = null }) =>
   [
     `out() { printf '%s\\n%s\\n' "$1" "$2" > ${sq(result)}; exit 0; }`,
-    `[ -n "$FACTORY_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
-    `[ -n "$FACTORY_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
+    `[ -n "$PENDULUM_PROBE_SCRIPT" ] || out 4 "the probe script is missing"`,
+    `[ -n "$PENDULUM_PROBE_DECOY" ] || out 4 "the probe's decoy is missing"`,
     ...toolchainRules(toolchain),
     ...persist.map((d) => `true >> ${sq(`${d}/${PROBE_PERSIST}`)} 2>/dev/null`),
-    `r=0; o=$(sh -c "$FACTORY_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${sq(tmp)} ${sq(host)} ${sq(marker)} "$FACTORY_PROBE_DECOY") || r=$?`,
+    `r=0; o=$(sh -c "$PENDULUM_PROBE_SCRIPT" sh "" ${sq(gitConfig)} ${sq(tmp)} ${sq(host)} ${sq(marker)} "$PENDULUM_PROBE_DECOY") || r=$?`,
     `out "$r" "$(printf '%s\\n' "$o" | tail -n 1)"`,
   ].join("\n");
 
 /** The probe's launch: CONFINEMENT_PROBE's decoy, then Claude Code with the decoy's pid in its environment. */
-export const CLAUDE_DECOY_LAUNCH = decoyLaunch('FACTORY_PROBE_DECOY=$d claude "$@"');
+export const CLAUDE_DECOY_LAUNCH = decoyLaunch('PENDULUM_PROBE_DECOY=$d claude "$@"');
 
 /**
  * A stand-in for the Anthropic Messages API on this machine's (or the sandbox's) loopback. The first request that
- * offers the Bash tool gets one Bash call, `sh -c "$FACTORY_CLAUDE_PROBE"`; every other request ends the turn.
+ * offers the Bash tool gets one Bash call, `sh -c "$PENDULUM_CLAUDE_PROBE"`; every other request ends the turn.
  * Nothing leaves the machine and nothing is billed. Returns {env, close, toolOutput}: the variables Claude Code needs
  * (a stand-in key, never a real one), and what it answered for the call (for the log only).
  */
@@ -65,14 +65,14 @@ export async function anthropicProbeModel() {
         toolOutput = (typeof c === "string" ? c : JSON.stringify(c ?? "")).slice(0, 2000);
       }
       const call = !results.length && (j.tools || []).some((t) => t?.name === "Bash");
-      const input = { command: 'sh -c "$FACTORY_CLAUDE_PROBE"', description: "Factory's sandbox probe" };
+      const input = { command: 'sh -c "$PENDULUM_CLAUDE_PROBE"', description: "Pendulum's sandbox probe" };
       if (!j.stream) {
         res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ id: "msg_probe", type: "message", role: "assistant", model: j.model || "factory-probe", content: call ? [{ type: "tool_use", id: "toolu_probe", name: "Bash", input }] : [{ type: "text", text: "done" }], stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null, usage }));
+        return res.end(JSON.stringify({ id: "msg_probe", type: "message", role: "assistant", model: j.model || "pendulum-probe", content: call ? [{ type: "tool_use", id: "toolu_probe", name: "Bash", input }] : [{ type: "text", text: "done" }], stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null, usage }));
       }
       res.writeHead(200, { "content-type": "text/event-stream" });
       const ev = (type, d) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...d })}\n\n`);
-      ev("message_start", { message: { id: "msg_probe", type: "message", role: "assistant", model: j.model || "factory-probe", content: [], stop_reason: null, stop_sequence: null, usage } });
+      ev("message_start", { message: { id: "msg_probe", type: "message", role: "assistant", model: j.model || "pendulum-probe", content: [], stop_reason: null, stop_sequence: null, usage } });
       ev("content_block_start", { index: 0, content_block: call ? { type: "tool_use", id: "toolu_probe", name: "Bash", input: {} } : { type: "text", text: "" } });
       ev("content_block_delta", { index: 0, delta: call ? { type: "input_json_delta", partial_json: JSON.stringify(input) } : { type: "text_delta", text: "done" } });
       ev("content_block_stop", { index: 0 });
@@ -87,7 +87,7 @@ export async function anthropicProbeModel() {
   });
   const { port } = server.address();
   return {
-    env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, ANTHROPIC_API_KEY: "sk-ant-factory-probe", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+    env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, ANTHROPIC_API_KEY: "sk-ant-pendulum-probe", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections();

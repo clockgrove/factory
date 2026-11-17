@@ -4,14 +4,14 @@
 // The invariant: nothing the agent uid can write, inside or outside Claude's sandbox, is read or executed by Claude
 // Code's own start-up outside the sandbox. Validation, install and setup run the repository's code as the agent uid
 // outside that sandbox, so the agent's home and the checkout's .git are the agent's to plant things in. So:
-// - Claude Code's HOME is a directory Factory owns (CLAUDE_HOME): no shell start-up file, no git config, only its env
-//   file and Factory's skills. The unit (or NAMESPACE_WRAP) sees it read-only.
+// - Claude Code's HOME is a directory Pendulum owns (CLAUDE_HOME): no shell start-up file, no git config, only its env
+//   file and Pendulum's skills. The unit (or NAMESPACE_WRAP) sees it read-only.
 // - Its own TMPDIR is /tmp, which its unit (PrivateTmp) or NAMESPACE_WRAP makes private and fresh for every start.
 // - Its config directory (CLAUDE_CONFIG_DIR) lives in the agent's home but is made afresh before
-//   every start (resetClaudeState), with only the sessions Factory itself captured put back, so nothing planted between
+//   every start (resetClaudeState), with only the sessions Pendulum itself captured put back, so nothing planted between
 //   two starts survives into the next. Its sandboxed commands cannot write them.
 // - The checkout's .git config, commondir, info/attributes and hooks, which Claude Code's own git reads, are put back
-//   to what Factory left before its first harness start (pinRunnerGit, restoreRunnerGit), and a .git that was replaced
+//   to what Pendulum left before its first harness start (pinRunnerGit, restoreRunnerGit), and a .git that was replaced
 //   refuses the start.
 // - Its commands get the agent's own HOME and TMPDIR back through CLAUDE_ENV_FILE, which Claude Code sources inside the
 //   sandbox before each command, so package caches and the agent's read-only gh login work as before.
@@ -23,8 +23,8 @@ import { GitRefusal } from "./local.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { log } from "./inputs.mjs";
 
-/** Claude Code's HOME on a runner: Factory's own, outside every home the agent can write. */
-export const CLAUDE_HOME = "/var/lib/factory-claude";
+/** Claude Code's HOME on a runner: Pendulum's own, outside every home the agent can write. */
+export const CLAUDE_HOME = "/var/lib/pendulum-claude";
 
 /** The package caches in the agent's home that Claude Code's sandboxed commands may write. */
 export const RUNNER_CACHES = [".npm", ".cache", ".local/share/pnpm", ".bun", ".yarn"];
@@ -40,12 +40,12 @@ export function uidOf(user, passwd = () => readFileSync("/etc/passwd", "utf8")) 
 }
 
 /**
- * Where everything lives for one agent: Factory's directory, and the per-start state in the agent's home.
+ * Where everything lives for one agent: Pendulum's directory, and the per-start state in the agent's home.
  * `editDiffs`: the directory Claude Code keeps its Bash edits' diffs in (`<command temp>/claude-<uid>/bash-edit-diff`),
  * which its own git reads outside the sandbox, so its commands must not write it.
  */
 export function runnerLayout(agent, claudeHome = CLAUDE_HOME) {
-  const state = join(agent.home, ".factory-claude");
+  const state = join(agent.home, ".pendulum-claude");
   const uid = agent.uid ?? uidOf(agent.user);
   return {
     editDiffs: uid === null || uid === undefined ? null : join(state, "cmd", `claude-${uid}`, "bash-edit-diff"),
@@ -148,7 +148,7 @@ export function envFileText(layout, ports = []) {
 }
 
 const RELAY = [
-  "# Services the repository's setup started, through the sandbox's proxy (Factory: lib/claude-runner.mjs).",
+  "# Services the repository's setup started, through the sandbox's proxy (Pendulum: lib/claude-runner.mjs).",
   "__f_x=\"${HTTPS_PROXY:-}\"; __f_x=\"${__f_x#*://}\"; __f_a=\"${__f_x%@*}\"; __f_h=\"${__f_x#*@}\"; __f_h=\"${__f_h%%/*}\"",
   "case \"$__f_a\" in",
   "  srt:*|srt.*:*)",
@@ -168,27 +168,27 @@ const RELAY = [
   "unset __f_x __f_a __f_h __f_p __f_i __f_l",
 ].join("\n");
 
-/** Factory's env file for Claude Code, written (or rewritten before a start) with the current service ports. */
+/** Pendulum's env file for Claude Code, written (or rewritten before a start) with the current service ports. */
 export function writeEnvFile(layout, ports = []) {
   writeFileSync(layout.envFile, envFileText(layout, ports));
   chmodSync(layout.envFile, 0o644);
 }
 
 /**
- * Factory's directory made afresh, owned by Factory's own user and 755 (the agent reads it, never writes it), with the
+ * Pendulum's directory made afresh, owned by Pendulum's own user and 755 (the agent reads it, never writes it), with the
  * env file. `sudo` false (tests): the directory is made by this process.
  */
 export async function prepareClaudeHome(layout, { sudo = true } = {}) {
-  await prepareFactoryHome(layout.home, "Claude Code", { sudo });
+  await preparePendulumHome(layout.home, "Claude Code", { sudo });
   writeEnvFile(layout);
 }
 
 /**
- * A harness's HOME on a runner (Claude Code's, Codex's), made afresh and empty: owned by Factory's own user and 755, so
+ * A harness's HOME on a runner (Claude Code's, Codex's), made afresh and empty: owned by Pendulum's own user and 755, so
  * the agent reads it and never writes it, and the unit (or NAMESPACE_WRAP) sees it read-only. `sudo` false (tests): the
  * directory is made by this process.
  */
-export async function prepareFactoryHome(dir, name, { sudo = true } = {}) {
+export async function preparePendulumHome(dir, name, { sudo = true } = {}) {
   if (sudo) {
     const r = await exec("/usr/bin/sudo", ["-n", "/bin/sh", "-c", 'rm -rf -- "$1" && install -d -m 755 -o "$2" -g "$3" -- "$1"', "sh", dir, String(process.getuid()), String(process.getgid())], { env: { PATH: SAFE_PATH } });
     if (r.code !== 0) throw new Error(`${name}'s home ${dir} could not be made: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200) || ""}`);
@@ -227,7 +227,7 @@ export async function realRoots({ fix = [], check = [] }, home, env = process.en
 
 // ------------------------------------------------------------- sessions
 
-/** Session archives Factory holds (restored from an earlier stage, or captured after a run), by session id, put back on every reset in that order. */
+/** Session archives Pendulum holds (restored from an earlier stage, or captured after a run), by session id, put back on every reset in that order. */
 const SESSIONS = new Map();
 /** A session archive (tar of paths under the config directory's projects/) to put back on every reset; a newer one replaces the session's older. */
 export const holdSession = (id, tar) => {
@@ -237,7 +237,7 @@ export const holdSession = (id, tar) => {
 };
 /** The held archives, in the order a reset puts them back (codex-runner.mjs resetCodexState). */
 export const SESSIONS_HELD = () => [...SESSIONS.values()];
-/** The newest archive Factory captured for a session id, or null. */
+/** The newest archive Pendulum captured for a session id, or null. */
 const CAPTURED = new Map();
 export const capturedSession = (id) => CAPTURED.get(id) || null;
 /** Tests: forget every held session. */
@@ -247,12 +247,12 @@ export const dropSessions = () => {
 };
 
 /** The projects/ directory, relative to the agent's home, where Claude Code keeps sessions on a runner. */
-export const RUNNER_SESSION_ROOT = ".factory-claude/config/projects";
+export const RUNNER_SESSION_ROOT = ".pendulum-claude/config/projects";
 
 /**
  * Claude Code's state made afresh before a start, as the agent: its config directory and its commands' temp directory
  * removed (a link is removed, never followed) and made empty, the package caches made where absent,
- * then every session archive Factory holds unpacked into projects/.
+ * then every session archive Pendulum holds unpacked into projects/.
  */
 export async function resetClaudeState(layout, env = process.env) {
   // The edit-diff directory is made too, so the sandbox's write denial holds a real directory.
@@ -302,7 +302,7 @@ async function archiveSessionWhy(layout, sessionId, env = process.env, { timeout
   if (listed.timedOut) return { archive: null, why: "timed out" };
   const files = String(listed.stdout).split("\0").map((l) => l.replace(/^\.\//, "")).filter((p) => /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p));
   if (!files.length) return { archive: null, why: "none" };
-  // Factory's own packer, not GNU tar (untar.mjs TARPACK: 26.04's tar cannot stat a nested name in the agent's unit).
+  // Pendulum's own packer, not GNU tar (untar.mjs TARPACK: 26.04's tar cannot stat a nested name in the agent's unit).
   const tar = await tarAsAgent(root, files, { cwd: layout.agentHome, env, timeoutMs, maxBytes, killPastMax: true });
   // Past `maxBytes` the archive is cut short: no archive, only that it was too large.
   if (tar.truncated) return { archive: { tar: null, files, truncated: true }, why: "truncated" };
@@ -339,7 +339,7 @@ if (op === "snap") {
   process.stdout.write(JSON.stringify({ id, files: Object.fromEntries(FILES.map((f) => [f, read(path.join(git, f))])), hooks }));
 } else if (op === "restore") {
   const snap = JSON.parse(fs.readFileSync(0, "utf8"));
-  if (snap.id !== id) { process.stderr.write(".git is not the directory Factory set up\n"); process.exit(3); }
+  if (snap.id !== id) { process.stderr.write(".git is not the directory Pendulum set up\n"); process.exit(3); }
   for (const f of FILES) {
     const p = path.join(git, f);
     fs.rmSync(p, { recursive: true, force: true });
@@ -352,12 +352,12 @@ if (op === "snap") {
 }
 `;
 
-/** Factory's git state of each checkout, as pinned (pinRunnerGit). */
+/** Pendulum's git state of each checkout, as pinned (pinRunnerGit). */
 const GIT_PINS = new Map();
 
 const guard = (op, clone, env, input) => exec(...backend(env).sandbox.git([process.execPath, "-e", GIT_GUARD, op, clone], env), { env, input, maxBytes: 64 * 1024 * 1024 });
 
-/** After Factory's own git work on the checkout and before anything of the repository's runs: its git state, pinned. */
+/** After Pendulum's own git work on the checkout and before anything of the repository's runs: its git state, pinned. */
 export async function pinRunnerGit(clone, env = process.env) {
   const r = await guard("snap", clone, env);
   if (r.code !== 0) throw new GitRefusal("git-state", `the checkout's git state could not be read: ${String(r.stderr).trim().slice(0, 200)}`);

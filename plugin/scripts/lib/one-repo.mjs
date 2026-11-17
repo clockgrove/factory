@@ -1,12 +1,12 @@
-// One repository per Objective. An issue body that names another repository on a `Factory-Repository: OWNER/NAME`
+// One repository per Objective. An issue body that names another repository on a `Pendulum-Repository: OWNER/NAME`
 // line, or a plan that needs a change in another repository (its `Needs-Repository: OWNER/NAME` line, the
-// factory-objective-plan skill), is a Question at plan time: the owner splits the Objective into one Objective per repository
+// pendulum-objective-plan skill), is a Question at plan time: the owner splits the Objective into one Objective per repository
 // and re-applies the label, or, for a plan's need, answers how to do the work in this repository alone. The body line
 // is checked before any harness runs; the plan's line when the harness writes its plan, which stops it there.
 
 /** The issue-body line that names a repository for the Objective to change. */
-export const DECLARE_KEY = "Factory-Repository";
-/** The plan line that names a repository the Objective needs a change in (the factory-objective-plan skill), then why. */
+export const DECLARE_KEY = "Pendulum-Repository";
+/** The plan line that names a repository the Objective needs a change in (the pendulum-objective-plan skill), then why. */
 export const NEED_KEY = "Needs-Repository";
 
 const NAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/;
@@ -75,13 +75,13 @@ export const plannedRepos = (plan) => namedRepos(plan, NEED_KEY, { loose: true }
 /** The repositories the issue body names on DECLARE_KEY lines, other than `source` (this repository): ["owner/name", ...]. */
 export const declaredRepos = (body, source) => namedRepos(body, DECLARE_KEY).repos.filter((r) => !source || key(r) !== key(source.full));
 
-const ONE_REPO = "Factory works in one repository per Objective";
+const ONE_REPO = "Pendulum works in one repository per Objective";
 
 /**
  * The Question for an issue body that names another repository (declaredRepos), or "": asked before any harness runs.
  * The owner splits the Objective, one per repository, takes the line out and re-applies `label`.
  */
-export function declaredQuestion(body, { source, label = "factory:objective" }) {
+export function declaredQuestion(body, { source, label = "pendulum:objective" }) {
   const repos = declaredRepos(body, source);
   if (!repos.length) return "";
   return `the issue names ${repos.join(", ")} on a ${DECLARE_KEY} line, and ${ONE_REPO}; split it into one Objective per repository (this one changes only ${source.full}), remove the line and re-apply ${label}`;
@@ -89,10 +89,10 @@ export function declaredQuestion(body, { source, label = "factory:objective" }) 
 
 /**
  * The repositories a plan-time Question asked about that the owner has answered since: `asked` maps each (lower-cased)
- * to when Factory asked (logic.mjs planAskedOf, from its own progress comments); an answer is a maintainer decision
+ * to when Pendulum asked (logic.mjs planAskedOf, from its own progress comments); an answer is a maintainer decision
  * (objectiveDecisions, already checked for write access) made or edited after that time that names the repository. A
  * Set of lower-cased names. The plan line may stay (a harness that annotates it, or writes no plan.md on the rerun and
- * so keeps the plan comment's): the owner has decided, and Factory does not ask the same thing again. `named: false`
+ * so keeps the plan comment's): the owner has decided, and Pendulum does not ask the same thing again. `named: false`
  * counts any decision since the ask, naming the repository or not: the mid-run stop's set (worker.mjs), so a rerun after
  * an answer runs on until the harness has re-planned with it, and the end of the run decides with the named set.
  */
@@ -110,11 +110,11 @@ export function answeredRepos(asked, decisions, { named = true } = {}) {
 /**
  * The plan-time Question, or {}: {reason, repos} when the plan (plannedRepos) needs a change in a repository other than
  * this one (`source`) that the owner has not answered about since it was asked (`answered`, answeredRepos). `reason` is
- * Factory's own one line, naming only values that are OWNER/NAME: Factory works in one repository per Objective, so the
+ * Pendulum's own one line, naming only values that are OWNER/NAME: Pendulum works in one repository per Objective, so the
  * owner splits the Objective, one per repository, and re-applies `label`, or answers in a comment how to do the work in
  * this repository alone. `repos` are the ones asked about, recorded so the answer is recognised on the rerun.
  */
-export function planNeeds(plan, { source, label = "factory:objective", answered = new Set() }) {
+export function planNeeds(plan, { source, label = "pendulum:objective", answered = new Set() }) {
   const missing = plannedRepos(plan).repos.filter((r) => key(r) !== key(source.full) && !answered.has(key(r)));
   if (!missing.length) return {};
   return { repos: missing, reason: `the plan needs a change in ${missing.join(", ")}, and ${ONE_REPO}; split it into one Objective per repository and re-apply ${label}, or answer in a comment how to do the work in ${source.full} alone` };

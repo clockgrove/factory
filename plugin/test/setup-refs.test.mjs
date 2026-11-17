@@ -20,7 +20,7 @@ const all = (c, ctx) => {
 /** The unresolved words alone, their reasons left off. */
 const unresolved = (c, ctx) => commandRefs(c, ctx).unresolved.map((u) => u.replace(/ \([^()]*(\([^()]*\)[^()]*)*\)$/, ""));
 const repo = (files) => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-setup-refs-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-setup-refs-"));
   for (const [p, text] of Object.entries(files)) {
     mkdirSync(join(dir, p, ".."), { recursive: true });
     writeFileSync(join(dir, p), text);
@@ -46,7 +46,7 @@ test("commandRefs resolves the files a command runs by bash's grammar: quotes, c
   assert.deepEqual(paths("cat /work/repo/scripts/x.sh /tmp/y.sh", { roots: ["/work/repo"] }), ["scripts/x.sh"], "an absolute path into the checkout is its file");
 });
 
-test("commandRefs is never short of the word scan Factory read commands with before it parsed them (S2)", () => {
+test("commandRefs is never short of the word scan Pendulum read commands with before it parsed them (S2)", () => {
   for (const [c, file] of [
     ["echo 'bash scripts/x.sh' | sh", "scripts/x.sh"],
     ["cat <<'EOF' | bash\n./b.sh\nEOF", "b.sh"],
@@ -101,7 +101,7 @@ test("commandRefs: package managers run the scripts of the package they run in, 
   for (const c of ["npx turbo run build", "pnpm exec turbo run build"]) assert.ok(s(c).includes("*:build"), c);
   for (const c of ["cross-env CI=1 npm run gen", "mise exec -- npm run gen", "dotenv -- pnpm run gen"]) assert.ok(s(c).includes("package.json:gen"), `a runner behind ${c.split(" ")[0]}`);
   assert.deepEqual(s("npm-run-all lint test").filter((x) => !/:(pre|post)/.test(x)), ["package.json:lint", "package.json:test"]);
-  assert.match(commandRefs("npm-run-all 'build:*'").unresolved[0], /scripts Factory cannot name/);
+  assert.match(commandRefs("npm-run-all 'build:*'").unresolved[0], /scripts Pendulum cannot name/);
   assert.deepEqual(commandRefs("yarn install").guarded, [".yarnrc", ".yarnrc.yml", ".npmrc"]);
   assert.deepEqual(unresolved("npm run $TASK"), ["$TASK"], "a computed script name");
   assert.deepEqual(unresolved('pnpm install --store-dir "$S"'), [], "a computed option value is data");
@@ -182,18 +182,18 @@ test("commandRefs: what names no repository file is no FAIL; a variable is unres
 test("commandRefs names what it cannot resolve", () => {
   assert.deepEqual(unresolved("bash $SCRIPT"), ["$SCRIPT"]);
   assert.deepEqual(unresolved("*.sh"), ["*.sh"], "a glob in the root: the whole repository");
-  assert.deepEqual(unresolved('cd "$DIR" && ./a.sh'), ['cd "$DIR"'], "a cd Factory cannot follow");
+  assert.deepEqual(unresolved('cd "$DIR" && ./a.sh'), ['cd "$DIR"'], "a cd Pendulum cannot follow");
   assert.deepEqual(unresolved("for d in a b; do cd $d; done"), ["a loop that changes directory"]);
   assert.deepEqual(unresolved("bash <<EOF\n./$X.sh\nEOF"), ["./$X.sh"], "a here-document fed to a shell is read as code");
   assert.match(commandRefs("if [; then").unresolved[0], /^the command does not parse as bash/);
 });
 
-test("setup files: what the setup command may run that Factory cannot name FAILs doctor and is named", async () => {
+test("setup files: what the setup command may run that Pendulum cannot name FAILs doctor and is named", async () => {
   const dir = repo({ "scripts/setup.sh": "" });
   for (const setup of ["bash $SETUP_SCRIPT", "for f in *.sh; do bash $f; done", 'cd "$UNSET_DIR" && ./scripts/setup.sh']) {
     const [fail] = await setupFilesCheck({ inputs: { setup, protectedAdditions: ["scripts/"] }, checkout: dir, env: {} });
     assert.equal(fail?.status, "FAIL", setup);
-    assert.match(fail.detail, /which Factory cannot resolve to repository files/);
+    assert.match(fail.detail, /which Pendulum cannot resolve to repository files/);
     const p = await protectSetup({ setup, protectedAdditions: [] }, dir);
     assert.ok(p.unresolved.length, `setup names it too: ${setup}`);
   }
@@ -208,7 +208,7 @@ test("fix-pass scope: an unresolved setup or install makes every file out of sco
   const fence = { prior: ["src/a.ts"], texts: ["FAIL src/b.ts"], extra: refs.paths, named: refs.named, unknown: refs.unresolved };
   assert.deepEqual(fixScopeRefused(["src/a.ts", "src/b.ts", "src/c.ts"], fence), ["src/c.ts"], "only what the scope reaches; anything else may be what setup runs");
   assert.deepEqual(fixScopeRefused(["src/c.ts"], { ...fence, unknown: [] }), [], "a resolved command fences only its own files");
-  assert.match(fixScopeReason(["src/c.ts"], refs.unresolved), /The setup or install command runs \$SETUP .*which Factory cannot resolve/);
+  assert.match(fixScopeReason(["src/c.ts"], refs.unresolved), /The setup or install command runs \$SETUP .*which Pendulum cannot resolve/);
   const pnpm = setupPaths({ setup: "pnpm install" });
   assert.ok(pnpm.paths.includes("pnpm-workspace.yaml"), "pnpm's own file is toolchain");
   assert.deepEqual(fixScopeRefused(["pnpm-workspace.yaml"], { extra: pnpm.paths, named: pnpm.named, membership: ["pnpm-workspace.yaml"] }), [], "a packages-list change alone stays the fix pass's (R1)");
@@ -229,10 +229,10 @@ test("setupFilesNote: each entry bounded and in a code span, nothing that breaks
   assert.match(note, /`x y \{ \{slot\} \} !--c-- `/);
   assert.match(note, /`z{77}\.\.\.`/, "an entry is cut at 80 characters");
   assert.match(note, /don't change them or anything under them: `a\.sh`, .*\. Setup's package\.json scripts, don't change them: `package\.json scripts\.b`\./, "scripts are not paths");
-  assert.equal(setupFilesNote({ files: [], scripts: [], unresolved: ["$X"] }), "Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");
+  assert.equal(setupFilesNote({ files: [], scripts: [], unresolved: ["$X"] }), "Setup also runs what Pendulum cannot name, so Pendulum refuses every push until a person fixes the setup command.");
 });
 
-test("commandRefs: a computed argument Factory resolves is a path wherever it stands; one it cannot is data outside a place setup runs it (N1)", () => {
+test("commandRefs: a computed argument Pendulum resolves is a path wherever it stands; one it cannot is data outside a place setup runs it (N1)", () => {
   const ctx = { env: { HOME: "/home/u", GITHUB_WORKSPACE: "/work/repo" }, roots: ["/work/repo"] };
   for (const [c, file] of [
     ["tsx $PWD/scripts/setup.ts", "scripts/setup.ts"],
@@ -271,7 +271,7 @@ test("commandRefs: find's leading options, sudo's assignments, and the cheap cas
   assert.deepEqual(paths("make -f build/Setup.mk"), ["build/Setup.mk"]);
   assert.ok(paths("git config core.hooksPath hooks").includes("hooks"), "git's hooks directory");
   assert.ok(all('NODE_OPTIONS="--require ./hook" node a.js').includes("hook.mjs"), "NODE_OPTIONS modules with node's candidates");
-  assert.deepEqual(commandRefs("npm --workspace=$W run build").scripts[0], { pkg: "*", name: "build" }, "a workspace option Factory cannot read: any package");
+  assert.deepEqual(commandRefs("npm --workspace=$W run build").scripts[0], { pkg: "*", name: "build" }, "a workspace option Pendulum cannot read: any package");
 });
 
 test("commandRefs: a global install and an npm subcommand that runs no script fence nothing (N8)", () => {

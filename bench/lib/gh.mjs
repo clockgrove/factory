@@ -41,7 +41,7 @@ export async function ghApi(path, { paginate = false, token } = {}) {
  * `{ id }` object). Needs a token with `actions: read` on the repository.
  */
 export async function downloadArtifact(repoFull, artifact, { token } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "factory-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   const env = { ...process.env };
   if (token) env.GH_TOKEN = token;
   const runId = artifact.workflow_run?.id ?? artifact.workflow_run;

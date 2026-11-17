@@ -4,7 +4,7 @@
 // planGate's own rule (objective-trust.mjs planTextState). A harness, model or host label changed is a changed
 // requirement as it stands, never asked about.
 // The decision model sits behind the decider adapter (adapters/decider.mjs, docs/ADAPTERS.md), with red-check triage's
-// key and model setting (triage.mjs). This runs in Factory's own process, never in a harness. Only the typed choice
+// key and model setting (triage.mjs). This runs in Pendulum's own process, never in a harness. Only the typed choice
 // reaches code; the texts are data between random-tag markers, never instructions.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";

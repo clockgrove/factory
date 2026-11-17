@@ -33,7 +33,7 @@ test("exec: an open command item whose command works silently (CPU) keeps the ru
 });
 
 test("exec: an open command item whose command reads slowly at no CPU (a download, a pipe) keeps the run", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-fifo-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-fifo-"));
   const fifo = join(dir, "feed");
   execFileSync("mkfifo", [fifo]);
   // The bytes come from outside the run, a few at a time, as a download's would.
@@ -69,7 +69,7 @@ test("exec: with no item open, a harness that streams its answer is hung once th
 
 test("exec: a helper the harness ships beside its own binary is the harness's, so its pipe I/O does not keep an idle command alive", async () => {
   // Codex runs codex-code-mode-host from its own install directory and talks to it over pipes on every turn.
-  const home = mkdtempSync(join(tmpdir(), "factory-harness-home-"));
+  const home = mkdtempSync(join(tmpdir(), "pendulum-harness-home-"));
   const helper = join(home, "code-mode-host");
   // A real binary in that directory (the kernel names a process's executable by the path it ran).
   try {
@@ -92,7 +92,7 @@ test("exec: a helper the harness ships beside its own binary is the harness's, s
 });
 
 test("harnessHome: a CLI's install directory, symlinks resolved: its npm package, else its own directory; never one of the system's command directories", () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-home-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-home-"));
   try {
     const pkg = join(root, "lib", "node_modules", "@openai", "codex");
     mkdirSync(join(pkg, "bin"), { recursive: true });
@@ -124,7 +124,7 @@ test("exec: a command that left the run's group and tree (setsid, double fork) i
 });
 
 // On a runner the harness runs as the agent in a systemd unit of its own (proc.mjs asAgent): systemd starts it, outside
-// the tree of the systemd-run client Factory waits on. A user manager's unit stands in for the system's here.
+// the tree of the systemd-run client Pendulum waits on. A user manager's unit stands in for the system's here.
 const userSystemd = (() => {
   try {
     execFileSync("systemctl", ["--user", "show-environment"], { stdio: "ignore" });
@@ -134,7 +134,7 @@ const userSystemd = (() => {
   }
 })();
 test("exec: a run in an agent's systemd unit is read from the unit's cgroup, its harness told from its commands", { skip: !userSystemd && "no systemd user manager here" }, async () => {
-  const unit = `factory-agent-hung${process.pid}`;
+  const unit = `pendulum-agent-hung${process.pid}`;
   const args = ["--user", "--quiet", "--wait", "--collect", "--pipe", `--unit=${unit}`, "--", process.execPath, "-e", harnessRunning([process.execPath, "-e", busy(WINDOW * 4)])];
   assert.deepEqual(agentRoute(args), { unit: { name: unit, user: true } });
   const a = harnessActivity();
@@ -167,7 +167,7 @@ test("runReading and hangVerdict: what cannot be read decides nothing", async ()
   const gone = spawn("true");
   await new Promise((r) => gone.on("exit", r));
   for (const procfs of [true, false]) assert.equal(await runReading(gone.pid, { procfs }), null, `procfs ${procfs}: a run not found is unknown, not idle`);
-  assert.equal(await runReading(process.pid, { agent: { cgroup: "/sys/fs/cgroup/factory-no-such-cgroup" } }), null, "an agent's cgroup unread is unknown");
+  assert.equal(await runReading(process.pid, { agent: { cgroup: "/sys/fs/cgroup/pendulum-no-such-cgroup" } }), null, "an agent's cgroup unread is unknown");
   const reading = (procs, ioRead = true) => ({ procs: new Map(procs.map((p, i) => [`${i}:1`, p])), ioRead });
   const harness = { pid: 1, ppid: 0, cpu: 5, io: { rchar: 10, wchar: 0 }, role: "harness" };
   const command = { pid: 2, ppid: 1, cpu: 5, io: { rchar: 10, wchar: 0 }, role: "command" };
@@ -182,8 +182,8 @@ test("runReading and hangVerdict: what cannot be read decides nothing", async ()
   assert.equal(hangVerdict(reading([harness]), reading([harness]), { open: 1 }), null, "an item open with no command process (a sub-agent)");
   const macos = reading([{ ...harness, io: null }, { ...command, io: null }], false);
   assert.equal(hangVerdict(macos, macos, { open: 1 }), true, "without I/O counts the command's CPU decides");
-  assert.equal(agentRoute(["-n", "/usr/bin/env", "codex", "--", "--unit=factory-agent-x"]), null, "only systemd-run's own options name a unit");
-  assert.deepEqual(agentRoute(["-n", "/usr/bin/unshare", "/bin/bash", "-c", "…", "factory-agent-wrap", "/home/a"]), { cgroup: "/sys/fs/cgroup/factory-agent" });
+  assert.equal(agentRoute(["-n", "/usr/bin/env", "codex", "--", "--unit=pendulum-agent-x"]), null, "only systemd-run's own options name a unit");
+  assert.deepEqual(agentRoute(["-n", "/usr/bin/unshare", "/bin/bash", "-c", "…", "pendulum-agent-wrap", "/home/a"]), { cgroup: "/sys/fs/cgroup/pendulum-agent" });
   assert.deepEqual(["00:01:02", "1:02.03", "1-00:00:00", "0:00.5", "x"].map(cpuTimeMs), [62_000, 62_030, 86_400_000, 500, null]);
 });
 
@@ -204,7 +204,7 @@ test("harnessActivity: open() counts each open command item once, a Claude sub-a
 });
 
 test("runHarness: a Codex pass silent while its open command works is kept; one whose open command sleeps is killed as hung", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "factory-hung-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-hung-"));
   const codex = (command) => `#!${process.execPath}
 const put = (o) => console.log(JSON.stringify(o));
 put({ type: "thread.started", thread_id: "t1" });
@@ -233,7 +233,7 @@ put({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, 
 });
 
 test("runHarness: a Claude pass streams its answer (--include-partial-messages) and is killed as hung when it stalls with no command open; the deltas stay out of its record", async () => {
-  const bin = mkdtempSync(join(tmpdir(), "factory-hung-claude-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-hung-claude-"));
   const events = join(bin, "usage", "events.jsonl");
   const claude = `#!${process.execPath}
 if (!process.argv.includes("--include-partial-messages")) process.exit(3);

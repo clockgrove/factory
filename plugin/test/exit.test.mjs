@@ -34,7 +34,7 @@ test("parseExitRecord: the first JSON object with a known exit, from a file or a
   assert.equal(parseExitRecord('{"exit":"maybe"}'), null);
   assert.equal(parseExitRecord("QUESTION: prose only"), null);
   assert.equal(parseExitRecord(""), null);
-  assert.equal(isPlaceholder("<!-- factory:placeholder -->\nFactory reviewer: no findings"), true);
+  assert.equal(isPlaceholder("<!-- pendulum:placeholder -->\nPendulum reviewer: no findings"), true);
   assert.equal(isPlaceholder("No findings here"), false);
 });
 
@@ -55,14 +55,14 @@ test("a question exit names the Question rule's test for each question; one that
   // Only a question exit is checked.
   assert.equal("unfounded" in parseExitRecord(JSON.stringify({ exit: "delivered", questions: [additive] })), false);
   assert.equal("unfounded" in parseExitRecord(JSON.stringify({ exit: "blocked", reason: "x", questions: ["q"] })), false);
-  // What Factory asks names each unfounded question on one line and the shape of the answer it parses.
+  // What Pendulum asks names each unfounded question on one line and the shape of the answer it parses.
   const prompt = questionCheckPrompt(parseExitRecord(JSON.stringify({ exit: "question", questions: ["Is an additive\ncommand acceptable?"] })));
   assert.match(prompt, /^Your exit record raises a Question/);
   assert.match(prompt, /\n1\. Is an additive command acceptable\?\n/);
   assert.match(prompt, /reply with only one JSON object/);
   assert.match(prompt, /\("access"\)/);
   assert.doesNotMatch(prompt, /already name a test/, "nothing stands: no list of questions that stay");
-  assert.match(questionCheckPrompt({ questions: ["q"], unfounded: ["q"] }, { file: true }), /write \$FACTORY_OUT\/exit\.json as only one JSON object/);
+  assert.match(questionCheckPrompt({ questions: ["q"], unfounded: ["q"] }, { file: true }), /write \$PENDULUM_OUT\/exit\.json as only one JSON object/);
   // Mixed: the founded question is named as staying, so the answer keeps it.
   const mixed = questionCheckPrompt(parseExitRecord(JSON.stringify({ exit: "question", questions: [breaks, additive] })));
   assert.match(mixed, /\n1\. Is an additive `materials` command acceptable\?\n\nThese questions already name a test and stay in the record as raised; keep their QUESTION: markers and include each unchanged in "questions":\n1\. Rename pnpm dev:yard/);
@@ -119,8 +119,8 @@ test("blocked: each reason in the worker contract, in priority order", () => {
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0 }).reason, "worker ended without commits or a PR");
   assert.equal(decideExit({ harness: { ok: false, error: "boom" }, pr: null, commits: 0 }).reason, "worker ended without commits: boom");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 2 }).reason, "no PR could be opened for the branch");
-  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 2, green: false } }).reason, "validation red after Factory's second pass");
-  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 2, green: false } }).reason, "validation red after Pendulum's second pass");
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: { passes: 1, green: false } }).reason, "validation red after Pendulum's first pass");
   assert.deepEqual(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, reviewUnaddressed: 2 }), { exit: "blocked", reason: "2 reviewer finding(s) still open after the answer pass", cause: "work", findingsOpen: true });
   assert.equal(decideExit({ harness: ok, pr: pr(), commits: 2, validation: green, record: { exit: "blocked", reason: "The migration needs a credential the runner lacks.", questions: [] } }).reason, "worker blocked: The migration needs a credential the runner lacks.");
   assert.equal(decideExit({ harness: { ok: false, error: "harness error" }, pr: pr(), commits: 2, validation: green }).reason, "harness error");
@@ -133,12 +133,12 @@ test("no commits: the worker's own exit record decides the Block or Question and
   }
   const question = parseExitRecord(JSON.stringify({ exit: "question", reason: "", questions: [{ question: "Drop the old route?", test: "contract", existing: "GET /v1/items" }] }));
   assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: question, recordBasis: "exit file" }), { exit: "question", reason: "question: Drop the old route?" });
-  // Factory's own stand-in when the ask could not run is no worker reason: the generic line leads and says why.
+  // Pendulum's own stand-in when the ask could not run is no worker reason: the generic line leads and says why.
   const none = { exit: "blocked", reason: "no exit record and no time left to ask", questions: [] };
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: none, recordBasis: "none" }).reason, "worker ended without commits or a PR; no exit record and no time left to ask");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a Block with no reason keeps the generic line");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "delivered", reason: "", questions: [] } }).reason, "worker ended without commits or a PR", "a delivery with nothing delivered Blocks");
-  assert.equal(decideExit({ harness: ok, pr: null, commits: 2, record: blocked }).reason, "no PR could be opened for the branch", "with commits, the missing PR is Factory's");
+  assert.equal(decideExit({ harness: ok, pr: null, commits: 2, record: blocked }).reason, "no PR could be opened for the branch", "with commits, the missing PR is Pendulum's");
 });
 
 test("clip: a long reason ends on a word boundary and shows it was cut", () => {
@@ -171,9 +171,9 @@ test("deniedHosts: a blocked exit record's host names, checked for DNS shape, be
   assert.deepEqual(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).deniedHosts, rec.deniedHosts, "a Block before any commit keeps the worker's reason and hosts");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: rec }).reason, "worker blocked: the proof needs the download host");
   assert.equal(decideExit({ harness: ok, pr: null, commits: 0, record: { exit: "blocked", reason: "x", questions: [] } }).deniedHosts, undefined, "without hosts no host fix");
-  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, protectedHits: [".github/x"], record: rec }).deniedHosts, undefined, "a Block of Factory's own carries no host fix");
-  assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, a person who can push applies `factory:host:cdn.example.org` to this issue, which opens it to this Objective alone, then re-applies `factory:objective`. To open it to every Objective, add it to `FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `factory:objective`.");
-  assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, .*To open them to every Objective, add them to `FACTORY_LOCAL_DOMAINS`/);
+  assert.equal(decideExit({ harness: ok, pr: pr(), commits: 1, validation: green, protectedHits: [".github/x"], record: rec }).deniedHosts, undefined, "a Block of Pendulum's own carries no host fix");
+  assert.equal(deniedHostsFix(["cdn.example.org"]), "The local sandbox denied `cdn.example.org`. If the Objective needs it, a person who can push applies `pendulum:host:cdn.example.org` to this issue, which opens it to this Objective alone, then re-applies `pendulum:objective`. To open it to every Objective, add it to `PENDULUM_LOCAL_DOMAINS` (a running `serve` reads it when it restarts), then re-apply `pendulum:objective`.");
+  assert.match(deniedHostsFix(["a.example.com", "b.example.com"]), /denied `a\.example\.com`, `b\.example\.com`\. If the Objective needs them, .*To open them to every Objective, add them to `PENDULUM_LOCAL_DOMAINS`/);
   assert.match(deniedHostsFix(["github.com", "a.cdn.example.com", "b.example.com"], ["github.com", "*.cdn.example.com"]), /denied `b\.example\.com`\./, "hosts already allowed are left out");
   assert.equal(deniedHostsFix(["github.com"], ["github.com"]), null, "allowed already: the generic fix stands");
   assert.equal(deniedHostsFix(["not a host"]), null);
@@ -259,7 +259,7 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   const diff = readFileSync(join(import.meta.dirname, "fixtures", "sample.diff"), "utf8");
   const entries = [{ id: "A", text: "a" }, { id: "B", text: "b" }, { id: "C", text: "c" }, { id: "D", text: "d" }];
   const review = {
-    comments: [{ path: "src/a.ts", line: 3, entry: "A", body: "acceptance A: fixes #12 for @someone <!-- factory:1:plan -->" }],
+    comments: [{ path: "src/a.ts", line: 3, entry: "A", body: "acceptance A: fixes #12 for @someone <!-- pendulum:1:plan -->" }],
     acceptance: [
       { entry: "A", met: false, path: "src/a.ts", line: 3, evidence: "covered by the comment" },
       { entry: "acceptance B", met: false, path: "src/new.ts", line: 2, evidence: "the rate limit is removed" },
@@ -269,14 +269,14 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   const post = reviewPost({ issue: 7, review, diff, entries });
   assert.equal(post.placeholder, false);
   assert.deepEqual(post.comments, [
-    { path: "src/a.ts", line: 3, side: "RIGHT", body: "acceptance A: refs #12 for @\u200bsomeone &lt;!-- factory:1:plan -->" },
+    { path: "src/a.ts", line: 3, side: "RIGHT", body: "acceptance A: refs #12 for @\u200bsomeone &lt;!-- pendulum:1:plan -->" },
     { path: "src/new.ts", line: 2, side: "RIGHT", body: "acceptance B: not met. the rate limit is removed" },
   ]);
   assert.equal(
     post.body,
-    ["<!-- factory:7:review -->", "Factory reviewer: one comment-only pass, 2 comment(s).", "", "Acceptance as the reviewer judged it:", "- A: not met (covered by the comment)", "- acceptance B: not met (the rate limit is removed)", "- C: met (line break)", "", "Not judged: D."].join("\n"),
+    ["<!-- pendulum:7:review -->", "Pendulum reviewer: one comment-only pass, 2 comment(s).", "", "Acceptance as the reviewer judged it:", "- A: not met (covered by the comment)", "- acceptance B: not met (the rate limit is removed)", "- C: met (line break)", "", "Not judged: D."].join("\n"),
   );
-  // Nothing line-tied and every entry met: Factory's placeholder, nothing to answer, the judgments still on record.
+  // Nothing line-tied and every entry met: Pendulum's placeholder, nothing to answer, the judgments still on record.
   const clean = reviewPost({ issue: 7, review: { comments: [], acceptance: [{ entry: "A", met: true, evidence: "ok" }] }, diff, entries: [{ id: "A", text: "a" }] });
   assert.equal(clean.placeholder, true);
   assert.equal(clean.comments.length, 1);
@@ -293,7 +293,7 @@ test("review: an entry judged not met is posted as a comment unless one carries 
   assert.deepEqual(none.unjudged, ["A", "B", "C", "D"]);
   // With no entries listed (no exact Acceptance section), an answer judging none says so too (#417).
   const unnamed = reviewPost({ issue: 7, review: parseReview('{"acceptance": [], "comments": []}'), diff, entries: [] });
-  assert.equal(unnamed.body, ["<!-- factory:7:review -->", "Factory reviewer: one comment-only pass, 1 comment(s).", "", "The reviewer judged no acceptance entry."].join("\n"));
+  assert.equal(unnamed.body, ["<!-- pendulum:7:review -->", "Pendulum reviewer: one comment-only pass, 1 comment(s).", "", "The reviewer judged no acceptance entry."].join("\n"));
   assert.match(unnamed.comments[0].body, /judged none of the acceptance entries; this is not a clean pass\.$/);
   const namedClean = reviewPost({ issue: 7, review: parseReview('{"acceptance": [{"entry": "W1", "met": true}], "comments": []}'), diff, entries: [] });
   assert.match(namedClean.comments[0].body, /no findings; the pass ran/);
@@ -336,7 +336,7 @@ test("review: a missed pass reruns once on every harness; with no review from ei
   // The Blocked reason and the log name a crash as a crash, apart from a pass that ran and found nothing.
   assert.equal(noReviewReason([crash, { ...crash, signal: "SIGSEGV", exitCode: null }], reviewOf), "the reviewer produced no review (a crash (exit 101), then a crash (signal SIGSEGV)), so nothing was posted and the PR does not merge");
   assert.equal(noReviewReason([prose, { ok: false, timedOut: true }], reviewOf), "the reviewer produced no review (an answer with no findings JSON, then the time cap), so nothing was posted and the PR does not merge");
-  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no progress; killed)", "a stop by Factory", "a review"]);
+  assert.deepEqual([{ ok: false, budgetExceeded: true }, { ok: false, idle: true }, { ok: false, stopped: true }, good].map((r) => reviewCallEnd(r, reviewOf({ finalText: r.finalText }))), ["the dollar cap", "a hang (no output and no progress; killed)", "a stop by Pendulum", "a review"]);
 });
 
 test("review: a pass that failed, held no JSON or judged no entry is missed; one judgment is enough", () => {
@@ -425,12 +425,12 @@ test("review: on a split part an entry judged deferred gets no comment; elsewher
 });
 
 test("markers follow the 0.5 idempotent shape lane 1 adopted", () => {
-  assert.equal(marker(811, "plan"), "<!-- factory:811:plan -->");
-  assert.equal(marker(811, "blocked", "work"), "<!-- factory:811:blocked:work -->");
+  assert.equal(marker(811, "plan"), "<!-- pendulum:811:plan -->");
+  assert.equal(marker(811, "blocked", "work"), "<!-- pendulum:811:blocked:work -->");
 });
 
 test("inputs: flag, then with:, then workflow env, then default; booleans and lists", () => {
-  const env = { FACTORY_INPUT_MAX_USD: "", FACTORY_MAX_USD: "12", FACTORY_INPUT_HARNESS: "codex", FACTORY_VALIDATION: "a, b\nc", FACTORY_AUTO_MERGE: "false", GITHUB_REPOSITORY: "o/r" };
+  const env = { PENDULUM_INPUT_MAX_USD: "", PENDULUM_MAX_USD: "12", PENDULUM_INPUT_HARNESS: "codex", PENDULUM_VALIDATION: "a, b\nc", PENDULUM_AUTO_MERGE: "false", GITHUB_REPOSITORY: "o/r" };
   assert.equal(input("max_usd", { env }), "12", "empty with: falls through to the env block");
   assert.equal(input("harness", { env }), "codex");
   assert.equal(input("harness", { env, args: { harness: "claude" } }), "claude");
@@ -453,14 +453,14 @@ test("inputs: flag, then with:, then workflow env, then default; booleans and li
 test("workflow template renders with defaults for empty values and stays valid YAML-shaped", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
   const out = renderWorkflow(template, { harness: "claude", max_concurrent: "4", timeout_minutes: "", runs_on: "ubuntu-latest", version: "v1" });
-  assert.match(out, /FACTORY_HARNESS: claude/);
-  assert.match(out, /FACTORY_MAX_CONCURRENT: 4/);
+  assert.match(out, /PENDULUM_HARNESS: claude/);
+  assert.match(out, /PENDULUM_MAX_CONCURRENT: 4/);
   assert.doesNotMatch(out, /max-parallel/, "the dispatcher's picks are the cap, so a repository variable that raises max_concurrent is not held to the rendered value (#284)");
-  const steps = Object.values(parseYaml(out).jobs).flatMap((j) => j.steps || []).filter((st) => String(st.uses).startsWith("clockgrove/factory@"));
+  const steps = Object.values(parseYaml(out).jobs).flatMap((j) => j.steps || []).filter((st) => String(st.uses).startsWith("clockgrove/pendulum@"));
   assert.ok(steps.length >= 3);
-  for (const st of steps) assert.equal(st.with.vars, "${{ toJSON(vars) }}", "every Factory step gets the repository's variables (#284)");
+  for (const st of steps) assert.equal(st.with.vars, "${{ toJSON(vars) }}", "every Pendulum step gets the repository's variables (#284)");
   assert.match(out, /timeout-minutes: 240/);
-  assert.match(out, /uses: clockgrove\/factory@v\d+\.\d+\.\d+\b/);
+  assert.match(out, /uses: clockgrove\/pendulum@v\d+\.\d+\.\d+\b/);
   assert.doesNotMatch(out, /\{\{\w+\}\}/, "every {{key}} placeholder rendered; ${{ }} expressions stay");
   assert.match(out, /contents: read/);
   assert.doesNotMatch(out, /contents: write/);
@@ -482,9 +482,9 @@ test("App JWT is RS256 with iss, iat and exp; a flattened PEM is restored", () =
 test("decideExit: a red validation names the command that failed", () => {
   const harness = { ok: true, died: 0 };
   const pr = { exists: true, draft: false, body: "## Assumptions\nnone" };
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 2, green: false, command: "pnpm test" } }).reason, "validation red after Factory's second pass (pnpm test)");
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Factory's first pass");
-  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 3, green: false } }).reason, "validation red after Factory's third pass");
+  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 2, green: false, command: "pnpm test" } }).reason, "validation red after Pendulum's second pass (pnpm test)");
+  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 1, green: false } }).reason, "validation red after Pendulum's first pass");
+  assert.equal(decideExit({ harness, pr, commits: 1, validation: { passes: 3, green: false } }).reason, "validation red after Pendulum's third pass");
 });
 
 test("evaluateChecks: required checks from a head's check-runs, latest run per name, missing is not red", async () => {
@@ -575,13 +575,13 @@ setTimeout(() => {
   put({ type: "item.completed", item: { type: "agent_message", text: '{"comments": []}' } });
   put({ type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } });
 }, 200);`;
-  const bin = mkdtempSync(join(tmpdir(), "factory-eagain-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-eagain-"));
   // After the spawn, as srt does: libuv makes a child's inherited stdio blocking again when it starts it.
   writeFileSync(join(bin, "codex"), `#!${process.execPath}\nrequire("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(writer)}], { stdio: "inherit" }).on("exit", (c) => process.exit(c ?? 1));\nsetTimeout(() => process.stdout, 50);\n`, { mode: 0o755 });
   const path = process.env.PATH;
   process.env.PATH = `${bin}:${path}`;
   try {
-    // Factory busy for a second after the first line (posting progress, a slow disk): the stream backs up meanwhile.
+    // Pendulum busy for a second after the first line (posting progress, a slow disk): the stream backs up meanwhile.
     const busy = new Int32Array(new SharedArrayBuffer(4));
     let first = true;
     const onLine = () => {
@@ -604,10 +604,10 @@ test("exec: fileStdio hands the child regular files and still streams lines, std
   assert.deepEqual([r.code, r.stdout, r.stderr, seen], [0, "a\nbc\n", "etruetrue", ["a", "bc"]]);
   const hung = await exec(process.execPath, ["-e", "console.log('x'); setTimeout(() => {}, 60000)"], { idleMs: 400, answerStreams: true, fileStdio: true });
   assert.deepEqual([hung.idle, hung.stdout, !!hung.signal], [true, "x\n", true]);
-  await assert.rejects(exec("factory-no-such-command", [], { fileStdio: true }), /ENOENT/);
+  await assert.rejects(exec("pendulum-no-such-command", [], { fileStdio: true }), /ENOENT/);
 });
 
-test("exec: a fileStdio run closes each of its descriptors once, so one Factory opens during the run stays open (#2660)", async () => {
+test("exec: a fileStdio run closes each of its descriptors once, so one Pendulum opens during the run stays open (#2660)", async () => {
   const { closeSync, fstatSync, openSync } = await import("node:fs");
   const { exec } = await import("../scripts/lib/proc.mjs");
   // Opened while the run is live: the numbers its write ends had are free again, and these take them.
@@ -618,7 +618,7 @@ test("exec: a fileStdio run closes each of its descriptors once, so one Factory 
     assert.equal(r.stdout, "done\n");
     for (const fd of mine) assert.ok(fstatSync(fd).isFile(), `fd ${fd} is still open`);
     // A child that cannot start: its descriptors are dropped once, whatever events follow the failure.
-    await assert.rejects(exec("factory-no-such-command", [], { fileStdio: true }), /ENOENT/);
+    await assert.rejects(exec("pendulum-no-such-command", [], { fileStdio: true }), /ENOENT/);
     const after = [openSync(process.execPath, "r"), openSync(process.execPath, "r")];
     mine.push(...after);
     await new Promise((r) => setTimeout(r, 200));
@@ -628,7 +628,7 @@ test("exec: a fileStdio run closes each of its descriptors once, so one Factory 
   }
 });
 
-test("exec: a fileStdio child that writes faster than Factory reads still meets the time cap (#2660)", async () => {
+test("exec: a fileStdio child that writes faster than Pendulum reads still meets the time cap (#2660)", async () => {
   const { exec } = await import("../scripts/lib/proc.mjs");
   // 20 MB/s of 1 KB lines for 3 s, read at about 10 MB/s: a reader that reads to the end before yielding never yields.
   const writer = "const fs=require('fs');const l=Buffer.from('y'.repeat(1023)+'\\n');const c=Buffer.concat(Array(1024).fill(l));let n=0;const t=setInterval(()=>{fs.writeSync(1,c);if(++n===60){clearInterval(t);fs.writeSync(2,'done');}},50);";
@@ -656,13 +656,13 @@ test("exec: a fileStdio run whose output grows past maxBytes is killed there, it
 test("exec: a fileStdio read that fails mid-run stops the run instead of leaving it silent (#2660)", async () => {
   const { closeSync, readdirSync, readlinkSync } = await import("node:fs");
   const { exec } = await import("../scripts/lib/proc.mjs");
-  // Factory's read end of the run's stdout file, closed from under it once its first line has been read (however long a
+  // Pendulum's read end of the run's stdout file, closed from under it once its first line has been read (however long a
   // loaded machine takes to start the child): the next read fails with EBADF.
   let closedAt = null;
   const closeReadEnd = () => {
     const fd = readdirSync("/proc/self/fd").map(Number).find((n) => {
       try {
-        return /factory-stdio-[^/]+\/stdout$/.test(readlinkSync(`/proc/self/fd/${n}`));
+        return /pendulum-stdio-[^/]+\/stdout$/.test(readlinkSync(`/proc/self/fd/${n}`));
       } catch {
         return false;
       }
@@ -708,28 +708,28 @@ test("harnessActivity: background commands are counted apart from sub-agents", a
   assert.match(activityLine(snap, { harness: "claude" }), /sub-agents 1 active \(implementer: Runtime: journey test, 0 min\); 1 background command running;/);
 });
 
-test("Factory's mirror refuses a branch name that collides with refs under it, before any harness spend", async () => {
+test("Pendulum's mirror refuses a branch name that collides with refs under it, before any harness spend", async () => {
   const { openOutbox } = await import("../scripts/lib/outbox.mjs");
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { execFileSync } = await import("node:child_process");
-  const dir = mkdtempSync(join(tmpdir(), "factory-refs-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-refs-"));
   const bare = join(dir, "remote.git");
   const work = join(dir, "work");
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
   execFileSync("git", ["init", "-q", "-b", "main", work]);
   execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base"]);
   execFileSync("git", ["-C", work, "remote", "add", "origin", bare]);
-  execFileSync("git", ["-C", work, "push", "-q", "origin", "main", "main:refs/heads/factory/5/old-slice"]);
-  const open = (n) => openOutbox({ branch: `factory/${n}`, defaultBranch: "main", checkout: work, remote: bare, base: dir });
-  await assert.rejects(open(5), (e) => e.code === "ref-collision" && /factory\/5 cannot be created: factory\/5\/old-slice exists/.test(e.message));
+  execFileSync("git", ["-C", work, "push", "-q", "origin", "main", "main:refs/heads/pendulum/5/old-slice"]);
+  const open = (n) => openOutbox({ branch: `pendulum/${n}`, defaultBranch: "main", checkout: work, remote: bare, base: dir });
+  await assert.rejects(open(5), (e) => e.code === "ref-collision" && /pendulum\/5 cannot be created: pendulum\/5\/old-slice exists/.test(e.message));
   const ok = await open(6);
   assert.deepEqual([ok.resumed, ok.start === ok.base], [false, true]);
 });
 
 test("decideExit: a refused or rejected push always Blocks with its reason, PR or not", () => {
   const harness = { ok: true, died: 0 };
-  assert.equal(decideExit({ harness, pr: null, commits: 3, pushRejected: "push rejected: ! [remote rejected] factory/808 (cannot lock ref)" }).reason, "push rejected: ! [remote rejected] factory/808 (cannot lock ref)");
+  assert.equal(decideExit({ harness, pr: null, commits: 3, pushRejected: "push rejected: ! [remote rejected] pendulum/808 (cannot lock ref)" }).reason, "push rejected: ! [remote rejected] pendulum/808 (cannot lock ref)");
   assert.deepEqual(decideExit({ harness, pr: pr(), commits: 3, validation: { passes: 1, green: true }, pushRejected: "touched protected path .github/x.yml" }), { exit: "blocked", reason: "push refused: touched protected path .github/x.yml", cause: "work" });
   assert.equal(decideExit({ harness, pr: null, commits: 3 }).reason, "no PR could be opened for the branch");
 });
@@ -760,12 +760,12 @@ test("Git LFS: a plain blob is refused (renames aside), local mode commits media
   const { tmpdir } = await import("node:os");
   const { execFileSync, spawnSync } = await import("node:child_process");
   // No git-lfs filter from the box's own config: exactly the checkout where the binary would go in as a plain blob.
-  const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM, l: process.env.FACTORY_LOCAL };
-  delete process.env.FACTORY_LOCAL;
+  const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM, l: process.env.PENDULUM_LOCAL };
+  delete process.env.PENDULUM_LOCAL;
   process.env.GIT_CONFIG_GLOBAL = "/dev/null";
   process.env.GIT_CONFIG_NOSYSTEM = "1";
   try {
-    const work = mkdtempSync(join(tmpdir(), "factory-lfs-"));
+    const work = mkdtempSync(join(tmpdir(), "pendulum-lfs-"));
     const g = (...a) => execFileSync("git", ["-C", work, ...a], { encoding: "utf8" });
     g("init", "-q", "-b", "main");
     writeFileSync(join(work, ".gitattributes"), "assets/** filter=lfs diff=lfs merge=lfs -text\n");
@@ -795,7 +795,7 @@ test("Git LFS: a plain blob is refused (renames aside), local mode commits media
     g("mv", "assets/old.bin", "assets/moved.bin");
     g("commit", "-q", "-m", "rename only");
     assert.deepEqual(await plainLfsBlobs(work, before), []);
-    // Media committed as a pointer passes (Factory's push uploads it); a plain blob is still refused.
+    // Media committed as a pointer passes (Pendulum's push uploads it); a plain blob is still refused.
     await configureGit(work, { login: "t", protectedList: [] });
     writeFileSync(join(work, "assets", "new.glb"), `${POINTER_HEAD}\noid sha256:${"b".repeat(64)}\nsize 10\n`);
     g("add", "assets/new.glb");
@@ -815,7 +815,7 @@ test("Git LFS: a plain blob is refused (renames aside), local mode commits media
     g("commit", "-q", "-m", "LFS off");
     assert.equal(await usesLfs(work), false);
   } finally {
-    for (const [k, v] of [["GIT_CONFIG_GLOBAL", saved.g], ["GIT_CONFIG_NOSYSTEM", saved.s], ["FACTORY_LOCAL", saved.l]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    for (const [k, v] of [["GIT_CONFIG_GLOBAL", saved.g], ["GIT_CONFIG_NOSYSTEM", saved.s], ["PENDULUM_LOCAL", saved.l]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });
 
@@ -823,7 +823,7 @@ test("Git LFS: a quota refusal is named and Blocks even with a PR open; the endp
   const { lfsEndpoint, lfsQuotaLine } = await import("../scripts/lib/lfs.mjs");
   const out = "Uploading LFS objects:   0% (0/1), 0 B | 0 B/s, done.\nbatch response: This repository is over its data quota. Account responsible for LFS bandwidth should purchase more data packs to restore access.\nerror: failed to push some refs to 'https://github.com/o/r'";
   assert.match(lfsQuotaLine(out), /^This repository is over its data quota/);
-  assert.equal(lfsQuotaLine("! [rejected] HEAD -> factory/1 (fetch first)\nerror: failed to push some refs"), null);
+  assert.equal(lfsQuotaLine("! [rejected] HEAD -> pendulum/1 (fetch first)\nerror: failed to push some refs"), null);
   const reason = `Git LFS refused the upload (quota or storage): ${lfsQuotaLine(out)}`;
   assert.deepEqual(decideExit({ harness: { ok: true }, pr: pr(), commits: 2, validation: { passes: 1, green: true }, pushRejected: reason, lfsRefused: true, lfsQuota: true }), { exit: "blocked", reason, cause: "provider-quota" });
   // Any other Git LFS refusal (the local cap, a missing endpoint, pointers) is a setup gap.
@@ -843,7 +843,7 @@ test("Git LFS: media the default branch gained is not the branch's own after a r
   process.env.GIT_CONFIG_GLOBAL = "/dev/null";
   process.env.GIT_CONFIG_NOSYSTEM = "1";
   try {
-    const root = mkdtempSync(join(tmpdir(), "factory-lfsbase-"));
+    const root = mkdtempSync(join(tmpdir(), "pendulum-lfsbase-"));
     const origin = join(root, "origin.git");
     const work = join(root, "work");
     const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
@@ -854,7 +854,7 @@ test("Git LFS: media the default branch gained is not the branch's own after a r
     run(work, "commit", "-q", "-m", "base");
     run(work, "push", "-q", "origin", "HEAD:main");
     const oldBase = run(work, "rev-parse", "HEAD").trim();
-    run(work, "checkout", "-q", "-b", "factory/1");
+    run(work, "checkout", "-q", "-b", "pendulum/1");
     writeFileSync(join(work, "code.txt"), "change\n");
     run(work, "add", "code.txt");
     run(work, "commit", "-q", "-m", "code only");
@@ -884,11 +884,11 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
   const { mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { execFileSync, spawnSync } = await import("node:child_process");
-  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "FACTORY_LOCAL", "FACTORY_LOCAL_MEDIA_MAX_MB", "GH_TOKEN"];
+  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "PENDULUM_LOCAL", "PENDULUM_LOCAL_MEDIA_MAX_MB", "GH_TOKEN"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GH_TOKEN: "not-a-real-token" });
   try {
-    const root = mkdtempSync(join(tmpdir(), "factory-lfspush-"));
+    const root = mkdtempSync(join(tmpdir(), "pendulum-lfspush-"));
     const origin = join(root, "origin.git");
     const work = join(root, "work");
     const run = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
@@ -902,15 +902,15 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     // The clone's own config holds no helper: whatever runs there (the harness, a repository's command) gets no token.
     const fill = (host, env = {}) => spawnSync("git", ["-C", work, "credential", "fill"], { input: `protocol=https\nhost=${host}\n\n`, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", ...env } });
     assert.doesNotMatch(fill("github.com").stdout, /password=/);
-    // Factory's own git gets the token by env config, for GitHub only: not the LFS storage host, not one a planted
+    // Pendulum's own git gets the token by env config, for GitHub only: not the LFS storage host, not one a planted
     // .lfsconfig names; and scrubbedEnv takes it all away from every child.
     const { credentialEnv } = await import("../scripts/lib/outbox.mjs");
     const { addGitConfig } = await import("../scripts/lib/session.mjs");
     const own = addGitConfig(lfsPinEnv("https://github.com/o/r.git"), credentialEnv("not-a-real-token"));
-    const factoryEnv = { ...lfsPinEnv("https://github.com/o/r.git"), ...own };
-    assert.match(fill("github.com", factoryEnv).stdout, /password=not-a-real-token/);
-    for (const host of ["github-cloud.s3.amazonaws.com", "example.invalid"]) assert.doesNotMatch(fill(host, factoryEnv).stdout, /password=/, host);
-    assert.deepEqual(scrubbedEnv({ PATH: "/bin", ...factoryEnv }), { PATH: "/bin" });
+    const pendulumEnv = { ...lfsPinEnv("https://github.com/o/r.git"), ...own };
+    assert.match(fill("github.com", pendulumEnv).stdout, /password=not-a-real-token/);
+    for (const host of ["github-cloud.s3.amazonaws.com", "example.invalid"]) assert.doesNotMatch(fill(host, pendulumEnv).stdout, /password=/, host);
+    assert.deepEqual(scrubbedEnv({ PATH: "/bin", ...pendulumEnv }), { PATH: "/bin" });
     // Command-line and env config outrank .lfsconfig for every key that picks the endpoint.
     const endpoint = lfsEndpoint("https://github.com/o/r.git");
     // The rest needs git-lfs (GitHub's runners have it).
@@ -921,7 +921,7 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     assert.match(run("lfs", "env"), /^Endpoint=https:\/\/example\.invalid\/lfs /m, "unpinned, .lfsconfig would redirect it");
     // The media a local push uploads: every object since the default branch's merge-base on origin, by git-lfs's own
     // parser (legacy pointer versions too), each once, whatever refs/remotes/origin/* say.
-    run("checkout", "-q", "-b", "factory/1");
+    run("checkout", "-q", "-b", "pendulum/1");
     mkdirSync(join(work, "assets"));
     const store = (bytes) => {
       const oid = createHash("sha256").update(bytes).digest("hex");
@@ -936,24 +936,24 @@ test("Git LFS: token for github.com only, endpoint over .lfsconfig, every object
     writeFileSync(join(work, "assets", "old.glb"), `version https://hawser.github.com/spec/v1\noid sha256:${b}\nsize 50000\n`);
     run("add", "assets");
     run("commit", "-q", "--no-verify", "-m", "media");
-    // Over the cap (the legacy pointer counted, the copy once), Factory's push Blocks with its reason and sends nothing.
-    Object.assign(process.env, { FACTORY_LOCAL_MEDIA_MAX_MB: "0.15" });
-    const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: work, remote: origin, local: true, base: root });
+    // Over the cap (the legacy pointer counted, the copy once), Pendulum's push Blocks with its reason and sends nothing.
+    Object.assign(process.env, { PENDULUM_LOCAL_MEDIA_MAX_MB: "0.15" });
+    const box = await openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: work, remote: origin, local: true, base: root });
     assert.equal(await box.push(), false);
     assert.equal(box.lfsRefused, true);
-    assert.match(box.error, /^the branch's Git LFS media is 0\.2 MB \(2 object\(s\)\), over the local limit of 0\.15 MB \(FACTORY_LOCAL_MEDIA_MAX_MB\)$/);
+    assert.match(box.error, /^the branch's Git LFS media is 0\.2 MB \(2 object\(s\)\), over the local limit of 0\.15 MB \(PENDULUM_LOCAL_MEDIA_MAX_MB\)$/);
     assert.equal(decideExit({ harness: { ok: true }, pr: pr(), commits: 1, pushRejected: box.error, lfsRefused: true }).reason, box.error);
     assert.equal(box.errorKind, "", "the local media cap is no quota of GitHub's");
-    assert.throws(() => execFileSync("git", ["-C", origin, "rev-parse", "--verify", "factory/1"], { stdio: "ignore" }), "nothing reached origin");
-    // The pin is Factory's own: no sandboxed child or harness gets it.
-    const scrubbed = scrubbedEnv({ ...lfsPinEnv("https://github.com/o/r.git"), FACTORY_LFS_PIN: "1", PATH: "/bin" });
+    assert.throws(() => execFileSync("git", ["-C", origin, "rev-parse", "--verify", "pendulum/1"], { stdio: "ignore" }), "nothing reached origin");
+    // The pin is Pendulum's own: no sandboxed child or harness gets it.
+    const scrubbed = scrubbedEnv({ ...lfsPinEnv("https://github.com/o/r.git"), PENDULUM_LFS_PIN: "1", PATH: "/bin" });
     assert.deepEqual(scrubbed, { PATH: "/bin" });
   } finally {
     for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
   }
 });
 
-test("Factory's push: a replace ref that adds media is neither counted nor uploaded", async (t) => {
+test("Pendulum's push: a replace ref that adds media is neither counted nor uploaded", async (t) => {
   const { openOutbox } = await import("../scripts/lib/outbox.mjs");
   const { POINTER_HEAD, lfsVersion } = await import("../scripts/lib/lfs.mjs");
   if (!(await lfsVersion())) return t.skip("git-lfs is not installed");
@@ -961,11 +961,11 @@ test("Factory's push: a replace ref that adds media is neither counted nor uploa
   const { existsSync, mkdirSync, mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { execFileSync } = await import("node:child_process");
-  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "FACTORY_LOCAL", "FACTORY_LOCAL_MEDIA_MAX_MB"];
+  const keys = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "PENDULUM_LOCAL", "PENDULUM_LOCAL_MEDIA_MAX_MB"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
   try {
-    const root = mkdtempSync(join(tmpdir(), "factory-lfsreplace-"));
+    const root = mkdtempSync(join(tmpdir(), "pendulum-lfsreplace-"));
     const origin = join(root, "origin.git");
     const work = join(root, "work");
     const run = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8" });
@@ -983,18 +983,18 @@ test("Factory's push: a replace ref that adds media is neither counted nor uploa
     mkdirSync(join(work, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4)), { recursive: true });
     writeFileSync(join(work, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid), bytes);
     const real = run("rev-parse", "HEAD").trim();
-    run("checkout", "-q", "-b", "factory/2");
+    run("checkout", "-q", "-b", "pendulum/2");
     run("commit", "-q", "--allow-empty", "-m", "work");
     run("checkout", "-q", "-b", "fake", real);
     mkdirSync(join(work, "assets"));
     writeFileSync(join(work, "assets", "big.glb"), `${POINTER_HEAD}\noid sha256:${oid}\nsize 400000\n`);
     run("add", "assets");
     run("commit", "-q", "--amend", "--no-verify", "-m", "base");
-    run("checkout", "-q", "factory/2");
+    run("checkout", "-q", "pendulum/2");
     run("replace", real, run("rev-parse", "fake").trim());
     run("update-ref", "-d", "refs/remotes/origin/main");
-    Object.assign(process.env, { FACTORY_LOCAL_MEDIA_MAX_MB: "0.1" });
-    const box = await openOutbox({ branch: "factory/2", defaultBranch: "main", checkout: work, remote: origin, local: true, base: root });
+    Object.assign(process.env, { PENDULUM_LOCAL_MEDIA_MAX_MB: "0.1" });
+    const box = await openOutbox({ branch: "pendulum/2", defaultBranch: "main", checkout: work, remote: origin, local: true, base: root });
     assert.equal(await box.push(), true, box.error || "the real branch carries no media");
     assert.equal(existsSync(join(origin, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)), false, "the replacement's media was not uploaded");
   } finally {
@@ -1010,7 +1010,7 @@ test("stageChanges: a stage answers for what it changed since it started, never 
   const saved = { g: process.env.GIT_CONFIG_GLOBAL, s: process.env.GIT_CONFIG_NOSYSTEM };
   Object.assign(process.env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
   try {
-    const root = mkdtempSync(join(tmpdir(), "factory-stage-"));
+    const root = mkdtempSync(join(tmpdir(), "pendulum-stage-"));
     const origin = join(root, "origin.git");
     const work = join(root, "work");
     const maint = join(root, "maintainer");
@@ -1025,21 +1025,21 @@ test("stageChanges: a stage answers for what it changed since it started, never 
     put(maint, "app.txt", "v1\n");
     run(maint, "commit", "-q", "-m", "base");
     run(maint, "push", "-q", "origin", "HEAD:main");
-    // A maintainer answers a Question by pushing a workflow to the Factory branch before the next stage.
-    run(maint, "checkout", "-q", "-b", "factory/1");
+    // A maintainer answers a Question by pushing a workflow to the Pendulum branch before the next stage.
+    run(maint, "checkout", "-q", "-b", "pendulum/1");
     put(maint, "app.txt", "v2\n");
     run(maint, "commit", "-q", "-m", "worker's earlier stage");
     put(maint, ".github/workflows/dispatch.yml", "on: workflow_dispatch\n");
     run(maint, "commit", "-q", "-m", "maintainer workflow");
-    run(maint, "push", "-q", "origin", "factory/1");
+    run(maint, "push", "-q", "origin", "pendulum/1");
     // main then changes another workflow.
     run(maint, "checkout", "-q", "main");
     put(maint, ".github/workflows/ci.yml", "on: push\n");
     run(maint, "commit", "-q", "-m", "ci on main");
     run(maint, "push", "-q", "origin", "main");
     execFileSync("git", ["clone", "-q", origin, work]);
-    // The stage starts from the branch as GitHub has it (Factory's mirror reads that; here, the clone does).
-    run(work, "checkout", "-q", "-b", "factory/1", "origin/factory/1");
+    // The stage starts from the branch as GitHub has it (Pendulum's mirror reads that; here, the clone does).
+    run(work, "checkout", "-q", "-b", "pendulum/1", "origin/pendulum/1");
     const start = run(work, "rev-parse", "HEAD");
     assert.deepEqual(await stageChanges(work, start), [], "the maintainer's push before the stage is not the stage's");
     run(work, "rebase", "-q", "origin/main");
@@ -1052,7 +1052,7 @@ test("stageChanges: a stage answers for what it changed since it started, never 
     put(work, ".github/workflows/ci.yml", "on: [push, pull_request]\n");
     run(work, "commit", "-q", "--amend", "--author", "maintainer <m@m>", "-m", "ci on main");
     const fake = run(work, "rev-parse", "HEAD");
-    run(work, "checkout", "-q", "factory/1");
+    run(work, "checkout", "-q", "pendulum/1");
     run(work, "rebase", "-q", "--onto", fake, main);
     run(work, "update-ref", "refs/remotes/origin/main", fake);
     writeFileSync(join(work, ".git", "info", "grafts"), `${main} ${fake}\n`);
@@ -1071,7 +1071,7 @@ test("exec group: a run's processes are killed when it ends, one that left the g
   const { exec } = await import("../scripts/lib/proc.mjs");
   const { mkdtempSync, existsSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
-  const dir = mkdtempSync(join(tmpdir(), "factory-group-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-group-"));
   const r = await exec("sh", ["-c", `sleep 300 & echo $! > ${dir}/a; setsid sh -c 'sleep 300 & echo $! > ${dir}/b; wait' & sleep 0.5; echo done`], { group: true });
   assert.equal(r.stdout.trim(), "done");
   await new Promise((res) => setTimeout(res, 200));
@@ -1088,7 +1088,7 @@ test("a Question raised in review is answered during the run only by a writer's 
   const decision = (author, seen) => ({ author, key: `comment:${seen}`, at: "2026-11-08T09:00:00Z", seen });
   const ready = (login, type, at) => ({ event: "ready_for_review", actor: { login, type }, created_at: at });
   const writers = new Set(["kirk"]);
-  const base = { writers, readAt, startedAt, self: "factory-app[bot]" };
+  const base = { writers, readAt, startedAt, self: "pendulum-app[bot]" };
   const answer = [decision("Kirk", "2026-11-08T10:05:00Z")];
   const marked = [ready("kirk", "User", "2026-11-08T10:07:00Z")];
   assert.equal(answerDuring({ ...base, unread: answer, events: marked }), "kirk marked the PR ready and 1 maintainer decision(s) arrived during the review");
@@ -1097,8 +1097,8 @@ test("a Question raised in review is answered during the run only by a writer's 
   assert.equal(answerDuring({ ...base, unread: answer, events: [] }), "", "a decision alone: the Question stands, the comment stays unread");
   assert.equal(answerDuring({ ...base, unread: [decision("kirk", "2026-11-08T10:01:00Z")], events: marked }), "", "posted before the job read the decisions");
   assert.equal(answerDuring({ ...base, unread: answer, events: [ready("kirk", "User", "2026-11-08T09:59:00Z")] }), "", "a ready mark before the run");
-  assert.equal(answerDuring({ ...base, unread: answer, events: [ready("factory-app[bot]", "Bot", "2026-11-08T10:07:00Z")] }), "", "Factory's own ready mark on Actions");
-  assert.equal(answerDuring({ ...base, self: "kirk", unread: answer, events: marked }), "", "local mode: Factory marks ready as the developer's login");
+  assert.equal(answerDuring({ ...base, unread: answer, events: [ready("pendulum-app[bot]", "Bot", "2026-11-08T10:07:00Z")] }), "", "Pendulum's own ready mark on Actions");
+  assert.equal(answerDuring({ ...base, self: "kirk", unread: answer, events: marked }), "", "local mode: Pendulum marks ready as the developer's login");
   assert.equal(answerDuring({ ...base, self: "someone-else", local: true, unread: answer, events: marked }), "", "local mode keeps the Question: serve runs a ready mark only while the issue is a Question");
 });
 
@@ -1185,7 +1185,7 @@ test("#414: toolchain by exact lists and the toolchain_paths setting, never by a
   assert.equal(toolchainFile("src/toolchain/x.ts", paths), false, "a directory matches from the root, as protected_paths do");
   assert.equal(toolchainFile("a/scripts/install-toolchain.sh", paths), false, "a leading / matches at the root only");
   assert.deepEqual(resolveInputs({ env: {} }).toolchainPaths, [], "empty by default: the exact lists only");
-  assert.deepEqual(resolveInputs({ env: { FACTORY_TOOLCHAIN_PATHS: "toolchain/, scripts/zig.sh" } }).toolchainPaths, ["toolchain/", "scripts/zig.sh"]);
+  assert.deepEqual(resolveInputs({ env: { PENDULUM_TOOLCHAIN_PATHS: "toolchain/, scripts/zig.sh" } }).toolchainPaths, ["toolchain/", "scripts/zig.sh"]);
   // What the fence check may let go: a lockfile, nothing else.
   for (const p of ["package-lock.json", "web/yarn.lock", "Cargo.lock", "uv.lock"]) assert.equal(fenceDecidable(p), true, p);
   // Never: version pins, CI and hooks, containers, wrappers, mise.toml, package-manager configuration, the setting's files.
@@ -1197,9 +1197,9 @@ test("#414: toolchain by exact lists and the toolchain_paths setting, never by a
   assert.equal(fenceDecidable("tools/yarn.lock", { extra: ["tools/yarn.lock"] }), false, "what setup or install names");
   assert.equal(fenceDecidable("web/package-lock.json", { extra: ["web"] }), false, "under a directory an explicit install names (guardCovers)");
   assert.equal(fenceDecidable("tools/yarn.lock", { guarded: ["tools"] }), false, "what the setup guard covers, under a guarded directory");
-  assert.equal(fenceDecidable("package-lock.json", { unknown: ["$SCRIPT"] }), false, "a command that may run a file Factory cannot name");
+  assert.equal(fenceDecidable("package-lock.json", { unknown: ["$SCRIPT"] }), false, "a command that may run a file Pendulum cannot name");
   assert.equal(fenceDecidable("package.json scripts.x/yarn.lock"), false, "a script entry, even one named like a lockfile");
-  // Every still-refused file undecided: Factory's or the outage's Block; any other among them: the work's.
+  // Every still-refused file undecided: Pendulum's or the outage's Block; any other among them: the work's.
   const undecided = { cause: "outage", undecided: ["a.lock"], judged: ["a.lock: the decision model (m) gave no answer (unavailable)"] };
   assert.equal(scopeRefusal(["a.lock"], undecided).cause, "outage");
   assert.equal(scopeRefusal(["a.lock", ".npmrc"], undecided).cause, undefined, "a file never asked about makes it the work's");
@@ -1209,7 +1209,7 @@ test("#414: toolchain by exact lists and the toolchain_paths setting, never by a
   const exit = (more) => decideExit({ harness: { ok: true }, pr: { exists: true, draft: true }, commits: 2, ...more });
   assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "outage" } }).cause, "outage");
   assert.equal(exit({ validation: { passes: 1, green: false, scope: reason, scopeCause: "nonsense" } }).cause, "work");
-  assert.equal(exit({ pushRejected: reason, pushCause: "factory" }).cause, "factory");
+  assert.equal(exit({ pushRejected: reason, pushCause: "pendulum" }).cause, "pendulum");
   assert.equal(exit({ pushRejected: reason }).cause, "work");
 });
 
@@ -1377,38 +1377,38 @@ test("fix-pass scope: a corrective turn that puts the files back and asks a Ques
 });
 
 test("workflowScopeReason: the cause and what to do, whether the branch changed the file or carries an older one (#2579)", () => {
-  const behind = workflowScopeReason({ branch: "factory/7", defaultBranch: "main", paths: [".github/workflows/factory.yml"], own: [] });
-  assert.match(behind, /^push rejected \(workflow scope\): GitHub refused factory\/7 because its \.github\/workflows\/factory\.yml is not the version main has/);
+  const behind = workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main", paths: [".github/workflows/pendulum.yml"], own: [] });
+  assert.match(behind, /^push rejected \(workflow scope\): GitHub refused pendulum\/7 because its \.github\/workflows\/pendulum\.yml is not the version main has/);
   assert.match(behind, /bring the branch up to date with main/);
-  const own = workflowScopeReason({ branch: "factory/7", defaultBranch: "main", paths: ["a", "b", "c", "d"], own: ["a", "b", "c", "d"] });
-  assert.match(own, /because it changes a, b, c and 1 more, .*hands a workflow change over in \$FACTORY_OUT\/workflow\.patch/);
+  const own = workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main", paths: ["a", "b", "c", "d"], own: ["a", "b", "c", "d"] });
+  assert.match(own, /because it changes a, b, c and 1 more, .*hands a workflow change over in \$PENDULUM_OUT\/workflow\.patch/);
   // Blocked as it stands: decideExit keeps a reason that starts with "push rejected".
   assert.equal(decideExit({ harness: { ok: true }, pushRejected: behind }).reason, behind);
-  // The branch's workflow files matched the default branch Factory read: it moved again during the push.
-  assert.match(workflowScopeReason({ branch: "factory/7", defaultBranch: "main" }), /^push rejected \(workflow scope\): GitHub refused factory\/7 for a workflow file .* main likely changed one again/);
+  // The branch's workflow files matched the default branch Pendulum read: it moved again during the push.
+  assert.match(workflowScopeReason({ branch: "pendulum/7", defaultBranch: "main" }), /^push rejected \(workflow scope\): GitHub refused pendulum\/7 for a workflow file .* main likely changed one again/);
 });
 
 test("pushRefusal: git's status word, git's own reason and the exit code; never the remote's text", () => {
-  const remote = ["To https://x-access-token@github.com/acme/app.git", "remote: error: GH013: Repository rule violations found for refs/heads/factory/7.", "!\trefs/heads/incoming:refs/heads/factory/7\t[remote rejected] (push declined due to repository rule violations)", "Done"];
-  const reason = pushRefusal({ branch: "factory/7", out: remote, code: 1 });
-  assert.equal(reason, "push rejected: GitHub refused refs/heads/factory/7 (remote rejected, exit 1); its message is in the job log");
+  const remote = ["To https://x-access-token@github.com/acme/app.git", "remote: error: GH013: Repository rule violations found for refs/heads/pendulum/7.", "!\trefs/heads/incoming:refs/heads/pendulum/7\t[remote rejected] (push declined due to repository rule violations)", "Done"];
+  const reason = pushRefusal({ branch: "pendulum/7", out: remote, code: 1 });
+  assert.equal(reason, "push rejected: GitHub refused refs/heads/pendulum/7 (remote rejected, exit 1); its message is in the job log");
   assert.doesNotMatch(reason, /GH013|rule|github\.com|declined/);
-  assert.equal(pushRefusal({ branch: "factory/7", out: ["!\trefs/heads/incoming:refs/heads/factory/7\t[rejected] (stale info)"], code: 1 }), "push rejected: GitHub refused refs/heads/factory/7 (rejected, GitHub's head moved since Factory read it, exit 1); its message is in the job log");
-  assert.equal(pushRefusal({ branch: "factory/7", out: ["!\trefs/heads/incoming:refs/heads/factory/7\t[rejected] (non-fast-forward)"], code: 1 }), "push rejected: GitHub refused refs/heads/factory/7 (rejected, non-fast-forward, exit 1); its message is in the job log");
-  assert.equal(pushRefusal({ branch: "factory/7", out: ["fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host"], code: 128 }), "push rejected: GitHub refused refs/heads/factory/7 (exit 128); its message is in the job log");
+  assert.equal(pushRefusal({ branch: "pendulum/7", out: ["!\trefs/heads/incoming:refs/heads/pendulum/7\t[rejected] (stale info)"], code: 1 }), "push rejected: GitHub refused refs/heads/pendulum/7 (rejected, GitHub's head moved since Pendulum read it, exit 1); its message is in the job log");
+  assert.equal(pushRefusal({ branch: "pendulum/7", out: ["!\trefs/heads/incoming:refs/heads/pendulum/7\t[rejected] (non-fast-forward)"], code: 1 }), "push rejected: GitHub refused refs/heads/pendulum/7 (rejected, non-fast-forward, exit 1); its message is in the job log");
+  assert.equal(pushRefusal({ branch: "pendulum/7", out: ["fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host"], code: 128 }), "push rejected: GitHub refused refs/heads/pendulum/7 (exit 128); its message is in the job log");
   assert.equal(decideExit({ harness: { ok: true }, pushRejected: reason }).reason, reason);
 });
 
 test("workflowScopeRefused: GitHub's own phrase on the ref's own line only", () => {
-  const line = (reason, ref = "factory/7") => `!\trefs/heads/incoming:refs/heads/${ref}\t[remote rejected] (${reason})`;
-  assert.equal(workflowScopeRefused(line("refusing to allow a Personal Access Token to create or update workflow .github/workflows/factory.yml without workflow scope"), "factory/7"), true);
-  assert.equal(workflowScopeRefused(line("refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission"), "factory/7"), true);
-  assert.equal(workflowScopeRefused(line("refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope"), "factory/7"), true);
+  const line = (reason, ref = "pendulum/7") => `!\trefs/heads/incoming:refs/heads/${ref}\t[remote rejected] (${reason})`;
+  assert.equal(workflowScopeRefused(line("refusing to allow a Personal Access Token to create or update workflow .github/workflows/pendulum.yml without workflow scope"), "pendulum/7"), true);
+  assert.equal(workflowScopeRefused(line("refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission"), "pendulum/7"), true);
+  assert.equal(workflowScopeRefused(line("refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope"), "pendulum/7"), true);
   // Another ref's line, another reason naming a workflow, a remote: line, git's own rejection.
-  assert.equal(workflowScopeRefused(line("refusing to allow a GitHub App to create or update workflow x", "factory/70"), "factory/7"), false);
-  assert.equal(workflowScopeRefused(line("pre-receive hook declined: workflow files are locked"), "factory/7"), false);
-  assert.equal(workflowScopeRefused("remote: refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml`", "factory/7"), false);
-  assert.equal(workflowScopeRefused("!\trefs/heads/incoming:refs/heads/factory/7\t[rejected] (non-fast-forward) workflow", "factory/7"), false);
+  assert.equal(workflowScopeRefused(line("refusing to allow a GitHub App to create or update workflow x", "pendulum/70"), "pendulum/7"), false);
+  assert.equal(workflowScopeRefused(line("pre-receive hook declined: workflow files are locked"), "pendulum/7"), false);
+  assert.equal(workflowScopeRefused("remote: refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml`", "pendulum/7"), false);
+  assert.equal(workflowScopeRefused("!\trefs/heads/incoming:refs/heads/pendulum/7\t[rejected] (non-fast-forward) workflow", "pendulum/7"), false);
 });
 
 test("a file named like an Object.prototype key is never read as a lockfile pair", () => {
@@ -1417,7 +1417,7 @@ test("a file named like an Object.prototype key is never read as a lockfile pair
   }
 });
 
-test("hostile member globs are decided in bounded time (factory#2618 review)", () => {
+test("hostile member globs are decided in bounded time (pendulum#2618 review)", () => {
   // Member globs come from a file a worker can write; a pattern built to backtrack must not stall the outbox.
   const stars = (n) => `x${"*a".repeat(n)}*b`;
   const deep = Array.from({ length: 30 }, (_, k) => `d${k}`).join("/");
@@ -1442,28 +1442,28 @@ test("hostile member globs are decided in bounded time (factory#2618 review)", (
 test("Block causes: each Block carries a code from the one closed list; refusals, the cap and GitHub's unstarted job are external, the rest not", async () => {
   const { BLOCK_CAUSES, blockCauseOf, blockMarker, refusalCause } = await import("../scripts/lib/logic.mjs");
   const { stageBlockCause } = await import("../scripts/lib/gateway-relay.mjs");
-  assert.deepEqual(Object.keys(BLOCK_CAUSES), ["max-usd", "gateway-budget", "provider-quota", "outage", "setup", "work", "factory"]);
+  assert.deepEqual(Object.keys(BLOCK_CAUSES), ["max-usd", "gateway-budget", "provider-quota", "outage", "setup", "work", "pendulum"]);
   assert.deepEqual(Object.entries(BLOCK_CAUSES).filter(([, c]) => c.external).map(([k]) => k), ["max-usd", "gateway-budget", "provider-quota", "outage"]);
   const ok = { ok: true };
   const cause = (args) => decideExit({ harness: ok, pr: { exists: true }, commits: 1, ...args }).cause;
   assert.equal(cause({ harness: { budgetExceeded: true } }), "max-usd");
-  assert.equal(cause({ harness: { budgetExceeded: true, unmetered: true } }), "factory");
+  assert.equal(cause({ harness: { budgetExceeded: true, unmetered: true } }), "pendulum");
   assert.equal(cause({ harness: { refusal: { harness: "codex", status: 429, type: "insufficient_quota" } } }), "provider-quota");
   assert.equal(cause({ harness: { refusal: { harness: "codex", status: null, type: "insufficient_funds" } } }), "gateway-budget");
   assert.equal(cause({ harness: { refusal: { harness: "claude", status: 401, type: "authentication_error" } } }), "setup");
   assert.equal(refusalCause({ harness: "claude", status: 402, type: null }), "provider-quota");
   assert.equal(cause({ validation: { passes: 1, green: false, notStarted: "GitHub never started the job" } }), "outage");
   assert.equal(cause({ validation: { passes: 2, green: false } }), "work");
-  assert.equal(cause({ harness: { died: 2 } }), "factory");
+  assert.equal(cause({ harness: { died: 2 } }), "pendulum");
   // The relay: the gateway's own refusal is the cause; its shutdown is no max_usd overrun.
   assert.equal(stageBlockCause("work", { gatewayRefused: { type: "insufficient_funds" } }), "gateway-budget");
-  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, false), "factory");
+  assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, false), "pendulum");
   assert.equal(stageBlockCause("max-usd", { shut: { calls: 2, why: "x" } }, true), "max-usd");
   assert.equal(stageBlockCause("work", null), "work");
   // The notice's cause line: read back by structure; a code off the list is written and read as nothing external.
   assert.equal(blockCauseOf(`@dev Blocked (work): dollar cap reached\n${blockMarker("max-usd")}`), "max-usd");
-  assert.equal(blockMarker("bogus"), '<!-- factory:block {"cause":"factory"} -->');
-  assert.equal(blockCauseOf('<!-- factory:block {"cause":"bogus"} -->'), null);
+  assert.equal(blockMarker("bogus"), '<!-- pendulum:block {"cause":"pendulum"} -->');
+  assert.equal(blockCauseOf('<!-- pendulum:block {"cause":"bogus"} -->'), null);
   assert.equal(blockCauseOf("@dev Blocked (work): an older notice"), null);
-  assert.equal(blockCauseOf(`${blockMarker("max-usd")}\n${blockMarker("work")}`), "work", "the last line is Factory's");
+  assert.equal(blockCauseOf(`${blockMarker("max-usd")}\n${blockMarker("work")}`), "work", "the last line is Pendulum's");
 });

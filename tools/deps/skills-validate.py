@@ -1,6 +1,6 @@
 """`python -I tools/deps/skills-validate.py <skill dir>...`: check each skill with the Agent Skills standard's reference
 validator (skills-ref, its own parser and rules), where a skill may also carry the frontmatter fields a harness reads
-beyond the standard's (HARNESS_FIELDS), each only with the value Factory writes. The standard's validator refuses every
+beyond the standard's (HARNESS_FIELDS), each only with the value Pendulum writes. The standard's validator refuses every
 field it does not define, and Claude Code hides a skill from its `/` menu only by such a field. Exits 1 when any skill
 fails, naming each failure on stderr.
 """

@@ -10,13 +10,13 @@ import { questionNotice } from "../scripts/lib/session.mjs";
 RETRY.sleep = async () => {};
 
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-const OBJ = "factory:objective";
+const OBJ = "pendulum:objective";
 const issue = (labels, number) => ({ number, state: "open", labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
 
 const withApi = async (fn) => {
-  const keys = ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"];
+  const keys = ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  Object.assign(process.env, { GITHUB_API_URL: "https://github.test", FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" });
+  Object.assign(process.env, { GITHUB_API_URL: "https://github.test", PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" });
   try {
     return await fn();
   } finally {
@@ -28,7 +28,7 @@ const withApi = async (fn) => {
 /** serve's pendingReviews over a fetch fake: `pulls` the open PRs, `issues` by number, `timelines` by number. */
 async function pending({ pulls, issues, timelines = {} }) {
   const { Local } = await import("../scripts/local.mjs");
-  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ FACTORY_LOCAL_ALL: "1" }) });
+  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1" }) });
   const reads = [];
   return withApi(async () => {
     const realFetch = globalThis.fetch;
@@ -54,19 +54,19 @@ async function pending({ pulls, issues, timelines = {} }) {
   });
 }
 
-const pull = (n, { draft = false, labels = [] } = {}) => ({ number: n * 10, state: "open", draft, head: { ref: `factory/${n}` }, labels: labels.map((name) => ({ name })) });
+const pull = (n, { draft = false, labels = [] } = {}) => ({ number: n * 10, state: "open", draft, head: { ref: `pendulum/${n}` }, labels: labels.map((name) => ({ name })) });
 const labeled = (name, at) => ({ event: "labeled", label: { name }, created_at: at });
 const ready = (at, login = "maintainer") => ({ event: "ready_for_review", actor: { login, type: "User" }, created_at: at });
 
 test("serve reviews a Question's PR a person marked ready, as the Action's ready_for_review event does", async () => {
   const { out } = await pending({
     pulls: [pull(7), pull(8), pull(9), pull(6, { draft: true })],
-    issues: { 7: issue([OBJ, "factory:question"], 7), 8: issue([OBJ, "factory:question"], 8), 9: issue([OBJ, "factory:in-review"], 9), 6: issue([OBJ, "factory:question"], 6) },
+    issues: { 7: issue([OBJ, "pendulum:question"], 7), 8: issue([OBJ, "pendulum:question"], 8), 9: issue([OBJ, "pendulum:in-review"], 9), 6: issue([OBJ, "pendulum:question"], 6) },
     timelines: {
-      7: [labeled("factory:question", "2026-11-15T10:00:00Z")],
+      7: [labeled("pendulum:question", "2026-11-15T10:00:00Z")],
       70: [ready("2026-11-15T09:00:00Z"), { event: "convert_to_draft", created_at: "2026-11-15T09:59:59Z" }, ready("2026-11-15T10:04:00Z")],
       // A Question whose PR GitHub kept out of draft: its only ready mark is from before the Question.
-      8: [labeled("factory:question", "2026-11-15T10:00:00Z")],
+      8: [labeled("pendulum:question", "2026-11-15T10:00:00Z")],
       80: [ready("2026-11-15T09:00:00Z")],
     },
   });
@@ -74,21 +74,21 @@ test("serve reviews a Question's PR a person marked ready, as the Action's ready
 });
 
 test("serve reads the Questions only when an open PR out of draft has no review label, and no timeline without a Question", async () => {
-  const none = await pending({ pulls: [pull(6, { draft: true }), pull(5, { labels: ["factory:review"] })], issues: { 6: issue([OBJ, "factory:question"], 6), 5: issue([OBJ, "factory:in-review"], 5) } });
+  const none = await pending({ pulls: [pull(6, { draft: true }), pull(5, { labels: ["pendulum:review"] })], issues: { 6: issue([OBJ, "pendulum:question"], 6), 5: issue([OBJ, "pendulum:in-review"], 5) } });
   assert.deepEqual(none.out, [{ issue: 5, pr: 50 }]);
-  assert.ok(!none.reads.includes("/issues?labels=factory:question"), none.reads.join("\n"));
-  const inReview = await pending({ pulls: [pull(9)], issues: { 9: issue([OBJ, "factory:in-review"], 9) } });
+  assert.ok(!none.reads.includes("/issues?labels=pendulum:question"), none.reads.join("\n"));
+  const inReview = await pending({ pulls: [pull(9)], issues: { 9: issue([OBJ, "pendulum:in-review"], 9) } });
   assert.deepEqual(inReview.out, []);
-  assert.deepEqual(inReview.reads.filter((r) => r !== "/pulls" && r !== "/user"), ["/issues?labels=factory:question"], "one listing, no per-PR read");
+  assert.deepEqual(inReview.reads.filter((r) => r !== "/pulls" && r !== "/user"), ["/issues?labels=pendulum:question"], "one listing, no per-PR read");
 });
 
 test("the review reads the person's ready mark on every route, and the Question comment names it", async () => {
   const { readyMark } = await import("../scripts/review.mjs");
-  const question = issue([OBJ, "factory:question"], 7);
-  const inReview = issue([OBJ, "factory:in-review"], 7);
+  const question = issue([OBJ, "pendulum:question"], 7);
+  const inReview = issue([OBJ, "pendulum:in-review"], 7);
   const out = { number: 70, draft: false };
   assert.equal(readyMark({ action: "ready_for_review", sender: { type: "User" } }), true, "Actions: a person's event");
-  assert.equal(readyMark({ action: "ready_for_review", sender: { type: "Bot" } }), false, "Actions: Factory's own mark");
+  assert.equal(readyMark({ action: "ready_for_review", sender: { type: "Bot" } }), false, "Actions: Pendulum's own mark");
   assert.equal(readyMark({ action: "labeled", sender: { type: "Bot" }, issue: question, pr: out }), false, "Actions: the review label is no ready mark");
   assert.equal(readyMark({ local: true, issue: question, pr: out }), true, "local: a Question's PR out of draft");
   assert.equal(readyMark({ local: true, issue: inReview, pr: out }), false, "local: an In-review PR's review");
@@ -98,7 +98,7 @@ test("the review reads the person's ready mark on every route, and the Question 
 
 test("a Question whose PR GitHub will not draft Blocks once, naming it, rather than leaving a ready PR serve would ask again each tick", async () => {
   const { applyExit } = await import("../scripts/lib/session.mjs");
-  const pr = { number: 70, node_id: "PR_70", draft: false, head: { sha: "abc" }, user: { login: "factory[bot]" } };
+  const pr = { number: 70, node_id: "PR_70", draft: false, head: { sha: "abc" }, user: { login: "pendulum[bot]" } };
   const writes = [];
   const run = (refuse) =>
     withApi(async () => {
@@ -128,18 +128,18 @@ test("a Question whose PR GitHub will not draft Blocks once, naming it, rather t
     });
   const asked = await run(false);
   assert.equal(asked.exit, "question");
-  assert.ok(writes.some((w) => w === "POST /issues/7/labels factory:question"), writes.join("\n"));
+  assert.ok(writes.some((w) => w === "POST /issues/7/labels pendulum:question"), writes.join("\n"));
   const blocked = await run(true);
   assert.equal(blocked.exit, "blocked", "the stage ends as it was applied");
   assert.match(blocked.reason, /^PR #70 could not be made a draft for its Question \(graphql: Resource not accessible by integration\), so the Question is not asked; the question was: which name\?$/);
-  assert.ok(!writes.some((w) => /factory:question/.test(w) && w.startsWith("POST")), `no Question label: ${writes.join("\n")}`);
+  assert.ok(!writes.some((w) => /pendulum:question/.test(w) && w.startsWith("POST")), `no Question label: ${writes.join("\n")}`);
   assert.ok(!writes.some((w) => /Question \(review\)/.test(w)), "no Question notice");
   assert.ok(!writes.some((w) => /requested_reviewers/.test(w)), "no review request");
   const notice = writes.find((w) => /^POST \/issues\/7\/comments /.test(w)) || "";
   assert.match(notice, /Blocked \(review\): PR #70 could not be made a draft/, writes.join("\n"));
-  assert.match(notice, /"cause":"factory"/, "cause factory");
-  assert.match(notice, /Fix by letting Factory's token convert PR #70 to a draft, or by making it one by hand/);
+  assert.match(notice, /"cause":"pendulum"/, "cause pendulum");
+  assert.match(notice, /Fix by letting Pendulum's token convert PR #70 to a draft, or by making it one by hand/);
   assert.ok(!/was delivered|is a draft/.test(notice), "the notice never says the PR is a draft");
   assert.equal(writes.filter((w) => w === "draft").length, 1, "one draft attempt");
-  assert.ok(writes.includes("POST /issues/7/labels factory:blocked"), writes.join("\n"));
+  assert.ok(writes.includes("POST /issues/7/labels pendulum:blocked"), writes.join("\n"));
 });

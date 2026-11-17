@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Factory's stage inside a cloud sandbox VM. The launcher (launch.mjs) starts it detached, as the VM's default user,
+// Pendulum's stage inside a cloud sandbox VM. The launcher (launch.mjs) starts it detached, as the VM's default user,
 // and exits; this process outlives it.
 //   node stage.mjs            run the stage the launcher's start command describes (its environment)
 //   node stage.mjs --deliver  hand fresh tokens (this command's environment) to the running stage over its socket
 // The stage is the same worker (worker.mjs) or reviewer (review.mjs) the Actions jobs run, with the same split: this
-// user holds the App's write token in memory; the harness and the repository's commands run as `factory-agent`
+// user holds the App's write token in memory; the harness and the repository's commands run as `pendulum-agent`
 // (agent.mjs) with only a read-only token in its own home. The tokens come in this process's start environment and are
 // moved into memory at once; fresh ones arrive over a 600 socket in a 700 directory and go to the child over its IPC
 // channel. None is written to a file.
@@ -34,15 +34,15 @@ const BEAT_MS = 2 * 60_000;
 const TOKEN_ASK_MS = 40 * 60_000;
 const TOKEN_RETRY_MS = 5 * 60_000;
 /** The secrets this process may be started with: moved into memory, gone from the environment. */
-const SECRETS = ["FACTORY_APP_TOKEN", "FACTORY_READ_TOKEN", "FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_INPUT_CODEX_API_KEY", "FACTORY_INPUT_CODEX_GATEWAY_KEY", "FACTORY_INPUT_COPILOT_GITHUB_TOKEN", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "FACTORY_INPUT_WORKER_SECRET_VALUES"];
+const SECRETS = ["PENDULUM_APP_TOKEN", "PENDULUM_READ_TOKEN", "PENDULUM_INPUT_ANTHROPIC_API_KEY", "PENDULUM_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "PENDULUM_INPUT_CODEX_API_KEY", "PENDULUM_INPUT_CODEX_GATEWAY_KEY", "PENDULUM_INPUT_COPILOT_GITHUB_TOKEN", "PENDULUM_INPUT_AI_GATEWAY_API_KEY", "PENDULUM_INPUT_WORKER_SECRET_VALUES"];
 
-const dirOf = (env = process.env) => join(env.HOME || "/tmp", "factory");
+const dirOf = (env = process.env) => join(env.HOME || "/tmp", "pendulum");
 const socketOf = (env = process.env) => join(dirOf(env), "stage.sock");
 
 /** `--deliver`: one JSON line to the running stage's socket; the stage checks the claim. */
 async function deliver() {
-  const msg = { claim: process.env.FACTORY_STAGE_CLAIM, write: process.env.FACTORY_APP_TOKEN, read: process.env.FACTORY_READ_TOKEN };
-  for (const k of ["FACTORY_APP_TOKEN", "FACTORY_READ_TOKEN"]) delete process.env[k];
+  const msg = { claim: process.env.PENDULUM_STAGE_CLAIM, write: process.env.PENDULUM_APP_TOKEN, read: process.env.PENDULUM_READ_TOKEN };
+  for (const k of ["PENDULUM_APP_TOKEN", "PENDULUM_READ_TOKEN"]) delete process.env[k];
   await new Promise((resolve, reject) => {
     const c = net.createConnection(socketOf(), () => c.end(`${JSON.stringify(msg)}\n`));
     c.on("close", resolve);
@@ -55,19 +55,19 @@ async function run() {
   const env = process.env;
   const secrets = Object.fromEntries(SECRETS.filter((k) => env[k]).map((k) => [k, env[k]]));
   for (const k of SECRETS) delete env[k];
-  const tokens = { write: secrets.FACTORY_APP_TOKEN, read: secrets.FACTORY_READ_TOKEN, at: Date.now() };
+  const tokens = { write: secrets.PENDULUM_APP_TOKEN, read: secrets.PENDULUM_READ_TOKEN, at: Date.now() };
   // Every secret the child is given, fresh tokens included: masked in its harness stream when the stage has to end it.
   // The opted-in worker secrets' values one by one (lib/worker-secrets.mjs), since they arrive as one block of lines.
-  const opted = optedValues(input("worker_secrets", { env }), secrets.FACTORY_INPUT_WORKER_SECRET_VALUES);
-  const given = new Set([...Object.values(secrets).filter((v, i) => Object.keys(secrets)[i] !== "FACTORY_INPUT_WORKER_SECRET_VALUES"), ...opted].filter(Boolean));
+  const opted = optedValues(input("worker_secrets", { env }), secrets.PENDULUM_INPUT_WORKER_SECRET_VALUES);
+  const given = new Set([...Object.values(secrets).filter((v, i) => Object.keys(secrets)[i] !== "PENDULUM_INPUT_WORKER_SECRET_VALUES"), ...opted].filter(Boolean));
   // What this process posts (the stage's record, an ended stage's exit): none of those values.
   holdSecrets(opted);
   const repo = repoOf(env.GITHUB_REPOSITORY);
-  const issue = Number(env.FACTORY_STAGE_ISSUE);
-  const stage = env.FACTORY_STAGE;
-  const claim = env.FACTORY_STAGE_CLAIM;
+  const issue = Number(env.PENDULUM_STAGE_ISSUE);
+  const stage = env.PENDULUM_STAGE;
+  const claim = env.PENDULUM_STAGE_CLAIM;
   if (!tokens.write || !issue || !claim || !["work", "review"].includes(stage)) throw new Error("the stage needs its tokens, issue, claim and stage from the launcher");
-  if (env.FACTORY_APP_SLUG) setSelf(`${env.FACTORY_APP_SLUG}[bot]`);
+  if (env.PENDULUM_APP_SLUG) setSelf(`${env.PENDULUM_APP_SLUG}[bot]`);
   const opts = { token: () => tokens.write };
   const dir = dirOf(env);
   mkdirSync(join(dir, "out"), { recursive: true, mode: 0o700 });
@@ -76,8 +76,8 @@ async function run() {
   // The record's start fields and the start's launch entry, as the launcher handed them over: written with every beat
   // and the end. The start's time is the one the launcher reads too (launch.mjs START). Declared before the writer,
   // which takes the launch entry when it is made.
-  const started = startedFields(env.FACTORY_STAGE_RECORD, env.FACTORY_STAGE_COMMAND_MS, env.FACTORY_TIMEOUT_MINUTES);
-  const launch = startedLaunch(env.FACTORY_STAGE_RECORD, started);
+  const started = startedFields(env.PENDULUM_STAGE_RECORD, env.PENDULUM_STAGE_COMMAND_MS, env.PENDULUM_TIMEOUT_MINUTES);
+  const launch = startedLaunch(env.PENDULUM_STAGE_RECORD, started);
   // The stage's part of the record: its own comment, written by this process alone (docs/ADAPTERS.md, Records), and
   // only while the claim comment still carries this stage's claim: {ok}, or {lost} (another launcher holds it now).
   const write = stageWriter({
@@ -88,16 +88,16 @@ async function run() {
     put: (id, body) => (id ? rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body } }) : rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } })),
   });
   // `ask` names one token request (its time, in seconds), so the launcher answers each request once (lib/lock.mjs).
-  const dispatch = (want, ask = null) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: { event_type: "factory-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}) } } });
+  const dispatch = (want, ask = null) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: { event_type: "pendulum-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}) } } });
 
   let code = 1;
   // Why the stage ended its child, when it did: "wall clock" (the watchdog), "claim lost" (another launcher holds it) or
   // "signal" (SIGTERM or SIGHUP to the stage).
   let killed = null;
   // The stage's wall clock (its setting, cut to the session's end when the worker starts) and its end, for the record.
-  let minutes = Number(env.FACTORY_TIMEOUT_MINUTES) || 0;
+  let minutes = Number(env.PENDULUM_TIMEOUT_MINUTES) || 0;
   let deadlineAt = null;
-  const sessionEnd = env.FACTORY_STAGE_SESSION_END || null;
+  const sessionEnd = env.PENDULUM_STAGE_SESSION_END || null;
   let beat = null;
   let server = null;
   let child = null;
@@ -153,13 +153,13 @@ async function run() {
   const usageDir = join(dir, "usage", claim);
   const tmp = join(dir, "tmp", claim);
   try {
-    // Factory's own tree of the default branch, as actions/checkout gives the Actions jobs: the workflow file doctor reads,
+    // Pendulum's own tree of the default branch, as actions/checkout gives the Actions jobs: the workflow file doctor reads,
     // the lockfile, the setup command's tree. The image's clone, brought to the default branch's head now (it was built
     // from an older one), when the sandbox started from the image; else a fresh clone. With the read-only token, by env
     // config for these commands only. The setup itself runs again in the stage (worker.mjs, review.mjs): a snapshot keeps
     // files, not processes, so its services start again there.
     const gitEnv = { PATH: env.PATH, HOME: dir, GIT_TERMINAL_PROMPT: "0", ...gitCredentialEnv(tokens.read || tokens.write) };
-    const image = env.FACTORY_IMAGE_CHECKOUT && existsSync(join(env.FACTORY_IMAGE_CHECKOUT, ".git")) ? env.FACTORY_IMAGE_CHECKOUT : null;
+    const image = env.PENDULUM_IMAGE_CHECKOUT && existsSync(join(env.PENDULUM_IMAGE_CHECKOUT, ".git")) ? env.PENDULUM_IMAGE_CHECKOUT : null;
     let workspace = image;
     if (image) {
       try {
@@ -192,7 +192,7 @@ async function run() {
           if (m.claim !== claim || typeof m.write !== "string" || !m.write) return log("a token hand-over for another claim was refused");
           Object.assign(tokens, { write: m.write, read: m.read || tokens.read, at: Date.now() });
           for (const t of [m.write, m.read]) if (typeof t === "string" && t) given.add(t);
-          child?.send({ type: "factory-tokens", write: m.write, read: m.read || null });
+          child?.send({ type: "pendulum-tokens", write: m.write, read: m.read || null });
           log("fresh tokens received");
         } catch {
           log("an unreadable token hand-over was refused");
@@ -207,7 +207,7 @@ async function run() {
     // The worker or the reviewer, with the environment an Actions job gives it, and the tokens.
     mkdirSync(usageDir, { recursive: true, mode: 0o700 });
     const script = join(import.meta.dirname, stage === "work" ? "worker.mjs" : "review.mjs");
-    const prNumber = Number(env.FACTORY_STAGE_PR);
+    const prNumber = Number(env.PENDULUM_STAGE_PR);
     if (stage === "review" && !(Number.isInteger(prNumber) && prNumber > 0)) throw new Error("a review stage needs its PR number from the launcher");
     const target = stage === "work" ? ["--issue", String(issue)] : ["--pr", String(prNumber)];
     mkdirSync(tmp, { recursive: true, mode: 0o700 });
@@ -217,7 +217,7 @@ async function run() {
     // What the image's setup exported, as a CI step's GITHUB_ENV would carry it to later steps; the setup's run in the
     // stage writes its own after these, and the later line wins.
     try {
-      const saved = env.FACTORY_IMAGE_ENV_FILE ? JSON.parse(readFileSync(env.FACTORY_IMAGE_ENV_FILE, "utf8")) : {};
+      const saved = env.PENDULUM_IMAGE_ENV_FILE ? JSON.parse(readFileSync(env.PENDULUM_IMAGE_ENV_FILE, "utf8")) : {};
       const lines = Object.entries(saved).filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === "string" && !v.includes("\n")).map(([k, v]) => `${k}=${v}`);
       if (lines.length) writeFileSync(files.GITHUB_ENV, `${lines.join("\n")}\n`, { mode: 0o600 });
     } catch (e) {
@@ -225,13 +225,13 @@ async function run() {
     }
     if (killed) throw new Error(`ended before the ${stage} started (${killed})`);
     // The wall clock again, from now: the start and the clone took some of the session.
-    minutes = stageMinutes({ sessionEnd, timeoutMinutes: env.FACTORY_TIMEOUT_MINUTES });
+    minutes = stageMinutes({ sessionEnd, timeoutMinutes: env.PENDULUM_TIMEOUT_MINUTES });
     if (minutes < 1) throw new Error(`the session ends ${sessionEnd}: no wall clock is left for the ${stage}`);
     deadlineAt = new Date(Date.now() + minutes * 60_000).toISOString();
     arm(watchdogMs({ minutes, sessionEnd }));
     log(`${stage}: wall clock ${minutes} min (to ${deadlineAt}; the session ends ${sessionEnd ?? "unknown"})`);
     child = fork(script, ["--repo", repo.full, ...target, "--checkout", workspace, "--usage-dir", usageDir], {
-      env: { ...env, ...secrets, FACTORY_APP_TOKEN: tokens.write, ...(tokens.read ? { FACTORY_READ_TOKEN: tokens.read } : {}), GITHUB_ACTIONS: "true", ...files, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: tmp, FACTORY_STAGE_SANDBOX: "1", FACTORY_USAGE_DIR: usageDir, FACTORY_TIMEOUT_MINUTES: String(minutes) },
+      env: { ...env, ...secrets, PENDULUM_APP_TOKEN: tokens.write, ...(tokens.read ? { PENDULUM_READ_TOKEN: tokens.read } : {}), GITHUB_ACTIONS: "true", ...files, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: tmp, PENDULUM_STAGE_SANDBOX: "1", PENDULUM_USAGE_DIR: usageDir, PENDULUM_TIMEOUT_MINUTES: String(minutes) },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
     code = await new Promise((resolve) =>
@@ -291,17 +291,17 @@ const handedRecord = (text) => {
 const isoOf = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? new Date(Date.parse(v)).toISOString() : null);
 
 /**
- * The record fields the launcher hands the stage (FACTORY_STAGE_RECORD): the sandbox's id, the default user's home,
+ * The record fields the launcher hands the stage (PENDULUM_STAGE_RECORD): the sandbox's id, the default user's home,
  * the start's cost readings (`meter`), the image it started from, the session's end and the progress key; with the
- * start's time (`commandMs`, FACTORY_STAGE_COMMAND_MS, the one the launcher reads) its time and dispatch latency, and
- * with the wall clock the launcher gave (`minutes`, FACTORY_TIMEOUT_MINUTES) the same `deadlineAt` it writes. The
+ * start's time (`commandMs`, PENDULUM_STAGE_COMMAND_MS, the one the launcher reads) its time and dispatch latency, and
+ * with the wall clock the launcher gave (`minutes`, PENDULUM_TIMEOUT_MINUTES) the same `deadlineAt` it writes. The
  * launcher writes them too, after the start; the stage's first beat can come before that write, so the stage's part
  * carries them from its first beat. Only plain shapes pass.
  */
 export function startedFields(text, commandMs = null, minutes = null) {
   const r = handedRecord(text);
   const out = {};
-  if (typeof r?.id === "string" && /^factory-[A-Za-z0-9_-]{1,60}$/.test(r.id)) out.id = r.id;
+  if (typeof r?.id === "string" && /^pendulum-[A-Za-z0-9_-]{1,60}$/.test(r.id)) out.id = r.id;
   if (typeof r?.home === "string" && /^\/[A-Za-z0-9._/-]{1,200}$/.test(r.home)) out.home = r.home;
   const m = r?.meter;
   const num = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
@@ -326,7 +326,7 @@ export function startedFields(text, commandMs = null, minutes = null) {
 }
 
 /**
- * The start's launch entry the launcher hands the stage (FACTORY_STAGE_RECORD `launch`, launch.mjs startEntry), with
+ * The start's launch entry the launcher hands the stage (PENDULUM_STAGE_RECORD `launch`, launch.mjs startEntry), with
  * its time and latency from `started` (startedFields): the stage's part carries it, and readers add it to the record's
  * launches where the launcher's own entry is missing (logic.mjs sandboxRecord). Null when it is not one.
  */
@@ -348,7 +348,7 @@ export function startedLaunch(text, started = {}) {
 }
 
 /**
- * The stage's writes of its part of the record (its own comment, `<!-- factory:<n>:stage:<claim> -->`): `change` and
+ * The stage's writes of its part of the record (its own comment, `<!-- pendulum:<n>:stage:<claim> -->`): `change` and
  * `launch` (startedLaunch), which readers merge into the record (logic.mjs sandboxRecord). `list()` reads the issue's
  * comments; `put(id, body)` writes this stage's comment (id null: a new one) and answers with it. The comment's id is
  * kept from the first write on, so a fresh comment still missing from the list is written again by its id, never
@@ -361,7 +361,7 @@ export function stageWriter({ issue, claim, launch = null, list, put }) {
     const comments = await list();
     if (sandboxRecord(comments, issue)?.claim !== claim) return { lost: true };
     const part = { ...change, ...(launch ? { launch } : {}), at: new Date().toISOString() };
-    const human = `Factory's ${part.state === "ended" ? "ended" : "running"} stage for this Objective's sandbox record (claim ${claim}).`;
+    const human = `Pendulum's ${part.state === "ended" ? "ended" : "running"} stage for this Objective's sandbox record (claim ${claim}).`;
     id ??= stagePartComment(comments, issue, claim)?.id ?? null;
     const wrote = await put(id, `${stageMarker(issue, claim)}\n${sandboxMarkerLine(part)}\n${human}`);
     id ??= Number.isSafeInteger(wrote?.id) ? wrote.id : null;
@@ -412,27 +412,27 @@ async function afterKill({ why, stage, repo, issue, prNumber, opts, env, usageDi
   await reapNamespace(AGENT_USER).catch((e) => log(`reap: ${String(e.message).slice(0, 120)}`));
   const masked = maskFile(join(usageDir, "events.jsonl"), secrets);
   if (masked) log(`masked ${masked} secret occurrence(s) in events.jsonl`);
-  // The child died before it wrote its usage: a result of Factory's own, so the stage's spend still counts.
+  // The child died before it wrote its usage: a result of Pendulum's own, so the stage's spend still counts.
   if (!existsSync(join(usageDir, "result.json"))) {
     try {
       const events = existsSync(join(usageDir, "events.jsonl")) ? readFileSync(join(usageDir, "events.jsonl"), "utf8") : "";
-      const harness = env.FACTORY_HARNESS || "claude";
-      const model = (stage === "review" ? env.FACTORY_REVIEWER_MODEL : env.FACTORY_MODEL) || null;
-      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, events, maxUsd: Number(env.FACTORY_MAX_USD) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
+      const harness = env.PENDULUM_HARNESS || "claude";
+      const model = (stage === "review" ? env.PENDULUM_REVIEWER_MODEL : env.PENDULUM_MODEL) || null;
+      writeUsage(usageDir, { harness, model, records: [killedUsage({ harness, model, events, maxUsd: Number(env.PENDULUM_MAX_USD) })], passes: 0, exit: "blocked", reason: `ended by the stage (${why})`, credentialBasis: null });
     } catch (e) {
       log(`usage after the kill not written: ${String(e.message).slice(0, 120)}`);
     }
   }
   if (why !== "wall clock") return;
-  const pr = wallClockPr(stage, prNumber, stage === "review" ? null : await findPr(repo, `factory/${issue}`, opts).catch(() => null));
-  const minutes = Number(env.FACTORY_TIMEOUT_MINUTES) || null;
-  const cap = sessionCapNote(env.FACTORY_STAGE_SESSION_CAP);
-  await applyExit(repo, { issue, pr, exit: "blocked", cause: "work", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.FACTORY_NOTIFY || "", stage }, { token: opts.token }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
+  const pr = wallClockPr(stage, prNumber, stage === "review" ? null : await findPr(repo, `pendulum/${issue}`, opts).catch(() => null));
+  const minutes = Number(env.PENDULUM_TIMEOUT_MINUTES) || null;
+  const cap = sessionCapNote(env.PENDULUM_STAGE_SESSION_CAP);
+  await applyExit(repo, { issue, pr, exit: "blocked", cause: "work", reason: `stage: the ${stage} passed its wall clock${minutes ? ` (${minutes} min)` : ""} and was ended${cap ? `: ${cap}` : ""}`, notify: env.PENDULUM_NOTIFY || "", stage }, { token: opts.token }).catch((e) => log(`exit after the wall clock failed: ${String(e.message).slice(0, 120)}`));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   (process.argv.includes("--deliver") ? deliver() : run()).catch((e) => {
-    process.stderr.write(`[factory] stage failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] stage failed: ${e.message}\n`);
     process.exit(1);
   });
 }

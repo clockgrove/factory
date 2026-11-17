@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { SandboxError, checkCreateSpec, checkRunSpec, openSandbox } from "../scripts/lib/adapters/sandbox.mjs";
 import { open, userCommand, vendorError } from "../scripts/lib/adapters/sandbox-vercel.mjs";
 
-const spec = { vcpus: 1, timeoutMs: 60_000, tags: { factory: "objective", issue: "12" }, network: { allow: ["registry.npmjs.org", "*.github.com"] } };
+const spec = { vcpus: 1, timeoutMs: 60_000, tags: { pendulum: "objective", issue: "12" }, network: { allow: ["registry.npmjs.org", "*.github.com"] } };
 const code = (fn) => {
   try {
     fn();
@@ -23,15 +23,15 @@ test("create spec: sizes, tags and the network allow-list are checked; an image 
 });
 
 test("run spec: argv, env names, the user name and the limit are checked", () => {
-  assert.equal(checkRunSpec({ argv: ["true"], env: { A_1: "x" }, user: "factory-agent", timeoutMs: 5 }).user, "factory-agent");
+  assert.equal(checkRunSpec({ argv: ["true"], env: { A_1: "x" }, user: "pendulum-agent", timeoutMs: 5 }).user, "pendulum-agent");
   for (const bad of [{ argv: [] }, { argv: ["true"], env: { "A-B": "x" } }, { argv: ["true"], env: { A: 1 } }, { argv: ["true"], user: "Bad User" }, { argv: ["true"], cwd: "rel" }, { argv: ["true"], timeoutMs: 0 }])
     assert.equal(code(() => checkRunSpec(bad)), "invalid", JSON.stringify(bad));
 });
 
 test("as another user: the sudo command line carries env names, never a value", () => {
-  const { cmd, args } = userCommand({ user: "factory-agent", home: "/home/factory-agent", env: { MODEL_KEY: "sk-secret-value" }, argv: ["node", "x.js"] });
+  const { cmd, args } = userCommand({ user: "pendulum-agent", home: "/home/pendulum-agent", env: { MODEL_KEY: "sk-secret-value" }, argv: ["node", "x.js"] });
   assert.equal(cmd, "sudo");
-  assert.deepEqual(args.slice(0, 4), ["-n", "-u", "factory-agent", "--"]);
+  assert.deepEqual(args.slice(0, 4), ["-n", "-u", "pendulum-agent", "--"]);
   assert.ok(args.includes("PATH LANG TERM MODEL_KEY"));
   assert.ok(!args.some((a) => a.includes("sk-secret-value")));
   assert.deepEqual(args.slice(-2), ["node", "x.js"]);

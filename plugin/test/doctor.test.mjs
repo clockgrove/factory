@@ -13,12 +13,12 @@ import { RETRY } from "../scripts/lib/github.mjs";
 RETRY.sleep = async () => {};
 
 const repo = { full: "o/r", owner: "o", name: "r" };
-const wf = (pin) => `on: issues\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${pin}\n`;
+const wf = (pin) => `on: issues\njobs:\n  work:\n    steps:\n      - uses: clockgrove/pendulum@${pin}\n`;
 function clone(text) {
   const root = mkdtempSync(join(tmpdir(), "doctor-"));
   if (text !== null) {
     mkdirSync(join(root, ".github", "workflows"), { recursive: true });
-    writeFileSync(join(root, ".github", "workflows", "factory.yml"), text);
+    writeFileSync(join(root, ".github", "workflows", "pendulum.yml"), text);
   }
   return root;
 }
@@ -33,7 +33,7 @@ test("doctor: the workflow is read from the default branch on GitHub; a local co
     return wf("v0.7.98");
   };
   const r = await workflowText({ repo, branch: "main", env: {}, root: clone(wf("v0.7.83")), read });
-  assert.deepEqual(asked, [[".github/workflows/factory.yml", "main"]]);
+  assert.deepEqual(asked, [[".github/workflows/pendulum.yml", "main"]]);
   assert.equal(r.text, wf("v0.7.98"));
   assert.equal(r.checks.length, 1);
   assert.equal(r.checks[0].status, "WARN");
@@ -58,7 +58,7 @@ test("doctor: no workflow on the default branch is none; one GitHub cannot serve
 test("setup files: every repository file the setup command runs must be protected, on every route; doctor FAILs otherwise and setup adds it", async () => {
   const { setupFilesCheck } = await import("../scripts/doctor.mjs");
   const { protectSetup } = await import("../scripts/setup.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "factory-setup-files-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-setup-files-"));
   mkdirSync(join(dir, "scripts", "ci"), { recursive: true });
   writeFileSync(join(dir, "scripts", "ci", "setup.sh"), "");
   writeFileSync(join(dir, "scripts", "ci", "toolchain.sh"), "");
@@ -77,7 +77,7 @@ test("setup files: every repository file the setup command runs must be protecte
   const [missing] = await setupFilesCheck({ inputs: { setup: "bash scripts/ci/missing.sh", protectedAdditions: [] }, checkout: dir });
   assert.equal(missing.status, "PASS", "a named path the checkout does not hold needs no protected entry");
   assert.match(missing.detail, /a push changing scripts\/ci\/missing\.sh is refused/, "but no push may create it (#387)");
-  // Setup renders the missing ones into FACTORY_PROTECTED_PATHS whatever the route (no sandbox here).
+  // Setup renders the missing ones into PENDULUM_PROTECTED_PATHS whatever the route (no sandbox here).
   const p = await protectSetup({ setup, protectedAdditions: ["scripts/ci/setup.sh"] }, dir);
   assert.deepEqual(p.scripts, ["scripts/ci/setup.sh", "scripts/ci/toolchain.sh"]);
   assert.deepEqual(p.adding, ["/scripts/ci/toolchain.sh"], "setup adds the file anchored at the root");
@@ -89,7 +89,7 @@ test("setup files: a root setup file is protected at the root only, so a same-na
   const { setupFilesCheck } = await import("../scripts/doctor.mjs");
   const { protectSetup } = await import("../scripts/setup.mjs");
   const { protectedPaths, protectedTouched } = await import("../scripts/lib/logic.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "factory-setup-root-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-setup-root-"));
   mkdirSync(join(dir, "packages", "web"), { recursive: true });
   for (const f of ["build.mjs", ".env.example", "configure", join("packages", "web", "build.mjs"), join("packages", "web", ".env.example")]) writeFileSync(join(dir, f), "");
   const p = await protectSetup({ setup: "node build.mjs && cp .env.example .env && sh configure", protectedAdditions: [] }, dir);
@@ -100,7 +100,7 @@ test("setup files: a root setup file is protected at the root only, so a same-na
   assert.deepEqual(protectedTouched(["build.mjs", ".env.example", "configure"], list), ["build.mjs", ".env.example", "configure"]);
 });
 
-test("app permissions: one list; a missing read FAILs, actions read is no extra, and README and the factory-setup skill carry the same text", async () => {
+test("app permissions: one list; a missing read FAILs, actions read is no extra, and README and the pendulum-setup skill carry the same text", async () => {
   const { APP_PERMISSIONS_TEXT, permissionGaps } = await import("../scripts/lib/app-token.mjs");
   const { appPermissionChecks } = await import("../scripts/doctor.mjs");
   const { readFileSync } = await import("node:fs");
@@ -129,7 +129,7 @@ test("app permissions: one list; a missing read FAILs, actions read is no extra,
   assert.deepEqual(wf.map((c) => c.status), ["PASS", "WARN"]);
   assert.match(wf[1].fix, /workflows permission off/);
   const root = join(import.meta.dirname, "..", "..");
-  for (const doc of ["README.md", "plugin/skills/factory-setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
+  for (const doc of ["README.md", "plugin/skills/pendulum-setup/SKILL.md"]) assert.ok(readFileSync(join(root, doc), "utf8").includes(APP_PERMISSIONS_TEXT), `${doc} names the App's permissions as doctor does`);
 });
 
 test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat or rg; no shell-credential WARN anywhere", async () => {
@@ -138,7 +138,7 @@ test("doctor: Claude on Actions or in a cloud sandbox FAILs without bwrap, socat
   const all = async () => true;
   const claude = { harness: "claude" };
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["claude sandbox: bwrap:FAIL", "claude sandbox: socat:FAIL", "claude sandbox: rg:FAIL"]);
-  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"]);
+  assert.deepEqual(names(await claudeSandboxChecks({ inputs: claude, env: { PENDULUM_STAGE_SANDBOX: "1" }, local: false, has: all })), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"]);
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: {}, local: false, has: none }), [], "a person's machine checking an Actions repository");
   assert.deepEqual(await claudeSandboxChecks({ inputs: claude, env: { GITHUB_ACTIONS: "true" }, local: true, has: none }), [], "local mode checks its own sandboxes");
   assert.deepEqual(names(await claudeSandboxChecks({ inputs: { harness: "copilot" }, env: { GITHUB_ACTIONS: "true" }, local: false, has: none })), ["copilot sandbox: bwrap:FAIL", "copilot sandbox: slirp4netns:FAIL", "copilot sandbox: socat:FAIL"], "Copilot runs its commands in its own sandbox there too");
@@ -150,8 +150,8 @@ test("doctor: no harness's commands can read its credential off local mode, so n
   const shell = (rows) => rows.filter((r) => /shell credential/.test(r.name)).map((r) => `${r.name}:${r.status}`);
   const codex = { harness: "codex", credential: "api", codexApiKey: "k", model: "m" };
   const copilot = { harness: "copilot", credential: "api", copilotGithubToken: "" };
-  assert.deepEqual(shell(await credentialChecks({ inputs: codex, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_API_KEY: "k" }, local: false })), []);
-  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: { FACTORY_STAGE_SANDBOX: "1" }, local: false })), [], "Copilot runs its commands in its own sandbox there");
+  assert.deepEqual(shell(await credentialChecks({ inputs: codex, env: { GITHUB_ACTIONS: "true", PENDULUM_INPUT_CODEX_API_KEY: "k" }, local: false })), []);
+  assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: { PENDULUM_STAGE_SANDBOX: "1" }, local: false })), [], "Copilot runs its commands in its own sandbox there");
   assert.deepEqual(shell(await credentialChecks({ inputs: copilot, env: {}, local: true })), []);
   assert.deepEqual(shell(await credentialChecks({ inputs: { harness: "claude", credential: "api", anthropicApiKey: "k" }, env: { GITHUB_ACTIONS: "true" }, local: false })), []);
 });
@@ -234,29 +234,29 @@ test("doctor without --checkout takes the settings from the default branch's wor
     const u = new URL(url);
     asked.push([`${u.pathname}${u.search}`, init.headers?.Authorization]);
     if (status !== 200) return new Response(JSON.stringify({ message: "x" }), { status, headers: { "content-type": "application/json" } });
-    if (u.pathname === "/repos/o/r/actions/organization-variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "FACTORY_MAX_USD", value: "9" }] }), { status: 200, headers: { "content-type": "application/json" } });
-    if (u.pathname === "/repos/o/r/actions/variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "FACTORY_DAILY_USD", value: "40" }] }), { status: 200, headers: { "content-type": "application/json" } });
-    return new Response("on: issues\nenv:\n  FACTORY_HARNESS: copilot\n  FACTORY_MODEL: gpt-x\n  FACTORY_RUNNER_NAME: no-setting\njobs: {}\n", { status: 200 });
+    if (u.pathname === "/repos/o/r/actions/organization-variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "PENDULUM_MAX_USD", value: "9" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (u.pathname === "/repos/o/r/actions/variables") return new Response(JSON.stringify({ total_count: 1, variables: [{ name: "PENDULUM_DAILY_USD", value: "40" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response("on: issues\nenv:\n  PENDULUM_HARNESS: copilot\n  PENDULUM_MODEL: gpt-x\n  PENDULUM_RUNNER_NAME: no-setting\njobs: {}\n", { status: 200 });
   };
-  const copy = clone("env:\n  FACTORY_HARNESS: codex\n");
+  const copy = clone("env:\n  PENDULUM_HARNESS: codex\n");
   try {
     const r = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: {} });
-    assert.deepEqual(asked, [["/repos/o/r/actions/variables?per_page=30", "Bearer t"], ["/repos/o/r/actions/organization-variables?per_page=30", "Bearer t"], ["/repos/o/r/contents/.github/workflows/factory.yml", "Bearer t"]], "the repository's variables, the organization's it shares, and the default branch's file, with doctor's token");
+    assert.deepEqual(asked, [["/repos/o/r/actions/variables?per_page=30", "Bearer t"], ["/repos/o/r/actions/organization-variables?per_page=30", "Bearer t"], ["/repos/o/r/contents/.github/workflows/pendulum.yml", "Bearer t"]], "the repository's variables, the organization's it shares, and the default branch's file, with doctor's token");
     assert.equal(r.inputs.harness, "copilot");
     assert.equal(r.inputs.dailyUsd, 40, "a repository variable over the workflow (#284)");
-    assert.equal(r.inputs.maxUsd, 25, "an organization variable is not Factory's");
+    assert.equal(r.inputs.maxUsd, 25, "an organization variable is not Pendulum's");
     assert.deepEqual(r.checks.map((c) => [c.status, c.name]), [["WARN", "organization variables"]]);
-    assert.match(r.checks[0].detail, /^organization variable FACTORY_MAX_USD is not supported: Factory's settings take the repository's own variables only/);
+    assert.match(r.checks[0].detail, /^organization variable PENDULUM_MAX_USD is not supported: Pendulum's settings take the repository's own variables only/);
     assert.match(defaultsCheck(r.inputs).detail, /^harness copilot, worker gpt-x,/);
     assert.deepEqual((await credentialChecks({ inputs: r.inputs, env: {}, local: false })).map((c) => c.name), ["copilot credential"]);
-    assert.equal(r.env.FACTORY_RUNNER_NAME, undefined, "only the settings Factory takes");
+    assert.equal(r.env.PENDULUM_RUNNER_NAME, undefined, "only the settings Pendulum takes");
     // #402: what a local stage reads, as serve's baseEnv: the repository's settings, and this shell's own settings only.
-    const shell = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: { FACTORY_GUESS_HOURS: "3, 9", FACTORY_SUBAGENT_MODEL: "mine" } });
-    assert.deepEqual([shell.env.FACTORY_GUESS_HOURS, shell.stage.FACTORY_GUESS_HOURS], ["3, 9", undefined], "a shell-only repository setting reaches no stage");
-    assert.deepEqual([shell.stage.FACTORY_DAILY_USD, shell.stage.FACTORY_SUBAGENT_MODEL], ["40", "mine"]);
+    const shell = await doctorSettings({ args: {}, checkout: clone(null), repo, token: "t", env: { PENDULUM_GUESS_HOURS: "3, 9", PENDULUM_SUBAGENT_MODEL: "mine" } });
+    assert.deepEqual([shell.env.PENDULUM_GUESS_HOURS, shell.stage.PENDULUM_GUESS_HOURS], ["3, 9", undefined], "a shell-only repository setting reaches no stage");
+    assert.deepEqual([shell.stage.PENDULUM_DAILY_USD, shell.stage.PENDULUM_SUBAGENT_MODEL], ["40", "mine"]);
     // GitHub's copy wins over a clone's here; this shell wins over both.
     assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "copilot");
-    assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: { FACTORY_HARNESS: "claude" } })).inputs.harness, "claude");
+    assert.equal((await doctorSettings({ args: {}, checkout: copy, repo, token: "t", env: { PENDULUM_HARNESS: "claude" } })).inputs.harness, "claude");
     // With --checkout, that checkout's copy, and GitHub's file is not read.
     asked.length = 0;
     assert.equal((await doctorSettings({ args: { checkout: copy }, checkout: copy, repo, token: "t", env: {} })).inputs.harness, "codex");
@@ -280,13 +280,13 @@ test("doctor without --checkout takes the settings from the default branch's wor
 });
 
 test("doctor and serve warn when the installed plugin is older than the release the workflow pins, and say how to update (#299)", async () => {
-  const { githubChecks, pluginVersionCheck } = await import("../scripts/doctor.mjs");
+  const { githubChecks, pinRow, pluginVersionCheck } = await import("../scripts/doctor.mjs");
   const { committedWorkflowEnv } = await import("../scripts/lib/local.mjs");
   const { pluginLine } = await import("../scripts/local.mjs");
-  const { FACTORY_VERSION } = await import("../scripts/lib/inputs.mjs");
-  const [maj, min, pat] = FACTORY_VERSION.split(".").map(Number);
+  const { PENDULUM_VERSION } = await import("../scripts/lib/inputs.mjs");
+  const [maj, min, pat] = PENDULUM_VERSION.split(".").map(Number);
   const newer = `v${maj}.${min}.${pat + 1}`;
-  const flow = (ref) => `on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    steps:\n      - uses: clockgrove/factory@${ref}\n`;
+  const flow = (ref) => `on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    steps:\n      - uses: clockgrove/pendulum@${ref}\n`;
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -296,36 +296,43 @@ test("doctor and serve warn when the installed plugin is older than the release 
     const path = new URL(String(url)).pathname;
     const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
     if (path === "/repos/o/r") return json(200, { default_branch: "main" });
-    if (path === "/repos/o/r/contents/.github/workflows/factory.yml") return new Response(flowText ?? flow(pinned), { status: 200 });
+    if (path === "/repos/o/r/contents/.github/workflows/pendulum.yml") return new Response(flowText ?? flow(pinned), { status: 200 });
     if (path === "/repos/o/r/rulesets") return json(200, []);
     if (path === "/graphql") return json(200, { data: {} });
     return json(404, { message: "Not Found" });
   };
-  const inputs = { repo: "o/r", objectiveLabel: "factory:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
+  const inputs = { repo: "o/r", objectiveLabel: "pendulum:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
   const env = { GITHUB_WORKSPACE: mkdtempSync(join(tmpdir(), "ws-")) };
-  const row = async (job) => (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env, job })).filter((c) => c.name === "plugin version");
+  const row = async (job) => (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "pendulum-app", missing: [], extra: [] }, env, job })).filter((c) => c.name === "plugin version");
   try {
     const [old] = await row(false);
     assert.equal(old.status, "WARN");
-    assert.equal(old.detail, `the installed plugin is v${FACTORY_VERSION}, older than clockgrove/factory@${newer}, which the workflow pins: a session's skills and local mode's stages run the older release`);
-    assert.match(old.fix, /claude plugin update factory@clockgrove/);
-    assert.match(old.fix, /codex plugin add factory@clockgrove/);
-    assert.match(old.fix, /copilot plugin update factory@clockgrove/);
+    assert.equal(old.detail, `the installed plugin is v${PENDULUM_VERSION}, older than clockgrove/pendulum@${newer}, which the workflow pins: a session's skills and local mode's stages run the older release`);
+    assert.match(old.fix, /claude plugin update pendulum@clockgrove/);
+    assert.match(old.fix, /codex plugin add pendulum@clockgrove/);
+    assert.match(old.fix, /copilot plugin update pendulum@clockgrove/);
     assert.deepEqual(await row(true), [], "a job's plugin is the Action it pins");
-    pinned = `v${FACTORY_VERSION}`;
+    pinned = `v${PENDULUM_VERSION}`;
     assert.equal((await row(false))[0].status, "PASS");
     const pinRow = async (text) => {
       flowText = text;
-      return (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env, job: true })).filter((c) => c.name === "factory pin");
+      return (await githubChecks({ inputs, repo, token: "t", app: { appSlug: "pendulum-app", missing: [], extra: [] }, env, job: true })).filter((c) => c.name === "pendulum pin");
     };
-    assert.deepEqual((await pinRow(`# - uses: clockgrove/factory@v0.7.1\n${flow("v0.9.30")}`)).map((c) => c.status), ["PASS"], "a commented-out old pin fails nothing");
-    assert.deepEqual((await pinRow(flow("v0.7.1").replace("clockgrove/factory@v0.7.1", "'clockgrove/factory@v0.7.1'"))).map((c) => c.status), ["FAIL"], "a quoted old pin is read");
+    assert.deepEqual((await pinRow(`# - uses: clockgrove/pendulum@v0.7.1\n${flow("v0.10.3")}`)).map((c) => c.status), ["PASS"], "a commented-out old pin fails nothing");
+    const [before] = await pinRow(flow("v0.9.37"));
+    assert.equal(before.status, "FAIL");
+    assert.match(before.detail, /a tag before v0\.10\.0: tags before v0\.10\.0 are the product under its previous name/);
+    assert.deepEqual((await pinRow(flow("v0.7.1").replace("clockgrove/pendulum@v0.7.1", "'clockgrove/pendulum@v0.7.1'"))).map((c) => c.status), ["FAIL"], "a quoted old pin is read");
     flowText = null;
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = before;
   }
+  // #465: every tag before the first Pendulum release fails, a floating one of an earlier line too; a branch is no release.
+  for (const ref of ["v0.9.37", "v0.9", "v0.7.1"]) assert.equal(pinRow(ref).status, "FAIL", ref);
+  for (const ref of ["v0.10.0", "v0.10", "v0", "v0.11.2", "v1"]) assert.equal(pinRow(ref).status, "PASS", ref);
+  assert.equal(pinRow("main"), null);
   // By the numbers, not the text: v0.9.30 is newer than v0.9.4; a commit or a floating tag is no release to compare.
   assert.equal(pluginVersionCheck(flow("v0.9.30"), "0.9.4").status, "WARN");
   assert.equal(pluginVersionCheck(flow("v0.9.4"), "0.9.30").status, "PASS");
@@ -333,21 +340,21 @@ test("doctor and serve warn when the installed plugin is older than the release 
   assert.equal(pluginVersionCheck(flow("v0.9"), "0.9.4"), null);
   assert.equal(pluginVersionCheck(flow("0123456789abcdef0123456789abcdef01234567"), "0.9.4"), null);
   // The parsed YAML decides: a commented-out pin is none, a quoted one counts, the first call wins.
-  const { factoryRef } = await import("../scripts/doctor.mjs");
-  const commented = `# - uses: clockgrove/factory@v9.9.9\n${flow("v0.9.4")}`;
-  assert.equal(factoryRef(commented), "v0.9.4");
+  const { pendulumRef } = await import("../scripts/doctor.mjs");
+  const commented = `# - uses: clockgrove/pendulum@v9.9.9\n${flow("v0.9.4")}`;
+  assert.equal(pendulumRef(commented), "v0.9.4");
   assert.equal(pluginVersionCheck(commented, "0.9.4").status, "PASS", "a comment pins nothing");
-  assert.equal(factoryRef("on: issues\n# uses: clockgrove/factory@v9.9.9\njobs: {}\n"), "");
-  const quoted = flow('"v0.9.31"').replace('clockgrove/factory@"v0.9.31"', '"clockgrove/factory@v0.9.31"');
-  assert.equal(factoryRef(quoted), "v0.9.31");
+  assert.equal(pendulumRef("on: issues\n# uses: clockgrove/pendulum@v9.9.9\njobs: {}\n"), "");
+  const quoted = flow('"v0.9.31"').replace('clockgrove/pendulum@"v0.9.31"', '"clockgrove/pendulum@v0.9.31"');
+  assert.equal(pendulumRef(quoted), "v0.9.31");
   assert.equal(pluginVersionCheck(quoted, "0.9.30").status, "WARN");
-  assert.equal(factoryRef("jobs: [unclosed"), "", "a file that does not parse pins nothing");
+  assert.equal(pendulumRef("jobs: [unclosed"), "", "a file that does not parse pins nothing");
   // serve's start: the default branch's committed workflow, read through git.
   const git = (text) => (args) => (args[0] === "show" ? (text === null ? { status: 128, stdout: "" } : { status: 0, stdout: text }) : args[0] === "ls-remote" ? { status: 0, stdout: "ref: refs/heads/main\tHEAD\n" } : { status: 0, stdout: "" });
   const line = pluginLine(committedWorkflowEnv("/clone", { git: git(flow(newer)) }));
-  assert.ok(line.startsWith(`the installed plugin is v${FACTORY_VERSION}, older than clockgrove/factory@${newer}, `), line);
+  assert.ok(line.startsWith(`the installed plugin is v${PENDULUM_VERSION}, older than clockgrove/pendulum@${newer}, `), line);
   assert.match(line, /; update the plugin, then start a new session: /);
-  assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(flow(`v${FACTORY_VERSION}`)) })), null);
+  assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(flow(`v${PENDULUM_VERSION}`)) })), null);
   assert.equal(pluginLine(committedWorkflowEnv("/clone", { git: git(null) })), null, "no workflow on the default branch: nothing to compare");
 });
 
@@ -403,12 +410,12 @@ test("secrets on a repository a user owns: GitHub's 422 for organization secrets
     return secretChecks({ inputs: { harness: "claude", credential: "api" }, repo: { owner: "me", name: "app", full: "me/app" } });
   };
   try {
-    const [missing] = await run(["FACTORY_APP_ID"], 422);
+    const [missing] = await run(["PENDULUM_APP_ID"], 422);
     assert.equal(missing.status, "FAIL");
-    assert.match(missing.detail, /missing FACTORY_APP_PRIVATE_KEY, ANTHROPIC_API_KEY/);
-    const [all] = await run(["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY"], 422);
+    assert.match(missing.detail, /missing PENDULUM_APP_PRIVATE_KEY, ANTHROPIC_API_KEY/);
+    const [all] = await run(["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY", "ANTHROPIC_API_KEY"], 422);
     assert.equal(all.status, "PASS");
-    const [unreadable] = await run(["FACTORY_APP_ID"], 403);
+    const [unreadable] = await run(["PENDULUM_APP_ID"], 403);
     assert.equal(unreadable.status, "WARN", "any other refusal is still unreadable");
   } finally {
     globalThis.fetch = realFetch;
@@ -432,7 +439,7 @@ test("doctor: an unknown flag exits 64 naming it before any check; --checkout an
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const api = `http://127.0.0.1:${server.address().port}`;
-  const env = { ...process.env, GITHUB_API_URL: api, GITHUB_GRAPHQL_URL: `${api}/graphql`, FACTORY_APP_TOKEN: "t" };
+  const env = { ...process.env, GITHUB_API_URL: api, GITHUB_GRAPHQL_URL: `${api}/graphql`, PENDULUM_APP_TOKEN: "t" };
   for (const k of ["GITHUB_ACTIONS", "GITHUB_WORKSPACE"]) delete env[k];
   // Run from a directory that is no clone: doctor checks the clone it is pointed at, or this one.
   const elsewhere = mkdtempSync(join(tmpdir(), "elsewhere-"));
@@ -581,7 +588,7 @@ test("doctor parses setup and validation, looks up their first command and the n
   }
   const env = { PATH: `${bin}:/usr/bin:/bin` };
   const rows = async (settings, name) => (await repositoryChecks({ inputs: resolveInputs({ env: settings }), checkout: dir, env })).filter((c) => c.name === name);
-  const setup = async (cmd) => (await rows({ FACTORY_SETUP: cmd }, "setup"))[0];
+  const setup = async (cmd) => (await rows({ PENDULUM_SETUP: cmd }, "setup"))[0];
   // A correctly set-up command is a clean PASS, saying doctor did not run it.
   for (const ok of ["./scripts/setup.sh", "if true; then ./scripts/setup.sh; fi", "f() { ./scripts/setup.sh; }; f", "FOO=1 ./scripts/setup.sh --ci"]) {
     const r = await setup(ok);
@@ -629,7 +636,7 @@ test("doctor parses setup and validation, looks up their first command and the n
     "pnpm run /^li/": "PASS",
     "npm test )": "FAIL",
   };
-  const val = await rows({ FACTORY_VALIDATION: Object.keys(commands).join(", ") }, "validation");
+  const val = await rows({ PENDULUM_VALIDATION: Object.keys(commands).join(", ") }, "validation");
   assert.deepEqual(Object.fromEntries(val.map((c) => [c.detail.split(":")[0].replace(/ \(.*$/, ""), c.status])), commands);
   assert.match(val.find((c) => c.status === "FAIL").detail, /^npm run lint: no script "lint" in package\.json$/);
   assert.match(val.at(-1).detail, /^npm test \): bash cannot parse it/);
@@ -665,7 +672,7 @@ test("doctor never starts a bash, or any program, the repository ships, whatever
 });
 
 /**
- * githubChecks against a fake GitHub (#418): factory.yml as `flow`, the other workflows as `files` (listed in that
+ * githubChecks against a fake GitHub (#418): pendulum.yml as `flow`, the other workflows as `files` (listed in that
  * order), and an active ruleset on the default branch with a merge queue and `required` as its required checks.
  */
 async function rowsWith({ flow, files = {}, required = [], refused = {}, fetched = [] }) {
@@ -674,7 +681,7 @@ async function rowsWith({ flow, files = {}, required = [], refused = {}, fetched
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   const json = (st, b) => new Response(JSON.stringify(b), { status: st, headers: { "content-type": "application/json" } });
-  const all = { ".github/workflows/factory.yml": flow, ...files };
+  const all = { ".github/workflows/pendulum.yml": flow, ...files };
   globalThis.fetch = async (url) => {
     const path = new URL(String(url)).pathname;
     if (path === "/repos/o/r") return json(200, { default_branch: "main", owner: { type: "Organization" } });
@@ -688,9 +695,9 @@ async function rowsWith({ flow, files = {}, required = [], refused = {}, fetched
     if (path === "/graphql") return json(200, { data: {} });
     return json(404, { message: "Not Found" });
   };
-  const inputs = { repo: "o/r", objectiveLabel: "factory:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
+  const inputs = { repo: "o/r", objectiveLabel: "pendulum:objective", maintainers: [], notify: "", ciChecks: [], setup: "", validation: [], githubToken: "" };
   try {
-    const rows = await githubChecks({ inputs, repo, token: "t", app: { appSlug: "factory-app", missing: [], extra: [] }, env: { GITHUB_WORKSPACE: mkdtempSync(join(tmpdir(), "ws-")) }, job: true });
+    const rows = await githubChecks({ inputs, repo, token: "t", app: { appSlug: "pendulum-app", missing: [], extra: [] }, env: { GITHUB_WORKSPACE: mkdtempSync(join(tmpdir(), "ws-")) }, job: true });
     return Object.fromEntries(rows.map((r) => [r.name, r]));
   } finally {
     globalThis.fetch = realFetch;
@@ -699,7 +706,7 @@ async function rowsWith({ flow, files = {}, required = [], refused = {}, fetched
   }
 }
 
-test("doctor's job token row reads factory.yml's parsed permissions, each job's own replacing the top level's, never its text (#418)", async () => {
+test("doctor's job token row reads pendulum.yml's parsed permissions, each job's own replacing the top level's, never its text (#418)", async () => {
   const token = async (flow) => (await rowsWith({ flow }))["job token"];
   const job = (perms) => `on: issues\npermissions:\n  contents: read\njobs:\n  work:\n    runs-on: ubuntu-latest\n${perms}    steps:\n      - run: echo\n`;
   // The shipped template's shapes: the top level reads, one job asks for actions alone (contents none), one for contents read.

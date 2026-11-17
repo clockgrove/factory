@@ -56,7 +56,7 @@ test("claude: a 401 is a refusal from the result's api_error_status; a 429 or 5x
   }
 });
 
-// #418: Factory does not judge a Claude model id by its form (choice.mjs modelProblem); the API's 404 for a model the
+// #418: Pendulum does not judge a Claude model id by its form (choice.mjs modelProblem); the API's 404 for a model the
 // login does not serve is the answer, read as a refusal (no retry, no death) that Blocks naming it. Recorded from Claude
 // Code 2.1.325 (`claude -p --model <unserved>`, a loopback API that 404s the model).
 test("claude: a 404 for a model the login does not serve is a refusal that Blocks", () => {
@@ -79,7 +79,7 @@ test("claude: a sub-agent's model refused is the run's refusal, and Blocks namin
   const d = decideExit({ harness: rec, pr: null, commits: 0 });
   assert.equal(d.exit, "blocked");
   assert.match(d.reason, /^claude was refused by its provider for its `implementer` sub-agent \(HTTP 404 model_not_found\): There's an issue with the selected model/);
-  assert.match(d.reason, /The fix is the sub-agent model, which a `factory:subagent-model:<id>` label on the issue \(else FACTORY_SUBAGENT_MODEL\) chooses/);
+  assert.match(d.reason, /The fix is the sub-agent model, which a `pendulum:subagent-model:<id>` label on the issue \(else PENDULUM_SUBAGENT_MODEL\) chooses/);
   // A sub-agent's busy answer or usage limit is not one: the main session meets those as its own.
   const sub = (fields) => [{ type: "assistant", is_api_error_message: true, parent_tool_use_id: "t1", subagent_type: "implementer", message: { content: [] }, ...fields }];
   assert.equal(subAgentRefusal(sub({ error: "rate_limit", api_error_type: "rate_limit_error" })), null);
@@ -88,14 +88,14 @@ test("claude: a sub-agent's model refused is the run's refusal, and Blocks namin
   assert.equal(subAgentRefusal(sub({ error: "rate_limit", api_error: "usage_limit_reached", api_error_status: 429 })), null);
   assert.equal(subAgentRefusal(sub({ error: "authentication_failed", api_error_status: 401 })).status, 401);
   assert.equal(subAgentRefusal(sub({ parent_tool_use_id: null, error: "model_not_found", api_error_type: "not_found_error" })), null, "the main session's own is providerRefusal's");
-  assert.match(decideExit({ harness: { ...rec, refusal: { ...rec.refusal, subAgent: "foundation-reviewer" } }, pr: null, commits: 0 }).reason, /`factory:reviewer-model:<id>` label on the issue \(else FACTORY_REVIEWER_MODEL\)/);
+  assert.match(decideExit({ harness: { ...rec, refusal: { ...rec.refusal, subAgent: "foundation-reviewer" } }, pr: null, commits: 0 }).reason, /`pendulum:reviewer-model:<id>` label on the issue \(else PENDULUM_REVIEWER_MODEL\)/);
 });
 
 // #418: the run stops at the sub-agent's refusal, before the main session goes on without that work and spends on it.
-test("runHarness: a Claude run is stopped at its sub-agent's model refusal, which is the pass's refusal, not a stop by Factory", async () => {
+test("runHarness: a Claude run is stopped at its sub-agent's model refusal, which is the pass's refusal, not a stop by Pendulum", async () => {
   const { runHarness } = await import("../scripts/lib/harness.mjs");
-  const bin = mkdtempSync(join(tmpdir(), "factory-subagent-"));
-  const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-subagent-"));
+  const home = mkdtempSync(join(tmpdir(), "pendulum-home-"));
   const lines = fixture("claude-2.1.325-subagent-model-not-found.jsonl").trim().split("\n");
   const at = lines.findIndex((l) => l.includes('"is_api_error_message":true'));
   // The recorded stream up to the sub-agent's refusal, then the main session's own going on a minute later.
@@ -108,7 +108,7 @@ test("runHarness: a Claude run is stopped at its sub-agent's model refusal, whic
     assert.ok(Date.now() - started < 30_000, "stopped at the refusal, not at the end of the run");
     assert.deepEqual([rec.refusal?.subAgent, rec.refusal?.status, rec.ok, rec.stopped], ["implementer", 404, false, false]);
     assert.equal(crashed(rec), false);
-    assert.match(decideExit({ harness: rec, pr: null, commits: 0 }).reason, /`factory:subagent-model:<id>` label/);
+    assert.match(decideExit({ harness: rec, pr: null, commits: 0 }).reason, /`pendulum:subagent-model:<id>` label/);
   } finally {
     process.env.PATH = path;
   }
@@ -134,7 +134,7 @@ test("a refusal outranks a death count and names itself in the review's account 
 test("runHarness and exitRecord: one refused Codex call, no second ask, the exit record Blocks with the refusal", async () => {
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   const { exitRecord } = await import("../scripts/lib/session.mjs");
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-refused-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-refused-"));
   const calls = join(bin, "calls");
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");

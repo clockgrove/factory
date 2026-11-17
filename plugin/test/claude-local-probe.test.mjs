@@ -18,29 +18,29 @@ test("Claude Code's local probe: the driver proves the toolchain, tries the home
   for (const d of [tmp, home, bin]) mkdirSync(d);
   const result = join(tmp, CLAUDE_PROBE_RESULT);
   const drive = (driver, extra = {}) => {
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m1", ...extra } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m1", ...extra } });
     return readFileSync(result, "utf8");
   };
   const base = { gitConfig: "", host: "", marker: "m1", result, tmp, persist: [home] };
   // Unconfined here: the marker is in this shell's parent, so the confinement probe names it; the home write lands.
   assert.equal(drive(claudeProbeDriver(base)), "4\nthe credential stand-in is readable in a process environment\n");
-  assert.ok(existsSync(join(home, PROBE_PERSIST)), "Factory checks the home from outside");
-  assert.equal(drive(claudeProbeDriver(base), { FACTORY_PROBE_SCRIPT: "" }), "4\nthe probe script is missing\n");
-  assert.equal(drive(claudeProbeDriver(base), { FACTORY_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n");
+  assert.ok(existsSync(join(home, PROBE_PERSIST)), "Pendulum checks the home from outside");
+  assert.equal(drive(claudeProbeDriver(base), { PENDULUM_PROBE_SCRIPT: "" }), "4\nthe probe script is missing\n");
+  assert.equal(drive(claudeProbeDriver(base), { PENDULUM_PROBE_DECOY: "" }), "4\nthe probe's decoy is missing\n");
   writeFileSync(join(bin, "pnpm"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   assert.equal(drive(claudeProbeDriver({ ...base, toolchain: { pm: "pnpm" } })), `4\n${TOOLCHAIN_RULE}\n`, "the package manager must run");
   assert.equal(drive(claudeProbeDriver({ ...base, toolchain: { node: "/nowhere/node" } })), `4\n${TOOLCHAIN_RULE}\n`, "the stage's node must be the one found");
-  assert.equal(drive(claudeProbeDriver(base), { FACTORY_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
+  assert.equal(drive(claudeProbeDriver(base), { PENDULUM_PROBE_SCRIPT: "true", [PROBE_MARKER]: "" }), "0\n\n", "a script that checks nothing leaves no pass line");
   assert.ok(!CLAUDE_DECOY_LAUNCH.includes("${") && !claudeProbeDriver(base).includes("${"));
 });
 
 test("Claude Code's local probe model: one Bash call, then the end; a stand-in key, never a real one", async () => {
   const model = await anthropicProbeModel();
   try {
-    assert.equal(model.env.ANTHROPIC_API_KEY, "sk-ant-factory-probe");
+    assert.equal(model.env.ANTHROPIC_API_KEY, "sk-ant-pendulum-probe");
     const ask = async (body) => (await fetch(`${model.env.ANTHROPIC_BASE_URL}/v1/messages`, { method: "POST", body: JSON.stringify(body) })).json();
     const first = await ask({ tools: [{ name: "Bash" }], messages: [{ role: "user", content: "x" }] });
-    assert.deepEqual(first.content[0].input.command, 'sh -c "$FACTORY_CLAUDE_PROBE"', "no path in the command line");
+    assert.deepEqual(first.content[0].input.command, 'sh -c "$PENDULUM_CLAUDE_PROBE"', "no path in the command line");
     assert.equal(first.stop_reason, "tool_use");
     const end = await ask({ tools: [{ name: "Bash" }], messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_probe", content: "ran" }] }] });
     assert.equal(end.stop_reason, "end_turn");
@@ -58,7 +58,7 @@ test("Claude Code's local probe before every start: launched as the run, the mar
   const [tmp, home, usage, clone] = ["t", "h", "u", "w"].map((d) => join(root, d));
   for (const d of [tmp, home, join(usage, "harness"), join(clone, ".git")]) mkdirSync(d, { recursive: true });
   const local = { clone, addDirs: [tmp], cacheDirs: [], readDirs: [usage], readOnly: [usage], domains: LOCAL_DOMAINS, toolchain: { node: "/usr/bin/node", pm: "pnpm" }, readable: ["/opt/pm"], claudeEnv: join(usage, "claude-env.sh") };
-  const env = { PATH: "/usr/bin", TMPDIR: tmp, FACTORY_USAGE_DIR: usage, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-real", ANTHROPIC_API_KEY: "sk-ant-real", MY_SECRET: "s" };
+  const env = { PATH: "/usr/bin", TMPDIR: tmp, PENDULUM_USAGE_DIR: usage, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-real", ANTHROPIC_API_KEY: "sk-ant-real", MY_SECRET: "s" };
   const calls = [];
   const leaving = (text, { persist = false } = {}) => async (cmd, args, opts) => {
     calls.push({ cmd, args, env: opts.env });
@@ -78,7 +78,7 @@ test("Claude Code's local probe before every start: launched as the run, the mar
   assert.ok(!("CLAUDE_CODE_OAUTH_TOKEN" in call.env) && !("ANTHROPIC_API_KEY" in call.env) && !("MY_SECRET" in call.env), "none of the run's credentials (the launcher adds a stand-in key)");
   assert.match(call.env[PROBE_MARKER], /^[0-9a-f]{32}$/);
   assert.equal(call.env.CLAUDE_CONFIG_DIR, join(usage, "harness", "claude-probe"));
-  assert.ok(call.env.FACTORY_CLAUDE_PROBE.includes("command -v node") && call.env.FACTORY_CLAUDE_PROBE.includes("pnpm --version"));
+  assert.ok(call.env.PENDULUM_CLAUDE_PROBE.includes("command -v node") && call.env.PENDULUM_CLAUDE_PROBE.includes("pnpm --version"));
   assert.ok(!existsSync(call.env.CLAUDE_CONFIG_DIR), "its config is removed afterwards");
   await assert.rejects(claudeLocalCheck(local, null, env, { run: leaving("4\nexample.com, off the allow-list, is reachable\n"), home }), (e) => e instanceof GitRefusal && e.rule === "a host off the allow-list is reachable" && e.harness === "claude" && e.local);
   assert.equal(calls.at(-1).cmd, process.execPath, "no outer sandbox: the launcher directly");

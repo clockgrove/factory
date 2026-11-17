@@ -16,12 +16,12 @@ const A = "a".repeat(40);
 const B = "b".repeat(40);
 const fixture = (name) => readFileSync(new URL(`./fixtures/red-logs/${name}`, import.meta.url), "utf8");
 
-test("lastGreenHead: the newest validated marker Factory itself wrote on the PR", () => {
-  setSelf("factory-app[bot]");
-  const c = (login, sha, at) => ({ user: { login }, created_at: at, body: `<!-- factory:7:validated:${sha} -->\nFactory: validation green` });
-  assert.equal(lastGreenHead([c("factory-app[bot]", A, "2026-11-08T01:00:00Z"), c("factory-app[bot]", B, "2026-11-08T02:00:00Z")], 7), B);
-  assert.equal(lastGreenHead([c("factory-app[bot]", A, "2026-11-08T01:00:00Z"), c("stranger", B, "2026-11-08T02:00:00Z")], 7), A, "anyone can paste a marker");
-  assert.equal(lastGreenHead([c("factory-app[bot]", A, "2026-11-08T01:00:00Z")], 8), null, "another Objective's marker");
+test("lastGreenHead: the newest validated marker Pendulum itself wrote on the PR", () => {
+  setSelf("pendulum-app[bot]");
+  const c = (login, sha, at) => ({ user: { login }, created_at: at, body: `<!-- pendulum:7:validated:${sha} -->\nPendulum: validation green` });
+  assert.equal(lastGreenHead([c("pendulum-app[bot]", A, "2026-11-08T01:00:00Z"), c("pendulum-app[bot]", B, "2026-11-08T02:00:00Z")], 7), B);
+  assert.equal(lastGreenHead([c("pendulum-app[bot]", A, "2026-11-08T01:00:00Z"), c("stranger", B, "2026-11-08T02:00:00Z")], 7), A, "anyone can paste a marker");
+  assert.equal(lastGreenHead([c("pendulum-app[bot]", A, "2026-11-08T01:00:00Z")], 8), null, "another Objective's marker");
   assert.equal(lastGreenHead([], 7), null);
   setSelf(null);
 });
@@ -91,7 +91,7 @@ test("a red is handed back only when every failing job is a steady base failure"
   assert.match(reason, /^base failure: unit, lint fail the same way on main@bbbbbbb \(.+\); not this change$/);
   const d = decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 1, green: false, baseFailure: reason } });
   assert.deepEqual(d, { exit: "blocked", reason, cause: "work" });
-  assert.match(decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 2, green: false } }).reason, /^validation red after Factory's second pass/);
+  assert.match(decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: 2, green: false } }).reason, /^validation red after Pendulum's second pass/);
 });
 
 test("leadJobs: every red required check first and named, even when an optional job failed first; one with no line says so (#280)", () => {
@@ -117,7 +117,7 @@ test("leadJobs: every red required check first and named, even when an optional 
 });
 
 test("mirrorDiff: two-dot, the green tree against the red one; not three-dot, which after a rebase shows the whole PR again", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-reds-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-reds-"));
   try {
     const g = (...args) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
     g("init", "-q");

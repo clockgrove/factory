@@ -1,18 +1,18 @@
-# clockgrove/factory: one composite Action, nine modes (dispatch | work | review | gate | launch | image | sweep | watch | account).
+# clockgrove/pendulum: one composite Action, nine modes (dispatch | work | review | gate | launch | image | sweep | watch | account).
 # The adopter's workflow (see workflow-template.yml) calls it once per job: dispatch, then work and review on the
 # runner, or, with a cloud sandbox (`sandbox: vercel`), launch jobs that start each stage in the Objective's sandbox and an
 # image job that builds the sandbox image every stage starts from. Every
-# GitHub write goes through the adopter's Factory GitHub App (app_id + app_private_key,
+# GitHub write goes through the adopter's Pendulum GitHub App (app_id + app_private_key,
 # minted into a short-lived installation token here and kept in memory); the harness runs as
 # its own uid with a read-only token and writes nothing (plugin/scripts/lib/agent.mjs). The job's own GITHUB_TOKEN
 # reads usage artifacts and never reaches the harness. This Action never creates an App.
-name: Factory
+name: Pendulum
 description: Build a labelled GitHub issue unattended, review it, and hand it to the merge queue.
 author: Clockgrove
 
 inputs:
   mode:
-    description: Which job this call runs. `dispatch` outputs the ready issue list; `work` builds one issue (needs `issue`); `review` reviews one PR (needs `pr`); `gate` decides whether an event starts anything (no install, no sandbox call); `launch` turns the event (or the dispatcher's pick, `issue`) into one stage start in the Objective's cloud sandbox (needs `sandbox`); `image` builds the sandbox image from the default branch's head with the repository's setup command (needs `sandbox` and a checkout); `sweep` destroys the Objective sandboxes no live Objective needs (needs `sandbox`); `watch` reads the merge queue entries of the PRs in `pr` (the dispatcher's `queue_watch`) until one leaves the queue or stalls there, and outputs `tick` (no install, reads only). `account` picks the account the next step's stage runs on, when the workflow's env block declares FACTORY_ACCOUNTS (the Objective in `issue`, or the review's PR branch; with FACTORY_AUTO_ACCOUNT on, a free one by the account holds Factory keeps on GitHub), and outputs `account`, the account whose secrets the stage's step gets (no install, reads only).
+    description: Which job this call runs. `dispatch` outputs the ready issue list; `work` builds one issue (needs `issue`); `review` reviews one PR (needs `pr`); `gate` decides whether an event starts anything (no install, no sandbox call); `launch` turns the event (or the dispatcher's pick, `issue`) into one stage start in the Objective's cloud sandbox (needs `sandbox`); `image` builds the sandbox image from the default branch's head with the repository's setup command (needs `sandbox` and a checkout); `sweep` destroys the Objective sandboxes no live Objective needs (needs `sandbox`); `watch` reads the merge queue entries of the PRs in `pr` (the dispatcher's `queue_watch`) until one leaves the queue or stalls there, and outputs `tick` (no install, reads only). `account` picks the account the next step's stage runs on, when the workflow's env block declares PENDULUM_ACCOUNTS (the Objective in `issue`, or the review's PR branch; with PENDULUM_AUTO_ACCOUNT on, a free one by the account holds Pendulum keeps on GitHub), and outputs `account`, the account whose secrets the stage's step gets (no install, reads only).
     required: true
   issue:
     description: The Objective issue number (mode work, mode account), or one issue to dispatch alone (mode dispatch, from workflow_dispatch).
@@ -21,16 +21,16 @@ inputs:
     description: '(work, review, launch) The account the stage runs on, the `account` output of the job''s account step (empty when the repository declares no accounts or the workflow was rendered for other ones, `-` when the step picked none): its credential is the only one the workflow passes, and the stage records the name and Blocks when its labels pick another. Never a secret.'
     required: false
   rendered_accounts:
-    description: '(account) The accounts setup rendered the workflow''s credential inputs for (FACTORY_ACCOUNTS as one line of JSON, empty for none). With other accounts declared in the env block now, the step picks none, since the jobs name only these accounts'' secrets, and the stage Blocks asking for a re-render.'
+    description: '(account) The accounts setup rendered the workflow''s credential inputs for (PENDULUM_ACCOUNTS as one line of JSON, empty for none). With other accounts declared in the env block now, the step picks none, since the jobs name only these accounts'' secrets, and the stage Blocks asking for a re-render.'
     required: false
   pr:
     description: The pull request number to review (mode review), or the JSON list of PR numbers to watch (mode watch).
     required: false
   harness:
-    description: The harness that runs the worker and the reviewer, `claude`, `codex` or `copilot`; the repository's default, which an Objective's `factory:harness:<name>` label overrides for that Objective.
+    description: The harness that runs the worker and the reviewer, `claude`, `codex` or `copilot`; the repository's default, which an Objective's `pendulum:harness:<name>` label overrides for that Objective.
     required: false
   model:
-    description: The worker session's model (the strong one); the harness default when empty. The repository's default, which an Objective's `factory:model:<id>` label overrides for that Objective.
+    description: The worker session's model (the strong one); the harness default when empty. The repository's default, which an Objective's `pendulum:model:<id>` label overrides for that Objective.
     required: false
   effort:
     description: The worker session's effort level (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`; the levels each model supports); the harness default when empty. Pinned so a CLI default change cannot move cost silently.
@@ -48,10 +48,10 @@ inputs:
     description: 'Claude''s prompt-cache lifetime for the worker and reviewer sessions (`CLAUDE_CODE_PROMPT_CACHE_TTL`, the main conversation; sub-agents keep the CLI default). `off` (default) leaves the CLI default until the A/B in bench/README.md is run. `auto` asks for `1h` when the run bills an API key, which otherwise gets five minutes, so a fix pass after a CI wait re-writes the whole prefix; a plan token already gets an hour. `1h` or `5m` set that on every credential. Any other value is refused with a warning and reads as `off`. Codex and Copilot manage their own caching. The usage record''s `cache` shows the writes after each CI wait, so the setting is measured, not assumed.'
     required: false
   subagent_model:
-    description: The implementer sub-agents' model, pinned in the agent definitions the job writes into the checkout. The repository's default, which an Objective's `factory:subagent-model:<id>` label overrides for that Objective.
+    description: The implementer sub-agents' model, pinned in the agent definitions the job writes into the checkout. The repository's default, which an Objective's `pendulum:subagent-model:<id>` label overrides for that Objective.
     required: false
   reviewer_model:
-    description: The reviewer's model for its one comment-only pass; `model` when empty. The repository's default, which an Objective's `factory:reviewer-model:<id>` label overrides for that Objective.
+    description: The reviewer's model for its one comment-only pass; `model` when empty. The repository's default, which an Objective's `pendulum:reviewer-model:<id>` label overrides for that Objective.
     required: false
   reviewer_effort:
     description: The reviewer's effort level for its one pass (Claude `--effort`, Codex `model_reasoning_effort`, Copilot `--reasoning-effort`). Empty is the harness's reviewer default, passed on every reviewer call - Codex `high` (its reviewer agent file), Claude and Copilot their CLI default (nothing passed) - since no harness applies its agent file's effort to that call.
@@ -81,13 +81,13 @@ inputs:
     description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.
     required: false
   auto_merge:
-    description: '`true` (default): Factory merges the reviewed, validated head itself once its required checks are green (it enqueues that exact head on a merge queue), with no human read; nothing is armed that a later push could ride. `false` leaves a ready-for-review PR.'
+    description: '`true` (default): Pendulum merges the reviewed, validated head itself once its required checks are green (it enqueues that exact head on a merge queue), with no human read; nothing is armed that a later push could ride. `false` leaves a ready-for-review PR.'
     required: false
   notify:
-    description: 'The GitHub handle that Blocked comments @mention, and Question drafts request as reviewer, written `login#id` (its numeric user id, as setup writes it) so Factory also trusts it as a maintainer by id; a bare login is mentioned but not trusted.'
+    description: 'The GitHub handle that Blocked comments @mention, and Question drafts request as reviewer, written `login#id` (its numeric user id, as setup writes it) so Pendulum also trusts it as a maintainer by id; a bare login is mentioned but not trusted.'
     required: false
   maintainers:
-    description: 'More maintainers Factory trusts beside `notify`, comma-separated, each `login#id` (the numeric user id). Their comments answer a Question and their markers count, whatever the App can see of their access (an organization member with private membership looks like a contributor to it). Matched by id, so a login renamed away is a stranger; a bare login is trusted for nothing.'
+    description: 'More maintainers Pendulum trusts beside `notify`, comma-separated, each `login#id` (the numeric user id). Their comments answer a Question and their markers count, whatever the App can see of their access (an organization member with private membership looks like a contributor to it). Matched by id, so a login renamed away is a stranger; a bare login is trusted for nothing.'
     required: false
   setup:
     description: The repository's toolchain command, run in the checkout before the worker (for example `scripts/ci/toolchain.sh postgresql`). Empty runs nothing.
@@ -96,43 +96,43 @@ inputs:
     description: '`auto` (default) installs the versions each lockfile in the repository''s root pins, one install per ecosystem, all of them: Node.js `pnpm install --frozen-lockfile` (offline from its store first, else online), `npm ci` or `yarn install --frozen-lockfile` (the one package.json''s `packageManager` names, else in that order); Rust `cargo fetch --locked`; Python `poetry install --no-root` or `uv sync --frozen` (in that order); Go `go mod download`. The list is closed: no file in the repository picks the command. It uses the network the stage allows and runs with no credential in its environment; npm, pnpm and yarn skip install scripts (`--ignore-scripts`), while a Python install that builds a source package runs its build. Each install''s program (`cargo`, `uv`, `go` and the rest) must be on PATH where the stage runs: setup installs it otherwise, and doctor''s lockfile row warns when it is not found. `none` skips; any other value is the command to run. An install that exits non-zero, or leaves a linked dependency or its declared binary missing, gets one clean reinstall (node_modules emptied, the package caches kept); still broken, the stage Blocks naming the install as infrastructure, before any validation runs. One whose program is not on PATH Blocks at once, naming the program.'
     required: false
   validation:
-    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Factory''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
+    description: 'The repository''s validation commands, comma- or newline-separated, named in the task card for the harness. Without `ci_checks` (and in local mode) they are also Pendulum''s own pass (two at most). A command marked `parallel: ` runs at the same time as the marked ones beside it; unmarked ones run in order. In a workflow''s env block, quote a value that holds such a mark.'
     required: false
   budget_command:
     description: The test-budget command named in the task card, if the repository has one.
     required: false
   protected_paths:
-    description: Repository-specific paths added to Factory's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
+    description: Repository-specific paths added to Pendulum's protected list (.github/, CODEOWNERS, .agents/skills/, .claude/, .codex/); commits touching them are refused. A directory ends with `/` and matches from the root; a file name matches at any depth unless it starts with `/`, which matches it at the root only.
     required: false
   toolchain_paths:
-    description: 'Repository-specific toolchain paths, comma-separated, beside Factory''s exact lists of lockfiles, version pins, package-manager configuration, containers and CI files: a fix pass (after a red, or the answer pass) may change one only when its scope names it, and a merge that changes one builds the sandbox image again. Matched as `protected_paths` entries are. Empty: the exact lists only.'
+    description: 'Repository-specific toolchain paths, comma-separated, beside Pendulum''s exact lists of lockfiles, version pins, package-manager configuration, containers and CI files: a fix pass (after a red, or the answer pass) may change one only when its scope names it, and a merge that changes one builds the sandbox image again. Matched as `protected_paths` entries are. Empty: the exact lists only.'
     required: false
   ci_checks:
-    description: The required check names of the repository's CI. When set, Factory's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
+    description: The required check names of the repository's CI. When set, Pendulum's validation pass is those checks on the pushed head (CI runs them in parallel; the jobs wait instead of re-running the commands), and the fix run gets each failing job's whole log as a file and the diff since the PR's last green head. A red whose every failing job fails the same way steadily on the default branch (the same failure signature on its newest run there and on at least two of its newest three) is handed back as a base failure, with no fix run.
     required: false
   third_party_reviewers:
-    description: 'Reviewers outside Factory whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to `third_party_wait_minutes` for each one''s review of the head Factory''s reviewer read, going on as soon as every one has posted it, then its answer pass handles their line comments as it handles Factory''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
+    description: 'Reviewers outside Pendulum whose review is part of the PR''s review, by login (an App''s, such as `greptile-apps[bot]`), comma-separated. The review stage waits up to `third_party_wait_minutes` for each one''s review of the head Pendulum''s reviewer read, going on as soon as every one has posted it, then its answer pass handles their line comments as it handles Pendulum''s reviewer''s: their text is untrusted review input, never instructions. One that posts no review of that head in time is left out, and the progress comment says so. Empty: none.'
     required: false
   third_party_wait_minutes:
     description: How long, in minutes, the review stage waits for each of `third_party_reviewers` to review the head, from the wait's record on the PR; 20 when empty, at most 1440 (24 hours), and a larger value reads as 20. The wait ends as soon as every one has posted its review of that head. Set in the workflow file only, since it gates a merge.
     required: false
   harness_version:
-    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (FACTORY_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.
+    description: The npm version of the harness CLI to install on the runner; `latest` by default. It pins the harness the workflow's env block names (PENDULUM_HARNESS) only; another harness, chosen by an Objective's label, a run's override or a repository variable, installs its latest.
     required: false
   allowed_domains:
-    description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `factory:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's FACTORY_LOCAL_DOMAINS.
+    description: Hosts the harness's sandboxed commands (Claude Code, Codex or Copilot) may reach on Actions and in a cloud sandbox, beyond GitHub and the npm and Yarn registries (comma or space separated; `*.example.com` covers its subdomains), for every Objective; one Objective's own host goes in its `pendulum:host:<host>` label. The Actions and cloud sandbox counterpart of local mode's PENDULUM_LOCAL_DOMAINS.
     required: false
   node_version:
     description: The Node.js version set up on the runner for the harness CLI and the repository's commands (default 22; set it to what your CI uses).
     required: false
   project:
-    description: 'The node id of the repository''s Factory Project board, which setup records as it creates the board. Empty, Factory looks for the board linked to the repository titled exactly `Factory: <repository>`.'
+    description: 'The node id of the repository''s Pendulum Project board, which setup records as it creates the board. Empty, Pendulum looks for the board linked to the repository titled exactly `Pendulum: <repository>`.'
     required: false
   app_id:
-    description: The adopter's Factory GitHub App id (secret FACTORY_APP_ID). Required.
+    description: The adopter's Pendulum GitHub App id (secret PENDULUM_APP_ID). Required.
     required: true
   app_private_key:
-    description: The App's private key PEM (secret FACTORY_APP_PRIVATE_KEY). Required; used only to mint a short-lived installation token.
+    description: The App's private key PEM (secret PENDULUM_APP_PRIVATE_KEY). Required; used only to mint a short-lived installation token.
     required: true
   anthropic_api_key:
     description: 'ANTHROPIC_API_KEY for the Claude harness. Leave empty to use workload identity federation (needs `id-token: write` and `anthropic_oidc_exchange_url`).'
@@ -147,7 +147,7 @@ inputs:
     description: CODEX_API_KEY for the Codex harness; passed to the harness child process only, never to the job environment.
     required: false
   codex_gateway_key:
-    description: 'A Vercel AI Gateway key (secret FACTORY_CODEX_GATEWAY_KEY) for the Codex harness: Codex then runs through the gateway and bills its credits at the provider''s list price. Wins over codex_api_key when both are set. Passed to the harness child process only, never to the job environment or the worker''s shell; never Factory''s own AI_GATEWAY_API_KEY.'
+    description: 'A Vercel AI Gateway key (secret PENDULUM_CODEX_GATEWAY_KEY) for the Codex harness: Codex then runs through the gateway and bills its credits at the provider''s list price. Wins over codex_api_key when both are set. Passed to the harness child process only, never to the job environment or the worker''s shell; never Pendulum''s own AI_GATEWAY_API_KEY.'
     required: false
   copilot_github_token:
     description: 'A fine-grained token with only the Copilot Requests permission, from a user with a Copilot seat, for the Copilot harness; it bills that seat. Passed to the harness process only; doctor checks it cannot write to the repository. Required for Copilot: the job token is never used.'
@@ -189,7 +189,7 @@ inputs:
     description: On GitHub Actions and in the cloud sandbox with automatic account choice, a usage limit that resets further away than this many minutes, while another account is free, ends the stage so the Objective goes on there, starting afresh from its branch; 60 when empty. A number above 0, at most 1440. Scheduling only.
     required: false
   claim_pause_hours:
-    description: How long an Objective a local loop holds may stay paused while that loop is away (its machine asleep or off, serve stopped) before the dispatcher Blocks it, and how long a factory:local Objective no loop has claimed (Running, or In review with its review owed) or whose claim cannot be read waits for one; 24 when empty. A number from 2 (twice the hourly beat a loop writes on a paused claim, and twice the most a local stage waits in place) to 720 (30 days). Keep it above local mode's FACTORY_LOCAL_OUTAGE_HOURS, so an outage Blocks naming the outage first.
+    description: How long an Objective a local loop holds may stay paused while that loop is away (its machine asleep or off, serve stopped) before the dispatcher Blocks it, and how long a pendulum:local Objective no loop has claimed (Running, or In review with its review owed) or whose claim cannot be read waits for one; 24 when empty. A number from 2 (twice the hourly beat a loop writes on a paused claim, and twice the most a local stage waits in place) to 720 (30 days). Keep it above local mode's PENDULUM_LOCAL_OUTAGE_HOURS, so an outage Blocks naming the outage first.
     required: false
   sibling_wait_hours:
     description: The longest a hand-off to review, or a conflicting PR's rebase, waits for a sibling ahead of it that it conflicts with (sibling_hold), counted from its first wait; then it goes on beside the sibling. 6 when empty. A number above 0, at most 168 (7 days). Scheduling only.
@@ -198,13 +198,13 @@ inputs:
     description: The most sequential PRs one Objective splits into; a split with work left after the last Blocks. It bounds how many PRs, not the spend; each part's work and review jobs are capped by max_usd separately, and its rebases, re-reviews and resumed stages each have that cap too, on top. 6 when empty. A whole number from 1 to 50.
     required: false
   step_stall_factor:
-    description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Factory then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.
+    description: A required check's step on a merge queue commit has hung once it runs past this many times its longest duration in the workflow's recent green runs (and past that duration plus step_stall_floor_minutes); Pendulum then takes the PR out of the queue and puts it back once. 3 when empty. A number from 1 to 100. Scheduling only.
     required: false
   step_stall_floor_minutes:
     description: The least time over a step's longest recent green duration before it counts as hung on a merge queue commit (step_stall_factor), and how old the queue commit must be before its checks are judged; 15 when empty. A number from 1 (under a minute every queue commit would be judged at once) to 1440. Scheduling only.
     required: false
   queue_stall_minutes:
-    description: How long a merge queue commit may wait with no CI begun on it before Factory takes the PR out of the queue and puts it back once; 10 when empty. A number from 1 (under a minute every queue commit would be stalled as it is made) to 1440. Scheduling only.
+    description: How long a merge queue commit may wait with no CI begun on it before Pendulum takes the PR out of the queue and puts it back once; 10 when empty. A number from 1 (under a minute every queue commit would be stalled as it is made) to 1440. Scheduling only.
     required: false
   relay_unknown_shut:
     description: How many failed calls through the gateway relay whose cost cannot be known and that may have been billed shut the relay for the stage (the stage Blocks); 6 when empty. A whole number from 1 to 1000. Set in the workflow file only, since it bounds spend.
@@ -216,16 +216,16 @@ inputs:
     description: The least dollars a failed relayed call that ran over 30 seconds upstream is booked at against max_usd; 1 when empty. A number above 0, at most 100. Set in the workflow file only, since it bounds spend.
     required: false
   ai_gateway_api_key:
-    description: 'A Vercel AI Gateway key (secret AI_GATEWAY_API_KEY) for Factory''s decision calls, which then ask the gateway''s decision models. Red-check triage: when a required check is red, each failing job is asked whether the change broke it or it is a flake; only when every failing job reads flaky at confidence 0.7 or more are the failed jobs rerun (once per head) instead of a fix pass. Each job''s log window and the PR''s file list go to the decision model. The drift advisory: while a worker''s harness runs, at most every two minutes, it is asked whether the agent is on task, drifting into scope creep or looping (the plan''s items, its last 12 activity entries and the files it edited go to the decision model); a drift label at confidence 0.7 or more writes one line on the progress comment, and never changes the run. The answer gate, on the triage model: whether what the answer and fix passes wrote after the review does only what its findings and the failing checks asked (that diff, the findings and the failures, up to 32 KiB in all, go to the decision model); anything else, or `only_asked` under confidence 0.7, gets a review pass. The finding check, on the triage model: whether each answer resolves its reviewer finding. The answer check, on the triage model: whether the writer comments since a Question give a decision on it (the Question''s notice and the comments go to the decision model); only `no_decision` at confidence 0.7 or more keeps the Question open; with a key the dispatcher and the launcher ask it before any stage starts, and each verdict is kept on the issue so no version of a comment is asked about twice. Empty: the stage''s own harness answers the same questions on its own credential, one short call with no tools per question (decision_route; docs/ADAPTERS.md, Decision model). Used by Factory''s own process only, never passed to the harness or any command.'
+    description: 'A Vercel AI Gateway key (secret AI_GATEWAY_API_KEY) for Pendulum''s decision calls, which then ask the gateway''s decision models. Red-check triage: when a required check is red, each failing job is asked whether the change broke it or it is a flake; only when every failing job reads flaky at confidence 0.7 or more are the failed jobs rerun (once per head) instead of a fix pass. Each job''s log window and the PR''s file list go to the decision model. The drift advisory: while a worker''s harness runs, at most every two minutes, it is asked whether the agent is on task, drifting into scope creep or looping (the plan''s items, its last 12 activity entries and the files it edited go to the decision model); a drift label at confidence 0.7 or more writes one line on the progress comment, and never changes the run. The answer gate, on the triage model: whether what the answer and fix passes wrote after the review does only what its findings and the failing checks asked (that diff, the findings and the failures, up to 32 KiB in all, go to the decision model); anything else, or `only_asked` under confidence 0.7, gets a review pass. The finding check, on the triage model: whether each answer resolves its reviewer finding. The answer check, on the triage model: whether the writer comments since a Question give a decision on it (the Question''s notice and the comments go to the decision model); only `no_decision` at confidence 0.7 or more keeps the Question open; with a key the dispatcher and the launcher ask it before any stage starts, and each verdict is kept on the issue so no version of a comment is asked about twice. Empty: the stage''s own harness answers the same questions on its own credential, one short call with no tools per question (decision_route; docs/ADAPTERS.md, Decision model). Used by Pendulum''s own process only, never passed to the harness or any command.'
     required: false
   worker_secrets:
-    description: 'Opt-in, off by default: the secrets the worker''s shell gets, comma or space separated, each `NAME` or `NAME=SOURCE` (the shell gets SOURCE''s value as NAME), for example `AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY`. Usually set as FACTORY_WORKER_SECRETS in the workflow''s env block, which local mode reads too. Any code the worker runs can read and spend them: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Refused (such an entry never reaches the shell): the model credentials and Factory''s, the runner''s and GitHub''s tokens; any name starting FACTORY_, GITHUB_, GH_, ACTIONS_, RUNNER_, ANTHROPIC_, CLAUDE_, CODEX_, OPENAI_ or COPILOT_; the process settings PATH, HOME, TMPDIR, SHELL, USER, LOGNAME, PWD, CI, BASH_ENV, ENV, NODE_OPTIONS, NODE_PATH, NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED, BUN_OPTIONS, PYTHONPATH, PYTHONHOME, PYTHONSTARTUP, PERL5LIB, PERL5OPT, RUBYOPT, SSL_CERT_FILE, SSL_CERT_DIR, SSLKEYLOGFILE, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and any name starting LD_, DYLD_, GIT_, NPM_CONFIG_ or SUDO_ (case-insensitive); a name shaped like a key (vck_, ghp_, github_pat_, sk-, xox…); and Factory''s own AI_GATEWAY_API_KEY secret as SOURCE. Only the worker''s harness gets them (the work stage''s passes and the review stage''s fix and answer passes); the setup, install and validation commands and the reviewer never do. An AI Gateway key (NAME AI_GATEWAY_API_KEY) is never handed over: Factory relays it, metered against max_usd, and the shell gets a relay token and FACTORY_GATEWAY_URL (docs/PLAN.md, The gateway relay).'
+    description: 'Opt-in, off by default: the secrets the worker''s shell gets, comma or space separated, each `NAME` or `NAME=SOURCE` (the shell gets SOURCE''s value as NAME), for example `AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY`. Usually set as PENDULUM_WORKER_SECRETS in the workflow''s env block, which local mode reads too. Any code the worker runs can read and spend them: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Refused (such an entry never reaches the shell): the model credentials and Pendulum''s, the runner''s and GitHub''s tokens; any name starting PENDULUM_, GITHUB_, GH_, ACTIONS_, RUNNER_, ANTHROPIC_, CLAUDE_, CODEX_, OPENAI_ or COPILOT_; the process settings PATH, HOME, TMPDIR, SHELL, USER, LOGNAME, PWD, CI, BASH_ENV, ENV, NODE_OPTIONS, NODE_PATH, NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED, BUN_OPTIONS, PYTHONPATH, PYTHONHOME, PYTHONSTARTUP, PERL5LIB, PERL5OPT, RUBYOPT, SSL_CERT_FILE, SSL_CERT_DIR, SSLKEYLOGFILE, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and any name starting LD_, DYLD_, GIT_, NPM_CONFIG_ or SUDO_ (case-insensitive); a name shaped like a key (vck_, ghp_, github_pat_, sk-, xox…); and Pendulum''s own AI_GATEWAY_API_KEY secret as SOURCE. Only the worker''s harness gets them (the work stage''s passes and the review stage''s fix and answer passes); the setup, install and validation commands and the reviewer never do. An AI Gateway key (NAME AI_GATEWAY_API_KEY) is never handed over: Pendulum relays it, metered against max_usd, and the shell gets a relay token and PENDULUM_GATEWAY_URL (docs/PLAN.md, The gateway relay).'
     required: false
   worker_secret_values:
-    description: 'The values of the `worker_secrets` SOURCEs, one `SOURCE=value` line each: the template passes the secret FACTORY_WORKER_SECRET_VALUES (work, review and launch jobs). A line whose SOURCE `worker_secrets` does not name opts nothing in. Passed to the worker''s harness only (the work stage and the review stage''s fix and answer passes, never the reviewer), masked in the job log and the uploaded harness stream.'
+    description: 'The values of the `worker_secrets` SOURCEs, one `SOURCE=value` line each: the template passes the secret PENDULUM_WORKER_SECRET_VALUES (work, review and launch jobs). A line whose SOURCE `worker_secrets` does not name opts nothing in. Passed to the worker''s harness only (the work stage and the review stage''s fix and answer passes, never the reviewer), masked in the job log and the uploaded harness stream.'
     required: false
   decision_route:
-    description: 'Who answers Factory''s decision calls (red-check triage, the drift advisory, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check). `auto` (default): the AI Gateway''s decision models with `ai_gateway_api_key`, else the stage''s own harness on its own credential. `gateway`: the gateway only, so without a key no decision call runs. `off`: none run; every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass, a reply resolves its reviewer finding unjudged, a send-back''s conflict pass is checked by matching commits rather than by content, a writer''s comment on a Question resumes it unjudged, a red after a fix pass the exact checks cannot judge counts as no progress, which Blocks, any edit to an Objective''s title, body or harness, model and host labels after its plan was made makes the plan and code stale, a fix pass''s lockfile change outside its scope is refused unjudged, a writer''s comment no pass has read holds a reviewed PR''s merge unjudged until the review stage applies it, and a plan-time Question is answered only by a comment naming the repository. On the harness, each call is one short request on the stage''s model (the reviewer''s in the review stage) whose spend counts toward max_usd: one per failing CI job at a red, a drift check every two minutes while a worker runs, one answer-gate call per review stage whose passes committed, one per answered reviewer finding, one per file a send-back''s conflict pass left other than the branch''s, one per version of the newest writer comment on a Question, asked first thing in the work stage it resumes and never twice for one version; one per red after a fix pass whose progress the exact checks cannot tell; one per distinct text of an Objective edited after its plan; one per version of each lockfile a fix pass changed outside its scope; one per set of unread writer comments on a reviewed, green PR about to merge (on the gateway only where the merge pass runs outside a stage); one per repository a plan-time Question named that a maintainer commented on since; on Copilot each call is a premium request.'
+    description: 'Who answers Pendulum''s decision calls (red-check triage, the drift advisory, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check). `auto` (default): the AI Gateway''s decision models with `ai_gateway_api_key`, else the stage''s own harness on its own credential. `gateway`: the gateway only, so without a key no decision call runs. `off`: none run; every red goes to the fix pass, no drift check runs, every answer and fix pass that commits after the review gets a review pass, a reply resolves its reviewer finding unjudged, a send-back''s conflict pass is checked by matching commits rather than by content, a writer''s comment on a Question resumes it unjudged, a red after a fix pass the exact checks cannot judge counts as no progress, which Blocks, any edit to an Objective''s title, body or harness, model and host labels after its plan was made makes the plan and code stale, a fix pass''s lockfile change outside its scope is refused unjudged, a writer''s comment no pass has read holds a reviewed PR''s merge unjudged until the review stage applies it, and a plan-time Question is answered only by a comment naming the repository. On the harness, each call is one short request on the stage''s model (the reviewer''s in the review stage) whose spend counts toward max_usd: one per failing CI job at a red, a drift check every two minutes while a worker runs, one answer-gate call per review stage whose passes committed, one per answered reviewer finding, one per file a send-back''s conflict pass left other than the branch''s, one per version of the newest writer comment on a Question, asked first thing in the work stage it resumes and never twice for one version; one per red after a fix pass whose progress the exact checks cannot tell; one per distinct text of an Objective edited after its plan; one per version of each lockfile a fix pass changed outside its scope; one per set of unread writer comments on a reviewed, green PR about to merge (on the gateway only where the merge pass runs outside a stage); one per repository a plan-time Question named that a maintainer commented on since; on Copilot each call is a premium request.'
     required: false
   triage_model:
     description: The decision model red-check triage, the answer gate, the finding check, the rebase check, the answer check, the fix-progress check, the edit check, the fence check, the comment check, the plan-answer check and local mode's lapse check ask with an AI Gateway key (an AI Gateway decision model id); `perplexity/pplx-decider-v1.2` when empty.
@@ -237,10 +237,10 @@ inputs:
     description: The decision model the drift advisory asks with an AI Gateway key (an AI Gateway decision model id); `baseten/elephant-1` when empty.
     required: false
   vars:
-    description: 'The repository''s variables as JSON: the workflow passes toJSON of the vars context (every `uses:` step of the workflow template does). Each `FACTORY_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
+    description: 'The repository''s variables as JSON: the workflow passes toJSON of the vars context (every `uses:` step of the workflow template does). Each `PENDULUM_<NAME>` variable that names a setting sets it over the workflow''s env block, but for the settings only the reviewed workflow file sets (docs/INSTALL.md, Settings in layers); empty: no variable layer.'
     required: false
   github_token:
-    description: 'The job''s GITHUB_TOKEN; Factory reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'
+    description: 'The job''s GITHUB_TOKEN; Pendulum reads usage artifacts and the workflow list with it, and it never reaches the harness. Defaults to `github.token`.'
     required: false
     default: ${{ github.token }}
 
@@ -327,7 +327,7 @@ outputs:
     description: "(account) The account the job's stage runs on, for the next step's `account` input and its credential inputs, which name each declared account's secret and pass this one's alone; `-` when none can be picked, empty when the workflow was rendered for other accounts (the stage then holds no credential, and Blocks or waits with why)."
     value: ${{ steps.run.outputs.account }}
   usage_dir:
-    description: (work, review) The directory holding usage/events.jsonl and usage/result.json to upload as `factory-usage-<issue>`; (launch) an ended sandbox stage's, named by `usage_name`.
+    description: (work, review) The directory holding usage/events.jsonl and usage/result.json to upload as `pendulum-usage-<issue>`; (launch) an ended sandbox stage's, named by `usage_name`.
     value: ${{ steps.run.outputs.usage_dir }}
 
 runs:
@@ -336,44 +336,44 @@ runs:
     - name: Node
       uses: actions/setup-node@v7
       with:
-        node-version: ${{ inputs.node_version || env.FACTORY_NODE_VERSION || '22' }}
+        node-version: ${{ inputs.node_version || env.PENDULUM_NODE_VERSION || '22' }}
 
-    # The harness an Objective's `factory:harness:<name>` label names (scripts/objective-harness.mjs), read with the job's
+    # The harness an Objective's `pendulum:harness:<name>` label names (scripts/objective-harness.mjs), read with the job's
     # own token: the job installs that CLI. The stage checks who applied the label, and Blocks when the harness it runs on
-    # is not the one installed here (FACTORY_STAGE_HARNESS below).
+    # is not the one installed here (PENDULUM_STAGE_HARNESS below).
     - name: The Objective's harness
       id: choice
       if: inputs.mode == 'work' || inputs.mode == 'review'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
-        FACTORY_INPUT_ISSUE: ${{ inputs.issue }}
+        PENDULUM_INPUT_ISSUE: ${{ inputs.issue }}
       # A review job's issue is its PR's branch's (GITHUB_HEAD_REF on a pull_request event): no API call for the PR.
-      run: node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --repo "$GITHUB_REPOSITORY" --issue "${FACTORY_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}"
+      run: node "$GITHUB_ACTION_PATH/plugin/scripts/objective-harness.mjs" --repo "$GITHUB_REPOSITORY" --issue "${PENDULUM_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}"
 
     - name: Install the harness CLI
       id: install
       if: inputs.mode != 'dispatch' && inputs.mode != 'launch' && inputs.mode != 'gate' && inputs.mode != 'image' && inputs.mode != 'watch' && inputs.mode != 'account'
       shell: bash
       # The harness comes from the Objective's harness label when it names one, else `with:` when given, else the
-      # repository's FACTORY_HARNESS variable, else the workflow's FACTORY_HARNESS env block (visible to composite steps at
+      # repository's PENDULUM_HARNESS variable, else the workflow's PENDULUM_HARNESS env block (visible to composite steps at
       # runtime), else claude: the same precedence as lib/choice.mjs chosenInputs over lib/inputs.mjs. Its version:
       # lib/choice.mjs harnessVersionFor.
       env:
-        FACTORY_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
-        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
-        FACTORY_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').FACTORY_HARNESS }}
-        FACTORY_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
+        PENDULUM_CHOSEN_HARNESS: ${{ steps.choice.outputs.harness }}
+        PENDULUM_INPUT_HARNESS: ${{ inputs.harness }}
+        PENDULUM_VARIABLE_HARNESS: ${{ fromJSON(inputs.vars || '{}').PENDULUM_HARNESS }}
+        PENDULUM_INPUT_HARNESS_VERSION: ${{ inputs.harness_version }}
       run: |
         # A harness name as lib/inputs.mjs reads it: the outer whitespace trimmed, lower case. A variable's is taken only
         # when it names a harness, as inputs.mjs takes it (valueProblem); anything else falls through to the workflow's.
         name() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v" | tr '[:upper:]' '[:lower:]'; }
-        WORKFLOW_HARNESS="$(name "${FACTORY_HARNESS:-}")"; WORKFLOW_HARNESS="${WORKFLOW_HARNESS:-claude}"
-        VARIABLE_HARNESS="$(name "${FACTORY_VARIABLE_HARNESS:-}")"
+        WORKFLOW_HARNESS="$(name "${PENDULUM_HARNESS:-}")"; WORKFLOW_HARNESS="${WORKFLOW_HARNESS:-claude}"
+        VARIABLE_HARNESS="$(name "${PENDULUM_VARIABLE_HARNESS:-}")"
         case "$VARIABLE_HARNESS" in claude|codex|copilot) ;; *) VARIABLE_HARNESS="" ;; esac
-        DEFAULT_HARNESS="$(name "${FACTORY_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
-        HARNESS="$(name "${FACTORY_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
-        VERSION="${FACTORY_INPUT_HARNESS_VERSION:-${FACTORY_HARNESS_VERSION:-latest}}"
+        DEFAULT_HARNESS="$(name "${PENDULUM_INPUT_HARNESS:-${VARIABLE_HARNESS:-$WORKFLOW_HARNESS}}")"
+        HARNESS="$(name "${PENDULUM_CHOSEN_HARNESS:-$DEFAULT_HARNESS}")"
+        VERSION="${PENDULUM_INPUT_HARNESS_VERSION:-${PENDULUM_HARNESS_VERSION:-latest}}"
         # harness_version pins the workflow env block's harness only: another one (an Objective's label's, a run's override's, a repository variable's) installs its latest.
         if [ "$HARNESS" != "$WORKFLOW_HARNESS" ]; then VERSION=latest; fi
         # Claude Code's postinstall puts its native binary in place (without it `claude` is a stub that exits 1); npm 11
@@ -402,11 +402,11 @@ runs:
               # Copilot's bwrap joins the namespaces unshare made, so only unshare needs the grant (and, on Ubuntu 25.04
               # and later, its unshare-userns-restrict profile unloaded, as bwrap-userns-restrict above).
               if sudo -n grep -q '^unpriv_unshare ' /sys/kernel/security/apparmor/profiles; then sudo -n apparmor_parser -R /etc/apparmor.d/unshare-userns-restrict || echo "::warning::unshare-userns-restrict could not be unloaded"; fi
-              printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-unshare /usr/bin/unshare flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-unshare >/dev/null
-              sudo -n apparmor_parser -r /etc/apparmor.d/factory-unshare || echo "::warning::the AppArmor profile for unshare did not load; copilot refuses to start where its sandbox cannot"
+              printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile pendulum-unshare /usr/bin/unshare flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/pendulum-unshare >/dev/null
+              sudo -n apparmor_parser -r /etc/apparmor.d/pendulum-unshare || echo "::warning::the AppArmor profile for unshare did not load; copilot refuses to start where its sandbox cannot"
             else
-              printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile factory-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/factory-bwrap >/dev/null
-              sudo -n apparmor_parser -r /etc/apparmor.d/factory-bwrap || echo "::warning::the AppArmor profile for bwrap did not load; $HARNESS refuses to start where its sandbox cannot"
+              printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile pendulum-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n' | sudo -n tee /etc/apparmor.d/pendulum-bwrap >/dev/null
+              sudo -n apparmor_parser -r /etc/apparmor.d/pendulum-bwrap || echo "::warning::the AppArmor profile for bwrap did not load; $HARNESS refuses to start where its sandbox cannot"
             fi
           fi
         fi
@@ -421,111 +421,111 @@ runs:
       shell: bash
       run: npm ci --ignore-scripts --no-audit --no-fund --prefix "$GITHUB_ACTION_PATH/plugin"
 
-    - name: Run factory (${{ inputs.mode }})
+    - name: Run pendulum (${{ inputs.mode }})
       id: run
       shell: bash
-      # Inputs reach the scripts as FACTORY_INPUT_*; an empty `with:` value falls
-      # through to the workflow's FACTORY_* env block (a repository variable of the
+      # Inputs reach the scripts as PENDULUM_INPUT_*; an empty `with:` value falls
+      # through to the workflow's PENDULUM_* env block (a repository variable of the
       # same name over it, lib/inputs.mjs applyVariables), then to the script default.
       # The Codex key is set here, on this one step, and the script passes it to the
       # harness child only; validation commands and git hooks never see it.
       env:
-        FACTORY_INPUT_MODE: ${{ inputs.mode }}
-        FACTORY_INPUT_ISSUE: ${{ inputs.issue }}
-        FACTORY_INPUT_PR: ${{ inputs.pr }}
-        FACTORY_INPUT_HARNESS: ${{ inputs.harness }}
-        FACTORY_INPUT_MODEL: ${{ inputs.model }}
-        FACTORY_INPUT_SUBAGENT_MODEL: ${{ inputs.subagent_model }}
-        FACTORY_INPUT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
-        FACTORY_INPUT_REVIEWER_EFFORT: ${{ inputs.reviewer_effort }}
-        FACTORY_INPUT_EFFORT: ${{ inputs.effort }}
-        FACTORY_INPUT_COMPACTION_WINDOW: ${{ inputs.compaction_window }}
-        FACTORY_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
-        FACTORY_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
-        FACTORY_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
-        FACTORY_INPUT_SIBLING_HOLD: ${{ inputs.sibling_hold }}
-        FACTORY_INPUT_DECISION_ROUTE: ${{ inputs.decision_route }}
-        FACTORY_INPUT_CREDENTIAL: ${{ inputs.credential }}
-        FACTORY_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
-        FACTORY_INPUT_REBASE_LIMIT: ${{ inputs.rebase_limit }}
-        FACTORY_INPUT_GUESS_HOURS: ${{ inputs.guess_hours }}
-        FACTORY_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
-        FACTORY_INPUT_MAX_USD: ${{ inputs.max_usd }}
-        FACTORY_INPUT_COPILOT_CREDIT_USD: ${{ inputs.copilot_credit_usd }}
-        FACTORY_INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
-        FACTORY_INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}
-        FACTORY_INPUT_NOTIFY: ${{ inputs.notify }}
-        FACTORY_INPUT_MAINTAINERS: ${{ inputs.maintainers }}
-        FACTORY_INPUT_SETUP: ${{ inputs.setup }}
-        FACTORY_INPUT_INSTALL: ${{ inputs.install }}
-        FACTORY_INPUT_VALIDATION: ${{ inputs.validation }}
-        FACTORY_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
-        FACTORY_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
-        FACTORY_INPUT_TOOLCHAIN_PATHS: ${{ inputs.toolchain_paths }}
-        FACTORY_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
-        FACTORY_INPUT_THIRD_PARTY_REVIEWERS: ${{ inputs.third_party_reviewers }}
-        FACTORY_INPUT_THIRD_PARTY_WAIT_MINUTES: ${{ inputs.third_party_wait_minutes }}
-        FACTORY_INPUT_APP_ID: ${{ inputs.app_id }}
-        FACTORY_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
-        FACTORY_INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
-        FACTORY_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
-        FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
-        FACTORY_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
-        FACTORY_INPUT_CODEX_GATEWAY_KEY: ${{ inputs.codex_gateway_key }}
-        FACTORY_INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_github_token }}
-        FACTORY_INPUT_AI_GATEWAY_API_KEY: ${{ inputs.ai_gateway_api_key }}
-        FACTORY_INPUT_WORKER_SECRETS: ${{ inputs.worker_secrets }}
-        FACTORY_INPUT_WORKER_SECRET_VALUES: ${{ inputs.worker_secret_values }}
-        FACTORY_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
-        FACTORY_INPUT_TRIAGE_MIN_CONFIDENCE: ${{ inputs.triage_min_confidence }}
-        FACTORY_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
-        FACTORY_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        PENDULUM_INPUT_MODE: ${{ inputs.mode }}
+        PENDULUM_INPUT_ISSUE: ${{ inputs.issue }}
+        PENDULUM_INPUT_PR: ${{ inputs.pr }}
+        PENDULUM_INPUT_HARNESS: ${{ inputs.harness }}
+        PENDULUM_INPUT_MODEL: ${{ inputs.model }}
+        PENDULUM_INPUT_SUBAGENT_MODEL: ${{ inputs.subagent_model }}
+        PENDULUM_INPUT_REVIEWER_MODEL: ${{ inputs.reviewer_model }}
+        PENDULUM_INPUT_REVIEWER_EFFORT: ${{ inputs.reviewer_effort }}
+        PENDULUM_INPUT_EFFORT: ${{ inputs.effort }}
+        PENDULUM_INPUT_COMPACTION_WINDOW: ${{ inputs.compaction_window }}
+        PENDULUM_INPUT_PROMPT_CACHE_TTL: ${{ inputs.prompt_cache_ttl }}
+        PENDULUM_INPUT_ALLOWED_DOMAINS: ${{ inputs.allowed_domains }}
+        PENDULUM_INPUT_RESUME_POLICY: ${{ inputs.resume_policy }}
+        PENDULUM_INPUT_SIBLING_HOLD: ${{ inputs.sibling_hold }}
+        PENDULUM_INPUT_DECISION_ROUTE: ${{ inputs.decision_route }}
+        PENDULUM_INPUT_CREDENTIAL: ${{ inputs.credential }}
+        PENDULUM_INPUT_MAX_CONCURRENT: ${{ inputs.max_concurrent }}
+        PENDULUM_INPUT_REBASE_LIMIT: ${{ inputs.rebase_limit }}
+        PENDULUM_INPUT_GUESS_HOURS: ${{ inputs.guess_hours }}
+        PENDULUM_INPUT_DAILY_USD: ${{ inputs.daily_usd }}
+        PENDULUM_INPUT_MAX_USD: ${{ inputs.max_usd }}
+        PENDULUM_INPUT_COPILOT_CREDIT_USD: ${{ inputs.copilot_credit_usd }}
+        PENDULUM_INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        PENDULUM_INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}
+        PENDULUM_INPUT_NOTIFY: ${{ inputs.notify }}
+        PENDULUM_INPUT_MAINTAINERS: ${{ inputs.maintainers }}
+        PENDULUM_INPUT_SETUP: ${{ inputs.setup }}
+        PENDULUM_INPUT_INSTALL: ${{ inputs.install }}
+        PENDULUM_INPUT_VALIDATION: ${{ inputs.validation }}
+        PENDULUM_INPUT_BUDGET_COMMAND: ${{ inputs.budget_command }}
+        PENDULUM_INPUT_PROTECTED_PATHS: ${{ inputs.protected_paths }}
+        PENDULUM_INPUT_TOOLCHAIN_PATHS: ${{ inputs.toolchain_paths }}
+        PENDULUM_INPUT_CI_CHECKS: ${{ inputs.ci_checks }}
+        PENDULUM_INPUT_THIRD_PARTY_REVIEWERS: ${{ inputs.third_party_reviewers }}
+        PENDULUM_INPUT_THIRD_PARTY_WAIT_MINUTES: ${{ inputs.third_party_wait_minutes }}
+        PENDULUM_INPUT_APP_ID: ${{ inputs.app_id }}
+        PENDULUM_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
+        PENDULUM_INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        PENDULUM_INPUT_ANTHROPIC_OIDC_EXCHANGE_URL: ${{ inputs.anthropic_oidc_exchange_url }}
+        PENDULUM_INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        PENDULUM_INPUT_CODEX_API_KEY: ${{ inputs.codex_api_key }}
+        PENDULUM_INPUT_CODEX_GATEWAY_KEY: ${{ inputs.codex_gateway_key }}
+        PENDULUM_INPUT_COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_github_token }}
+        PENDULUM_INPUT_AI_GATEWAY_API_KEY: ${{ inputs.ai_gateway_api_key }}
+        PENDULUM_INPUT_WORKER_SECRETS: ${{ inputs.worker_secrets }}
+        PENDULUM_INPUT_WORKER_SECRET_VALUES: ${{ inputs.worker_secret_values }}
+        PENDULUM_INPUT_TRIAGE_MODEL: ${{ inputs.triage_model }}
+        PENDULUM_INPUT_TRIAGE_MIN_CONFIDENCE: ${{ inputs.triage_min_confidence }}
+        PENDULUM_INPUT_DRIFT_MODEL: ${{ inputs.drift_model }}
+        PENDULUM_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
         # The repository's variables (lib/inputs.mjs applyVariables lays them over the env block, then drops this).
-        FACTORY_INPUT_VARS: ${{ inputs.vars }}
-        FACTORY_INPUT_SANDBOX: ${{ inputs.sandbox }}
-        FACTORY_INPUT_VERCEL_TOKEN: ${{ inputs.vercel_token }}
-        FACTORY_INPUT_VERCEL_TEAM_ID: ${{ inputs.vercel_team_id }}
-        FACTORY_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
-        FACTORY_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
-        FACTORY_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
-        FACTORY_INPUT_IMAGE_MAX_AGE_DAYS: ${{ inputs.image_max_age_days }}
-        FACTORY_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
-        FACTORY_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
-        FACTORY_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
-        FACTORY_INPUT_USAGE_LIMIT_WAITS: ${{ inputs.usage_limit_waits }}
-        FACTORY_INPUT_USAGE_LIMIT_MOVE_MINUTES: ${{ inputs.usage_limit_move_minutes }}
-        FACTORY_INPUT_CLAIM_PAUSE_HOURS: ${{ inputs.claim_pause_hours }}
-        FACTORY_INPUT_SIBLING_WAIT_HOURS: ${{ inputs.sibling_wait_hours }}
-        FACTORY_INPUT_MAX_PARTS: ${{ inputs.max_parts }}
-        FACTORY_INPUT_STEP_STALL_FACTOR: ${{ inputs.step_stall_factor }}
-        FACTORY_INPUT_STEP_STALL_FLOOR_MINUTES: ${{ inputs.step_stall_floor_minutes }}
-        FACTORY_INPUT_QUEUE_STALL_MINUTES: ${{ inputs.queue_stall_minutes }}
-        FACTORY_INPUT_RELAY_UNKNOWN_SHUT: ${{ inputs.relay_unknown_shut }}
-        FACTORY_INPUT_RELAY_UNKNOWN_FLOOR_USD: ${{ inputs.relay_unknown_floor_usd }}
-        FACTORY_INPUT_RELAY_SLOW_FLOOR_USD: ${{ inputs.relay_slow_floor_usd }}
+        PENDULUM_INPUT_VARS: ${{ inputs.vars }}
+        PENDULUM_INPUT_SANDBOX: ${{ inputs.sandbox }}
+        PENDULUM_INPUT_VERCEL_TOKEN: ${{ inputs.vercel_token }}
+        PENDULUM_INPUT_VERCEL_TEAM_ID: ${{ inputs.vercel_team_id }}
+        PENDULUM_INPUT_VERCEL_PROJECT_ID: ${{ inputs.vercel_project_id }}
+        PENDULUM_INPUT_IMAGE_REFRESH: ${{ inputs.image_refresh }}
+        PENDULUM_INPUT_IMAGE_DAILY_MINUTES: ${{ inputs.image_daily_minutes }}
+        PENDULUM_INPUT_IMAGE_MAX_AGE_DAYS: ${{ inputs.image_max_age_days }}
+        PENDULUM_INPUT_IMAGE_OWED: ${{ inputs.image_owed }}
+        PENDULUM_INPUT_SANDBOX_IDLE_DAYS: ${{ inputs.sandbox_idle_days }}
+        PENDULUM_INPUT_SWEEP_MAX_DESTROYS: ${{ inputs.sweep_max_destroys }}
+        PENDULUM_INPUT_USAGE_LIMIT_WAITS: ${{ inputs.usage_limit_waits }}
+        PENDULUM_INPUT_USAGE_LIMIT_MOVE_MINUTES: ${{ inputs.usage_limit_move_minutes }}
+        PENDULUM_INPUT_CLAIM_PAUSE_HOURS: ${{ inputs.claim_pause_hours }}
+        PENDULUM_INPUT_SIBLING_WAIT_HOURS: ${{ inputs.sibling_wait_hours }}
+        PENDULUM_INPUT_MAX_PARTS: ${{ inputs.max_parts }}
+        PENDULUM_INPUT_STEP_STALL_FACTOR: ${{ inputs.step_stall_factor }}
+        PENDULUM_INPUT_STEP_STALL_FLOOR_MINUTES: ${{ inputs.step_stall_floor_minutes }}
+        PENDULUM_INPUT_QUEUE_STALL_MINUTES: ${{ inputs.queue_stall_minutes }}
+        PENDULUM_INPUT_RELAY_UNKNOWN_SHUT: ${{ inputs.relay_unknown_shut }}
+        PENDULUM_INPUT_RELAY_UNKNOWN_FLOOR_USD: ${{ inputs.relay_unknown_floor_usd }}
+        PENDULUM_INPUT_RELAY_SLOW_FLOOR_USD: ${{ inputs.relay_slow_floor_usd }}
         # The harness the install step put in place (empty for the modes that install none): a stage that would run another Blocks.
-        FACTORY_STAGE_HARNESS: ${{ steps.install.outputs.harness }}
+        PENDULUM_STAGE_HARNESS: ${{ steps.install.outputs.harness }}
         # The account the job's account step picked (#267), whose credential alone the workflow passed: a stage whose labels pick another Blocks.
-        FACTORY_STAGE_ACCOUNT: ${{ inputs.account }}
+        PENDULUM_STAGE_ACCOUNT: ${{ inputs.account }}
         # The accounts setup rendered the credential inputs for (account mode): another declaration picks no account.
-        FACTORY_RENDERED_ACCOUNTS: ${{ inputs.rendered_accounts }}
-        FACTORY_USAGE_DIR: ${{ runner.temp }}/factory-usage
+        PENDULUM_RENDERED_ACCOUNTS: ${{ inputs.rendered_accounts }}
+        PENDULUM_USAGE_DIR: ${{ runner.temp }}/pendulum-usage
         # The scripts, skills, agents and task card are one tree: the plugin beside this action.
-        FACTORY_PLUGIN_ROOT: ${{ github.action_path }}/plugin
+        PENDULUM_PLUGIN_ROOT: ${{ github.action_path }}/plugin
       run: |
         set -euo pipefail
         # The launcher sets its own (an ended sandbox stage's usage, or none).
-        case "$FACTORY_INPUT_MODE" in work|review) echo "usage_dir=$FACTORY_USAGE_DIR" >> "$GITHUB_OUTPUT" ;; esac
-        mkdir -p "$FACTORY_USAGE_DIR"
-        case "$FACTORY_INPUT_MODE" in
-          dispatch) node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
-          work)     node "$FACTORY_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$FACTORY_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
-          review)   node "$FACTORY_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$FACTORY_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$FACTORY_USAGE_DIR" ;;
-          gate)     node "$FACTORY_PLUGIN_ROOT/scripts/launch.mjs"   --repo "$GITHUB_REPOSITORY" --gate ;;
-          launch)   FACTORY_ADAPTER_INSTALL=1 node "$FACTORY_PLUGIN_ROOT/scripts/launch.mjs" --repo "$GITHUB_REPOSITORY" ;;
-          image)    node "$FACTORY_PLUGIN_ROOT/scripts/image.mjs"    --repo "$GITHUB_REPOSITORY" --checkout "$GITHUB_WORKSPACE" ;;
-          sweep)    node "$FACTORY_PLUGIN_ROOT/scripts/sweep.mjs"    --repo "$GITHUB_REPOSITORY" ;;
-          watch)    node "$FACTORY_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" --watch "${FACTORY_INPUT_PR:-[]}" ;;
-          account)  node "$FACTORY_PLUGIN_ROOT/scripts/objective-account.mjs" --repo "$GITHUB_REPOSITORY" --issue "${FACTORY_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}" ;;
+        case "$PENDULUM_INPUT_MODE" in work|review) echo "usage_dir=$PENDULUM_USAGE_DIR" >> "$GITHUB_OUTPUT" ;; esac
+        mkdir -p "$PENDULUM_USAGE_DIR"
+        case "$PENDULUM_INPUT_MODE" in
+          dispatch) node "$PENDULUM_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          work)     node "$PENDULUM_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$PENDULUM_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
+          review)   node "$PENDULUM_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$PENDULUM_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
+          gate)     node "$PENDULUM_PLUGIN_ROOT/scripts/launch.mjs"   --repo "$GITHUB_REPOSITORY" --gate ;;
+          launch)   PENDULUM_ADAPTER_INSTALL=1 node "$PENDULUM_PLUGIN_ROOT/scripts/launch.mjs" --repo "$GITHUB_REPOSITORY" ;;
+          image)    node "$PENDULUM_PLUGIN_ROOT/scripts/image.mjs"    --repo "$GITHUB_REPOSITORY" --checkout "$GITHUB_WORKSPACE" ;;
+          sweep)    node "$PENDULUM_PLUGIN_ROOT/scripts/sweep.mjs"    --repo "$GITHUB_REPOSITORY" ;;
+          watch)    node "$PENDULUM_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" --watch "${PENDULUM_INPUT_PR:-[]}" ;;
+          account)  node "$PENDULUM_PLUGIN_ROOT/scripts/objective-account.mjs" --repo "$GITHUB_REPOSITORY" --issue "${PENDULUM_INPUT_ISSUE:-0}" --branch "${GITHUB_HEAD_REF:-none}" ;;
           *) echo "mode must be dispatch, work, review, gate, launch, image, sweep, watch or account" >&2; exit 1 ;;
         esac

@@ -80,7 +80,7 @@ function checkout({ said = "ERR_PNPM_META_FETCH_FAIL", fails = null } = {}) {
   return { dir, down, command, runs: () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0) };
 }
 
-const netLines = (lines) => lines.filter((l) => /\[factory\] network: /.test(l));
+const netLines = (lines) => lines.filter((l) => /\[pendulum\] network: /.test(l));
 const allowed = (lookups) => lookups.every((h) => LOCAL_DOMAINS.includes(h));
 
 test("install: a failure while the general check fails waits for this machine's network and runs once more, no Block and no reinstall", async () => {
@@ -102,7 +102,7 @@ test("install: a failure while the general check fails waits for this machine's 
       assert.deepEqual([...new Set(checks)], [GITHUB], "the general check alone, on GitHub's origin");
       assert.ok(allowed(lookups), `only the stage's allowed hosts are looked up: ${lookups}`);
       assert.deepEqual(fetched, [], "no pooled request stands in for the check");
-      assert.ok(lines.some((l) => /\[factory\] install: failed while this machine's network was down \(EAI_AGAIN\); waiting for the network, then running it once more/.test(l)), lines.join(""));
+      assert.ok(lines.some((l) => /\[pendulum\] install: failed while this machine's network was down \(EAI_AGAIN\); waiting for the network, then running it once more/.test(l)), lines.join(""));
       assert.equal(netLines(lines).length, 2, "one line lost, one back");
     },
   );
@@ -388,11 +388,11 @@ test("dispatch: a blocked-by read cut off mid-answer on every try fails the tick
       cuts += 1;
       throw new TypeError("terminated", { cause: Object.assign(new Error("read ETIMEDOUT"), { code: "ETIMEDOUT" }) });
     }
-    if (/\/repos\/acme\/app\/issues$/.test(u.pathname) && u.searchParams.get("state") === "open") return Response.json([{ number: 7, state: "open", body: "", labels: [{ name: "factory:objective" }], user: { login: "maintainer" } }]);
+    if (/\/repos\/acme\/app\/issues$/.test(u.pathname) && u.searchParams.get("state") === "open") return Response.json([{ number: 7, state: "open", body: "", labels: [{ name: "pendulum:objective" }], user: { login: "maintainer" } }]);
     return Response.json([]);
   };
   try {
-    await assert.rejects(dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60 }, { token: "t" }), /blocked_by\?per_page=100 failed: terminated \(ETIMEDOUT\)/);
+    await assert.rejects(dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 2, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60 }, { token: "t" }), /blocked_by\?per_page=100 failed: terminated \(ETIMEDOUT\)/);
     assert.equal(cuts, RETRY.tries, "the client's retries, all of them");
     assert.deepEqual(writes, [], "nothing marked");
   } finally {

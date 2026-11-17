@@ -1,10 +1,10 @@
 # Dependabot PRs that need no review join the merge queue by themselves (Kirk, 2026-11-09: App token + review).
-# Hourly on the default branch, never on a PR event, no checkout. With a Factory App installation token scoped to this
+# Hourly on the default branch, never on a PR event, no checkout. With a Pendulum App installation token scoped to this
 # repository, it queues an open Dependabot PR only when it is not a draft, every commit is Dependabot's, it comes from
 # the minor-and-patch group or a security group with no major update, its ecosystem is not github-actions, and it
 # changes nothing under .github/ (the App has no workflows permission). The required checks and the merge queue still
-# decide. Everything else waits for a person's review. Without the Factory App secrets (a repository that is not a
-# Factory adopter) the job does nothing. Part of the clockgrove repository standard (~/work/ops/repo-standard.sh).
+# decide. Everything else waits for a person's review. Without the Pendulum App secrets (a repository that is not a
+# Pendulum adopter) the job does nothing. Part of the clockgrove repository standard (~/work/ops/repo-standard.sh).
 name: Dependabot auto-merge
 on:
   schedule:
@@ -20,17 +20,17 @@ jobs:
     timeout-minutes: 10
     permissions: {}
     env:
-      HAS_APP: ${{ secrets.FACTORY_APP_ID != '' && secrets.FACTORY_APP_PRIVATE_KEY != '' }}
+      HAS_APP: ${{ secrets.PENDULUM_APP_ID != '' && secrets.PENDULUM_APP_PRIVATE_KEY != '' }}
     steps:
-      - name: No Factory App here
+      - name: No Pendulum App here
         if: env.HAS_APP != 'true'
-        run: echo "::notice::no Factory App secrets in this repository (not a Factory adopter); nothing queued"
+        run: echo "::notice::no Pendulum App secrets in this repository (not a Pendulum adopter); nothing queued"
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         if: env.HAS_APP == 'true'
         id: app
         with:
-          app-id: ${{ secrets.FACTORY_APP_ID }}
-          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.PENDULUM_APP_ID }}
+          private-key: ${{ secrets.PENDULUM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write

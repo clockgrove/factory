@@ -5,10 +5,10 @@
   },
   "plugins": [
     {
-      "name": "factory",
+      "name": "pendulum",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/clockgrove/factory.git",
+        "url": "https://github.com/clockgrove/pendulum.git",
         "path": "plugin",
         "ref": "main"
       },

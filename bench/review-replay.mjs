@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * `node bench/review-replay.mjs`: replay the private review set with the 0.6 reviewer
- * (the factory-review-pr skill as the pinned reviewer agent) and score its comments against the
+ * (the pendulum-review-pr skill as the pinned reviewer agent) and score its comments against the
  * set's labels. PLAN.md: no skill line changes without a replay-set run.
  *
  *   --set DIR               the replay set (records/, labels.json, seeded/, inputs/, plans/)
@@ -10,7 +10,7 @@
  *   --plugin DIR            the plugin whose prompt, skills and agents are reviewed (default: ../plugin);
  *                           the scoring is always this checkout's, so an older plugin is a fair baseline
  *   --model NAME            the reviewer model (default: the plugin's pinned reviewer)
- *   --effort LEVEL          --effort for Claude (default: the reviewer_effort Factory passes)
+ *   --effort LEVEL          --effort for Claude (default: the reviewer_effort Pendulum passes)
  *   --seeded                add the seeded records (one planted defect each)
  *   --only ID ...           only these records
  *   --concurrency N         reviews at once (default 2)
@@ -63,7 +63,7 @@ const plugin = resolve(values.plugin ?? join(here, "..", "plugin"));
 const scripts = join(plugin, "scripts", "lib");
 const { installPlugin } = await import(pathToFileURL(join(scripts, "checkout.mjs")).href);
 const { runHarness, scrubbedEnv } = await import(pathToFileURL(join(scripts, "harness.mjs")).href);
-// Scoring (what Factory would post from an answer) comes from this checkout, never --plugin: both sides of an A/B are
+// Scoring (what Pendulum would post from an answer) comes from this checkout, never --plugin: both sides of an A/B are
 // scored by the same code, and an older plugin without these exports still runs as a baseline.
 const own = join(here, "..", "plugin", "scripts", "lib");
 const { acceptanceEntries, parseReview } = await import(pathToFileURL(join(own, "logic.mjs")).href);
@@ -131,7 +131,7 @@ async function reviewOne(r) {
   const env = scrubbedEnv(process.env, { CI: "true" });
   const started = Date.now();
   const rec = await runHarness({ harness: "claude", model, effort, prompt, maxUsd: 5, agent: "reviewer", cwd: wt, env, timeoutMs, eventsFile: join(out, "events", `${r.id}.jsonl`), label: r.id });
-  // What Factory would post: the reviewer's comments plus one per entry it judged not met without one; never the placeholder.
+  // What Pendulum would post: the reviewer's comments plus one per entry it judged not met without one; never the placeholder.
   const review = rec.ok ? parseReview(rec.finalText || "") : { comments: [], acceptance: null, parsed: false };
   const post = rec.ok && review.parsed ? reviewPost({ issue: r.objective, review, diff, entries: acceptanceEntries(issueBody(r)) }) : null;
   const comments = post && !post.placeholder ? post.comments : [];

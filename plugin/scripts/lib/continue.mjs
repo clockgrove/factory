@@ -19,7 +19,7 @@ export const CONTINUE_GUARDS = { branch: "the branch on GitHub", restart: "the n
 
 /**
  * The login a harness runs on here, as a short hash of its state folder's real path (Claude Code's config folder, the
- * Codex home), so no path is recorded; null for a harness with no such folder (Copilot's home is Factory's own).
+ * Codex home), so no path is recorded; null for a harness with no such folder (Copilot's home is Pendulum's own).
  */
 export function loginOf(harness, env = process.env, home = homedir()) {
   const dir = harness === "claude" ? env.CLAUDE_CONFIG_DIR || join(home, ".claude") : harness === "codex" ? env.CODEX_HOME || join(home, ".codex") : null;
@@ -170,16 +170,16 @@ export async function enterStage({ ws, own, now, holds, putOn, clean, restore })
 }
 
 /**
- * What a resumed session is told when its stage continues a pause: the checkout as it left it, and Factory's hand-off
+ * What a resumed session is told when its stage continues a pause: the checkout as it left it, and Pendulum's hand-off
  * folders, which are new for every stage (`dirs`: handoff.mjs handoffDirs), restated so a path it remembers is not used.
  */
 export function continuePrompt(dirs, { note = "" } = {}) {
-  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Factory's hand-off folders are new for this run and the earlier ones are gone: FACTORY_IN is now ${dirs.in} and FACTORY_OUT is now ${dirs.out}. $FACTORY_IN/plan.md is your plan as Factory last saved it. Read $FACTORY_IN/decisions.md again: it holds every maintainer decision, those made since you stopped included. Keep the current plan in $FACTORY_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $FACTORY_OUT.${note ? ` ${note}` : ""}`;
+  return `Your previous run stopped at the provider's usage limit, which has now reset. Continue the same task from where it stopped, in the same checkout: your commits and uncommitted changes are as you left them. Do not redo finished steps. Pendulum's hand-off folders are new for this run and the earlier ones are gone: PENDULUM_IN is now ${dirs.in} and PENDULUM_OUT is now ${dirs.out}. $PENDULUM_IN/plan.md is your plan as Pendulum last saved it. Read $PENDULUM_IN/decisions.md again: it holds every maintainer decision, those made since you stopped included. Keep the current plan in $PENDULUM_OUT/plan.md, and write every other output the task card names (pr.md, exit.json) to the new $PENDULUM_OUT.${note ? ` ${note}` : ""}`;
 }
 
 /** The task card for a fresh session on a kept checkout (a continued stage whose session does not carry over). */
 export function keptPrompt(prompt, { note = "" } = {}) {
-  return `${prompt.trimEnd()}\n\n---\n\nAn earlier pass of this Objective stopped at the provider's usage limit before it finished. Its work is still in this checkout: its commits on the branch and its uncommitted changes. $FACTORY_IN/plan.md is its plan as Factory last saved it. Continue from there; do not redo finished items.${note ? ` ${note}` : ""}`;
+  return `${prompt.trimEnd()}\n\n---\n\nAn earlier pass of this Objective stopped at the provider's usage limit before it finished. Its work is still in this checkout: its commits on the branch and its uncommitted changes. $PENDULUM_IN/plan.md is its plan as Pendulum last saved it. Continue from there; do not redo finished items.${note ? ` ${note}` : ""}`;
 }
 
 /**
@@ -192,13 +192,13 @@ export function installEnd(result, { continued, command }) {
   if (result.ok) return {};
   // A program the install needs that is not there (installDeps `absent`) is setup's to bring, never the pass's.
   if (!continued || result.absent?.length) return { block: result.reason };
-  return { note: `Factory's install (${command}) failed on this checkout, which keeps your unfinished changes: finish any dependency change, its lockfile included, and install before you validate.` };
+  return { note: `Pendulum's install (${command}) failed on this checkout, which keeps your unfinished changes: finish any dependency change, its lockfile included, and install before you validate.` };
 }
 
 /**
  * The maintainers' decisions a work pass is recorded as having read (logic.mjs decisionsRead), or null for none: a pass
  * given the whole task card reads those that fit it (decisionsShown); a continued session's resumed pass is told to read
- * $FACTORY_IN/decisions.md, which holds every one (continuePrompt); a conflict pass is told only to rebase.
+ * $PENDULUM_IN/decisions.md, which holds every one (continuePrompt); a conflict pass is told only to rebase.
  */
 export function decisionsFed({ decisions, full, continued, rebaseConflict }) {
   if (rebaseConflict) return null;

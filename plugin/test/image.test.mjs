@@ -18,13 +18,13 @@ const SHA = "a".repeat(40);
 const OTHER = "b".repeat(40);
 /** The harness CLIs' exact versions, as harnessVersions resolves them. */
 const VERSIONS = { "@anthropic-ai/claude-code": "2.1.400", "@openai/codex": "0.200.0", "@github/copilot": "1.0.40" };
-const build = (over = {}) => imageEntry({ vendor: "vercel", snapshot: "snap_abc", source: "factory-src1", sha: SHA, builtAt: "2026-11-08T10:00:00Z", buildMs: 60_000, ...over });
-const image = (over = {}) => ({ source: "factory-src1", snapshot: "snap_abc", sha: SHA, createdAt: "2026-11-08T09:59:00Z", ...over });
+const build = (over = {}) => imageEntry({ vendor: "vercel", snapshot: "snap_abc", source: "pendulum-src1", sha: SHA, builtAt: "2026-11-08T10:00:00Z", buildMs: 60_000, ...over });
+const image = (over = {}) => ({ source: "pendulum-src1", snapshot: "snap_abc", sha: SHA, createdAt: "2026-11-08T09:59:00Z", ...over });
 
 test("image record: one JSON line, angle brackets escaped, every build checked; no path is read from it", () => {
   const line = imageMarkerLine([build(), { vendor: "vercel", sha: "nope", builtAt: "x" }, { ...build(), checkout: "/etc", snapshot: "</script>" }]);
   assert.doesNotMatch(line.slice(4, -3), /[<>]/, "no value can close the comment");
-  const builds = imageRecordOf(`${line}\nFactory's sandbox image: ...`);
+  const builds = imageRecordOf(`${line}\nPendulum's sandbox image: ...`);
   assert.equal(builds.length, 2, "the malformed build is dropped");
   assert.equal(builds[0].snapshot, "snap_abc");
   assert.equal(builds[1].snapshot, null, "an odd snapshot id is no snapshot");
@@ -32,15 +32,15 @@ test("image record: one JSON line, angle brackets escaped, every build checked; 
   assert.equal(build({ buildMs: 9e9 }).buildMs, 45 * 60_000, "minutes are capped");
 });
 
-test("verified builds: only what the vendor's listing in Factory's project confirms", () => {
+test("verified builds: only what the vendor's listing in Pendulum's project confirms", () => {
   const forgedSnapshot = build({ snapshot: "snap_other_team" });
-  const forgedSource = build({ source: "factory-elsewhere" });
+  const forgedSource = build({ source: "pendulum-elsewhere" });
   const forgedHead = build({ sha: OTHER });
   const genuine = build();
   const failed = build({ snapshot: null, source: null, buildMs: 30_000 });
   assert.deepEqual(verifiedRecords([forgedHead, forgedSource, forgedSnapshot, failed, genuine], [image()], "vercel"), [genuine]);
   assert.deepEqual(verifiedRecords([genuine], [image()], "e2b"), [], "another vendor's");
-  assert.equal(todaysBuildMs([failed, genuine], new Date("2026-11-08T23:00:00Z")), 90_000, "Factory's own record counts failed builds too");
+  assert.equal(todaysBuildMs([failed, genuine], new Date("2026-11-08T23:00:00Z")), 90_000, "Pendulum's own record counts failed builds too");
 });
 
 test("vendor images: stopped sandboxes with this repository's tag, a head and a snapshot; the rest are a crashed build's", async () => {
@@ -52,32 +52,32 @@ test("vendor images: stopped sandboxes with this repository's tag, a head and a 
   ];
   let asked;
   const { images, others } = await vendorImages({ list: async (f) => ((asked = f.tag), listed) }, 7);
-  assert.deepEqual(asked, ["factory-image", "7"]);
+  assert.deepEqual(asked, ["pendulum-image", "7"]);
   assert.deepEqual(images.map((i) => i.source), ["new", "old"]);
   assert.deepEqual(others.map((i) => i.id), ["crashed", "running"]);
   assert.deepEqual(staleImages([{ source: "built" }, { source: "new" }, { source: "old" }, { source: "older" }], "built").map((i) => i.source), ["old", "older"], "the new one and the newest other stay");
 });
 
-test("current image: Factory's own record on its own issue, confirmed by the vendor, ready, its head on the default branch", async () => {
-  setSelf("factory-app[bot]");
+test("current image: Pendulum's own record on its own issue, confirmed by the vendor, ready, its head on the default branch", async () => {
+  setSelf("pendulum-app[bot]");
   const realActions = process.env.GITHUB_ACTIONS;
   process.env.GITHUB_ACTIONS = "true";
   const realFetch = globalThis.fetch;
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  const self = { login: "factory-app[bot]" };
+  const self = { login: "pendulum-app[bot]" };
   const stranger = { login: "someone" };
   const body = (builds) => `${marker(5, "image")}\n${imageMarkerLine(builds)}\nhuman line`;
   const asked = [];
   globalThis.fetch = async (url) => {
     const u = String(url);
     asked.push(u);
-    if (u.includes("/issues?creator=factory-app%5Bbot%5D") && u.includes(`labels=${encodeURIComponent(IMAGE_LABEL)}`)) {
+    if (u.includes("/issues?creator=pendulum-app%5Bbot%5D") && u.includes(`labels=${encodeURIComponent(IMAGE_LABEL)}`)) {
       return json([{ number: 2, user: self, title: "something else", locked: true }, { number: 3, user: stranger, title: IMAGE_TITLE, locked: true }, { number: 4, user: self, title: IMAGE_TITLE, locked: false }, { number: 5, user: self, title: IMAGE_TITLE, locked: true }]);
     }
     if (u.includes("/issues/5/comments")) {
       return json([
-        { id: 1, user: stranger, body: body([build({ snapshot: "snap_forged", source: "factory-forged" })]) },
-        { id: 2, user: self, body: body([build({ sha: OTHER, snapshot: "snap_gone", source: "factory-gone", builtAt: "2026-11-08T12:00:00Z" }), build()]) },
+        { id: 1, user: stranger, body: body([build({ snapshot: "snap_forged", source: "pendulum-forged" })]) },
+        { id: 2, user: self, body: body([build({ sha: OTHER, snapshot: "snap_gone", source: "pendulum-gone", builtAt: "2026-11-08T12:00:00Z" }), build()]) },
       ]);
     }
     if (u.includes("/compare/")) return json({ status: "ahead" });
@@ -86,14 +86,14 @@ test("current image: Factory's own record on its own issue, confirmed by the ven
   const adapter = {
     name: "vercel",
     list: async () => [
-      { id: "factory-gone", state: "stopped", createdAt: "2026-11-08T12:00:00Z", tags: { ...imageTags(7, OTHER), snapshot: "snap_gone" } },
-      { id: "factory-src1", state: "stopped", createdAt: "2026-11-08T09:59:00Z", tags: { ...imageTags(7, SHA), snapshot: "snap_abc" } },
+      { id: "pendulum-gone", state: "stopped", createdAt: "2026-11-08T12:00:00Z", tags: { ...imageTags(7, OTHER), snapshot: "snap_gone" } },
+      { id: "pendulum-src1", state: "stopped", createdAt: "2026-11-08T09:59:00Z", tags: { ...imageTags(7, SHA), snapshot: "snap_abc" } },
     ],
-    snapshots: async (id) => [{ snapshot: id === "factory-gone" ? "snap_gone" : "snap_abc", state: id === "factory-gone" ? "deleted" : "ready" }],
+    snapshots: async (id) => [{ snapshot: id === "pendulum-gone" ? "snap_gone" : "snap_abc", state: id === "pendulum-gone" ? "deleted" : "ready" }],
   };
   try {
     const img = await currentImage(adapter, { full: "o/r", owner: "o", name: "r" }, { token: "t" });
-    assert.deepEqual(img, { snapshot: "snap_abc", sha: SHA, builtAt: "2026-11-08T10:00:00.000Z", checkout: "/opt/factory/r", envFile: "/opt/factory/setup-env.json" }, "an expired snapshot is skipped; a stranger's issue and comment are not read");
+    assert.deepEqual(img, { snapshot: "snap_abc", sha: SHA, builtAt: "2026-11-08T10:00:00.000Z", checkout: "/opt/pendulum/r", envFile: "/opt/pendulum/setup-env.json" }, "an expired snapshot is skipped; a stranger's issue and comment are not read");
     assert.ok(!asked.some((u) => /\/issues\/[234]\//.test(u)), "a stranger's issue, another title and an unlocked one are never read");
     assert.equal((await findImageIssue({ full: "o/r" }, { token: "t" }, { actions: false })).number, 4, "off Actions the lock is not required");
   } finally {
@@ -170,7 +170,7 @@ test("the image job's own wake: the sweep's, minutes after a build that left an 
 
 test("triggers, privileged config changes and the setup script", async () => {
   assert.equal(imageTrigger("push", { ref: "refs/heads/main" }, "main"), "merge");
-  assert.equal(imageTrigger("push", { ref: "refs/heads/factory/4" }, "main"), null);
+  assert.equal(imageTrigger("push", { ref: "refs/heads/pendulum/4" }, "main"), null);
   assert.equal(imageTrigger("schedule", { schedule: NIGHTLY_CRON }, "main"), "nightly");
   assert.equal(imageTrigger("schedule", { schedule: "*/10 * * * *" }, "main"), null);
   assert.equal(imageTrigger("workflow_dispatch", {}, "main"), null, "a plain tick builds only what the dispatcher found owed");
@@ -178,12 +178,12 @@ test("triggers, privileged config changes and the setup script", async () => {
   assert.deepEqual(privilegedChanges("a  /etc/sudoers\n", "a  /etc/sudoers\nb  /etc/sudoers.d/x\n"), ["+ b  /etc/sudoers.d/x"]);
   assert.deepEqual(privilegedChanges("x\n", "x\n"), []);
   const h = "a".repeat(64);
-  const where = { home: "/vercel", checkout: "/opt/factory/r" };
-  const changes = [`+ ${h}  /usr/bin/crontab`, `+ ${h}  /etc/pam.d/cron`, "+ /usr/bin/ping cap_net_raw=ep", `+ ${h}  /usr/local/bin/probe`, `+ ${h}  /etc/sudoers.d/x`, `+ ${h}  /opt/factory/r/.git/hooks/pre-commit`, "+ uid0 evil", "+ group sudo:ubuntu,evil"];
+  const where = { home: "/vercel", checkout: "/opt/pendulum/r" };
+  const changes = [`+ ${h}  /usr/bin/crontab`, `+ ${h}  /etc/pam.d/cron`, "+ /usr/bin/ping cap_net_raw=ep", `+ ${h}  /usr/local/bin/probe`, `+ ${h}  /etc/sudoers.d/x`, `+ ${h}  /opt/pendulum/r/.git/hooks/pre-commit`, "+ uid0 evil", "+ group sudo:ubuntu,evil"];
   assert.deepEqual(changes.map(changePath).slice(0, 3), ["/usr/bin/crontab", "/etc/pam.d/cron", "/usr/bin/ping"]);
-  const clean = new Set(["/usr/bin/crontab", "/etc/pam.d/cron", "/usr/bin/ping", "/etc/sudoers.d/x", "/opt/factory/r/.git/hooks/pre-commit"]);
+  const clean = new Set(["/usr/bin/crontab", "/etc/pam.d/cron", "/usr/bin/ping", "/etc/sudoers.d/x", "/opt/pendulum/r/.git/hooks/pre-commit"]);
   assert.deepEqual(unexplainedChanges(changes, clean, where), changes.slice(3), "a package's own setuid, PAM and capability files pass; an unowned setuid file, sudoers, the clone's hooks and accounts never do");
-  const dir = mkdtempSync(join(tmpdir(), "factory-image-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-image-test-"));
   mkdirSync(join(dir, "scripts", "ci"), { recursive: true });
   writeFileSync(join(dir, "scripts", "ci", "setup.sh"), "");
   assert.deepEqual((await setupRuns("scripts/ci/setup.sh postgresql", dir)).files, ["scripts/ci/setup.sh"]);
@@ -204,7 +204,7 @@ test("triggers, privileged config changes and the setup script", async () => {
 
 test("workflow template: the image job runs on the default branch's pushes, the nightly cron and by hand on it, with the App writing the record", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: { raw: JSON.stringify("on") } }));
+  const doc = parseYaml(renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", sandbox: "vercel", ci_workflow: "Quality", default_branch: { raw: JSON.stringify("on") } }));
   assert.deepEqual(doc.on.push.branches, ["on"], "a branch YAML would read as a boolean stays a string");
   assert.ok(doc.on.schedule.some((s) => s.cron === NIGHTLY_CRON));
   const job = doc.jobs.image;
@@ -224,10 +224,10 @@ test("workflow template: the image job runs on the default branch's pushes, the 
   assert.equal(String(job.concurrency["cancel-in-progress"]), "false");
   const step = job.steps.find((s) => s.with?.mode === "image");
   assert.ok(step && step.with.app_id && step.with.app_private_key, "the App writes the record");
-  assert.equal(doc.env.FACTORY_IMAGE_REFRESH, "merge");
-  assert.equal(String(doc.env.FACTORY_IMAGE_DAILY_MINUTES), "5");
-  assert.equal(String(doc.env.FACTORY_IMAGE_MAX_AGE_DAYS), "7");
-  const plain = renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3" });
+  assert.equal(doc.env.PENDULUM_IMAGE_REFRESH, "merge");
+  assert.equal(String(doc.env.PENDULUM_IMAGE_DAILY_MINUTES), "5");
+  assert.equal(String(doc.env.PENDULUM_IMAGE_MAX_AGE_DAYS), "7");
+  const plain = renderWorkflow(template, { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3" });
   assert.doesNotMatch(plain, /image|push:|41 10/, "nothing of the image without a sandbox");
 });
 
@@ -256,12 +256,12 @@ test("a head whose changes touch nothing the image is made from builds nothing: 
   const npmrc = commit({ ".npmrc": "registry=https://example.invalid\n" });
   assert.deepEqual(await imageChange(dir, dep, npmrc, { setup, install }), { touched: ".npmrc" }, "the install's own configuration");
   const later = commit({ "src/a.js": "3\n" });
-  assert.deepEqual(await imageChange(dir, npmrc, later, { setup: 'bash "$(cat which-script)"', install }), { touched: "src/a.js" }, "setup may run a file Factory cannot name: any change");
+  assert.deepEqual(await imageChange(dir, npmrc, later, { setup: 'bash "$(cat which-script)"', install }), { touched: "src/a.js" }, "setup may run a file Pendulum cannot name: any change");
   assert.match((await imageChange(dir, "c".repeat(40), later, { setup, install })).unknown, /^git cannot list the changes/, "a head git does not have");
 });
 
 test("imageDecision: a head that changes nothing the image is made from, under the same settings, is covered, not built, on every trigger but a manual one", () => {
-  const made = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1" });
+  const made = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", pendulum: "f1" });
   const now = new Date("2026-11-08T15:00:00Z");
   const base = { refresh: "merge", head: SHA, current: build({ sha: OTHER, made }), made, lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now };
   for (const trigger of ["merge", "nightly", "owed"]) {
@@ -269,7 +269,7 @@ test("imageDecision: a head that changes nothing the image is made from, under t
     assert.deepEqual(imageDecision({ ...base, trigger, unchanged: false }), { build: true }, `${trigger}: a change the image is made from`);
   }
   assert.deepEqual(imageDecision({ ...base, trigger: "manual", unchanged: true }), { build: true }, "by hand it builds");
-  const other = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts && cargo fetch --locked", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1" });
+  const other = imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts && cargo fetch --locked", versions: VERSIONS, base: "vercel/sandbox/node:22", pendulum: "f1" });
   assert.notEqual(other, made);
   assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: other, unchanged: true }), { build: true }, "other settings build");
   assert.deepEqual(imageDecision({ ...base, trigger: "merge", current: build({ sha: OTHER }), unchanged: true }), { build: true }, "a build recorded without its settings builds once");
@@ -281,13 +281,13 @@ test("imageDecision: a head that changes nothing the image is made from, under t
 });
 
 test("recordCover: the current image's entry covers the head, the owed job's attempt goes, and the record keeps it", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   const realFetch = globalThis.fetch;
   const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
-  const self = { login: "factory-app[bot]" };
+  const self = { login: "pendulum-app[bot]" };
   const made = "d".repeat(64);
   const attempt = { vendor: "vercel", snapshot: null, source: null, sha: SHA, builtAt: "2026-11-09T03:00:00.000Z", buildMs: 0, sizeBytes: null, usd: null, attempt: true };
-  const older = build({ sha: "e".repeat(40), source: "factory-src0", snapshot: "snap_0", builtAt: "2026-11-07T10:00:00Z" });
+  const older = build({ sha: "e".repeat(40), source: "pendulum-src0", snapshot: "snap_0", builtAt: "2026-11-07T10:00:00Z" });
   let comment = `${marker(5, "image")}\n${imageMarkerLine([attempt, build({ sha: OTHER, made }), older])}\nhuman line`;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
@@ -300,7 +300,7 @@ test("recordCover: the current image's entry covers the head, the owed job's att
     return json({});
   };
   try {
-    await recordCover({ full: "o/r", owner: "o", name: "r" }, { source: "factory-src1", head: SHA, attempt }, { token: "t" });
+    await recordCover({ full: "o/r", owner: "o", name: "r" }, { source: "pendulum-src1", head: SHA, attempt }, { token: "t" });
   } finally {
     globalThis.fetch = realFetch;
     setSelf(null);
@@ -308,7 +308,7 @@ test("recordCover: the current image's entry covers the head, the owed job's att
   const builds = imageRecordOf(comment);
   assert.deepEqual(builds.map((b) => [b.sha.slice(0, 1), b.covers ?? null, b.made ?? null]), [["b", SHA, made], ["e", null, null]], "the attempt is gone; the image built from OTHER covers SHA");
   assert.match(comment, /changes nothing the image is made from\.$/);
-  assert.equal(coverHead(builds, { source: "factory-src0", head: OTHER })[1].covers, OTHER, "a later cover moves to the build it names");
+  assert.equal(coverHead(builds, { source: "pendulum-src0", head: OTHER })[1].covers, OTHER, "a later cover moves to the build it names");
 });
 
 // A git repository in a temp directory, and a commit of `files` (path: text) in it, returning its sha.
@@ -328,16 +328,16 @@ const gitRepo = () => {
   return { dir, commit };
 };
 
-test("imageMade: Factory's own build code and each harness CLI's exact version are part of what the image is made from, so an image another Factory or other CLIs built is built again", () => {
+test("imageMade: Pendulum's own build code and each harness CLI's exact version are part of what the image is made from, so an image another Pendulum or other CLIs built is built again", () => {
   const now = new Date("2026-11-08T15:00:00Z");
-  const of = (over = {}) => imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", factory: "f1", ...over });
+  const of = (over = {}) => imageMade({ setup: "bash scripts/setup.sh", install: "npm ci --ignore-scripts", versions: VERSIONS, base: "vercel/sandbox/node:22", pendulum: "f1", ...over });
   const made = of();
   assert.equal(of({ versions: { ...VERSIONS } }), made, "the same versions, in any order, make the same digest");
-  assert.notEqual(of({ factory: "f2" }), made, "another Factory");
+  assert.notEqual(of({ pendulum: "f2" }), made, "another Pendulum");
   assert.notEqual(of({ versions: { ...VERSIONS, "@anthropic-ai/claude-code": "2.1.401" } }), made, "a newer Claude Code");
   assert.equal(of({ versions: null }), null, "unknown versions: nothing is taken as made the same way");
   const base = { refresh: "merge", head: SHA, current: build({ sha: OTHER, made }), lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now, unchanged: true };
-  assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: of({ factory: "f2" }) }), { build: true }, "an image the previous Factory built is built again once");
+  assert.deepEqual(imageDecision({ ...base, trigger: "merge", made: of({ pendulum: "f2" }) }), { build: true }, "an image the previous Pendulum built is built again once");
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", made: of({ versions: { ...VERSIONS, "@openai/codex": "0.201.0" } }) }), { build: true }, "a newer CLI is built in");
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", made }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}`, covers: true });
 });
@@ -363,11 +363,11 @@ test("imageDecision: an image older than image_max_age_days stands for no head, 
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", current: { ...old, covers: SHA } }), { build: true }, "a head it covered too");
   assert.deepEqual(imageDecision({ ...base, trigger: "nightly", current: { ...old, sha: SHA } }), { build: true }, "its own head too");
   assert.deepEqual(imageDecision({ ...base, trigger: "merge", maxAgeDays: 14 }), { skip: `nothing the image is made from changed since ${OTHER.slice(0, 7)}`, covers: true });
-  const days = (v) => resolveInputs({ env: { FACTORY_IMAGE_MAX_AGE_DAYS: v } }).imageMaxAgeDays;
+  const days = (v) => resolveInputs({ env: { PENDULUM_IMAGE_MAX_AGE_DAYS: v } }).imageMaxAgeDays;
   assert.deepEqual(["", "14", "30", "0", "31", "2.5", "x"].map(days), [7, 14, 30, 7, 7, 7, 7]);
 });
 
-test("imageDecision: the image's own head is built again on a merge or nightly once what it is made from changed outside the tree (a setting, a CLI, Factory)", () => {
+test("imageDecision: the image's own head is built again on a merge or nightly once what it is made from changed outside the tree (a setting, a CLI, Pendulum)", () => {
   const now = new Date("2026-11-08T15:00:00Z");
   const made = "a".repeat(64);
   const base = { refresh: "merge", head: SHA, current: build({ sha: SHA, made }), lastAttemptAt: null, todayMs: 0, dailyMinutes: 5, now };
@@ -395,20 +395,20 @@ test("imageChange: a toolchain pin, and a file a program reads by convention, ch
   assert.deepEqual(await imageChange(r.dir, code, pinned, { setup: "make setup", install }), { touched: null }, "the same path without the setting");
 });
 
-test("imagePlan: the job's decision on a real clone, with an owed attempt in the record: a head that changes nothing is covered and the attempt goes; a change, a newer CLI or another Factory builds", async () => {
+test("imagePlan: the job's decision on a real clone, with an owed attempt in the record: a head that changes nothing is covered and the attempt goes; a change, a newer CLI or another Pendulum builds", async () => {
   const r = gitRepo();
   const built = r.commit({ "package.json": "{}", "package-lock.json": "{}", Makefile: "setup:\n\ttrue\n", "src/a.js": "1\n" });
   const head = r.commit({ "src/a.js": "2\n", "docs/x.md": "x\n" });
-  const inputs = resolveInputs({ env: { FACTORY_SETUP: "make setup" } });
+  const inputs = resolveInputs({ env: { PENDULUM_SETUP: "make setup" } });
   const base = "vercel/sandbox/node:22";
   const view = (pkg) => VERSIONS[pkg];
   const now = new Date("2026-11-09T03:00:00Z");
-  // What the current image was made from: the same install the plan reads from the clone, the same CLIs and Factory.
-  const made = imageMade({ setup: "make setup", install: "npm ci --ignore-scripts", versions: VERSIONS, base, factory: "f1" });
+  // What the current image was made from: the same install the plan reads from the clone, the same CLIs and Pendulum.
+  const made = imageMade({ setup: "make setup", install: "npm ci --ignore-scripts", versions: VERSIONS, base, pendulum: "f1" });
   const current = build({ sha: built, made, builtAt: "2026-11-08T10:00:00Z" });
   const attempt = { vendor: "vercel", snapshot: null, sha: head, builtAt: "2026-11-09T02:59:00.000Z", buildMs: 0, attempt: true };
   const builds = [imageEntry(attempt), current];
-  const plan = (over = {}) => imagePlan({ checkout: r.dir, head, trigger: "owed", inputs, base, current, builds, attempt, todayMs: 0, factory: "f1", view, now, ...over });
+  const plan = (over = {}) => imagePlan({ checkout: r.dir, head, trigger: "owed", inputs, base, current, builds, attempt, todayMs: 0, pendulum: "f1", view, now, ...over });
   const p = await plan();
   assert.equal(p.install, "npm ci --ignore-scripts");
   assert.deepEqual(p.tools.map((t) => t.tool), ["npm"]);
@@ -421,8 +421,8 @@ test("imagePlan: the job's decision on a real clone, with an owed attempt in the
   assert.equal(next.length, 1, "the owed job's own attempt goes: no build of the head ran");
   assert.equal(next[0].covers, head);
   assert.equal(imageOwed({ refresh: "merge", head, headAt: "2026-11-08T22:00:00Z", builds: next, todayMs: 0, dailyMinutes: 5, now }), false, "and the dispatcher owes it nothing");
-  // A newer CLI, or another Factory: built again, the diff not even read.
-  for (const over of [{ view: (pkg) => (pkg === "@github/copilot" ? "1.0.41" : VERSIONS[pkg]) }, { factory: "f2" }]) {
+  // A newer CLI, or another Pendulum: built again, the diff not even read.
+  for (const over of [{ view: (pkg) => (pkg === "@github/copilot" ? "1.0.41" : VERSIONS[pkg]) }, { pendulum: "f2" }]) {
     const q = await plan(over);
     assert.deepEqual([q.decision, q.change, q.cover], [{ build: true }, null, null]);
     assert.match(q.notes.join("\n"), /was built otherwise/);

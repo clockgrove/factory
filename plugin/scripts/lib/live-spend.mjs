@@ -84,7 +84,7 @@ export function rolloutTotal(text, id = null) {
 /**
  * A live meter for one pass: `line(text)` takes each line of the harness's stream, `usd()` is its spend so far, and
  * `estimated()` whether any of it was priced at the table's dearest rates (a model with no row: an over-estimate of the
- * tokens read, not a lower bound). `prior`: a resumed session's running total as Factory last read it (harness.mjs
+ * tokens read, not a lower bound). `prior`: a resumed session's running total as Pendulum last read it (harness.mjs
  * SESSION_TOTALS), taken off once.
  */
 export function liveSpend(harness, model = null, { prior = null, creditUsd = COPILOT_CREDIT_USD, rollout = null } = {}) {

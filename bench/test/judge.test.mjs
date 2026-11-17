@@ -13,7 +13,7 @@ const BENCH = join(import.meta.dirname, "..");
 const STUB = join(import.meta.dirname, "fixtures", "judge-stub.mjs");
 
 test("judge.mjs: blind pair, unblinded to refs; the judge prefers the quoting tree on intent", () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-judge-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-judge-test-"));
   const repo = join(dir, "repo");
   const git = (...args) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   execFileSync("git", ["init", "-q", repo]);

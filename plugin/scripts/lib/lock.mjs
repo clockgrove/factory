@@ -1,8 +1,8 @@
 // A real create-only lock in GitHub, for launches that more than one process may attempt (the Actions launcher's
-// runs, the dispatcher's re-launch): a git ref under refs/factory-launch/. Creating a ref that
+// runs, the dispatcher's re-launch): a git ref under refs/pendulum-launch/. Creating a ref that
 // exists is refused (HTTP 422), so of two creators exactly one holds it; a sandbox record's write-then-read-back claim
 // cannot promise that. The ref points at a commit object of its own (no parents, the default branch's tree) whose
-// author is Factory, whose message is the ref (then a random line: git objects are named by their content, so two
+// author is Pendulum, whose message is the ref (then a random line: git objects are named by their content, so two
 // launchers in one second would otherwise make the same commit and both read it back as theirs) and whose author
 // date is when it was taken, so a lock its holder never
 // released (a crash, a cut job) is known to be stale. Taking over a stale lock and releasing one are compare-and-swap
@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { graphql, rest } from "./github.mjs";
 
-export const LOCK_NAMESPACE = "factory-launch";
+export const LOCK_NAMESPACE = "pendulum-launch";
 /**
  * A lock is held for one launcher call (the Action's launch job is cut at 5 minutes), so
  * one older than this has no live holder: the next launcher takes it over and the dispatcher's tick releases it.
@@ -21,10 +21,10 @@ export const LOCK_NAMESPACE = "factory-launch";
 export const LOCK_STALE_MS = 15 * 60_000;
 const PART = /^[A-Za-z0-9._-]{1,80}$/;
 const ZERO = "0".repeat(40);
-const AUTHOR = Object.freeze({ name: "Factory", email: "factory@users.noreply.github.com" });
+const AUTHOR = Object.freeze({ name: "Pendulum", email: "pendulum@users.noreply.github.com" });
 const API = Object.freeze({ rest, graphql });
 
-/** The lock for one cue of one stage of Objective `n`: `refs/factory-launch/<n>/<stage>-<cue>`. */
+/** The lock for one cue of one stage of Objective `n`: `refs/pendulum-launch/<n>/<stage>-<cue>`. */
 export function lockRef(n, stage, cue) {
   if (!Number.isSafeInteger(n) || n < 1 || !PART.test(stage) || !PART.test(cue)) throw new Error("a lock needs an issue number, a stage and a cue of plain characters");
   return `refs/${LOCK_NAMESPACE}/${n}/${stage}-${cue}`;
@@ -37,7 +37,7 @@ export async function lockBase(repo, opts, api = API) {
 }
 
 /**
- * The lock as GitHub holds it now: null when the ref is absent, else `{oid, at, foreign}`. `foreign` is a ref Factory
+ * The lock as GitHub holds it now: null when the ref is absent, else `{oid, at, foreign}`. `foreign` is a ref Pendulum
  * did not make the way takeLock does (not a commit, another author, a message whose first line is not the ref); its
  * `at` is null.
  */

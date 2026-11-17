@@ -27,7 +27,7 @@ const MAINTAINER = { login: "maintainer", type: "User" };
  * after each listing. A single-issue read always shows the current labels; `onIssue(read)` runs after it.
  */
 async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => false }) {
-  const labels = new Set(["factory:objective"]);
+  const labels = new Set(["pendulum:objective"]);
   const timeline = [];
   const writes = [];
   let reads = 0;
@@ -58,7 +58,7 @@ async function fakeGitHub({ view, onList, onIssue = () => {}, extra = () => fals
         return onIssue(reads, { labels, timeline });
       }
       // The dispatcher's other listings (the stopped pass's state labels) see the current labels, and are no Objectives read.
-      if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("state") === "open" && url.searchParams.get("labels") !== "factory:objective") return send(200, labels.has(url.searchParams.get("labels")) ? [issue([...labels])] : []);
+      if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("state") === "open" && url.searchParams.get("labels") !== "pendulum:objective") return send(200, labels.has(url.searchParams.get("labels")) ? [issue([...labels])] : []);
       if (url.pathname === "/repos/o/r/issues" && url.searchParams.get("state") === "open") {
         reads += 1;
         send(200, [issue(view(reads, [...labels]))]);
@@ -82,10 +82,10 @@ function heldOn(account) {
 }
 
 /** The labels a listing from before the stage's exit labels landed shows: no state label at all. */
-const stopLabels = (all) => all.filter((l) => !l.startsWith("factory:") || l === "factory:objective");
+const stopLabels = (all) => all.filter((l) => !l.startsWith("pendulum:") || l === "pendulum:objective");
 const answerAt = (read, at, timeline) => {
   // A maintainer answers by re-applying the Objective label: a writer the repository lists (MAINTAINER).
-  if (read === at) timeline.push({ event: "labeled", label: { name: "factory:objective" }, actor: MAINTAINER, created_at: new Date().toISOString() });
+  if (read === at) timeline.push({ event: "labeled", label: { name: "pendulum:objective" }, actor: MAINTAINER, created_at: new Date().toISOString() });
 };
 
 /**
@@ -94,7 +94,7 @@ const answerAt = (read, at, timeline) => {
  * replace more of the loop.
  */
 async function serveAgainst({ view, onList = () => {}, onIssue, extra, firstStage, pausedHere = async () => [], stopAfter = 8, stubs = {} }) {
-  const env = { GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_ALL: process.env.FACTORY_LOCAL_ALL };
+  const env = { GITHUB_API_URL: process.env.GITHUB_API_URL, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL, PENDULUM_LOCAL_ALL: process.env.PENDULUM_LOCAL_ALL };
   const claims = [];
   const lines = [];
   const fake = await fakeGitHub({
@@ -107,20 +107,20 @@ async function serveAgainst({ view, onList = () => {}, onIssue, extra, firstStag
     },
   });
   process.env.GITHUB_API_URL = fake.url;
-  process.env.FACTORY_LOCAL = "1";
-  process.env.FACTORY_LOCAL_ALL = "1";
+  process.env.PENDULUM_LOCAL = "1";
+  process.env.PENDULUM_LOCAL_ALL = "1";
   const loop = Object.assign(Object.create(Local.prototype), {
     repo: { owner: "o", name: "r", full: "o/r" },
     repoFull: "o/r",
     token: "t",
     notice: null,
     second: null,
-    wf: { FACTORY_LOCAL_MAX_CONCURRENT: "2" },
+    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "2" },
     // A machine of its own (lib/machine.mjs): this one's slots and load are never read or held.
     machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     opts: { token: "t" },
     children: new Set(),
-    baseEnv: () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_INPUT_MAX_CONCURRENT: "2" }),
+    baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1", PENDULUM_INPUT_MAX_CONCURRENT: "2" }),
     cleanup: async () => {},
     pausedHere: () => pausedHere(fake),
     pendingReviews: async () => [],
@@ -143,7 +143,7 @@ async function serveAgainst({ view, onList = () => {}, onIssue, extra, firstStag
     for (const [k, v] of Object.entries(env)) v === undefined ? delete process.env[k] : (process.env[k] = v);
     await fake.close();
   }
-  const questionRemoved = fake.writes.filter((w) => w.op === "remove" && w.labels.includes("factory:question")).map((w) => w.read);
+  const questionRemoved = fake.writes.filter((w) => w.op === "remove" && w.labels.includes("pendulum:question")).map((w) => w.read);
   return { claims: claims.map((c) => c.read), questionRemoved, lines, labels: [...fake.labels] };
 }
 
@@ -162,20 +162,20 @@ test("serve: a Question exit is never re-claimed by a tick that read the issue b
     onList: (read, { labels, timeline }) => {
       if (read === 2) {
         // The stage ends with its Question while this tick's dispatch is still under way.
-        labels.add("factory:question");
-        timeline.push({ event: "labeled", label: { name: "factory:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
+        labels.add("pendulum:question");
+        timeline.push({ event: "labeled", label: { name: "pendulum:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
         stageEnd({ exit: "question" });
       }
       answerAt(read, 5, timeline);
     },
     firstStage: (fake) => {
       // The stage's exit: Running comes off first, then (on the next listing) its Question goes on.
-      fake.labels.delete("factory:running");
+      fake.labels.delete("pendulum:running");
       return new Promise((ok) => (stageEnd = ok));
     },
   });
   assert.deepEqual(run.claims, [1, 5], "claimed once, then again only after the answer");
-  assert.deepEqual(run.questionRemoved, [5], "factory:question stays until the answer");
+  assert.deepEqual(run.questionRemoved, [5], "pendulum:question stays until the answer");
   assert.ok(run.lines.some((l) => /tick: nothing ready; holding #7 \(its stage here ended with a Question/.test(l)), "the tick line names the hold");
 });
 
@@ -187,9 +187,9 @@ test("serve: a stop recorded while a dispatch reads the Objective Running is kep
     onList: (read, { labels, timeline }) => {
       if (read === 2) {
         // The stage ends with its Question after this tick's listing, while its dispatch is still under way.
-        labels.delete("factory:running");
-        labels.add("factory:question");
-        timeline.push({ event: "labeled", label: { name: "factory:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
+        labels.delete("pendulum:running");
+        labels.add("pendulum:question");
+        timeline.push({ event: "labeled", label: { name: "pendulum:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
         stageEnd({ exit: "question" });
       }
       answerAt(read, 5, timeline);
@@ -197,7 +197,7 @@ test("serve: a stop recorded while a dispatch reads the Objective Running is kep
     firstStage: () => new Promise((ok) => (stageEnd = ok)),
   });
   assert.deepEqual(run.claims, [1, 5], "claimed once, then again only after the answer");
-  assert.deepEqual(run.questionRemoved, [5], "factory:question stays until the answer");
+  assert.deepEqual(run.questionRemoved, [5], "pendulum:question stays until the answer");
 });
 
 test("serve: a stop that ends between ticks survives a stale Running read and then a stale Queued one (#2667)", async () => {
@@ -205,16 +205,16 @@ test("serve: a stop that ends between ticks survives a stale Running read and th
   let ticks = 0;
   const run = await serveAgainst({
     // 2 is a stale listing that still shows Running; 3 a stale one with no state label.
-    view: (read, labels) => (read === 2 ? ["factory:objective", "factory:running"] : read === 3 ? stopLabels(labels) : labels),
+    view: (read, labels) => (read === 2 ? ["pendulum:objective", "pendulum:running"] : read === 3 ? stopLabels(labels) : labels),
     onList: (read, { timeline }) => answerAt(read, 5, timeline),
     firstStage: () => new Promise((ok) => (stageEnd = ok)),
     pausedHere: async (fake) => {
       ticks += 1;
       if (ticks === 2) {
         // The stage ends with its Question before the second tick reads anything: all its labels land first.
-        fake.labels.delete("factory:running");
-        fake.labels.add("factory:question");
-        fake.timeline.push({ event: "labeled", label: { name: "factory:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
+        fake.labels.delete("pendulum:running");
+        fake.labels.add("pendulum:question");
+        fake.timeline.push({ event: "labeled", label: { name: "pendulum:question" }, created_at: new Date(Date.now() - 60_000).toISOString() });
         stageEnd({ exit: "question" });
         await new Promise((ok) => setImmediate(ok));
       }
@@ -222,7 +222,7 @@ test("serve: a stop that ends between ticks survives a stale Running read and th
     },
   });
   assert.deepEqual(run.claims, [1, 5], "claimed once, then again only after the answer");
-  assert.deepEqual(run.questionRemoved, [5], "factory:question stays until the answer");
+  assert.deepEqual(run.questionRemoved, [5], "pendulum:question stays until the answer");
 });
 
 test("serve: a Block whose labels never reached GitHub is not held forever; a fresh read shows it Queued and it runs again (#2667)", async () => {
@@ -230,7 +230,7 @@ test("serve: a Block whose labels never reached GitHub is not held forever; a fr
     view: (read, labels) => labels,
     firstStage: (fake) => {
       // The exit write failed after Running came off (applyExit's catch): GitHub shows no stop.
-      fake.labels.delete("factory:running");
+      fake.labels.delete("pendulum:running");
       return Promise.resolve({ exit: "blocked" });
     },
     stopAfter: 6,
@@ -247,18 +247,18 @@ test("serve: a dispatch that releases a stop never drops a newer stop recorded w
     view: (read, labels) => (read === 4 ? stopLabels(labels) : labels),
     onList: (read, { labels }) => {
       // A person clears the Block by hand: the next tick's fresh read shows it Queued and releases the first stop.
-      if (read === 2) labels.delete("factory:blocked");
+      if (read === 2) labels.delete("pendulum:blocked");
     },
     onIssue: (read, { labels }) => {
       if (read !== 3 || !reviewEnd) return;
       // The review running here Blocks after that fresh read, while the same dispatch is still under way.
-      labels.add("factory:blocked");
+      labels.add("pendulum:blocked");
       reviewEnd({ exit: "blocked" });
       reviewEnd = null;
     },
     firstStage: (fake) => {
-      fake.labels.delete("factory:running");
-      fake.labels.add("factory:blocked");
+      fake.labels.delete("pendulum:running");
+      fake.labels.add("pendulum:blocked");
       return Promise.resolve({ exit: "blocked" });
     },
     stubs: {
@@ -277,7 +277,7 @@ test("serve: a dispatch that releases a stop never drops a newer stop recorded w
  * labels and PR.
  * `fail(kind)` answers 502 to a read while it returns true: "comments", "issue" or "pulls" (404 for "repo").
  */
-function claimGitHub({ labels = ["factory:objective", "factory:local", "factory:running"], pr = null, fail = () => false } = {}) {
+function claimGitHub({ labels = ["pendulum:objective", "pendulum:local", "pendulum:running"], pr = null, fail = () => false } = {}) {
   const comments = [];
   const writes = [];
   const sets = new Map();
@@ -350,11 +350,11 @@ for (const [stage, end, how] of [
   ["work", { code: 137, signal: null }, /exit code 137/],
   ["review", { code: null, signal: "SIGKILL" }, /signal SIGKILL/],
 ]) {
-  test(`withClaim: a ${stage} stage that ends with no exit record keeps its claim and is resumed once; a second such end Blocks it with its exit and log (cause factory) (#167)`, async () => {
-    const gh = claimGitHub({ labels: ["factory:objective", "factory:local", stage === "work" ? "factory:running" : "factory:in-review"] });
+  test(`withClaim: a ${stage} stage that ends with no exit record keeps its claim and is resumed once; a second such end Blocks it with its exit and log (cause pendulum) (#167)`, async () => {
+    const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", stage === "work" ? "pendulum:running" : "pendulum:in-review"] });
     try {
       const loop = await claimLoop();
-      const died = async () => ({ ...end, exit: null, usd: null, stage, log: "/x/.factory/7/usage/stage.log" });
+      const died = async () => ({ ...end, exit: null, usd: null, stage, log: "/x/.pendulum/7/usage/stage.log" });
       assert.equal((await loop.withClaim(7, died)).exit, null);
       assert.equal(gh.comments.length, 1, "the claim stays: the dispatcher sees it held, never vanished");
       assert.match(gh.comments[0].body, new RegExp(`holder: ${loop.holder}`));
@@ -364,14 +364,14 @@ for (const [stage, end, how] of [
       assert.deepEqual(await loop.pausedHere(new Map([[7, null]])), []);
       // The resume dies the same way: Blocked here, naming the stage, its exit and its log; the claim goes.
       await loop.withClaim(7, died);
-      assert.ok(gh.labels.has("factory:blocked"));
-      const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-      assert.match(notice, new RegExp(`the ${stage} stage ended with no exit record \\(${how.source}\\) twice in a row on this machine; its log on this machine: /x/.factory/7/usage/stage.log`));
-      assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+      assert.ok(gh.labels.has("pendulum:blocked"));
+      const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
+      assert.match(notice, new RegExp(`the ${stage} stage ended with no exit record \\(${how.source}\\) twice in a row on this machine; its log on this machine: /x/.pendulum/7/usage/stage.log`));
+      assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
       assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0);
       assert.deepEqual(await loop.pausedHere(new Map()), [], "nothing left to resume");
       // A stage with an exit record drops the claim and clears the count.
-      gh.labels.delete("factory:blocked");
+      gh.labels.delete("pendulum:blocked");
       await loop.withClaim(7, died);
       await loop.withClaim(7, async () => ({ exit: "delivered" }));
       assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0);
@@ -398,8 +398,8 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     const lastNotice = () => gh.comments.filter((c) => c.body.includes(":blocked:")).sort((a, b) => a.updated_at.localeCompare(b.updated_at) || a.id - b.id).at(-1).body;
     // A cause that stays: Blocked on the first lapse, no resume spent on it.
     await loop.withClaim(7, died);
-    assert.ok(gh.labels.has("factory:blocked"), "Blocked on the first lapse");
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    assert.ok(gh.labels.has("pendulum:blocked"), "Blocked on the first lapse");
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
     assert.match(notice, /the work stage ended with no exit record \(exit code 127\) on this machine; the lapse check \(.*\) judged it likely to end the same way again; its log on this machine: /);
     assert.equal(asked[0].question.name, "stage_lapse");
     assert.match(asked[0].input, /Stage: work\nEnded with: exit code 127/);
@@ -408,32 +408,32 @@ test("#421: the lapse check decides a stage's lapse: same_again Blocks at once n
     assert.match(asked[0].input, /Machine at the end: /);
     assert.ok(!asked[0].input.includes("The time before"), "no lapse before it");
     // A cause that passed (an out-of-memory kill under load): resumed, then resumed again; the third in a row Blocks.
-    gh.labels.delete("factory:blocked");
+    gh.labels.delete("pendulum:blocked");
     verdict = "transient";
-    const before = gh.writes.filter((w) => w.includes("factory:block")).length;
+    const before = gh.writes.filter((w) => w.includes("pendulum:block")).length;
     await loop.withClaim(7, died);
     await loop.withClaim(7, died);
-    assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, before, "two transient lapses resume");
+    assert.equal(gh.writes.filter((w) => w.includes("pendulum:block")).length, before, "two transient lapses resume");
     assert.equal(loop.lapsed.get(7).count, 2);
     assert.match(asked.at(-1).input, /The time before \(resumed after it\):/, "the lapse before it is given too");
     await loop.withClaim(7, died);
-    assert.ok(gh.labels.has("factory:blocked"));
+    assert.ok(gh.labels.has("pendulum:blocked"));
     assert.match(lastNotice(), /3 times in a row on this machine; the lapse check \(.*\) judged it transient/);
     // A verdict under the floor is none: resumed once, the second Blocks (as with no key).
-    gh.labels.delete("factory:blocked");
+    gh.labels.delete("pendulum:blocked");
     loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict: "same_again", confidence: 0.5 }) } });
     await loop.withClaim(7, died);
     assert.equal(loop.lapsed.get(7).count, 1);
-    // FACTORY_LOCAL_LAPSE_MAX sets the transient lapse in a row that Blocks: 4 here, so the third resumes.
+    // PENDULUM_LOCAL_LAPSE_MAX sets the transient lapse in a row that Blocks: 4 here, so the third resumes.
     loop.lapsed.delete(7);
-    gh.labels.delete("factory:blocked");
-    loop.wf = { ...loop.wf, FACTORY_LOCAL_LAPSE_MAX: "4" };
+    gh.labels.delete("pendulum:blocked");
+    loop.wf = { ...loop.wf, PENDULUM_LOCAL_LAPSE_MAX: "4" };
     verdict = "transient";
     loop.lapseCheck = openLapseCheck({ decider: { decide: async () => ({ verdict, confidence: 0.9 }) } });
-    const blocks = gh.writes.filter((w) => w.includes("factory:block")).length;
+    const blocks = gh.writes.filter((w) => w.includes("pendulum:block")).length;
     for (let i = 0; i < 3; i += 1) await loop.withClaim(7, died);
     assert.equal(loop.lapsed.get(7).count, 3);
-    assert.equal(gh.writes.filter((w) => w.includes("factory:block")).length, blocks);
+    assert.equal(gh.writes.filter((w) => w.includes("pendulum:block")).length, blocks);
     await loop.withClaim(7, died);
     assert.match(lastNotice(), /4 times in a row on this machine/);
   } finally {
@@ -467,7 +467,7 @@ test("outagePaused: pauses on GitHub's spent rate limit one after another count 
 });
 
 test("resume: a review paused on an outage after its label came off (on its merge path) runs again; with no such pause here, nothing runs (#337)", async () => {
-  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "factory/7" }, labels: [] } });
+  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], pr: { number: 9, state: "open", draft: false, head: { ref: "pendulum/7" }, labels: [] } });
   try {
     const since = Date.parse("2026-11-15T22:40:39Z");
     const reviewed = [];
@@ -485,10 +485,10 @@ test("resume: a review paused on an outage after its label came off (on its merg
   }
 });
 
-test("withClaim: Factory's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
+test("withClaim: Pendulum's set-up of the review stage failing after the PR was delivered Blocks naming that set-up and the delivered PR, never the work (#261)", async () => {
   const { mkdirSync } = await import("node:fs");
   const { gitPinFile, pinGitDir } = await import("../scripts/lib/local.mjs");
-  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], pr: { number: 9, draft: false, head: { ref: "factory/7" }, labels: [{ name: "factory:review" }] } });
+  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], pr: { number: 9, draft: false, head: { ref: "pendulum/7" }, labels: [{ name: "pendulum:review" }] } });
   try {
     const loop = Object.assign(await claimLoop(), { harness: "claude", firstSetup: new Map(), children: new Set() });
     mkdirSync(join(loop.ws(7), "repo", ".git"), { recursive: true });
@@ -499,14 +499,14 @@ test("withClaim: Factory's set-up of the review stage failing after the PR was d
     const gone = join(tmpdir(), "gone-account", "plans");
     loop.stageEnv = () => mkdirSync(gone);
     await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
-    assert.ok(!gh.labels.has("factory:blocked"), "resumed once first");
+    assert.ok(!gh.labels.has("pendulum:blocked"), "resumed once first");
     await assert.rejects(loop.withClaim(7, () => loop.review(7, 9)), /ENOENT/);
-    assert.ok(gh.labels.has("factory:blocked"));
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /Blocked \(review\): Factory's set-up of the review stage failed \(ENOENT from mkdir; the local loop's log names the path\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
+    assert.ok(gh.labels.has("pendulum:blocked"));
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
+    assert.match(notice, /Blocked \(review\): Pendulum's set-up of the review stage failed \(ENOENT from mkdir; the local loop's log names the path\) twice in a row on this machine — PR #9 was delivered; it is a draft until this is fixed\. Fix it on this machine/);
     assert.ok(!notice.includes("gone-account"), "no path of this machine's set-up");
     assert.doesNotMatch(notice, /\(work\)|the work stage|draft with what exists/);
-    assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+    assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
   } finally {
     gh.restore();
   }
@@ -613,7 +613,7 @@ test("withClaim: a read-back that fails once is read again; one that never answe
 
 test("resume: a failed read of the issue or its PR keeps the claim and runs nothing (#167)", async () => {
   let down = true;
-  const gh = claimGitHub({ labels: ["factory:objective", "factory:local", "factory:in-review"], fail: (kind) => down && kind === "issue" });
+  const gh = claimGitHub({ labels: ["pendulum:objective", "pendulum:local", "pendulum:in-review"], fail: (kind) => down && kind === "issue" });
   try {
     const { writeClaim } = await import("../scripts/lib/local.mjs");
     const dead = await claimLoop(process.pid + 1);
@@ -649,7 +649,7 @@ test("runObjective: a failed start goes back to Queued and is held for a doublin
     // First failure: un-marked, claim dropped, no Block, and held for 5 minutes.
     let r = await loop.runObjective(7);
     assert.equal(r.startFailed, "work");
-    assert.ok(!gh.labels.has("factory:running"), "un-marked");
+    assert.ok(!gh.labels.has("pendulum:running"), "un-marked");
     assert.equal(gh.comments.length, 0, "its claim goes with the Running mark");
     assert.deepEqual(posted(), [], "no Block on a first failure");
     assert.match(loop.startHolds()[7], /its last start here failed \(1 in a row\)/);
@@ -658,38 +658,38 @@ test("runObjective: a failed start goes back to Queued and is held for a doublin
     now += 2000;
     assert.deepEqual(loop.startHolds(), {}, "free to pick once it ends");
     // Second failure (the dispatcher marked it Running again): held twice as long.
-    gh.labels.add("factory:running");
+    gh.labels.add("pendulum:running");
     await loop.runObjective(7);
-    assert.ok(!gh.labels.has("factory:running"));
+    assert.ok(!gh.labels.has("pendulum:running"));
     now += 2 * START_BACKOFF_MS - 1000;
     assert.ok(loop.startHolds()[7]);
     now += 2000;
     // Third failure in a row: Blocked once, with the error and cause `setup`, not un-marked again.
-    gh.labels.add("factory:running");
+    gh.labels.add("pendulum:running");
     r = await loop.runObjective(7);
     assert.equal(r.exit, "blocked");
-    assert.ok(gh.labels.has("factory:blocked"));
+    assert.ok(gh.labels.has("pendulum:blocked"));
     assert.equal(posted().length, 1);
     assert.match(posted()[0], /could not start on this machine 3 times in a row \(work, ENOSPC\): ENOSPC from mkdir; the local loop's log names the path\./);
     assert.ok(!posted()[0].includes("/srv/accounts"), "no path of this machine's set-up");
-    assert.match(posted()[0], /<!-- factory:block \{"cause":"setup"\} -->/);
+    assert.match(posted()[0], /<!-- pendulum:block \{"cause":"setup"\} -->/);
     assert.deepEqual(loop.startHolds(), {}, "the Block ends the count");
     // A start that succeeds clears an earlier failure.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     await loop.runObjective(7);
     assert.ok(loop.startFailures.has(7));
-    gh.labels.add("factory:running");
+    gh.labels.add("pendulum:running");
     loop.fail = false;
     await loop.runObjective(7);
     assert.ok(!loop.startFailures.has(7), "a start clears it");
     assert.equal(starts, 5);
     // A start that fails on an Objective no longer Running (a person moved it) changes no label.
     loop.fail = true;
-    gh.labels.delete("factory:running");
-    gh.labels.add("factory:question");
+    gh.labels.delete("pendulum:running");
+    gh.labels.add("pendulum:question");
     await loop.runObjective(7);
-    assert.ok(gh.labels.has("factory:question"));
+    assert.ok(gh.labels.has("pendulum:question"));
   } finally {
     gh.restore();
   }
@@ -721,13 +721,13 @@ test("runObjective: the same failed start on two Objectives is the machine's: no
     loop.machineProbes = { statfs: (dir) => (read.push(dir), { bavail: free, bsize: 1 }) };
     let fail = { code: "ENOSPC", errno: -28 };
     loop.stage = async (n) => {
-      if (fail) throw Object.assign(new Error(`${fail.code}: mkdir '/srv/box/.factory/${n}/usage-work'`), { ...fail, syscall: "mkdir", path: `/srv/box/.factory/${n}/usage-work` });
+      if (fail) throw Object.assign(new Error(`${fail.code}: mkdir '/srv/box/.pendulum/${n}/usage-work'`), { ...fail, syscall: "mkdir", path: `/srv/box/.pendulum/${n}/usage-work` });
       return { code: 0, exit: "blocked", usd: 0 };
     };
     const posted = () => gh.writes.filter((w) => /^POST \/issues\/\d+\/(comments|labels)/.test(w) && !w.includes(":local -->"));
     // #7 alone: its own, as before: back to Queued, one failed start counted, held for its backoff; no machine hold.
     await loop.runObjective(7);
-    assert.ok(!gh.labelsOf(7).has("factory:running"));
+    assert.ok(!gh.labelsOf(7).has("pendulum:running"));
     assert.equal(loop.startFailures.get(7).count, 1);
     assert.match(loop.startHolds()[7], /1 in a row/);
     assert.deepEqual(await loop.machineWait(), { work: null, all: null }, "one Objective alone is no fault of the machine");
@@ -739,12 +739,12 @@ test("runObjective: the same failed start on two Objectives is the machine's: no
       for (let i = 0; i < 4; i += 1) {
         now += 60 * 60_000;
         for (const n of [7, 8]) {
-          gh.labelsOf(n).add("factory:running");
+          gh.labelsOf(n).add("pendulum:running");
           await loop.runObjective(n);
         }
       }
     });
-    assert.ok(!gh.labelsOf(8).has("factory:running"), "back to Queued");
+    assert.ok(!gh.labelsOf(8).has("pendulum:running"), "back to Queued");
     assert.deepEqual(posted(), [], "no Block, no label written");
     assert.equal(loop.startFailures.get(7).count, 1, "the count from before the hold stays as it was");
     assert.equal(loop.startFailures.get(8).count, 0);
@@ -757,14 +757,14 @@ test("runObjective: the same failed start on two Objectives is the machine's: no
     const held = await loop.machineWait();
     assert.match(held.work, /^this machine's starts fail \(setup, ENOSPC\): 0\.0 GB free on its disk/);
     assert.equal(held.all, held.work);
-    assert.ok(read.at(-1).startsWith("/srv/box/.factory/"));
+    assert.ok(read.at(-1).startsWith("/srv/box/.pendulum/"));
     const probed = read.length;
     free = START_DISK_FLOOR;
     assert.ok((await loop.machineWait()).work, "within the minute: the last probe's answer");
     assert.equal(read.length, probed);
     // Another cause on one Objective, during the hold: its own, counted as before.
     fail = { code: "EACCES", errno: -13 };
-    gh.labelsOf(9).add("factory:running");
+    gh.labelsOf(9).add("pendulum:running");
     await loop.runObjective(9);
     assert.equal(loop.startFailures.get(9).count, 1);
     // The disk freed, a minute on: the hold ends, said once, and starts go on; one that starts clears its record.
@@ -772,7 +772,7 @@ test("runObjective: the same failed start on two Objectives is the machine's: no
     const back = await logged(async () => assert.deepEqual(await loop.machineWait(), { work: null, all: null }));
     assert.ok(back.some((l) => /this machine's start fault \(setup, ENOSPC\) is gone \(2 GB free on its disk\): new starts resume/.test(l)));
     fail = null;
-    gh.labelsOf(7).add("factory:running");
+    gh.labelsOf(7).add("pendulum:running");
     await loop.runObjective(7);
     assert.ok(!loop.startFailures.has(7));
   } finally {
@@ -793,9 +793,9 @@ test("runObjective: two Objectives whose starts fail at the same moment the same
     loop.stage = async (n) => {
       if (++arrived === 2) open();
       await barrier;
-      throw Object.assign(new Error(`ENOSPC: mkdir '/srv/box/.factory/${n}'`), { code: "ENOSPC", syscall: "mkdir", path: `/srv/box/.factory/${n}` });
+      throw Object.assign(new Error(`ENOSPC: mkdir '/srv/box/.pendulum/${n}'`), { code: "ENOSPC", syscall: "mkdir", path: `/srv/box/.pendulum/${n}` });
     };
-    gh.labelsOf(8).add("factory:running");
+    gh.labelsOf(8).add("pendulum:running");
     await Promise.all([loop.runObjective(7), loop.runObjective(8)]);
     assert.ok(loop.machineHolds.has("setup ENOSPC"), "held as the machine's");
     assert.deepEqual([...loop.machineHolds.get("setup ENOSPC").issues].sort(), [7, 8]);
@@ -823,11 +823,11 @@ test("runObjective: a cause that fails again after its hold's probe passed is no
       for (let round = 1; round <= 12; round += 1) {
         await loop.machineWait();
         for (const n of [7, 8]) {
-          if (gh.labelsOf(n).has("factory:blocked")) continue;
-          gh.labelsOf(n).add("factory:running");
+          if (gh.labelsOf(n).has("pendulum:blocked")) continue;
+          gh.labelsOf(n).add("pendulum:running");
           await loop.runObjective(n);
         }
-        if (blockedBy === null && [7, 8].every((n) => gh.labelsOf(n).has("factory:blocked"))) blockedBy = round;
+        if (blockedBy === null && [7, 8].every((n) => gh.labelsOf(n).has("pendulum:blocked"))) blockedBy = round;
         now += Math.max(MACHINE_PROBE_EVERY_MS, (61 * 60_000) / 12);
       }
     });
@@ -872,7 +872,7 @@ test("startCause: a failed start's kind and code, on structure; a clone's machin
       };
       loop.withClaim = fail.startFailed ? async () => Promise.reject(Object.assign(new Error("failed"), fail)) : Local.prototype.withClaim;
       for (const n of [7, 8]) {
-        gh.labelsOf(n).add("factory:running");
+        gh.labelsOf(n).add("pendulum:running");
         await loop.runObjective(n);
       }
       assert.match(await loop.machineProbe(loop.machineHolds.get(key)), why);
@@ -890,7 +890,7 @@ test("startCause: a failed start's kind and code, on structure; a clone's machin
     sandbox = [];
     assert.deepEqual(await loop.machineWait(), { work: null, all: null }, "every probe passes: every hold ends");
     assert.equal(loop.machineHolds.size, 0);
-    assert.ok(!gh.writes.some((w) => /factory:blocked/.test(w)), "nothing Blocked");
+    assert.ok(!gh.writes.some((w) => /pendulum:blocked/.test(w)), "nothing Blocked");
   } finally {
     gh.restore();
   }
@@ -909,7 +909,7 @@ test("serve: a machine hold starts nothing new, with its reason on the tick line
       dev: mkdtempSync(join(tmpdir(), "dev-")),
       machineProbeEveryMs: 0,
       machineProbes: { statfs: () => ({ bavail: free, bsize: 1 }) },
-      machineHolds: new Map([["setup ENOSPC", { kind: "setup", code: "ENOSPC", key: "setup ENOSPC", probes: ["disk"], path: "/srv/box/.factory/7", issues: new Set([7, 8]), all: true, since: Date.now(), retryAt: Date.now() }]]),
+      machineHolds: new Map([["setup ENOSPC", { kind: "setup", code: "ENOSPC", key: "setup ENOSPC", probes: ["disk"], path: "/srv/box/.pendulum/7", issues: new Set([7, 8]), all: true, since: Date.now(), retryAt: Date.now() }]]),
     },
   });
   assert.deepEqual(run.claims, [3], "nothing started while the disk was full; picked on the tick after it was freed");
@@ -931,44 +931,44 @@ test("runObjective: a start that fails on a claim it cannot read, or on another 
     // The claim cannot be read: another machine may be running it, so nothing changes yet.
     let r = await loop.runObjective(7);
     assert.equal(r.startFailed, "claim-read");
-    assert.ok(gh.labels.has("factory:running"), "not un-marked");
+    assert.ok(gh.labels.has("pendulum:running"), "not un-marked");
     assert.deepEqual(gh.writes, [], "nothing written");
     // Inside the backoff the tick does not read again; after it, a read that answers with no live claim requeues it.
     down = null;
     await loop.recheckStarts(new Map());
-    assert.ok(gh.labels.has("factory:running"));
+    assert.ok(gh.labels.has("pendulum:running"));
     now += START_BACKOFF_MS + 1000;
     await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("factory:running"), "back to Queued for the next pick");
+    assert.ok(!gh.labels.has("pendulum:running"), "back to Queued for the next pick");
     assert.deepEqual(loop.startHolds(), {}, "free to pick");
     // The next pick (the dispatcher marks it Running) starts it, which clears the count.
-    gh.labels.add("factory:running");
+    gh.labels.add("pendulum:running");
     await loop.runObjective(7);
     assert.equal(starts, 1);
     assert.ok(!loop.startFailures.has(7));
 
     // Another machine's stale claim that this loop cannot replace (the edit fails): left as it is, then requeued once
     // a read shows it is still stale, and started.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     gh.comments.length = 0;
-    gh.comments.push({ id: 9, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("otherbox:1:abc:m:b", new Date())}`, updated_at: new Date(Date.now() - 20 * 60_000).toISOString() });
+    gh.comments.push({ id: 9, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("otherbox:1:abc:m:b", new Date())}`, updated_at: new Date(Date.now() - 20 * 60_000).toISOString() });
     down = "patch";
     r = await loop.runObjective(7);
     assert.equal(r.startFailed, "claim");
-    assert.ok(gh.labels.has("factory:running"));
+    assert.ok(gh.labels.has("pendulum:running"));
     assert.equal(gh.comments.length, 1, "its claim stays");
     down = null;
     now += START_BACKOFF_MS + 1000;
     gh.comments[0].updated_at = new Date(Date.now() - 20 * 60_000).toISOString();
     await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("factory:running"));
-    gh.labels.add("factory:running");
+    assert.ok(!gh.labels.has("pendulum:running"));
+    gh.labels.add("pendulum:running");
     await loop.runObjective(7);
     assert.equal(starts, 2);
     // A claim read that keeps failing: the third failed start in a row Blocks.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     down = "comments";
     for (let i = 0; i < 3; i += 1) {
       if (i === 0) await loop.runObjective(7);
@@ -977,7 +977,7 @@ test("runObjective: a start that fails on a claim it cannot read, or on another 
         await loop.recheckStarts(new Map());
       }
     }
-    assert.ok(gh.labels.has("factory:blocked"));
+    assert.ok(gh.labels.has("pendulum:blocked"));
   } finally {
     gh.restore();
   }
@@ -987,13 +987,13 @@ test("serve: a review this loop owes is held from its own dispatch, so a day-old
   const reviewed = [];
   let loop = null;
   const run = await serveAgainst({
-    view: () => ["factory:objective", "factory:local", "factory:in-review"],
+    view: () => ["pendulum:objective", "pendulum:local", "pendulum:in-review"],
     onList: (read, { timeline }) => {
-      // In review for three days; the merge pass re-applied factory:review to its PR long ago, as the fixture's day 0.
-      if (read === 1) timeline.push({ event: "labeled", label: { name: "factory:in-review" }, created_at: new Date(Date.now() - 3 * 86_400_000).toISOString() });
+      // In review for three days; the merge pass re-applied pendulum:review to its PR long ago, as the fixture's day 0.
+      if (read === 1) timeline.push({ event: "labeled", label: { name: "pendulum:in-review" }, created_at: new Date(Date.now() - 3 * 86_400_000).toISOString() });
     },
     extra: (req, url, send) => {
-      if (url.pathname === "/repos/o/r/pulls" && url.searchParams.get("head")) return send(200, [{ number: 9, draft: false, labels: [{ name: "factory:review" }], head: { ref: "factory/7" } }]), true;
+      if (url.pathname === "/repos/o/r/pulls" && url.searchParams.get("head")) return send(200, [{ number: 9, draft: false, labels: [{ name: "pendulum:review" }], head: { ref: "pendulum/7" } }]), true;
       return false;
     },
     firstStage: () => Promise.resolve({ exit: "delivered" }),
@@ -1008,7 +1008,7 @@ test("serve: a review this loop owes is held from its own dispatch, so a day-old
     },
   });
   assert.ok(reviewed.includes(9), "the review runs");
-  assert.ok(!run.labels.includes("factory:blocked"), "never Blocked as 'no local loop running its review'");
+  assert.ok(!run.labels.includes("pendulum:blocked"), "never Blocked as 'no local loop running its review'");
   assert.ok(!run.lines.some((l) => /no local loop running its review/.test(l)));
 });
 
@@ -1023,14 +1023,14 @@ test("unstart: a GitHub failure while settling a failed start still records the 
     loop.stage = async () => ({ code: 0, exit: "blocked", usd: 0, stage: "work" });
     // The claim read and the issue read fail together: nothing changes, but the loop will read it again.
     await loop.runObjective(7);
-    assert.ok(gh.labels.has("factory:running"));
+    assert.ok(gh.labels.has("pendulum:running"));
     assert.equal(loop.startFailures.get(7)?.recheck, true, "not stranded: a recheck is due after the backoff");
     down = new Set();
     now += START_BACKOFF_MS + 1000;
     await loop.recheckStarts(new Map());
-    assert.ok(!gh.labels.has("factory:running"), "back to Queued");
+    assert.ok(!gh.labels.has("pendulum:running"), "back to Queued");
     // A person moved it out of Running while its claim stays unreadable: the loop lets it go, no read every tick.
-    gh.labels.add("factory:question");
+    gh.labels.add("pendulum:question");
     down = new Set(["comments"]);
     loop.startFailures.set(7, { count: 1, retryAt: now, recheck: true });
     await loop.recheckStarts(new Map());
@@ -1054,12 +1054,12 @@ test("unstart: the third failed start keeps its count when the Block cannot be w
     // The Block's own writes fail (its labels): the entry stays, with a recheck, so the Objective is not stranded.
     down = new Set(["labels"]);
     await loop.runObjective(7);
-    assert.ok(!gh.labels.has("factory:blocked"));
+    assert.ok(!gh.labels.has("pendulum:blocked"));
     assert.equal(loop.startFailures.get(7)?.count, 3);
     assert.equal(loop.startFailures.get(7)?.recheck, true);
     down = new Set();
     await loop.runObjective(7);
-    assert.ok(gh.labels.has("factory:blocked"));
+    assert.ok(gh.labels.has("pendulum:blocked"));
     assert.ok(!loop.startFailures.has(7));
   } finally {
     gh.restore();
@@ -1113,13 +1113,13 @@ test("withClaim: a stage that paused on this machine's network keeps its claim w
     // Past the bound: Blocked with the External cause, naming the host and since when, and the claim goes.
     t = since + OUTAGE.blockMs;
     assert.equal((await loop.resume(7)).exit, "blocked");
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Factory's 12 h bound for an outage\. The network is back: re-apply the label/);
-    assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
+    assert.match(notice, /this machine could not reach api\.anthropic\.test \(EAI_AGAIN\) from 2026-11-14T08:47:00\.000Z for 12 h, past Pendulum's 12 h bound for an outage\. The network is back: re-apply the label/);
+    assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     // A later pause long after a resume is a new outage: its own since.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     await loop.withClaim(7, paused(t));
     loop.offline.get(7).resumedAt = t;
     await loop.withClaim(7, paused(t + OUTAGE.stageWaitMs + 60_000));
@@ -1202,15 +1202,15 @@ test("#389: a stage paused on GitHub's 5xx waits on while GitHub's status page r
     }
     assert.equal(tries(), 12, "every resume ran the stage again");
     assert.equal(page.asked(), 11, "the page was asked at each resume (the one to the refusing origin aside)");
-    assert.ok(!gh.writes.some((w) => w.includes("factory:block")));
+    assert.ok(!gh.writes.some((w) => w.includes("pendulum:block")));
     // Twelve hours from the first pause: taken up at once and Blocked as an outage, whatever the page says.
     at.t = first + OUTAGE.blockMs;
     assert.deepEqual(await loop.pausedHere(new Map()), [7]);
     assert.equal((await loop.resume(7)).exit, "blocked");
     assert.equal(tries(), 12);
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
-    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Factory's 12 h bound for github\.test failing/);
-    assert.match(notice, /<!-- factory:block \{"cause":"outage"\} -->/);
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
+    assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z, through 13 pauses over 12 h, past Pendulum's 12 h bound for github\.test failing/);
+    assert.match(notice, /<!-- pendulum:block \{"cause":"outage"\} -->/);
     assert.ok(!loop.offline.has(7));
   } finally {
     await refusing.close();
@@ -1237,14 +1237,14 @@ test("#389: a stage paused on GitHub's 5xx while GitHub's status page reports it
     assert.equal(tries(), 3, "no try after the one more");
     assert.equal(page.asked(), 4);
     assert.ok(page.paths.every((u) => u === "/api/v2/summary.json"), page.paths.join(" "));
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
     assert.match(notice, /github\.test answered HTTP 500 to every try of POST repos\/acme\/app\/issues\/7\/labels from 2026-11-14T08:47:00\.000Z; GitHub's status page reported API Requests operational, Issues operational, Pull Requests operational, before and after one more try, so the failure is this request's/);
-    assert.match(notice, /<!-- factory:block \{"cause":"factory"\} -->/);
+    assert.match(notice, /<!-- pendulum:block \{"cause":"pendulum"\} -->/);
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 0, "the claim is dropped");
     assert.ok(!loop.offline.has(7));
     // A stage that ends any other way starts the count again.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     await loop.withClaim(7, async () => ({ exit: "paused", stage: "work", code: 0, outage: { host: "github.test", origin: "https://github.test", code: "HTTP 500", since: new Date().toISOString() } }));
     await loop.withClaim(7, async () => ({ exit: "delivered" }));
     assert.ok(!loop.offline.has(7));
@@ -1322,7 +1322,7 @@ test("#389: the one more try belongs to the request that failed: a 5xx on anothe
     assert.notEqual((await next()).exit, "blocked");
     assert.equal((await next()).exit, "blocked");
     assert.equal(tries(), 3);
-    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("factory:block"));
+    const notice = gh.writes.find((w) => w.startsWith("POST /issues/7/comments") && w.includes("pendulum:block"));
     assert.ok(notice.includes(`github.test answered HTTP 500 to every try of GET repos/acme/app/pulls from ${new Date(fresh).toISOString()};`), notice);
     assert.doesNotMatch(notice, /from 2026-11-14T08:47:00\.000Z/, "not the first pause's request time");
   } finally {
@@ -1422,11 +1422,11 @@ test("pausedHere: an Objective paused on a provider that never answers again is 
     assert.match(notice, /bound for an outage\. api\.anthropic\.test is still unreachable from this machine: re-apply the label once it answers/);
     assert.ok(!/The network is back/.test(notice));
     // Paused again, then stopped by a person: its pause is over with it.
-    gh.labels.delete("factory:blocked");
-    gh.labels.add("factory:running");
+    gh.labels.delete("pendulum:blocked");
+    gh.labels.add("pendulum:running");
     await loop.withClaim(7, paused);
     assert.ok(loop.offline.has(7));
-    gh.labels.delete("factory:objective");
+    gh.labels.delete("pendulum:objective");
     await loop.pausedHere(new Map());
     assert.ok(!loop.offline.has(7));
   } finally {
@@ -1446,7 +1446,7 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
     const paused = async () => ({ exit: "paused", stage: "review", code: 0, usageLimit: { harness: "claude", reset: new Date(reset).toISOString(), since: new Date(since).toISOString() } });
     assert.equal((await loop.withClaim(7, paused)).exit, "paused");
     assert.equal(gh.comments.filter((c) => c.body.includes(":local -->")).length, 1, "the claim stays");
-    assert.equal(gh.comments.filter((c) => c.body.startsWith("<!-- factory:7:account-limit -->")).length, 1, "and the pause notice (#265)");
+    assert.equal(gh.comments.filter((c) => c.body.startsWith("<!-- pendulum:7:account-limit -->")).length, 1, "and the pause notice (#265)");
     assert.ok(!loop.lapsed?.has(7), "a pause is no lapse");
     assert.ok(!gh.writes.some((w) => w.startsWith("POST /issues/7/labels")), "nothing Blocked");
     assert.equal(loop.limitUntil({ key: "claude", shared: true }), reset, "no stage starts on claude until the reset");
@@ -1464,7 +1464,7 @@ test("withClaim: a stage that paused on its harness's usage limit keeps its clai
   }
 });
 
-test("#376: an Objective paused on a usage limit with a far reset resumes at the next tick once its account is no longer held: released with factory hold release, or its files removed by hand; another account's release moves nothing", async () => {
+test("#376: an Objective paused on a usage limit with a far reset resumes at the next tick once its account is no longer held: released with pendulum hold release, or its files removed by hand; another account's release moves nothing", async () => {
   const gh = claimGitHub();
   try {
     const home = mkdtempSync(join(tmpdir(), "hold-"));
@@ -1510,7 +1510,7 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
     },
   });
   assert.deepEqual(run.claims, [], "nothing new started");
-  assert.ok(!run.labels.includes("factory:running"), `the dispatcher never picked it: it stays Queued (${run.labels.join(", ")})`);
+  assert.ok(!run.labels.includes("pendulum:running"), `the dispatcher never picked it: it stays Queued (${run.labels.join(", ")})`);
   assert.deepEqual(reviewed, [], "no review started");
   assert.equal(run.lines.filter((l) => /claude's usage limit is spent until .*; no stage starts on claude until then/.test(l)).length, 1);
 });
@@ -1518,7 +1518,7 @@ test("serve: while the loop's harness's usage limit is spent, no new work or rev
 test("serve: one harness's spent usage limit holds only that harness's work; an Objective labelled for another still starts (#254)", async () => {
   const reviewed = [];
   const run = await serveAgainst({
-    view: (read, labels) => [...labels, "factory:harness:codex"],
+    view: (read, labels) => [...labels, "pendulum:harness:codex"],
     firstStage: () => Promise.resolve({ exit: "delivered" }),
     stopAfter: 3,
     stubs: {

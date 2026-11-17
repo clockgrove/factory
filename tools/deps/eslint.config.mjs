@@ -28,13 +28,13 @@ const noShadowedImport = {
 export default [
   { ignores: ["plugin/vendor/**", "**/node_modules/**"] },
   {
-    files: ["**/*.mjs", "plugin/bin/factory"],
+    files: ["**/*.mjs", "plugin/bin/pendulum"],
     languageOptions: { ecmaVersion: "latest", sourceType: "module", globals: globals.node },
     // Directives name rules this config leaves off on purpose; an unused one is no fault.
     linterOptions: { reportUnusedDisableDirectives: "off" },
-    plugins: { factory: { rules: { "no-shadowed-import": noShadowedImport } } },
+    plugins: { pendulum: { rules: { "no-shadowed-import": noShadowedImport } } },
     rules: {
-      "factory/no-shadowed-import": "error",
+      "pendulum/no-shadowed-import": "error",
       "no-undef": "error",
       // variables: false still reports a read in the binding's own scope before it is set, a parameter default that
       // names itself among them; it skips closures that read a module constant declared further down, which run later.

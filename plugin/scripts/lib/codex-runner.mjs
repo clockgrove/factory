@@ -12,15 +12,15 @@
 // The invariant, as for Claude Code: nothing the agent uid can write, inside or outside Codex's sandbox, is read or run
 // by Codex's own start-up outside the sandbox. Validation, install and setup run the repository's code as the agent
 // outside the sandbox, so the agent's home and the checkout's .git are the agent's to plant things in. So:
-// - Codex's HOME is a directory Factory owns (CODEX_RUNNER_HOME): empty, so its shell snapshot (`bash -lc`, run with
+// - Codex's HOME is a directory Pendulum owns (CODEX_RUNNER_HOME): empty, so its shell snapshot (`bash -lc`, run with
 //   the credential in its environment) sources no start-up file of the agent's. The unit (or NAMESPACE_WRAP) sees it
 //   read-only.
 // - Its TMPDIR is /tmp, which its unit (PrivateTmp) or NAMESPACE_WRAP makes private and fresh for every start.
 // - CODEX_HOME (its config, sessions and plugins) lives in the agent's home but is made afresh and empty before every
-//   start, with only the sessions Factory itself captured put back; `--ignore-user-config` besides. Its sandboxed
+//   start, with only the sessions Pendulum itself captured put back; `--ignore-user-config` besides. Its sandboxed
 //   commands cannot write it.
 // - The checkout's .git config, commondir, info/attributes and hooks, which Codex's own git reads with the credential
-//   in its environment, are put back to what Factory pinned (claude-runner.mjs pinRunnerGit, restoreRunnerGit), and the
+//   in its environment, are put back to what Pendulum pinned (claude-runner.mjs pinRunnerGit, restoreRunnerGit), and the
 //   checkout's harness configuration is restored to the commit (local.mjs clearHarnessConfig).
 // - Its commands get the agent's own HOME and TMPDIR back (`shell_environment_policy.set`), so package caches and the
 //   agent's read-only gh login work as before.
@@ -30,15 +30,15 @@ import { GitRefusal, codexLocalConfig, codexReadOnly } from "./local.mjs";
 import { RUNNER_CACHES, SESSIONS_HELD } from "./claude-runner.mjs";
 import { untarAsAgent } from "./untar.mjs";
 
-/** Codex's HOME on a runner: Factory's own, outside every home the agent can write. */
-export const CODEX_RUNNER_HOME = "/var/lib/factory-codex";
+/** Codex's HOME on a runner: Pendulum's own, outside every home the agent can write. */
+export const CODEX_RUNNER_HOME = "/var/lib/pendulum-codex";
 
 /** Codex's sessions on a runner, relative to the agent's home (session.mjs reads and restores them there). */
-export const CODEX_RUNNER_SESSION_ROOT = ".factory-codex/home/sessions";
+export const CODEX_RUNNER_SESSION_ROOT = ".pendulum-codex/home/sessions";
 
-/** Where everything lives for one agent: Factory's HOME for Codex, and the per-start state in the agent's home. */
+/** Where everything lives for one agent: Pendulum's HOME for Codex, and the per-start state in the agent's home. */
 export function codexRunnerLayout(agent, home = CODEX_RUNNER_HOME) {
-  const state = join(agent.home, ".factory-codex");
+  const state = join(agent.home, ".pendulum-codex");
   return {
     home,
     agentHome: agent.home,
@@ -53,7 +53,7 @@ export function codexRunnerLayout(agent, home = CODEX_RUNNER_HOME) {
 
 /**
  * Codex's state made afresh before a start, as the agent: its state directory removed (a link is removed, never
- * followed) and made empty, then every session archive Factory holds unpacked into its sessions directory.
+ * followed) and made empty, then every session archive Pendulum holds unpacked into its sessions directory.
  */
 export async function resetCodexState(layout, env = process.env) {
   // The caches are made by realRoots (claude-runner.mjs), which replaces a link with a real directory.
@@ -96,11 +96,11 @@ export async function presentPaths(clone, env = process.env, { run = exec } = {}
  * `true >>` opens for append and writes nothing (a regular builtin: a refused redirection is no shell error, as it is
  * for `:`), so a writable file is left as it was. The network rule needs curl or node; with neither it fails.
  */
-export const PROBE_MARKER = "FACTORY_PROBE_MARKER";
+export const PROBE_MARKER = "PENDULUM_PROBE_MARKER";
 /** The probe's last line when every rule held: Copilot's check passes only on it (an empty script would exit 0 too). */
-export const PROBE_PASS = "factory: confined";
+export const PROBE_PASS = "pendulum: confined";
 export const CONFINEMENT_PROBE = [
-  'h=$1; g=$2; t=$3; host=$4; m=$5; d=$6; f=".factory-sandbox-probe-$$"',
+  'h=$1; g=$2; t=$3; host=$4; m=$5; d=$6; f=".pendulum-sandbox-probe-$$"',
   'if [ -n "$h" ] && true >> "$h/$f" 2>/dev/null; then rm -f -- "$h/$f"; echo "the agent home is writable"; exit 4; fi',
   'if [ -n "$g" ] && [ -e "$g" ] && true >> "$g" 2>/dev/null; then echo "the checkout\'s .git/config is writable"; exit 4; fi',
   'if ! true > "$t/$f" 2>/dev/null; then echo "the agent temp directory is not writable"; exit 4; fi; rm -f -- "$t/$f"',
@@ -127,7 +127,7 @@ export const decoyLaunch = (start) =>
   [
     "sleep 300 & d=$!",
     "i=0",
-    `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "factory: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
+    `until tr '\\0' '\\n' < "/proc/$d/environ" 2>/dev/null | grep -qxF "${PROBE_MARKER}=$${PROBE_MARKER}"; do i=$((i+1)); if [ "$i" -gt 100 ]; then kill "$d" 2>/dev/null; echo "pendulum: the probe's decoy did not come up" >&2; exit 5; fi; sleep 0.05; done`,
     `${start}; r=$?`,
     'kill "$d" 2>/dev/null',
     'exit "$r"',

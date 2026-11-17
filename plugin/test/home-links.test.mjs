@@ -148,7 +148,7 @@ test("#261: a file where the harness keeps a directory, or a link to one, is ref
   refused(() => ensureHarnessHomes("claude", { CLAUDE_CONFIG_DIR: join(h3, ".claude-four") }, h3), { link: join(h3, ".claude-four"), target: null, made: null, why: /no directory/ });
 });
 
-test("#261: every directory Factory makes is checked where it really lies; a file or a loop of links on the way is refused", () => {
+test("#261: every directory Pendulum makes is checked where it really lies; a file or a loop of links on the way is refused", () => {
   const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
   // `cache` a link to a directory that exists outside every home: `cache/model-catalog` would be made there.
   const { h, two, env } = fakeHome();

@@ -95,13 +95,13 @@ test("reviewOverlap: the reviewer starts at the first reading; a red found while
       assert.equal(r.held.sha, SHA);
       assert.deepEqual(r.held.failures.map((f) => f.command), ["CI job quality"]);
       assert.match(r.held.lead, /AssertionError \[ERR_ASSERTION\]: 2 == 3/);
-      // The answer pass's prompt carries it beside the comments, its whole output in $FACTORY_IN/checks/.
+      // The answer pass's prompt carries it beside the comments, its whole output in $PENDULUM_IN/checks/.
       const prompt = answerPrompt({ taskCard: "CARD", prNumber: 5, comments: [{ id: 1, path: "a.js", line: 2, body: "acceptance 1: x" }], red: { sha: r.held.sha, lines: redLines(r.held) } });
-      assert.match(prompt, /handle each comment once[\s\S]*Factory's validation found the required checks red on the head the reviewer read \(aaaaaaa\)\. Fix that cause in the code too/);
-      assert.match(prompt, /## Red required checks\n\nCommand: CI job quality\nExit: 1\nWhole output: \$FACTORY_IN\/checks\/1-CI-job-quality\.log/);
+      assert.match(prompt, /handle each comment once[\s\S]*Pendulum's validation found the required checks red on the head the reviewer read \(aaaaaaa\)\. Fix that cause in the code too/);
+      assert.match(prompt, /## Red required checks\n\nCommand: CI job quality\nExit: 1\nWhole output: \$PENDULUM_IN\/checks\/1-CI-job-quality\.log/);
       // With no comment to answer, the pass is the red's alone.
       const alone = answerPrompt({ taskCard: "CARD", prNumber: 5, comments: [], red: { sha: r.held.sha, lines: redLines(r.held) } });
-      assert.match(alone, /^CARD\n\n---\n\nFactory's validation found the required checks red[^\n]*There are no reviewer comments to answer: write no replies\. Then rebase/);
+      assert.match(alone, /^CARD\n\n---\n\nPendulum's validation found the required checks red[^\n]*There are no reviewer comments to answer: write no replies\. Then rebase/);
     });
     assert.deepEqual(lines, [
       "pre-review-validation pass 1 (required checks)",
@@ -204,8 +204,8 @@ test("validationLoop checksOnlyFirst: a handed-off head's commands are not run a
   }
 });
 
-test("headMarks: the worker's hand-off marker and the validated marker are read in one listing, from Factory's own comments only", async () => {
-  setSelf("factory-app[bot]");
+test("headMarks: the worker's hand-off marker and the validated marker are read in one listing, from Pendulum's own comments only", async () => {
+  setSelf("pendulum-app[bot]");
   const comments = [];
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
@@ -213,7 +213,7 @@ test("headMarks: the worker's hand-off marker and the validated marker are read 
   globalThis.fetch = async (url, init = {}) => {
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if ((init.method || "GET") === "POST") {
-      comments.push({ id: comments.length + 1, user: { login: "factory-app[bot]" }, body: JSON.parse(init.body).body });
+      comments.push({ id: comments.length + 1, user: { login: "pendulum-app[bot]" }, body: JSON.parse(init.body).body });
       return json(comments.at(-1), 201);
     }
     return json(comments);
@@ -312,7 +312,7 @@ test("validationLoop: a green result names the head its checks were green on (th
 });
 
 test("validatedOn: the validated marker goes on the head the checks were green on; a head that moved meanwhile gets no marker and the review again", async () => {
-  setSelf("factory-app[bot]");
+  setSelf("pendulum-app[bot]");
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -336,7 +336,7 @@ test("validatedOn: the validated marker goes on the head the checks were green o
     head = "b".repeat(40);
     const moved = await validatedOn({ repo, issue: 4, prNumber: 5, sha: SHA, token: { token: "t" } });
     assert.match(moved.moved, /^PR #5's head moved to bbbbbbb while aaaaaaa was validated; the review runs again on the new head$/);
-    assert.deepEqual(writes, ["DELETE /repos/acme/app/issues/5/labels/factory:review", 'POST /repos/acme/app/issues/5/labels {"labels":["factory:review"]}'], "no marker; the review label off and on again");
+    assert.deepEqual(writes, ["DELETE /repos/acme/app/issues/5/labels/pendulum:review", 'POST /repos/acme/app/issues/5/labels {"labels":["pendulum:review"]}'], "no marker; the review label off and on again");
   } finally {
     globalThis.fetch = realFetch;
     if (before === undefined) delete process.env.GITHUB_API_URL;

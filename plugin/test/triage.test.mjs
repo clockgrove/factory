@@ -156,22 +156,22 @@ test("changedPathIn: a container's, Docker's or a subdirectory run's path to a c
   assert.equal(at("    at f (packages/web/src/a.ts:3:4)", "src/a.ts"), null, "a longer relative path is another file");
 });
 
-test("triage records: written in the progress comment, read back only from Factory's own progress comments", () => {
-  setSelf("factory-app[bot]");
+test("triage records: written in the progress comment, read back only from Pendulum's own progress comments", () => {
+  setSelf("pendulum-app[bot]");
   const rec = { reruns: new Set(["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"]), sigs: new Set(["0123456789ab"]) };
   const progress = (login, body) => ({ user: { login }, body });
   const comments = [
-    progress("factory-app[bot]", `<!-- factory:7:progress:work:1 -->\nFactory work run 1\n${triageMarker(rec)}`),
-    progress("someone", `<!-- factory:7:progress:work:2 -->\n${triageMarker({ reruns: ["ffffffffffffffffffffffffffffffffffffffff"], sigs: ["ffffffffffff"] })}`),
-    progress("factory-app[bot]", `a plain comment\n${triageMarker({ reruns: ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"], sigs: [] })}`),
-    progress("factory-app[bot]", `<!-- factory:8:progress:work:3 -->\n${triageMarker({ reruns: ["dddddddddddddddddddddddddddddddddddddddd"], sigs: [] })}`),
+    progress("pendulum-app[bot]", `<!-- pendulum:7:progress:work:1 -->\nPendulum work run 1\n${triageMarker(rec)}`),
+    progress("someone", `<!-- pendulum:7:progress:work:2 -->\n${triageMarker({ reruns: ["ffffffffffffffffffffffffffffffffffffffff"], sigs: ["ffffffffffff"] })}`),
+    progress("pendulum-app[bot]", `a plain comment\n${triageMarker({ reruns: ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"], sigs: [] })}`),
+    progress("pendulum-app[bot]", `<!-- pendulum:8:progress:work:3 -->\n${triageMarker({ reruns: ["dddddddddddddddddddddddddddddddddddddddd"], sigs: [] })}`),
   ];
   const got = triageOf(comments, { issue: 7 });
   assert.deepEqual([...got.reruns], ["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"]);
   assert.deepEqual([...got.sigs], ["0123456789ab"]);
   assert.equal(got.refused, false);
   // A refused rerun is remembered for the Objective.
-  const refused = triageOf([progress("factory-app[bot]", `<!-- factory:7:progress:review:4 -->\n${triageMarker(mergeTriage({ refused: true }))}`)], { issue: 7 });
+  const refused = triageOf([progress("pendulum-app[bot]", `<!-- pendulum:7:progress:review:4 -->\n${triageMarker(mergeTriage({ refused: true }))}`)], { issue: 7 });
   assert.equal(refused.refused, true);
   assert.equal(mergeTriage(got, refused).refused, true);
   setSelf(null);
@@ -192,14 +192,14 @@ test("triageInput and triageLine: one job per question; the line names each verd
 });
 
 test("the key: the Action's input on Actions, only the key file elsewhere; none turns triage off", () => {
-  const home = mkdtempSync(join(tmpdir(), "factory-triage-"));
+  const home = mkdtempSync(join(tmpdir(), "pendulum-triage-"));
   const actions = { GITHUB_ACTIONS: "true" };
   try {
     assert.equal(triageKey({ inputs: { aiGatewayApiKey: "k-input" }, env: { ...actions, AI_GATEWAY_API_KEY: "k-env" }, home }), "k-input");
     assert.equal(triageKey({ inputs: {}, env: { ...actions, AI_GATEWAY_API_KEY: "k-env" }, home }), "", "no env route on a runner");
     assert.equal(triageKey({ inputs: { aiGatewayApiKey: "k-input" }, env: { AI_GATEWAY_API_KEY: "k-env" }, home }), "", "locally neither the env nor an input");
-    mkdirSync(join(home, ".config", "factory"), { recursive: true });
-    writeFileSync(join(home, ".config", "factory", "ai-gateway-key"), "k-file\n", { mode: 0o600 });
+    mkdirSync(join(home, ".config", "pendulum"), { recursive: true });
+    writeFileSync(join(home, ".config", "pendulum", "ai-gateway-key"), "k-file\n", { mode: 0o600 });
     assert.equal(triageKey({ inputs: {}, env: {}, home }), "k-file");
     assert.equal(triageKey({ inputs: {}, env: actions, home }), "", "a runner reads no key file");
     assert.equal(openTriage({ inputs: {}, env: actions, repo: { full: "o/r" }, issue: 1, prNumber: 2 }).off, "no-key");
@@ -207,14 +207,14 @@ test("the key: the Action's input on Actions, only the key file elsewhere; none 
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
-  const inputs = resolveInputs({ env: { FACTORY_INPUT_AI_GATEWAY_API_KEY: "k", FACTORY_TRIAGE_MODEL: "m/n" } });
+  const inputs = resolveInputs({ env: { PENDULUM_INPUT_AI_GATEWAY_API_KEY: "k", PENDULUM_TRIAGE_MODEL: "m/n" } });
   assert.equal(inputs.aiGatewayApiKey, "k");
   assert.equal(inputs.triageModel, "m/n");
 });
 
 test("locally the key file is held to the key-file rules, and each way it fails has a code", () => {
-  const home = mkdtempSync(join(tmpdir(), "factory-triage-"));
-  const dir = join(home, ".config", "factory");
+  const home = mkdtempSync(join(tmpdir(), "pendulum-triage-"));
+  const dir = join(home, ".config", "pendulum");
   const file = join(dir, "ai-gateway-key");
   const state = () => triageKeyState({ inputs: {}, env: {}, home });
   try {
@@ -226,18 +226,18 @@ test("locally the key file is held to the key-file rules, and each way it fails 
     assert.deepEqual(state(), { key: "", code: "key-file-mode" });
     chmodSync(file, 0o600);
     assert.deepEqual(state(), { key: "k-file", code: null });
-    // A harness home the outer sandbox leaves readable (#2551) that holds ~/.config/factory exposes the key: refused,
+    // A harness home the outer sandbox leaves readable (#2551) that holds ~/.config/pendulum exposes the key: refused,
     // and serve will not start with the file there; a harness home elsewhere is fine.
     const exposed = (harness, env) => triageKeyState({ inputs: { harness }, env, home });
     assert.deepEqual(exposed("claude", { CLAUDE_CONFIG_DIR: join(home, ".config") }), { key: "", code: "key-dir-exposed" });
     assert.deepEqual(exposed("codex", { CODEX_HOME: home }), { key: "", code: "key-dir-exposed" });
     assert.deepEqual(exposed("copilot", { COPILOT_HOME: dir }), { key: "", code: "key-dir-exposed" });
-    assert.deepEqual(exposed("claude", { CLAUDE_CONFIG_DIR: join(home, ".config", "factory-claude") }), { key: "k-file", code: null }, "a sibling is not inside");
+    assert.deepEqual(exposed("claude", { CLAUDE_CONFIG_DIR: join(home, ".config", "pendulum-claude") }), { key: "k-file", code: null }, "a sibling is not inside");
     assert.deepEqual(exposed("codex", {}), { key: "k-file", code: null });
     assert.match(gatewayKeyProblem({ CODEX_HOME: join(home, ".config") }, home, "codex"), /inside the codex harness's home/);
     assert.equal(gatewayKeyProblem({}, home, "codex"), null);
     linkSync(file, join(home, "second-link"));
-    assert.deepEqual(state(), { key: "", code: "key-file-links" }, "a second hard link reaches the key outside ~/.config/factory");
+    assert.deepEqual(state(), { key: "", code: "key-file-links" }, "a second hard link reaches the key outside ~/.config/pendulum");
     rmSync(join(home, "second-link"));
     writeFileSync(join(home, "elsewhere"), "k-other\n", { mode: 0o600 });
     rmSync(file);
@@ -246,8 +246,8 @@ test("locally the key file is held to the key-file rules, and each way it fails 
     rmSync(file);
     writeFileSync(file, "\n", { mode: 0o600 });
     assert.deepEqual(state(), { key: "", code: "key-file-empty" });
-    // ~/.config/factory itself a symlink: the sandboxes deny the literal path, not where it leads.
-    rmSync(join(home, ".config", "factory"), { recursive: true });
+    // ~/.config/pendulum itself a symlink: the sandboxes deny the literal path, not where it leads.
+    rmSync(join(home, ".config", "pendulum"), { recursive: true });
     mkdirSync(join(home, "real-dir"));
     writeFileSync(join(home, "real-dir", "ai-gateway-key"), "k\n", { mode: 0o600 });
     symlinkSync(join(home, "real-dir"), dir);
@@ -258,7 +258,7 @@ test("locally the key file is held to the key-file rules, and each way it fails 
 });
 
 test("local triage: on with the key file, the key in no stage env; off says so once, with its code", async () => {
-  const home = mkdtempSync(join(tmpdir(), "factory-triage-"));
+  const home = mkdtempSync(join(tmpdir(), "pendulum-triage-"));
   const repo = { full: "o/r" };
   const red = { sha: "abcdef1234567", failedRuns: [{ id: 1, name: "checks" }], required: ["checks"] };
   try {
@@ -272,16 +272,16 @@ test("local triage: on with the key file, the key in no stage env; off says so o
     await again.red(red);
     assert.deepEqual(lines, ["triage: off (no-key); fix pass"], "once per stage, a code and no text from anywhere else");
     // The key file in place: triage is on, read by this process alone.
-    mkdirSync(join(home, ".config", "factory"), { recursive: true });
-    writeFileSync(join(home, ".config", "factory", "ai-gateway-key"), "k-file\n", { mode: 0o600 });
+    mkdirSync(join(home, ".config", "pendulum"), { recursive: true });
+    writeFileSync(join(home, ".config", "pendulum", "ai-gateway-key"), "k-file\n", { mode: 0o600 });
     const env = { PATH: "/usr/bin", HOME: home };
     const on = openTriage({ inputs: {}, env, home, repo, issue: 1, prNumber: 2 });
     assert.equal(on.off, undefined);
     assert.equal(typeof on.red, "function");
     assert.deepEqual(env, { PATH: "/usr/bin", HOME: home }, "reading the key puts nothing in the environment");
-    // A stage's env starts from localBaseEnv: the developer's shell and the workflow's FACTORY_LOCAL_ENV cannot carry it.
-    const shell = { PATH: "/usr/bin", HOME: home, AI_GATEWAY_API_KEY: "k-env", FACTORY_AI_GATEWAY_API_KEY: "k-env", FACTORY_INPUT_AI_GATEWAY_API_KEY: "k-env", DATABASE_URL: "postgres://x" };
-    const stage = localBaseEnv(shell, ["AI_GATEWAY_API_KEY", "FACTORY_AI_GATEWAY_API_KEY", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "DATABASE_URL"]);
+    // A stage's env starts from localBaseEnv: the developer's shell and the workflow's PENDULUM_LOCAL_ENV cannot carry it.
+    const shell = { PATH: "/usr/bin", HOME: home, AI_GATEWAY_API_KEY: "k-env", PENDULUM_AI_GATEWAY_API_KEY: "k-env", PENDULUM_INPUT_AI_GATEWAY_API_KEY: "k-env", DATABASE_URL: "postgres://x" };
+    const stage = localBaseEnv(shell, ["AI_GATEWAY_API_KEY", "PENDULUM_AI_GATEWAY_API_KEY", "PENDULUM_INPUT_AI_GATEWAY_API_KEY", "DATABASE_URL"]);
     assert.equal(stage.DATABASE_URL, "postgres://x");
     for (const [k, v] of Object.entries(stage)) assert.ok(!/AI_GATEWAY/.test(k) && v !== "k-env" && v !== "k-file", `${k} carries the key`);
     // And a child of the stage (the harness, a command) never gets it under any name.
@@ -292,13 +292,13 @@ test("local triage: on with the key file, the key in no stage env; off says so o
 });
 
 test("no secret input reaches a child under either name input() reads it by", () => {
-  const env = scrubbedEnv({ AI_GATEWAY_API_KEY: "k", FACTORY_INPUT_TRIAGE_MODEL: "m", FACTORY_TRIAGE_MODEL: "m", PATH: "/usr/bin" });
-  assert.deepEqual(Object.keys(env).sort(), ["FACTORY_INPUT_TRIAGE_MODEL", "FACTORY_TRIAGE_MODEL", "PATH"]);
+  const env = scrubbedEnv({ AI_GATEWAY_API_KEY: "k", PENDULUM_INPUT_TRIAGE_MODEL: "m", PENDULUM_TRIAGE_MODEL: "m", PATH: "/usr/bin" });
+  assert.deepEqual(Object.keys(env).sort(), ["PATH", "PENDULUM_INPUT_TRIAGE_MODEL", "PENDULUM_TRIAGE_MODEL"]);
   for (const name of SECRET_INPUTS) {
     const upper = name.toUpperCase();
-    const left = scrubbedEnv({ [`FACTORY_INPUT_${upper}`]: "s1", [`FACTORY_${upper}`]: "s2" });
-    assert.deepEqual(left, {}, `${name} under FACTORY_INPUT_ and FACTORY_`);
-    assert.equal(resolveInputs({ env: { [`FACTORY_${upper}`]: "s2" } })[name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())] !== undefined, true);
+    const left = scrubbedEnv({ [`PENDULUM_INPUT_${upper}`]: "s1", [`PENDULUM_${upper}`]: "s2" });
+    assert.deepEqual(left, {}, `${name} under PENDULUM_INPUT_ and PENDULUM_`);
+    assert.equal(resolveInputs({ env: { [`PENDULUM_${upper}`]: "s2" } })[name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())] !== undefined, true);
   }
   assert.ok(SECRET_INPUTS.has("ai_gateway_api_key") && SECRET_INPUTS.has("codex_api_key") && SECRET_INPUTS.has("anthropic_api_key") && SECRET_INPUTS.has("copilot_github_token"));
 });
@@ -349,7 +349,7 @@ test("failureSignature: only the failing step counts; setup noise and post-job l
   // The setup step's noise can differ between runs (another cache outage, another warning): the signature does not move.
   assert.equal(failureSignature("test", log.replace("responded with 503", "timed out after 30000 ms").replace("legacy.js:9:9", "other.js:1:1")).id, sig.id);
   assert.equal(sig.id, failureSignature("test", fixture("paths/mocha.txt")).id, "the same failure as the bare test output: the other steps add nothing");
-  // A runner Factory does not recognise (Gradle's output has no failure line it knows) gets no signature from setup
+  // A runner Pendulum does not recognise (Gradle's output has no failure line it knows) gets no signature from setup
   // noise; read whole, the setup step's `Error:` line would have given it one.
   const gradle = fixture("steps-gradle.txt");
   assert.equal(failureSignature("test", gradle).id, null);
@@ -673,7 +673,7 @@ test("notStartedJobs: a job the token cannot read (403) is skipped, and the log 
   } finally {
     process.stdout.write = write;
   }
-  assert.ok(said.includes("[factory] job 1 (quality) unreadable (403): never-started check skipped\n"), said.join(""));
+  assert.ok(said.includes("[pendulum] job 1 (quality) unreadable (403): never-started check skipped\n"), said.join(""));
 });
 
 // ------------------------------------------------------------------ a flaky red whose rerun GitHub refused (#74)
@@ -730,7 +730,7 @@ test("triage: a flaky verdict whose rerun GitHub refuses comes back with the ver
 });
 
 test("the last red, triaged flaky with its rerun refused, Blocks naming the verdict, the refusal and the remedy, quoting the failing job's own line first", async () => {
-  // The fix pass commits (the head moves on, as Factory pushes it) and the same jobs fail. The roll-up (quality) has no
+  // The fix pass commits (the head moves on, as Pendulum pushes it) and the same jobs fail. The roll-up (quality) has no
   // failure line of its own and only repeats the job it gathers, so it is left out of the comparison: test failing with
   // the same lines is the same red, no progress.
   const { validationLoop, DETAIL_CHARS } = await import("../scripts/lib/session.mjs");
@@ -765,7 +765,7 @@ test("the last red, triaged flaky with its rerun refused, Blocks naming the verd
   assert.equal(result.usage.length, 1, "one fix pass");
   assert.equal(result.triageRefused, refusedRerunText(refused));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: result.passes, green: false, command: result.command, triageRefused: result.triageRefused, stalled: result.stalled } });
-  assert.equal(exit.reason, `validation red on Factory's pass 2 (required checks quality on ddddddd): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: test (quality (required check), from test: ${supplyChain}); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label`);
+  assert.equal(exit.reason, `validation red on Pendulum's pass 2 (required checks quality on ddddddd): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: test (quality (required check), from test: ${supplyChain}); red-check triage read it as a flake or infrastructure (test: flaky_or_infra 0.99), but GitHub refused the rerun (403: the token cannot rerun jobs); rerun the failed jobs on GitHub, or give the token Actions read and write, then re-apply the label`);
   // What the Blocked notice quotes (applyExit keeps the last DETAIL_CHARS): the failing job's own line leads it.
   const shown = result.lastOutput.slice(-2500);
   assert.equal(DETAIL_CHARS, 2500);
@@ -1310,7 +1310,7 @@ test("validation loop: a fix pass that commits nothing never counts the same red
           env: codex.env,
           deadlineAt: Date.now() + 10 * 60_000,
           checks: { repo: repo165, issue: 4, prNumber: 5, names: ["quality"], token: "t", appearMs: 0, pollMs: 1, timeoutMs: 2000 },
-          // The fix pass commits nothing: the head Factory pushes stays the red one.
+          // The fix pass commits nothing: the head Pendulum pushes stays the red one.
           outbox: { push: async () => true, expected: () => sha },
           triage: openTriage({ inputs: {}, env: {}, home, repo: repo165, issue: 4, prNumber: 5, token: "t", ...(key ? { decider } : {}) }),
           onPhase: async (l) => phases.push(l),
@@ -1497,10 +1497,10 @@ test("validation loop: a fresh pass's commit red again the same way is no progre
   assert.equal(red.calls.length, 2, "no third harness run");
   assert.equal(red.result.freshPass, "9".repeat(40));
   const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: true, body: "" }, commits: 1, validation: { passes: red.result.passes, green: false, command: red.result.command, unchanged: red.result.unchanged, freshPass: red.result.freshPass, stalled: red.result.stalled } });
-  assert.deepEqual(exit, { exit: "blocked", reason: `validation red on Factory's pass 2 (required checks quality on bbbbbbb): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality (quality (required check): ${supplyChain}); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
+  assert.deepEqual(exit, { exit: "blocked", reason: `validation red on Pendulum's pass 2 (required checks quality on bbbbbbb): the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality (quality (required check): ${supplyChain}); a fresh worker pass followed the fix pass that changed nothing on 9999999`, cause: "work" });
 });
 
-test("validation loop: a red on Factory's own catch-up merge gets its fix pass unjudged; the red after that pass is judged (#399)", async () => {
+test("validation loop: a red on Pendulum's own catch-up merge gets its fix pass unjudged; the red after that pass is judged (#399)", async () => {
   const { validationLoop } = await import("../scripts/lib/session.mjs");
   const [first, merge, next] = ["9", "b", "e"].map((c) => c.repeat(40));
   const run = (id) => [{ id, name: "quality", status: "completed", conclusion: "failure", check_suite: { id: 9 }, started_at: "2026-11-11T21:55:00Z", completed_at: "2026-11-11T21:57:00Z" }];
@@ -1509,7 +1509,7 @@ test("validation loop: a red on Factory's own catch-up merge gets its fix pass u
     const codex = recordingCodex();
     const phases = [];
     try {
-      // Each red fails quality the same way; the head Factory pushes moves on after each fix pass (merge, then next).
+      // Each red fails quality the same way; the head Pendulum pushes moves on after each fix pass (merge, then next).
       const result = await withHead({ runs: run(id), heads: { [merge]: run(id + 1), [next]: run(id + 2) }, jobs: { [id]: { ...testFailed, id }, [id + 1]: { ...testFailed, id: id + 1 }, [id + 2]: { ...testFailed, id: id + 2 } }, logs: { [id]: failingLog, [id + 1]: failingLog, [id + 2]: failingLog } }, () =>
         validationLoop({
           checkout: codex.work,
@@ -1535,7 +1535,7 @@ test("validation loop: a red on Factory's own catch-up merge gets its fix pass u
   assert.ok(caught.phases.includes("validation pass 2 red: required checks quality on bbbbbbb; fix run"), caught.phases.join("\n"));
   assert.match(caught.result.stalled, /^the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: quality /);
   assert.equal(caught.result.passes, 3);
-  // Not Factory's merge: the same red after the first fix pass is no progress.
+  // Not Pendulum's merge: the same red after the first fix pass is no progress.
   const own = await go(false);
   assert.equal(own.calls, 1);
   assert.equal(own.result.passes, 2);
@@ -1777,7 +1777,7 @@ test("#413: sameExact: equal signatures are the same failure; another job or ano
 });
 
 test("#413: a flaky verdict acts only at the floor set beside the model (triage_min_confidence) while the gateway's model answers; the line records the verdict, its confidence and the floor", async () => {
-  const floor = { FACTORY_TRIAGE_MIN_CONFIDENCE: "0.9" };
+  const floor = { PENDULUM_TRIAGE_MIN_CONFIDENCE: "0.9" };
   // The stage's harness answering is another model: the setting is not its floor.
   for (const [env, who, rerun, floorText] of [[{}, "ai-gateway", true, "default floor 0\\.7"], [floor, "ai-gateway", false, "floor 0\\.9"], [floor, "harness", true, "default floor 0\\.7"]]) {
     const [id] = fresh413(1);
@@ -1839,7 +1839,7 @@ test("#413: the triage record keeps each job rerun (id, name, failed step, signa
   const rec = mergeTriage({ reruns: ["d".repeat(40)], ran: [{ id: 41, name: "e2e -->", step: "Run npm test", sig: "0123456789ab" }, { id: -1, name: "x" }, { id: 7, name: "" }, { id: 8, name: "lint", step: 3, sig: "nope" }] });
   const marker = triageMarker(rec);
   assert.ok(!marker.slice(4, -3).includes(">") && !marker.slice(4, -3).includes("<"), marker);
-  const back = mergeTriage(JSON.parse(/^<!-- factory:triage (\{.*\}) -->$/.exec(marker)[1]));
+  const back = mergeTriage(JSON.parse(/^<!-- pendulum:triage (\{.*\}) -->$/.exec(marker)[1]));
   assert.deepEqual([...back.ran.values()], [{ id: 41, name: "e2e -->", step: "Run npm test", sig: "0123456789ab" }, { id: 8, name: "lint", step: "", sig: null }]);
 });
 
@@ -1859,7 +1859,7 @@ test("#413: a red the default branch shows with another signature in the same fa
     [{ verdict: "same_failure", confidence: 0.6 }, false, null],
     [{ verdict: "different_failure", confidence: 0.9 }, false, null],
     [{ verdict: null, confidence: null, error: "unavailable" }, false, "outage"],
-    [{ verdict: null, confidence: null, error: "timeout" }, false, "factory"],
+    [{ verdict: null, confidence: null, error: "timeout" }, false, "pendulum"],
   ];
   for (const [answer, base, unjudged] of cases) {
     const decider = byQuestion({ same_failure: answer });
@@ -2078,7 +2078,7 @@ test("#413 review: the stage harness's usage limit that stopped a same-failure q
       const step = async (x) => (typeof x.step === "function" ? await x.step() : x.step) || "";
       if (sameExact({ ...a, step: await step(a) }, { ...b, step: await step(b) }) === "different") return { same: false, different: true, exact: true, said: "another failed step" };
       labels.push(a.label);
-      return { same: false, different: false, exact: false, undecided: true, cause: "factory", said: "no verdict (rate_limited)", limited: { harness: "codex", resetAt: Date.now() + 3600_000 } };
+      return { same: false, different: false, exact: false, undecided: true, cause: "pendulum", said: "no verdict (rate_limited)", limited: { harness: "codex", resetAt: Date.now() + 3600_000 } };
     },
   });
   const first = [];

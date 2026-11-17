@@ -1,5 +1,5 @@
 // The review replay's issue body: the Work Item's criteria are the issue's acceptance entries, on the same exact-heading
-// path the review job reads for a factory-file issue.
+// path the review job reads for a pendulum-file issue.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { acceptanceEntries } from "../../plugin/scripts/lib/logic.mjs";

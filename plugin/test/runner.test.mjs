@@ -36,7 +36,7 @@ jobs:
   assert.ok(!linuxRunner("macos-15") && !linuxRunner("windows-2025") && !linuxRunner('["self-hosted","macOS"]') && !linuxRunner(null));
 });
 
-// A cross-platform CI whose first job is macOS: Factory's jobs need Linux (the agent launcher).
+// A cross-platform CI whose first job is macOS: Pendulum's jobs need Linux (the agent launcher).
 const CROSS = `name: CI
 on: [pull_request, merge_group]
 jobs:
@@ -77,7 +77,7 @@ test("pickRunner: --runs-on wins, else the CI workflow's Linux runner that runs 
 
 test("runnerMatchCheck: warns when the rendered runner jobs leave the CI workflow's setup runner; silent in sandbox mode", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const base = { harness: "claude", action: "clockgrove/factory@v1.2.3" };
+  const base = { harness: "claude", action: "clockgrove/pendulum@v1.2.3" };
   const render = (runs_on, extra = {}) => renderWorkflow(template, { ...base, runs_on, ...extra });
   const ci = ciOf(QUALITY);
   const latest = runnerMatchCheck(render("ubuntu-latest"), ci);
@@ -118,7 +118,7 @@ test("a container-only runner (ubuntu-slim) is never picked for work or review, 
   assert.equal(pickRunner("", ci).runsOn, "ubuntu-latest", "not the pinned-looking ubuntu-slim");
   assert.equal(pickRunner("", ciOf("jobs:\n  c: { runs-on: ubuntu-slim, steps: [] }\n", "CI")).runsOn, "ubuntu-latest", "only a container job: the default");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const render = (runs_on) => renderWorkflow(template, { harness: "claude", action: "clockgrove/factory@v1.2.3", runs_on });
+  const render = (runs_on) => renderWorkflow(template, { harness: "claude", action: "clockgrove/pendulum@v1.2.3", runs_on });
   assert.equal(runnerMatchCheck(render("ubuntu-latest"), ci).status, "PASS");
   const slim = runnerMatchCheck(render("ubuntu-slim"), ci);
   assert.equal(slim.status, "WARN");
@@ -143,11 +143,11 @@ jobs:
   assert.equal(picked.runsOn, "ubuntu-24.04");
   assert.match(picked.note, /could not read the runner label "\[self-hosted"/);
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const render = (runs_on) => renderWorkflow(template, { harness: "claude", action: "clockgrove/factory@v1.2.3", runs_on });
+  const render = (runs_on) => renderWorkflow(template, { harness: "claude", action: "clockgrove/pendulum@v1.2.3", runs_on });
   const row = runnerMatchCheck(render(picked.runsOn), ci, { commands: ["scripts/ci/setup.sh"] });
   assert.equal(row.status, "WARN");
   assert.match(row.detail, /could not read the runner label "\[self-hosted"/);
-  // The Factory workflow's own odd label: quoted when rendered (a scalar, not a broken flow sequence), then a WARN row.
+  // The Pendulum workflow's own odd label: quoted when rendered (a scalar, not a broken flow sequence), then a WARN row.
   const mine = render("[self-hosted");
   assert.match(mine, /runs-on: "\[self-hosted"/);
   const own = runnerMatchCheck(mine, ciOf(QUALITY));
@@ -158,7 +158,7 @@ jobs:
 
 test("--runs-on takes a label list typed as YAML or JSON and renders it as a list; doctor names each mismatch once", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const render = (runsOn) => renderWorkflow(template, { harness: "claude", action: "clockgrove/factory@v1.2.3", runs_on: runsOnValue(runsOn) });
+  const render = (runsOn) => renderWorkflow(template, { harness: "claude", action: "clockgrove/pendulum@v1.2.3", runs_on: runsOnValue(runsOn) });
   for (const typed of ["[self-hosted, linux]", '["self-hosted", "linux"]', ' [ self-hosted , "linux" ] ']) {
     const picked = pickRunner(typed, {});
     assert.equal(picked.runsOn, '["self-hosted","linux"]', typed);
@@ -175,7 +175,7 @@ test("--runs-on takes a label list typed as YAML or JSON and renders it as a lis
     assert.match(picked.note, /could not read the runner label/, bad);
     assert.match(render(picked.runsOn), new RegExp(`runs-on: ${JSON.stringify(JSON.stringify(bad)).slice(1, -1).replace(/[[\]]/g, "\\$&")}`), bad);
   }
-  // ubuntu-slim on Factory's side and ubuntu-24.04 in CI: one clause names the container runner, none repeats it.
+  // ubuntu-slim on Pendulum's side and ubuntu-24.04 in CI: one clause names the container runner, none repeats it.
   const slim = runnerMatchCheck(render("ubuntu-slim"), ciOf(QUALITY));
   assert.equal(slim.status, "WARN");
   assert.equal(slim.detail.split("ubuntu-slim").length, 2, slim.detail);
@@ -185,8 +185,8 @@ test("--runs-on takes a label list typed as YAML or JSON and renders it as a lis
 });
 
 // #418: setup's note names the workflow doctor will compare against, read as doctor reads it: the branch's required
-// checks (not FACTORY_CI_CHECKS), and a workflow told apart from --ci-workflow's by path, not by a joined name.
-test("doctorRunnerNote: from the branch's required checks, never FACTORY_CI_CHECKS, and by path", async () => {
+// checks (not PENDULUM_CI_CHECKS), and a workflow told apart from --ci-workflow's by path, not by a joined name.
+test("doctorRunnerNote: from the branch's required checks, never PENDULUM_CI_CHECKS, and by path", async () => {
   const { doctorRunnerNote } = await import("../scripts/setup.mjs");
   const files = {
     ".github/workflows/quality.yml": QUALITY.replace("ubuntu-24.04 # ubuntu-latest moved to 26.04", "ubuntu-latest").replace("quality:", "lint:"),
@@ -211,7 +211,7 @@ test("doctorRunnerNote: from the branch's required checks, never FACTORY_CI_CHEC
     const repo = { full: "o/r", owner: "o", name: "r" };
     const ci = { found: true, name: "Quality", path: ".github/workflows/quality.yml", jobs: workflowJobs(files[".github/workflows/quality.yml"]) };
     const note = (ciChecks) => doctorRunnerNote({ repo, opts: { token: "t" }, ci, runsOn: "ubuntu-latest", hints: { commands: [], checks: ciChecks }, ciChecks });
-    // FACTORY_CI_CHECKS names Quality's lint; the branch requires CI's build, which doctor reads.
+    // PENDULUM_CI_CHECKS names Quality's lint; the branch requires CI's build, which doctor reads.
     assert.equal(await note(["lint"]), "; doctor compares against CI (the workflows on pull_request that make the required checks), which runs on ubuntu-24.04, so it will warn");
     // The branch requires Quality's lint: doctor reads Quality, the --ci-workflow one by its path, so no note.
     required = ["lint"];

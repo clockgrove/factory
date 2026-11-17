@@ -21,7 +21,7 @@ const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOS
 const STAMP = (n) => `2026-11-14T0${n}-00-00-000Z`;
 const RESET = "2026-11-14T23:00:00.000Z";
 
-/** A clone on factory/7 as a paused work pass left it: a pushed head, a commit on it, a change, untracked and ignored files. */
+/** A clone on pendulum/7 as a paused work pass left it: a pushed head, a commit on it, a change, untracked and ignored files. */
 function pausedClone(root) {
   const clone = join(root, "repo");
   const git = (...a) => execFileSync("git", ["-C", clone, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8", env: GIT_ENV });
@@ -33,7 +33,7 @@ function pausedClone(root) {
   git("add", ".");
   git("add", "-f", "schema.gen");
   git("commit", "-q", "-m", "base");
-  git("checkout", "-q", "-b", "factory/7");
+  git("checkout", "-q", "-b", "pendulum/7");
   const pushed = git("rev-parse", "HEAD").trim();
   writeFileSync(join(clone, "app.txt"), "v2\n");
   git("commit", "-q", "-am", "unpushed work");
@@ -46,7 +46,7 @@ function pausedClone(root) {
 }
 
 /** outbox.mjs putOn's own command: the checkout forced onto the branch at `ref`. */
-const putOn = (clone, ref) => execFileSync("sh", ["-c", 'git -C "$1" rebase --quit >/dev/null 2>&1; exec git -C "$1" checkout -q -f -B "$2" "$3"', "sh", clone, "factory/7", ref], { env: GIT_ENV });
+const putOn = (clone, ref) => execFileSync("sh", ["-c", 'git -C "$1" rebase --quit >/dev/null 2>&1; exec git -C "$1" checkout -q -f -B "$2" "$3"', "sh", clone, "pendulum/7", ref], { env: GIT_ENV });
 
 /** The four guards as they stand, and the harness and login, as worker.mjs reads them now. */
 const guardsNow = (over = {}) => ({ branch: "a".repeat(40), restart: "2026-11-14T01:00:00.000Z", running: "2026-11-14T01:05:00Z", text: "f".repeat(64), harness: "claude", login: loginOf("claude"), ...over });
@@ -98,7 +98,7 @@ test("a work stage's start leaves the clone as it is for the worker to decide; a
   chmodSync(join(bin, "srt"), 0o755);
   const caches = [join(dev, "pnpm"), join(dev, "bun")];
   for (const d of caches) mkdirSync(d);
-  local.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, GITHUB_API_URL: "http://127.0.0.1:9", FACTORY_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1] });
+  local.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, GITHUB_API_URL: "http://127.0.0.1:9", PENDULUM_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1] });
   // The stage's process is stopped as it starts: what matters is what its start did to the clone.
   local.children = {
     add(child) {
@@ -115,13 +115,13 @@ test("a work stage's start leaves the clone as it is for the worker to decide; a
 
 test("all four guards unchanged: the stage continues on the kept tree, nothing cleaned, and Claude's session resumes under another config folder, its spend counted once", async () => {
   const root = mkdtempSync(join(tmpdir(), "cont-go-"));
-  const saved = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, FACTORY_LOCAL: process.env.FACTORY_LOCAL, PATH: process.env.PATH };
+  const saved = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL, PATH: process.env.PATH };
   try {
     const { clone, git, pushed } = pausedClone(root);
     const ws = root;
     const id = "00000000-0000-0000-0000-000000000257";
     // The paused session, on account A, with Claude Code's running total at the pause.
-    process.env.FACTORY_LOCAL = "1";
+    process.env.PENDULUM_LOCAL = "1";
     process.env.CLAUDE_CONFIG_DIR = join(root, "claude-a");
     const project = join(root, "claude-a", "projects", claudeProject(clone));
     mkdirSync(project, { recursive: true });
@@ -140,7 +140,7 @@ test("all four guards unchanged: the stage continues on the kept tree, nothing c
       ws,
       own,
       now: async () => ({ ...now, login: loginOf("claude") }),
-      holds: (pause) => checkoutHolds((args) => exec("git", ["-C", clone, ...args], { env: GIT_ENV }), "factory/7", pause),
+      holds: (pause) => checkoutHolds((args) => exec("git", ["-C", clone, ...args], { env: GIT_ENV }), "pendulum/7", pause),
       putOn: async () => assert.fail("the kept tree is not put on the branch"),
       clean: async () => (cleaned += 1),
       restore: (from) => restoreTranscript({ checkout: clone, workDir: ws, harness: "claude", only: from }),
@@ -165,15 +165,15 @@ const args = process.argv.slice(2);
 fs.writeFileSync(${JSON.stringify(join(root, "call.json"))}, JSON.stringify({ args, prompt: fs.readFileSync(0, "utf8") }));
 console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 3, session_id: args[args.indexOf("--resume") + 1], total_cost_usd: 1.25, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }));
 `, { mode: 0o755 });
-    delete process.env.FACTORY_LOCAL;
+    delete process.env.PENDULUM_LOCAL;
     process.env.PATH = `${bin}:${saved.PATH}`;
     const dirs = { in: join(root, "h", "in"), out: join(root, "h", "out") };
     const rec = await runHarness({ harness: "claude", model: "claude-fable-5-2", prompt: continuePrompt(dirs), freshPrompt: keptPrompt("the task card"), resume: entry.session.id, maxUsd: 0, cwd: clone, env: { HOME: process.env.HOME, PATH: process.env.PATH }, timeoutMs: 60_000, label: "work-1" });
     const call = JSON.parse(readFileSync(join(root, "call.json"), "utf8"));
     assert.equal(call.args[call.args.indexOf("--resume") + 1], id);
-    assert.ok(call.prompt.includes(`FACTORY_IN is now ${dirs.in}`) && call.prompt.includes(`FACTORY_OUT is now ${dirs.out}`), "the new hand-off folders restated");
+    assert.ok(call.prompt.includes(`PENDULUM_IN is now ${dirs.in}`) && call.prompt.includes(`PENDULUM_OUT is now ${dirs.out}`), "the new hand-off folders restated");
     assert.match(call.prompt, /plan\.md.*exit\.json/s, "it ends with a current plan and exit record of its own");
-    assert.match(call.prompt, /Read \$FACTORY_IN\/decisions\.md again: it holds every maintainer decision, those made since you stopped included/);
+    assert.match(call.prompt, /Read \$PENDULUM_IN\/decisions\.md again: it holds every maintainer decision, those made since you stopped included/);
     assert.ok(Math.abs(rec.usd - 0.25) < 1e-9, `the resumed pass counts its own share, not the session's total: ${rec.usd}`);
   } finally {
     for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
@@ -265,14 +265,14 @@ test("checkoutHolds: the checkout on the branch, built on the head the pause rec
   const root = mkdtempSync(join(tmpdir(), "cont-holds-"));
   const { clone, git, pushed } = pausedClone(root);
   const g = (args) => exec("git", ["-C", clone, ...args], { env: GIT_ENV });
-  assert.equal(await checkoutHolds(g, "factory/7", { branch: pushed }), "");
-  assert.equal(await checkoutHolds(g, "factory/7", { branch: "" }), "", "a branch not on GitHub at the pause: its own commits only");
+  assert.equal(await checkoutHolds(g, "pendulum/7", { branch: pushed }), "");
+  assert.equal(await checkoutHolds(g, "pendulum/7", { branch: "" }), "", "a branch not on GitHub at the pause: its own commits only");
   git("checkout", "-q", "--orphan", "other");
   git("commit", "-q", "-m", "elsewhere");
-  git("checkout", "-q", "-B", "factory/7");
-  assert.equal(await checkoutHolds(g, "factory/7", { branch: pushed }), "the checkout no longer holds the branch head the paused pass built on");
+  git("checkout", "-q", "-B", "pendulum/7");
+  assert.equal(await checkoutHolds(g, "pendulum/7", { branch: pushed }), "the checkout no longer holds the branch head the paused pass built on");
   git("checkout", "-q", "-f", "main");
-  assert.equal(await checkoutHolds(g, "factory/7", { branch: pushed }), "the checkout is no longer on the paused pass's branch");
+  assert.equal(await checkoutHolds(g, "pendulum/7", { branch: pushed }), "the checkout is no longer on the paused pass's branch");
 });
 
 test("which session carries over: Claude under any config folder; Codex on its own login only (a fresh thread on the kept tree under another); Copilot fresh", () => {
@@ -344,7 +344,7 @@ test("a clean that fails on a fresh entry fails the entry, and the work stage Bl
   const failing = () => prepareClone(join(ws, "repo"), [], async () => ({ code: 3, stdout: "", stderr: "refusing" }), { fresh: true });
   await assert.rejects(failing(), /could not be prepared in its sandbox/);
   await assert.rejects(enterStage({ ws, own: join(ws, `usage-work-${STAMP(2)}`), now: async () => guardsNow({ text: "0".repeat(64) }), holds: async () => "", putOn: async () => {}, clean: () => failing().catch(() => Promise.reject(refused)), restore: async () => assert.fail("nothing restored") }), (e) => e === refused);
-  assert.doesNotMatch(CLEAN_REFUSED, /\/home|\/tmp|\/Users|\.factory\//, "no local path reaches GitHub");
+  assert.doesNotMatch(CLEAN_REFUSED, /\/home|\/tmp|\/Users|\.pendulum\//, "no local path reaches GitHub");
   // worker.mjs: that failure Blocks the stage with cause setup before any harness, never a crash.
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "worker.mjs"), "utf8");
   const at = src.indexOf('if (e?.code !== "clone-clean") throw e;');
@@ -395,7 +395,7 @@ test("a continued stage's frozen install that fails on its unfinished dependency
   assert.deepEqual(installEnd(result, { continued: false, command }), { block: result.reason }, "a fresh stage Blocks on it, as before");
   const kept = installEnd(result, { continued: true, command });
   assert.equal(kept.block, undefined);
-  assert.match(kept.note, /^Factory's install \(npm ci --ignore-scripts\) failed on this checkout.*lockfile included/);
+  assert.match(kept.note, /^Pendulum's install \(npm ci --ignore-scripts\) failed on this checkout.*lockfile included/);
   assert.ok(continuePrompt({ in: "/i", out: "/o" }, { note: kept.note }).endsWith(kept.note), "the resumed session is told");
   assert.ok(keptPrompt("# Task card\n", { note: kept.note }).endsWith(kept.note), "so is a fresh session on the kept checkout");
   assert.deepEqual(installEnd({ ok: true }, { continued: true, command }), {});
@@ -407,8 +407,8 @@ test("a continued session's resumed pass is recorded as reading every decision i
   const shown = decisionsShown(decisions);
   assert.ok(shown.length < decisions.length, "the card cuts the oldest");
   const resumed = decisionsFed({ decisions, full: false, continued: true, rebaseConflict: false });
-  assert.deepEqual(resumed, decisions, "decisions.md in the new $FACTORY_IN holds every one, and the prompt says to read it");
-  assert.match(continuePrompt({ in: "/i", out: "/o" }), /\$FACTORY_IN\/decisions\.md again/);
+  assert.deepEqual(resumed, decisions, "decisions.md in the new $PENDULUM_IN holds every one, and the prompt says to read it");
+  assert.match(continuePrompt({ in: "/i", out: "/o" }), /\$PENDULUM_IN\/decisions\.md again/);
   assert.match(decisionsReadMarker(decisionsRead(resumed)), /"comment:8":"2026-11-14T07:00:00Z"/, "the one posted during the pause is recorded read");
   assert.deepEqual(decisionsFed({ decisions, full: true, continued: true, rebaseConflict: false }), shown, "a fresh session on the kept checkout reads the card's");
   assert.deepEqual(decisionsFed({ decisions, full: true, continued: false, rebaseConflict: false }), shown);

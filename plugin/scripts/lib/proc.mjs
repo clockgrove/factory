@@ -12,9 +12,9 @@ import { StringDecoder } from "node:string_decoder";
 // ------------------------------------------------------------------ the agent uid
 
 /**
- * On Actions the harness, the install and the validation run as a separate uid, `factory-agent` (agent.mjs sets it up):
- * it cannot read Factory's /proc/<pid>/environ, its 700 home or the runner's. Set here, every process Factory starts with
- * its working directory in the agent's home runs as the agent, so Factory runs no command of its own in the agent's
+ * On Actions the harness, the install and the validation run as a separate uid, `pendulum-agent` (agent.mjs sets it up):
+ * it cannot read Pendulum's /proc/<pid>/environ, its 700 home or the runner's. Set here, every process Pendulum starts with
+ * its working directory in the agent's home runs as the agent, so Pendulum runs no command of its own in the agent's
  * checkout. Null in local mode and before setup.
  */
 let AGENT = null;
@@ -26,24 +26,24 @@ const inAgentHome = (cwd) => !!AGENT && !!cwd && (cwd === AGENT.home || String(c
 
 /**
  * The variables an agent process may see: the toolchain's and the locale's, the repository's own (what `setup` wrote,
- * agent.mjs allowAgentEnv), Factory's hand-off names, and `extra` (the harness's model credential). Never a token, a
+ * agent.mjs allowAgentEnv), Pendulum's hand-off names, and `extra` (the harness's model credential). Never a token, a
  * runner credential or anything else from the job's env.
  */
-const AGENT_ENV = /^(LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLORTERM|CI|NODE_OPTIONS|NODE_EXTRA_CA_CERTS|npm_config_[a-z_]+|COREPACK_[A-Z_]+|JAVA_HOME[A-Z0-9_]*|GOROOT[A-Z0-9_]*|GOPATH|CARGO_HOME|RUSTUP_HOME|PYTHONPATH|PIPX_[A-Z_]+|CHROME[A-Z_]*|CHROMEWEBDRIVER|EDGEWEBDRIVER|GECKOWEBDRIVER|SELENIUM_JAR_PATH|ANDROID_[A-Z_]+|DOTNET_[A-Z_]+|GITHUB_(ACTIONS|REPOSITORY|REPOSITORY_OWNER|REF|REF_NAME|SHA|SERVER_URL|API_URL|GRAPHQL_URL|EVENT_NAME|RUN_ID|RUN_NUMBER|JOB|WORKFLOW)|RUNNER_(OS|ARCH|NAME|ENVIRONMENT)|ImageOS|ImageVersion|FACTORY_(IN|OUT|ISSUE|BRANCH|COMPACTION_WINDOW|DB_WRAP|LOCAL_DB))$/;
+const AGENT_ENV = /^(LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLORTERM|CI|NODE_OPTIONS|NODE_EXTRA_CA_CERTS|npm_config_[a-z_]+|COREPACK_[A-Z_]+|JAVA_HOME[A-Z0-9_]*|GOROOT[A-Z0-9_]*|GOPATH|CARGO_HOME|RUSTUP_HOME|PYTHONPATH|PIPX_[A-Z_]+|CHROME[A-Z_]*|CHROMEWEBDRIVER|EDGEWEBDRIVER|GECKOWEBDRIVER|SELENIUM_JAR_PATH|ANDROID_[A-Z_]+|DOTNET_[A-Z_]+|GITHUB_(ACTIONS|REPOSITORY|REPOSITORY_OWNER|REF|REF_NAME|SHA|SERVER_URL|API_URL|GRAPHQL_URL|EVENT_NAME|RUN_ID|RUN_NUMBER|JOB|WORKFLOW)|RUNNER_(OS|ARCH|NAME|ENVIRONMENT)|ImageOS|ImageVersion|PENDULUM_(IN|OUT|ISSUE|BRANCH|COMPACTION_WINDOW|DB_WRAP|LOCAL_DB))$/;
 
 /**
- * On Actions, Factory's own commands run by absolute path with a fixed PATH: the runner image leaves directories that
+ * On Actions, Pendulum's own commands run by absolute path with a fixed PATH: the runner image leaves directories that
  * come first on PATH (the tool cache, pipx's bin) writable by every uid, so a bare name could be the agent's.
  */
 export const SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 export const bin = (name) => (AGENT ? `/usr/bin/${name}` : name);
 
 /** Every unit the agent runs in is named with this prefix, so a reap can stop them all. */
-const UNIT_PREFIX = "factory-agent-";
+const UNIT_PREFIX = "pendulum-agent-";
 
 /**
  * `cmd args` as the agent, in a transient systemd unit of its own:
- * `sudo -n systemd-run --uid=factory-agent --pipe --wait --collect -p ... -E NAME ... -- env cmd args`.
+ * `sudo -n systemd-run --uid=pendulum-agent --pipe --wait --collect -p ... -E NAME ... -- env cmd args`.
  * The unit sees the file system read-only except the agent's home (ProtectSystem=strict, ProtectHome=tmpfs with only
  * that home bound in), /run read-only, a private /tmp, /dev/shm, /run/lock and IPC namespace, no privilege gain, and when its main process ends systemd kills everything left
  * in its cgroup. The variables' values travel in the environment (`-E NAME` takes them from there), never on the
@@ -97,7 +97,7 @@ export function asAgent(cmd, args, env = {}, extra = [], cwd = null) {
 }
 
 /** The cgroup every namespace-launched agent process joins, so a reap can kill all of them at once. */
-export const AGENT_CGROUP = "/sys/fs/cgroup/factory-agent";
+export const AGENT_CGROUP = "/sys/fs/cgroup/pendulum-agent";
 
 /**
  * The namespace launcher's wrapper, run as root in a fresh mount, PID and IPC namespace (`unshare`), for a machine with
@@ -113,7 +113,7 @@ export const AGENT_CGROUP = "/sys/fs/cgroup/factory-agent";
 export const NAMESPACE_WRAP = [
   "set -eu",
   'home=$1; tmp=$2; cwd=$3; user=$4; path=$5; shift 5',
-  '[ -d "$home" ] && [ ! -L "$home" ] || { echo "factory: the agent home is not a plain directory" >&2; exit 126; }',
+  '[ -d "$home" ] && [ ! -L "$home" ] || { echo "pendulum: the agent home is not a plain directory" >&2; exit 126; }',
   `echo $$ > ${AGENT_CGROUP}/cgroup.procs`,
   "mount --make-rprivate /",
   'private="/tmp /var/tmp /dev/shm /run/lock"',
@@ -121,7 +121,7 @@ export const NAMESPACE_WRAP = [
   // The iptables lock, where it is a plain file: a private one over it, from the private /run/lock only this namespace sees,
   // which Copilot's sandbox takes as the agent where ip6tables is the legacy backend (launch.mjs START). Its rules go
   // into network namespaces of its own, so nothing on the host needs that lock shared; the host's stays root's.
-  'if [ -f /run/xtables.lock ] && [ ! -L /run/xtables.lock ] && [ -d /run/lock ] && [ ! -L /run/lock ]; then ( umask 0; : > /run/lock/factory-xtables.lock ) && mount --bind /run/lock/factory-xtables.lock /run/xtables.lock; fi',
+  'if [ -f /run/xtables.lock ] && [ ! -L /run/xtables.lock ] && [ -d /run/lock ] && [ ! -L /run/lock ]; then ( umask 0; : > /run/lock/pendulum-xtables.lock ) && mount --bind /run/lock/pendulum-xtables.lock /run/xtables.lock; fi',
   'mount --bind "$home" "$home"',
   'mount -o remount,bind,nosuid,nodev "$home"',
   // Every other mount, read-only: the root and whatever the vendor mounted beside it (/dev, /sys, the cgroup tree, its
@@ -131,20 +131,20 @@ export const NAMESPACE_WRAP = [
   '  if [ "$m" = /dev ]; then mount -o remount,bind,ro,nosuid "$m"; else mount -o remount,bind,ro,nosuid,nodev "$m"; fi',
   "done",
   'export HOME="$home" TMPDIR="$tmp" PATH="$path" USER="$user" LOGNAME="$user"',
-  'exec /usr/bin/setpriv --reuid="$user" --regid="$user" --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all /bin/sh -c \'umask 077; [ -L "$1" ] && { echo "factory: the agent temp directory is a symlink" >&2; exit 126; }; mkdir -p -- "$1" && cd -- "$2" && shift 2 && exec /usr/bin/env "$@"\' factory-agent-sh "$tmp" "$cwd" "$@"',
+  'exec /usr/bin/setpriv --reuid="$user" --regid="$user" --clear-groups --no-new-privs --inh-caps=-all --bounding-set=-all /bin/sh -c \'umask 077; [ -L "$1" ] && { echo "pendulum: the agent temp directory is a symlink" >&2; exit 126; }; mkdir -p -- "$1" && cd -- "$2" && shift 2 && exec /usr/bin/env "$@"\' pendulum-agent-sh "$tmp" "$cwd" "$@"',
 ].join("\n");
 
 /** `cmd args` as the agent through NAMESPACE_WRAP: `sudo -n --preserve-env=NAMES unshare ... bash -c WRAP ...`. */
 function asAgentInNamespace(cmd, args, env, keys, cwd) {
   return [
     "/usr/bin/sudo",
-    ["-n", `--preserve-env=${keys.join(",")}`, "/usr/bin/unshare", "--mount", "--pid", "--ipc", "--fork", "--kill-child", "--mount-proc", "/bin/bash", "-c", NAMESPACE_WRAP, "factory-agent-wrap", AGENT.home, AGENT.tmp, cwd || AGENT.home, AGENT.user, env.PATH || process.env.PATH, cmd, ...args],
+    ["-n", `--preserve-env=${keys.join(",")}`, "/usr/bin/unshare", "--mount", "--pid", "--ipc", "--fork", "--kill-child", "--mount-proc", "/bin/bash", "-c", NAMESPACE_WRAP, "pendulum-agent-wrap", AGENT.home, AGENT.tmp, cwd || AGENT.home, AGENT.user, env.PATH || process.env.PATH, cmd, ...args],
   ];
 }
 
 /**
  * The environment `sudo` itself is started with: only the names it preserves for the command, and a fixed PATH. sudo's
- * own processes keep the environment they were started with, so they never get Factory's.
+ * own processes keep the environment they were started with, so they never get Pendulum's.
  */
 export function sudoEnv(args, env = process.env) {
   const keep = String(args.find((a) => String(a).startsWith("--preserve-env=")) || "").slice("--preserve-env=".length).split(",").filter(Boolean);
@@ -152,12 +152,12 @@ export function sudoEnv(args, env = process.env) {
 }
 const isSudo = (cmd) => cmd === "sudo" || cmd === "/usr/bin/sudo";
 
-/** Factory's own tools: on Actions they also run with the fixed PATH, so git finds its helpers (git-lfs) in /usr/bin. */
+/** Pendulum's own tools: on Actions they also run with the fixed PATH, so git finds its helpers (git-lfs) in /usr/bin. */
 const OWN_TOOLS = new Set(["git", "tar", "find", "gh", "id", "chmod", "mkdir", "mv", "rm", "pkill", "systemctl", "systemd-run", "unshare"]);
 
 /**
- * A command Factory runs as the runner on Actions, by bare name: found only in the system directories (never the tool
- * cache or pipx's bin, which the image leaves writable), and Factory's own tools also get the fixed PATH. A repository's
+ * A command Pendulum runs as the runner on Actions, by bare name: found only in the system directories (never the tool
+ * cache or pipx's bin, which the image leaves writable), and Pendulum's own tools also get the fixed PATH. A repository's
  * own command (setup) keeps its PATH: only the program it starts is pinned.
  */
 export function runnerCommand(cmd, env) {
@@ -174,7 +174,7 @@ export function runnerCommand(cmd, env) {
 
 /**
  * After an agent run: every unit the agent runs in is stopped (its whole cgroup killed) and any process of the agent's
- * left is killed, before Factory reads anything it left.
+ * left is killed, before Pendulum reads anything it left.
  */
 export async function reapAgent() {
   if (!AGENT) return;
@@ -197,23 +197,23 @@ export async function reapNamespace(user) {
 export const FILE_STDIO_POLL_MS = 100;
 
 /**
- * The most a `fileStdio` read takes from each file in one go: a child that writes faster than Factory reads never holds
+ * The most a `fileStdio` read takes from each file in one go: a child that writes faster than Pendulum reads never holds
  * the event loop, so the time cap, the idle kill and a caller's stop still fire.
  */
 export const FILE_STDIO_READ_BYTES = 8 * 1024 * 1024;
 
 /**
- * The child's stdout and stderr as regular files Factory reads as they grow (exec's `fileStdio`), never pipes. A pipe or
+ * The child's stdout and stderr as regular files Pendulum reads as they grow (exec's `fileStdio`), never pipes. A pipe or
  * socket's O_NONBLOCK flag belongs to the open file, which every process holding it shares: a Node process in the chain
  * that touches its own process.stdout (srt, the outer sandbox's launcher, does) makes the harness's stdout non-blocking
  * too, and a harness that writes it synchronously (Codex's Rust println!) then dies on EAGAIN the moment the buffer is
  * full (#2649: exit 101, "failed printing to stdout"). A write to a regular file never returns EAGAIN.
- * Each descriptor is closed exactly once: a number closed is free for whatever Factory opens next (a socket, a file),
+ * Each descriptor is closed exactly once: a number closed is free for whatever Pendulum opens next (a socket, a file),
  * and a second close would close that instead. `limit`: no file is read past it, and `pull` says when one has grown past
  * it (the caller kills the run: a file, unlike a pipe, would keep growing on disk).
  */
 function fileStdio(limit) {
-  const dir = mkdtempSync(join(tmpdir(), "factory-stdio-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-stdio-"));
   const open = (name) => {
     const file = join(dir, name);
     const w = openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW, 0o600);
@@ -230,11 +230,11 @@ function fileStdio(limit) {
   };
   return {
     stdio: [files.out.w, files.err.w],
-    /** Factory's descriptor of the stdout file, open until drop: what the run's own processes hold as their stdout. */
+    /** Pendulum's descriptor of the stdout file, open until drop: what the run's own processes hold as their stdout. */
     get streamFd() {
       return files.out.r;
     },
-    /** The child holds its own copies once it is spawned: Factory's write ends are closed. */
+    /** The child holds its own copies once it is spawned: Pendulum's write ends are closed. */
     spawned: () => {
       for (const f of Object.values(files)) closeOnce(f, "w");
     },
@@ -290,7 +290,7 @@ function fileStdio(limit) {
  * only when the process cannot start. `truncated`: stdout ran past `maxBytes` and only its first `maxBytes` are kept. `tee`
  * streams stdout lines to a file as they arrive
  * (the harness event log), `echo` mirrors stderr to ours. `fileStdio`: the child writes its stdout and stderr to
- * regular files Factory reads every FILE_STDIO_POLL_MS (fileStdio above says why: the harness runs). There an output
+ * regular files Pendulum reads every FILE_STDIO_POLL_MS (fileStdio above says why: the harness runs). There an output
  * file past `maxBytes` kills the run (`truncated`), and a read that fails mid-run kills it too (`readError`, its code),
  * rather than leaving a live run that looks silent.
  * `idleMs`: the window a silent run is checked over, and `openItems` (a function) the count of command items its own
@@ -307,7 +307,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     else {
       // Already the agent's (backend.mjs sandbox.command): the unit (or the namespace wrapper) starts in this directory.
       args = args.map((a) => (String(a).startsWith("--working-directory=") ? `--working-directory=${cwd}` : a));
-      const w = args.indexOf("factory-agent-wrap");
+      const w = args.indexOf("pendulum-agent-wrap");
       if (w >= 0) args[w + 3] = cwd;
     }
     cwd = "/";
@@ -316,7 +316,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
   else if (AGENT && !String(cmd).includes("/")) [cmd, env] = runnerCommand(cmd, env ?? process.env);
   return new Promise((resolve, reject) => {
     // `group`: the child leads a process group, and the whole group is killed when it exits (local mode's harness:
-    // nothing it or its sandboxed commands started outlives the run, before Factory reads what it left).
+    // nothing it or its sandboxed commands started outlives the run, before Pendulum reads what it left).
     // Every process the run starts inherits a tag, so one that left the group (setsid, a double fork) is still found.
     // A signal that stops this process stops the group first (stopGroups); `record` names the run in a file for as long
     // as it lives (a file in the `record` directory), so a later start can stop it should this process die unsignalled
@@ -325,7 +325,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
     const files = toFiles ? fileStdio(maxBytes) : null;
     let child;
     try {
-      child = spawn(cmd, args, { cwd, env: tag ? { ...(env ?? process.env), FACTORY_RUN_TAG: tag } : env ?? process.env, stdio: ["pipe", ...(files ? files.stdio : ["pipe", "pipe"])], detached: group });
+      child = spawn(cmd, args, { cwd, env: tag ? { ...(env ?? process.env), PENDULUM_RUN_TAG: tag } : env ?? process.env, stdio: ["pipe", ...(files ? files.stdio : ["pipe", "pipe"])], detached: group });
     } catch (e) {
       files?.drop();
       throw e;
@@ -493,7 +493,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
           // the group is gone already
         }
         const left = killTagged(tag);
-        if (left) process.stdout.write(`[factory] ${left} process(es) the run left outside its group were killed\n`);
+        if (left) process.stdout.write(`[pendulum] ${left} process(es) the run left outside its group were killed\n`);
         untrackGroup(child.pid);
       });
     }
@@ -509,7 +509,7 @@ export function exec(cmd, args, { cwd, env, input, timeoutMs, tee, echo = false,
         while (pullFiles()?.more) await new Promise((r) => setImmediate(r));
         files.drop();
       }
-      if (readError) err.push(Buffer.from(`\n[factory] reading the run's output failed (${readError}); the run was stopped\n`));
+      if (readError) err.push(Buffer.from(`\n[pendulum] reading the run's output failed (${readError}); the run was stopped\n`));
       partial += decoder.end();
       if (partial && !dropLine?.(partial)) {
         if (dropLine) keep(Buffer.from(partial));
@@ -650,7 +650,7 @@ async function psRows() {
 
 /**
  * The agent route an asAgent command runs on, from its own argv: `{unit: {name, user}}` for a systemd unit
- * (`--unit=factory-agent-…`, `--user` for a user manager's), `{cgroup: AGENT_CGROUP}` for the namespace wrapper, or
+ * (`--unit=pendulum-agent-…`, `--user` for a user manager's), `{cgroup: AGENT_CGROUP}` for the namespace wrapper, or
  * null for any other command.
  */
 export function agentRoute(args) {
@@ -658,7 +658,7 @@ export function agentRoute(args) {
   const own = end < 0 ? args : args.slice(0, end);
   const name = own.find((a) => String(a).startsWith(`--unit=${UNIT_PREFIX}`))?.slice("--unit=".length);
   if (name) return { unit: { name, user: own.includes("--user") } };
-  return args.includes("factory-agent-wrap") ? { cgroup: AGENT_CGROUP } : null;
+  return args.includes("pendulum-agent-wrap") ? { cgroup: AGENT_CGROUP } : null;
 }
 
 /**
@@ -715,7 +715,7 @@ const ioCounts = (text) => {
 
 /**
  * Linux: each pid's I/O counts (rchar, wchar), what its stdout is ("<dev>:<ino>", or "stream" when it is the run's
- * own stdout, `streamFd`: Factory's descriptor of it) and its executable (the kernel's resolved path). Read directly; with `privileged` (an agent route, whose processes
+ * own stdout, `streamFd`: Pendulum's descriptor of it) and its executable (the kernel's resolved path). Read directly; with `privileged` (an agent route, whose processes
  * are another uid's and need ptrace access), what that cannot read is read through `sudo -n`, with no shell, and the
  * stream through it too, so both sides of the comparison come from one reader. Whatever neither reads stays null.
  */
@@ -735,7 +735,7 @@ async function procIo(pids, streamFd, privileged) {
   );
   const missed = pids.filter((p) => io.get(p) === null || fd1.get(p) === null || exe.get(p) === null);
   if (privileged && missed.length) {
-    // Each line names its file, so a pid gone meanwhile fails alone. Factory's own descriptor goes by its pid.
+    // Each line names its file, so a pid gone meanwhile fails alone. Pendulum's own descriptor goes by its pid.
     const ours = streamFd !== null ? `/proc/${process.pid}/fd/${streamFd}` : null;
     const grep = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/grep", "-H", "-E", "^(rchar|wchar):", ...missed.map((p) => `/proc/${p}/io`)]);
     const st = await runOut("/usr/bin/sudo", ["-n", "/usr/bin/stat", "-L", "-c", "%n %d %i", ...(ours ? [ours] : []), ...missed.map((p) => `/proc/${p}/fd/1`)]);
@@ -801,7 +801,7 @@ async function lsofFiles(pids, streamFd) {
  * with `ioRead` whether this platform gives I/O counts at all (Linux /proc does; elsewhere `ps` and `lsof` give CPU
  * and stdout only). The run's processes: on an agent route (`agent`, agentRoute) its systemd unit's or the namespace's
  * cgroup; otherwise `pid` and its descendants, with `group` its process group, and with `tag` every process carrying
- * FACTORY_RUN_TAG=`tag` (a setsid or double fork) and their descendants. `streamFd`: Factory's descriptor of the run's
+ * PENDULUM_RUN_TAG=`tag` (a setsid or double fork) and their descendants. `streamFd`: Pendulum's descriptor of the run's
  * stdout file (exec's fileStdio).
  * Role: the harness and its launchers (sudo, systemd-run's unit, srt, bwrap) write the run's stdout and pass it on
  * unchanged, so a process is `harness` when it is a root of the run (its parent outside it) whose stdout is the run's
@@ -927,7 +927,7 @@ export function startTime(pid) {
   }
 }
 
-/** A process as Factory names it in a record: its pid, start time and boot (sameProcess checks one). */
+/** A process as Pendulum names it in a record: its pid, start time and boot (sameProcess checks one). */
 export const processRecord = (pid = process.pid) => ({ pid, start: startTime(pid), boot: bootId() });
 
 /**
@@ -945,9 +945,9 @@ export function sameProcess(rec) {
   return now === String(rec.start);
 }
 
-/** Whether process `pid` carries FACTORY_RUN_TAG=`tag` in its environment (Linux /proc; elsewhere `ps eww`). */
+/** Whether process `pid` carries PENDULUM_RUN_TAG=`tag` in its environment (Linux /proc; elsewhere `ps eww`). */
 function carriesTag(pid, tag) {
-  const mark = `FACTORY_RUN_TAG=${tag}`;
+  const mark = `PENDULUM_RUN_TAG=${tag}`;
   if (process.platform === "linux") {
     try {
       return holdsMark(readFileSync(`/proc/${pid}/environ`, "latin1"), mark);
@@ -1093,7 +1093,7 @@ export const git = (cwd, args, opts = {}) => must("git", args, { cwd, ...opts })
 /** Whether a command is on PATH. */
 /**
  * The executable `cmd` resolves to on PATH, or null. A plain scan of PATH, never a shell: the name can come from a
- * repository's workflow file or the developer's env (FACTORY_HARNESS), and must not be able to run anything.
+ * repository's workflow file or the developer's env (PENDULUM_HARNESS), and must not be able to run anything.
  */
 export function whichSync(cmd, env = process.env) {
   const name = String(cmd);
@@ -1122,7 +1122,7 @@ export async function onPath(cmd, env = process.env) {
 }
 
 /**
- * Kill every process of this user whose environment carries FACTORY_RUN_TAG=`tag` (exec's `group` runs): what a run
+ * Kill every process of this user whose environment carries PENDULUM_RUN_TAG=`tag` (exec's `group` runs): what a run
  * left behind outside its process group, a setsid or double-forked one included. Linux reads /proc; elsewhere `ps eww`.
  * Returns how many were killed.
  */
@@ -1142,16 +1142,16 @@ export function killTagged(tag) {
 
 /** taggedPids without holding the event loop: a run's reading scans /proc while the stage goes on. */
 async function taggedPidsAsync(tag, procfs = process.platform === "linux") {
-  const mark = `FACTORY_RUN_TAG=${tag}`;
+  const mark = `PENDULUM_RUN_TAG=${tag}`;
   if (!procfs) return String((await runOut("ps", ["eww", "-A", "-o", "pid=,command="])) || "").split("\n").filter((l) => holdsMark(l, mark)).map((l) => Number(l.trim().split(/\s+/)[0]));
   const names = await readdir("/proc").catch(() => []);
   const hits = await Promise.all(names.map(async (p) => /^\d+$/.test(p) && Number(p) !== process.pid && (await readFile(`/proc/${p}/environ`, "latin1").catch(() => "")).split("\0").includes(mark)));
   return names.filter((_, i) => hits[i]).map(Number);
 }
 
-/** The pids of this user's processes whose environment carries FACTORY_RUN_TAG=`tag`: /proc, or `ps eww` without it. */
+/** The pids of this user's processes whose environment carries PENDULUM_RUN_TAG=`tag`: /proc, or `ps eww` without it. */
 function taggedPids(tag, procfs = process.platform === "linux") {
-  const mark = `FACTORY_RUN_TAG=${tag}`;
+  const mark = `PENDULUM_RUN_TAG=${tag}`;
   const pids = [];
   if (procfs) {
     for (const p of readdirSync("/proc")) {

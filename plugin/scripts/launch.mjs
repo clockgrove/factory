@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Factory launcher (mode: launch): one GitHub event in, at most one sandbox call out, in a job of about thirty seconds.
+// Pendulum launcher (mode: launch): one GitHub event in, at most one sandbox call out, in a job of about thirty seconds.
 // The runner is never the sandbox. The decision and the sandbox call are launchOne().
 //   node scripts/launch.mjs --repo OWNER/NAME [--issue N] [--gate]
 // The event comes from GITHUB_EVENT_NAME and GITHUB_EVENT_PATH; --issue is the Objective the dispatcher named (the
@@ -11,7 +11,7 @@
 // Every start, hand-over and end first takes a create-only lock for its cue (lib/lock.mjs), so two launchers (two
 // Action runs, the sweep) never both act on one; the holder decides again on fresh reads.
 //   start   claim the record (written `running` with a short lease under the record lock), find the recorded sandbox or create
-//           one, bring Factory's plugin and the harness CLI up to date in it, and start the stage (stage.mjs) detached
+//           one, bring Pendulum's plugin and the harness CLI up to date in it, and start the stage (stage.mjs) detached
 //           with the App's write token, a read-only token and the harness's credential in its start environment
 //   token   hand a running stage fresh tokens before the hour is out (it asked: repository_dispatch)
 //   ended   a stage ended (it said so): its usage directory comes out for the artifact, then the next stage due starts
@@ -31,7 +31,7 @@ import { PLUGIN_ROOT, pluginDigest } from "./lib/checkout.mjs";
 import { checksOn, findPr, findProject, getIssue, getPr, getRepo, graphql, listComments, moveCard, objectiveLabeledAt, primeWriters, projectStatuses, repoOf, requiredChecks, rest, runningSince, setStateLabel, upsertComment } from "./lib/github.mjs";
 import { CLI, CODEX_LOGIN_REFUSED } from "./lib/harness.mjs";
 import { DEFAULTS, SECRET_INPUTS, input, log, mask, parseArgs, resolveInputs, setOutput, workflowHarness } from "./lib/inputs.mjs";
-import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, factorySandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
+import { KEEP_LAUNCHES, MAX_FAILED_STARTS, QUOTA_WAIT_MS, START_RETRY_MAX_MS, TRANSIENT_START, settleStale, startBackoffMs, startFailures, startRetryAt, REVIEW_LABEL, SESSION_RESERVE_MS, dispatchLatency, quotaBackoff, pendulumSandboxId, failedSince, isSelf, launchDecision, launchEvent, marker, pickSandbox, pushAuthor, reviewRequestOf, sandboxMarkerLine, sandboxRecord, sandboxTags, setSelf, sessionCapEnv, stageDeadline, stageMinutes, stateOf, stopwatch, timingLine, vendorBody, vendorLine, withLaunch } from "./lib/logic.mjs";
 import { currentImage, imagePaths } from "./lib/image.mjs";
 import { lockBase, lockRef, releaseLock, takeLock } from "./lib/lock.mjs";
 import { applyExit, doctorBlock, objectiveDecisions } from "./lib/session.mjs";
@@ -73,15 +73,15 @@ const MIN_STAGE_MINUTES = 10;
 /** Inputs that are secrets in the environment under any of their names, beside SECRET_INPUTS. */
 const MORE_SECRETS = ["vercel_token", "vercel_team_id", "vercel_project_id"];
 const BARE_SECRETS = new Set(["GITHUB_TOKEN", "GH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "COPILOT_GITHUB_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"]);
-/** Every name a secret can have in this process's environment: FACTORY_INPUT_<X>, FACTORY_<X> and the bare names. */
-export const isSecretEnv = (k) => BARE_SECRETS.has(k) || [...SECRET_INPUTS, ...MORE_SECRETS].some((n) => k === `FACTORY_INPUT_${n.toUpperCase()}` || k === `FACTORY_${n.toUpperCase()}`);
+/** Every name a secret can have in this process's environment: PENDULUM_INPUT_<X>, PENDULUM_<X> and the bare names. */
+export const isSecretEnv = (k) => BARE_SECRETS.has(k) || [...SECRET_INPUTS, ...MORE_SECRETS].some((n) => k === `PENDULUM_INPUT_${n.toUpperCase()}` || k === `PENDULUM_${n.toUpperCase()}`);
 /** Inputs a stage does not take from the launcher's settings: this job's own, and every secret. */
 const NOT_FOR_STAGE = new Set(["mode", "issue", "pr", "account", "repo", "sandbox", "app_id", ...SECRET_INPUTS, ...MORE_SECRETS]);
 /** The harness's credentials, by harness: only the one the stage's harness needs goes into the sandbox. */
 const HARNESS_SECRETS = { claude: ["anthropicApiKey", "claudeCodeOauthToken"], codex: ["codexGatewayKey", "codexApiKey"], copilot: ["copilotGithubToken"] };
 const INPUT_NAME = { anthropicApiKey: "ANTHROPIC_API_KEY", claudeCodeOauthToken: "CLAUDE_CODE_OAUTH_TOKEN", codexApiKey: "CODEX_API_KEY", codexGatewayKey: "CODEX_GATEWAY_KEY", copilotGithubToken: "COPILOT_GITHUB_TOKEN", aiGatewayApiKey: "AI_GATEWAY_API_KEY" };
 /** The secrets that carry each harness's credential to the launch job (workflow-template.yml), for a refusal's fix. */
-const HARNESS_SECRET_NAMES = { claude: "ANTHROPIC_API_KEY (CLAUDE_CODE_OAUTH_TOKEN with credential: plan)", codex: "FACTORY_CODEX_GATEWAY_KEY or CODEX_API_KEY", copilot: "COPILOT_GITHUB_TOKEN" };
+const HARNESS_SECRET_NAMES = { claude: "ANTHROPIC_API_KEY (CLAUDE_CODE_OAUTH_TOKEN with credential: plan)", codex: "PENDULUM_CODEX_GATEWAY_KEY or CODEX_API_KEY", copilot: "COPILOT_GITHUB_TOKEN" };
 /**
  * {reason, fix} when the launcher holds no credential for the stage's harness (HARNESS_SECRETS), else null: the stage
  * would Block on it inside its sandbox, after the sandbox's cost, so the launcher Blocks first.
@@ -90,8 +90,8 @@ export function missingCredential(inputs, account = null) {
   if ((HARNESS_SECRETS[inputs.harness] || []).some((k) => inputs[k])) return null;
   // An account's own secrets carry its suffix (lib/accounts.mjs routeSecretSuffix): the names its fix gives.
   const suffix = account ? routeSecretSuffix(account, inputs.harness) : "";
-  const names = (HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness").replace(/\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|FACTORY_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g, `$1${suffix}`);
-  return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`factory:objective\`.` };
+  const names = (HARNESS_SECRET_NAMES[inputs.harness] ?? "for that harness").replace(/\b(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|PENDULUM_CODEX_GATEWAY_KEY|CODEX_API_KEY|COPILOT_GITHUB_TOKEN)\b/g, `$1${suffix}`);
+  return { reason: `no ${inputs.harness} credential${account ? ` of account \`${account}\`` : ""} reached the launch job, so a stage on ${inputs.harness} cannot run`, fix: `Add the repository secret ${names} (gh secret set NAME), which the workflow passes to the launch job, then re-apply \`pendulum:objective\`.` };
 }
 
 /**
@@ -100,7 +100,7 @@ export function missingCredential(inputs, account = null) {
  */
 export function refusedCredential(inputs) {
   if (inputs.harness !== "codex" || ![inputs.codexGatewayKey, inputs.codexApiKey].some(chatgptLogin)) return null;
-  return { reason: CODEX_LOGIN_REFUSED, fix: "Replace that secret's value with an OpenAI API key (or a Vercel AI Gateway key), then re-apply `factory:objective`." };
+  return { reason: CODEX_LOGIN_REFUSED, fix: "Replace that secret's value with an OpenAI API key (or a Vercel AI Gateway key), then re-apply `pendulum:objective`." };
 }
 
 /** The GitHub context a stage's scripts read, as an Actions job has it. */
@@ -141,7 +141,7 @@ const plain = (s, re = /^[A-Za-z0-9._:-]{1,80}$/) => (typeof s === "string" && r
 /** The marker comment's text: the escaped JSON record on its own line, then one human line built from codes and times. */
 export function recordBody(rec) {
   const last = rec.launches?.at(-1) || {};
-  const id = factorySandboxId(rec.id) ? `\`${rec.id}\`` : "none";
+  const id = pendulumSandboxId(rec.id) ? `\`${rec.id}\`` : "none";
   const stage = `stage **${plain(rec.stage)}**`;
   const what = {
     running: `${stage} running${rec.leaseUntil ? ` (lease to ${clock(rec.leaseUntil)})` : ""}`,
@@ -151,7 +151,7 @@ export function recordBody(rec) {
   }[rec.state] || `state ${plain(rec.state)}`;
   const latency = last.ok && Number.isFinite(last.latencyMs) ? ` Dispatch latency ${secs(last.latencyMs)} (\`${plain(last.event, /^[a-z_]{1,40}$/)}\` at ${clock(rec.eventAt)} → stage start ${clock(rec.commandAt)}; sandbox ${last.found ? "found" : "created"}).` : "";
   const run = /^\d{1,20}$/.test(String(rec.run || "")) ? `run ${rec.run}` : "";
-  return `${sandboxMarkerLine(rec)}\nFactory's sandbox for this Objective: ${id} (${plain(rec.vendor)}); ${what}.${latency} ${run}`.trimEnd();
+  return `${sandboxMarkerLine(rec)}\nPendulum's sandbox for this Objective: ${id} (${plain(rec.vendor)}); ${what}.${latency} ${run}`.trimEnd();
 }
 
 const API = Object.freeze({ rest, graphql });
@@ -166,7 +166,7 @@ const READ_BACK_TRIES = 4;
 const READ_BACK_PAUSE_MS = 1000;
 
 /**
- * Write the sandbox record's claim comment (`<!-- factory:<n>:sandbox -->`), the one part with more than one writer:
+ * Write the sandbox record's claim comment (`<!-- pendulum:<n>:sandbox -->`), the one part with more than one writer:
  * launchers and the sweep, which claim the sandbox against each other. Each write holds the Objective's record lock
  * (`recordLock`, a create-only ref; the dispatcher's tick clears one left stale), reads the record (merged with the
  * stage's part, logic.mjs sandboxRecord), settles what ended unseen (logic.mjs settleStale), and writes `next(cur)`
@@ -253,11 +253,11 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
     listComments(repo, n, opts),
     due ? runningSince(repo, n, opts).catch(() => null) : null,
     due
-      ? findPr(repo, `factory/${n}`, opts).then((pr) => reviewRequest(repo, pr, opts, { labelledOnly: true })).catch(() => null)
+      ? findPr(repo, `pendulum/${n}`, opts).then((pr) => reviewRequest(repo, pr, opts, { labelledOnly: true })).catch(() => null)
       : ev.kind === "review" && Number.isSafeInteger(ev.pr)
         ? getPr(repo, ev.pr, opts).then((pr) => reviewRequest(repo, pr, opts)).catch(() => null)
         : null,
-    ev.kind === "checks" ? rest(`repos/${repo.full}/git/ref/heads/factory/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null) : null,
+    ev.kind === "checks" ? rest(`repos/${repo.full}/git/ref/heads/pendulum/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null) : null,
     readEventTime ? ev.at || eventAt || (runId ? rest(`repos/${repo.full}/actions/runs/${runId}`, { token: inputs.githubToken || opts.token }).then((r) => r?.created_at ?? null, () => null) : null) : null,
     ev.kind === "comment" ? primeWriters(repo, opts, { maintainers: inputs.maintainers }) : null,
   ]);
@@ -267,8 +267,8 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
   const labels = (issueData.labels || []).map((l) => (typeof l === "string" ? l : l.name));
   // A stage's own events are answered whatever became of the issue: an Objective closed while its stage ran still gets
   // its sandbox stopped and its usage collected.
-  // Whether it may run is lib/stop.mjs stopCause's answer, as on every route: a draft (factory:draft) or a restart
-  // pending (factory:restart) starts nothing either; the dispatcher restarts the latter first.
+  // Whether it may run is lib/stop.mjs stopCause's answer, as on every route: a draft (pendulum:draft) or a restart
+  // pending (pendulum:restart) starts nothing either; the dispatcher restarts the latter first.
   const cause = issueData.pull_request ? "pull request" : stopCause(issueData, inputs.objectiveLabel);
   const closed = !!cause;
   if (closed && ev.kind !== "stage") return { skip: cause === "restart" ? `#${n} waits for its restart (${RESTART_LABEL})` : cause === "draft" ? `#${n} is a draft (${DRAFT_LABEL}): never run` : `#${n} is not an open ${inputs.objectiveLabel} issue` };
@@ -280,7 +280,7 @@ export async function readContext({ repo, n, ev, inputs, opts, readEventTime, ru
   let head = headSha;
   let checksDone = false;
   if (ev.kind === "swept" && record?.waiting === "checks" && record.head) {
-    head = await rest(`repos/${repo.full}/git/ref/heads/factory/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null);
+    head = await rest(`repos/${repo.full}/git/ref/heads/pendulum/${n}`, opts).then((r) => r?.object?.sha ?? null, () => null);
     const names = inputs.ciChecks.length ? inputs.ciChecks : await requiredChecks(repo, opts).catch(() => []);
     checksDone = head === record.head && names.length > 0 && !!(await checksOn(repo, head, names, opts).catch(() => null))?.done;
   }
@@ -308,7 +308,7 @@ export async function mintTokens(inputs, repo, { read = false } = {}) {
   return { write: write.token, read: readToken, app: write };
 }
 
-/** Factory's plugin as a tarball for the sandbox, and a digest of its files (not the tarball's bytes, which carry times). */
+/** Pendulum's plugin as a tarball for the sandbox, and a digest of its files (not the tarball's bytes, which carry times). */
 export function pluginPackage(root = PLUGIN_ROOT) {
   const tgz = execFileSync("tar", ["czf", "-", "--exclude=./node_modules", "--exclude=./test", "-C", root, "."], { maxBuffer: 64 * 1024 * 1024 });
   return { tgz, digest: pluginDigest(root).slice(0, 16) };
@@ -331,37 +331,37 @@ export function stageEnvironment({ inputs, defaults = inputs, env = process.env,
   for (const name of Object.keys(DEFAULTS)) {
     if (NOT_FOR_STAGE.has(name)) continue;
     const v = input(name, { env });
-    if (v !== "") out[`FACTORY_${name.toUpperCase()}`] = v;
+    if (v !== "") out[`PENDULUM_${name.toUpperCase()}`] = v;
   }
   // The repository's harness and models as this run resolved them (`defaults`: a harness override takes that harness's own
   // defaults), not as written, and never the Objective's labels: the stage reads those itself (objective-trust.mjs
-  // choiceGate), so a label changed after this read is seen there. FACTORY_STAGE_HARNESS: the harness this start prepared
+  // choiceGate), so a label changed after this read is seen there. PENDULUM_STAGE_HARNESS: the harness this start prepared
   // the stage for (`inputs`, the labels' choice: its credential below, its CLI in the sandbox); a stage whose labels name
   // another by then Blocks.
-  Object.assign(out, { FACTORY_HARNESS: defaults.harness, FACTORY_STAGE_HARNESS: inputs.harness, FACTORY_MODEL: defaults.model, FACTORY_SUBAGENT_MODEL: defaults.subagentModel, FACTORY_REVIEWER_MODEL: defaults.reviewerModel, FACTORY_REVIEWER_EFFORT: defaults.reviewerEffort, FACTORY_EFFORT: defaults.effort });
-  for (const k of ["FACTORY_MODEL", "FACTORY_SUBAGENT_MODEL", "FACTORY_REVIEWER_MODEL", "FACTORY_REVIEWER_EFFORT", "FACTORY_EFFORT"]) if (!out[k]) delete out[k];
+  Object.assign(out, { PENDULUM_HARNESS: defaults.harness, PENDULUM_STAGE_HARNESS: inputs.harness, PENDULUM_MODEL: defaults.model, PENDULUM_SUBAGENT_MODEL: defaults.subagentModel, PENDULUM_REVIEWER_MODEL: defaults.reviewerModel, PENDULUM_REVIEWER_EFFORT: defaults.reviewerEffort, PENDULUM_EFFORT: defaults.effort });
+  for (const k of ["PENDULUM_MODEL", "PENDULUM_SUBAGENT_MODEL", "PENDULUM_REVIEWER_MODEL", "PENDULUM_REVIEWER_EFFORT", "PENDULUM_EFFORT"]) if (!out[k]) delete out[k];
   for (const k of GITHUB_CONTEXT) if (env[k]) out[k] = env[k];
   // Codex with both keys gets the gateway's only: the one it runs on (harness.mjs credentialEnv).
   const harnessKeys = (HARNESS_SECRETS[inputs.harness] || []).filter((k) => !(k === "codexApiKey" && inputs.codexGatewayKey));
-  for (const key of [...harnessKeys, "aiGatewayApiKey"]) if (inputs[key]) out[`FACTORY_INPUT_${INPUT_NAME[key]}`] = inputs[key];
+  for (const key of [...harnessKeys, "aiGatewayApiKey"]) if (inputs[key]) out[`PENDULUM_INPUT_${INPUT_NAME[key]}`] = inputs[key];
   // The worker secrets' values (lib/worker-secrets.mjs): the worker hands them to its harness alone, the review stage to
   // its fix and answer passes alone.
-  if (inputs.workerSecretValues) out.FACTORY_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
+  if (inputs.workerSecretValues) out.PENDULUM_INPUT_WORKER_SECRET_VALUES = inputs.workerSecretValues;
   // The accounts the workflow declares and the one the job's account step picked (#267), whose credential is the only one
   // the launch job holds: the stage checks its labels still pick it (objective-trust.mjs accountGate) and records it.
   // Automatic account choice (#268): the stage accepts the step's pick and records its usage limits as holds.
-  if (env.FACTORY_ACCOUNTS) out.FACTORY_ACCOUNTS = env.FACTORY_ACCOUNTS;
-  if (env.FACTORY_AUTO_ACCOUNT) out.FACTORY_AUTO_ACCOUNT = env.FACTORY_AUTO_ACCOUNT;
-  if (env.FACTORY_STAGE_ACCOUNT) out.FACTORY_STAGE_ACCOUNT = env.FACTORY_STAGE_ACCOUNT;
-  Object.assign(out, { FACTORY_STAGE: stage, FACTORY_STAGE_ISSUE: String(issue), FACTORY_STAGE_CLAIM: claim, FACTORY_PROGRESS_RUN: stageProgressKey(runId, claim), FACTORY_APP_TOKEN: tokens.write });
-  if (pr) out.FACTORY_STAGE_PR = String(pr);
-  if (tokens.read) out.FACTORY_READ_TOKEN = tokens.read;
-  if (appSlug) out.FACTORY_APP_SLUG = appSlug;
+  if (env.PENDULUM_ACCOUNTS) out.PENDULUM_ACCOUNTS = env.PENDULUM_ACCOUNTS;
+  if (env.PENDULUM_AUTO_ACCOUNT) out.PENDULUM_AUTO_ACCOUNT = env.PENDULUM_AUTO_ACCOUNT;
+  if (env.PENDULUM_STAGE_ACCOUNT) out.PENDULUM_STAGE_ACCOUNT = env.PENDULUM_STAGE_ACCOUNT;
+  Object.assign(out, { PENDULUM_STAGE: stage, PENDULUM_STAGE_ISSUE: String(issue), PENDULUM_STAGE_CLAIM: claim, PENDULUM_PROGRESS_RUN: stageProgressKey(runId, claim), PENDULUM_APP_TOKEN: tokens.write });
+  if (pr) out.PENDULUM_STAGE_PR = String(pr);
+  if (tokens.read) out.PENDULUM_READ_TOKEN = tokens.read;
+  if (appSlug) out.PENDULUM_APP_SLUG = appSlug;
   return out;
 }
 
-/** Runs in the sandbox as its default user: its home, and whether its Factory plugin is this one. */
-const PROBE = 'echo "$HOME"; [ "$(cat "$HOME/factory/plugin/.factory-digest" 2>/dev/null)" = "$1" ] && echo have || echo need';
+/** Runs in the sandbox as its default user: its home, and whether its Pendulum plugin is this one. */
+const PROBE = 'echo "$HOME"; [ "$(cat "$HOME/pendulum/plugin/.pendulum-digest" 2>/dev/null)" = "$1" ] && echo have || echo need';
 /**
  * Runs in the sandbox as its default user: the plugin unpacked when one was uploaded, the harness CLI installed system
  * wide (the agent runs it) when absent or not the version asked, then the stage started detached, the VM's clock
@@ -373,9 +373,9 @@ const PROBE = 'echo "$HOME"; [ "$(cat "$HOME/factory/plugin/.factory-digest" 2>/
 export const START = [
   "set -eu",
   'bare() { env -i HOME="$HOME" PATH="$PATH" "$@"; }',
-  'd="$HOME/factory"; mkdir -p "$d/logs"; chmod 700 "$HOME" "$d" "$d/logs"',
-  'if [ -n "$2" ]; then rm -rf "$d/plugin.new"; mkdir -p "$d/plugin.new"; tar xzf "$2" -C "$d/plugin.new"; rm -f "$2"; echo "$3" > "$d/plugin.new/.factory-digest"; rm -rf "$d/plugin"; mv "$d/plugin.new" "$d/plugin"; fi',
-  // Factory's own tools, which a vendor's base image may lack (the adopter's image keeps them once installed).
+  'd="$HOME/pendulum"; mkdir -p "$d/logs"; chmod 700 "$HOME" "$d" "$d/logs"',
+  'if [ -n "$2" ]; then rm -rf "$d/plugin.new"; mkdir -p "$d/plugin.new"; tar xzf "$2" -C "$d/plugin.new"; rm -f "$2"; echo "$3" > "$d/plugin.new/.pendulum-digest"; rm -rf "$d/plugin"; mv "$d/plugin.new" "$d/plugin"; fi',
+  // Pendulum's own tools, which a vendor's base image may lack (the adopter's image keeps them once installed).
   'need=""; command -v git-lfs >/dev/null || need="$need git-lfs"; command -v gh >/dev/null || need="$need gh"',
   // Claude Code runs its commands in its bubblewrap sandbox here (harness.mjs claudeRunner): bwrap and socat, and ripgrep.
   'if [ "$4" = claude ]; then command -v bwrap >/dev/null || need="$need bubblewrap"; command -v socat >/dev/null || need="$need socat"; command -v rg >/dev/null || need="$need ripgrep"; fi',
@@ -394,7 +394,7 @@ export const START = [
   'if [ "$4" = copilot ]; then',
   // A step that fails here starts the stage anyway: Copilot's pre-start probe then Blocks with what is missing.
   "  bare sudo -n chmod 0666 /dev/net/tun >&2 || true",
-  "  bare sudo -n unshare --net ip6tables-nft -t filter -N factory-probe >/dev/null 2>&1 || bare sudo -n update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >&2 || true",
+  "  bare sudo -n unshare --net ip6tables-nft -t filter -N pendulum-probe >/dev/null 2>&1 || bare sudo -n update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >&2 || true",
   '  case "$(bare ip6tables --version 2>/dev/null || true)" in *legacy*) bare sudo -n touch /run/xtables.lock >&2 || true ;; esac',
   "fi",
   'want="$6"; if [ "$want" = latest ]; then want="$(bare npm view "$5" version 2>/dev/null || true)"; fi',
@@ -404,7 +404,7 @@ export const START = [
   "umask 077",
   // The stage's start time, the launcher's and the stage's alike (its record writes carry it).
   't="$(date -u +%s%3N)"; echo "$t"',
-  'FACTORY_STAGE_COMMAND_MS="$t" setsid nohup node "$d/plugin/scripts/stage.mjs" >>"$d/logs/stage-$1.log" 2>&1 </dev/null &',
+  'PENDULUM_STAGE_COMMAND_MS="$t" setsid nohup node "$d/plugin/scripts/stage.mjs" >>"$d/logs/stage-$1.log" 2>&1 </dev/null &',
 ].join("\n");
 
 /**
@@ -428,7 +428,7 @@ export const START = [
  * (all but `found`, which this fills in), handed to the stage with the rest of its record fields (stage.mjs startedFields).
  */
 export async function startInSandbox({ adapter, repo, repoId, issue, recordedId, recordedImage = null, image: imageP = null, baseImage, claim, env, budgetMs, vcpus, harness, harnessVersion, plugin, maxUsd = 0, stoppedAt = null, listing = null, settled = null, handoff = null, watch = NO_WATCH }) {
-  const listed = await (listing ?? adapter.list({ tag: ["factory-issue", String(issue)] }));
+  const listed = await (listing ?? adapter.list({ tag: ["pendulum-issue", String(issue)] }));
   watch.mark("list");
   let id = pickSandbox(listed, { repoId, issue, recordedId });
   const found = !!id;
@@ -512,27 +512,27 @@ export async function startInSandbox({ adapter, repo, repoId, issue, recordedId,
       if (r.exitCode !== 0) throw Object.assign(new Error(`a sandbox command exited ${r.exitCode}: ${err.slice(-500)}`), { code: "stage_exit" });
       return out.split("\n").map((l) => l.trim()).filter(Boolean);
     };
-    const [home, have] = await sh(["bash", "-c", PROBE, "factory-probe", plugin.digest]);
+    const [home, have] = await sh(["bash", "-c", PROBE, "pendulum-probe", plugin.digest]);
     watch.mark("probe");
     let tarball = "";
     if (have !== "have") {
-      tarball = `/tmp/factory-plugin-${claim}.tgz`;
+      tarball = `/tmp/pendulum-plugin-${claim}.tgz`;
       await adapter.writeFiles(id, [{ path: tarball, content: plugin.tgz }]);
       watch.mark("upload");
     }
-    // Where the image keeps its clone and the setup's exports: Factory's constants (lib/image.mjs), never a recorded path.
+    // Where the image keeps its clone and the setup's exports: Pendulum's constants (lib/image.mjs), never a recorded path.
     const paths = from?.snapshot ? imagePaths(repo) : null;
-    const imageEnv = paths ? { FACTORY_IMAGE_CHECKOUT: paths.checkout, FACTORY_IMAGE_ENV_FILE: paths.envFile } : {};
+    const imageEnv = paths ? { PENDULUM_IMAGE_CHECKOUT: paths.checkout, PENDULUM_IMAGE_ENV_FILE: paths.envFile } : {};
     // The stage's wall clock fits the session, with room for the watchdog's grace and to pack and announce its end
     // before the vendor stops the VM; the stage cuts it again from the same end when it forks the worker.
-    const minutes = stageMinutes({ sessionEnd, timeoutMinutes: env.FACTORY_TIMEOUT_MINUTES });
+    const minutes = stageMinutes({ sessionEnd, timeoutMinutes: env.PENDULUM_TIMEOUT_MINUTES });
     if (minutes < MIN_STAGE_MINUTES) throw Object.assign(new Error(`the session ends ${sessionEnd}: ${minutes} min for the stage, under ${MIN_STAGE_MINUTES}`), { code: "session_short" });
     // The harness's budget, and what the record must carry (the sandbox, its home, the cost readings, the image it
     // started from, the session's end and the start's launch entry), handed to the stage too: its heartbeat writes them
     // with the lease, so whichever of its write and the launcher's lands last, they are there.
     const handed = { id, home, meter, image: from ?? null, sessionEnd, ...(handoff ? { progress: handoff.progress, launch: { ...handoff.launch, found } } : {}) };
-    const budget = { ...(maxUsd > 0 ? { FACTORY_MAX_USD: String(harnessUsd) } : {}), FACTORY_STAGE_RECORD: JSON.stringify(handed) };
-    const lines = await sh(["bash", "-c", START, "factory-stage-start", claim, tarball, plugin.digest, CLI[harness].bin, CLI[harness].pkg, harnessVersion || "latest"], { env: { ...env, ...imageEnv, ...budget, ...sessionCapEnv({ vendor: adapter.name, setting: env.FACTORY_TIMEOUT_MINUTES, minutes }), FACTORY_TIMEOUT_MINUTES: String(minutes), FACTORY_STAGE_SESSION_END: sessionEnd } });
+    const budget = { ...(maxUsd > 0 ? { PENDULUM_MAX_USD: String(harnessUsd) } : {}), PENDULUM_STAGE_RECORD: JSON.stringify(handed) };
+    const lines = await sh(["bash", "-c", START, "pendulum-stage-start", claim, tarball, plugin.digest, CLI[harness].bin, CLI[harness].pkg, harnessVersion || "latest"], { env: { ...env, ...imageEnv, ...budget, ...sessionCapEnv({ vendor: adapter.name, setting: env.PENDULUM_TIMEOUT_MINUTES, minutes }), PENDULUM_TIMEOUT_MINUTES: String(minutes), PENDULUM_STAGE_SESSION_END: sessionEnd } });
     watch.mark("command");
     const vmMs = Number(lines.at(-1));
     const commandAt = Number.isFinite(vmMs) && vmMs > 1e12 ? new Date(vmMs).toISOString() : new Date().toISOString();
@@ -549,32 +549,32 @@ export async function startInSandbox({ adapter, repo, repoId, issue, recordedId,
  * stage left none (no file: the adapter's readFile says so). A read or unpack that fails throws: the tarball may still be there.
  */
 async function collectUsage(adapter, record, n) {
-  if (!factorySandboxId(record.id) || !record.home) return null;
-  const tgz = await adapter.readFile(record.id, `${record.home}/factory/out/usage-${record.claim}.tgz`);
+  if (!pendulumSandboxId(record.id) || !record.home) return null;
+  const tgz = await adapter.readFile(record.id, `${record.home}/pendulum/out/usage-${record.claim}.tgz`);
   if (!tgz) return null;
-  const dir = join(process.env.RUNNER_TEMP || tmpdir(), `factory-usage-${n}-${record.claim}`);
+  const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "..", `usage-${record.claim}.tgz`), tgz);
   execFileSync("tar", ["xzf", join(dir, "..", `usage-${record.claim}.tgz`), "-C", dir, "--no-same-owner", "--no-same-permissions"]);
   rmSync(join(dir, "..", `usage-${record.claim}.tgz`), { force: true });
-  return { dir, name: record.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
+  return { dir, name: record.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
 }
 
 /**
- * A sandbox stage's progress comment among `comments`: Factory's own, keyed `<stage>:<run>-<claim>` or `<stage>:<claim>`
+ * A sandbox stage's progress comment among `comments`: Pendulum's own, keyed `<stage>:<run>-<claim>` or `<stage>:<claim>`
  * (stageProgressKey), so the claim alone finds it. Null when the stage wrote none.
  */
 export function stageProgressComment(comments, n, stage, claim) {
   if (!/^[0-9a-f]{12}$/.test(String(claim)) || !["work", "review"].includes(stage)) return null;
-  const key = new RegExp(`^<!-- factory:${Number(n)}:progress:${stage}:(?:\\d{1,20}-)?${claim} -->\n`);
+  const key = new RegExp(`^<!-- pendulum:${Number(n)}:progress:${stage}:(?:\\d{1,20}-)?${claim} -->\n`);
   return (comments || []).find((c) => isSelf(c) && key.test(c.body || "")) ?? null;
 }
 
 /**
  * Book an ended stage's vendor cost, once, where the caps and the bench read dollars: its usage record (`result.json`
  * in the collected usage directory, field `vendor`; a directory of its own when the stage left none, so the bench
- * still sees the cost) and the stage's vendor comment (`<!-- factory:<n>:vendor:<stage>:<key> -->`, the progress
+ * still sees the cost) and the stage's vendor comment (`<!-- pendulum:<n>:vendor:<stage>:<key> -->`, the progress
  * comment's key: a line with the sandbox's state, seconds, size and list rates, and a spend line of the vendor's
  * dollars, which `daily_usd` adds to the progress comment's). One booker writes it: the stage's book lock
  * (`<stage>-book-<claim>`) is taken first and kept until stale, so a second booker (the sweep, a later start) writes
@@ -588,17 +588,17 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   if (!v || typeof v !== "object") return { usage, vendor: null };
   const cost = stageVendorCost(adapter.rates, { before: v.base ?? null, after, created: v.created === true, stored: v.stored ?? null, ceilingUsd: Number.isFinite(v.ceilingUsd) ? v.ceilingUsd : null, settled });
   const { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth } = adapter.rates;
-  const vendor = { ...cost, sandbox: factorySandboxId(record.id) ? record.id : null, stage: record.stage, claim: record.claim, state, ...(error ? { error } : {}), rates: { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth }, basis: cost.upperBound ? "upper bound: the session's ceiling at list rates (the usage was not read or not settled)" : `the vendor's usage totals across the stage's session, at ${rv} ${plan} list rates (${region}) read ${date} from ${source}; the stop snapshot's storage for the stretch before it` };
+  const vendor = { ...cost, sandbox: pendulumSandboxId(record.id) ? record.id : null, stage: record.stage, claim: record.claim, state, ...(error ? { error } : {}), rates: { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth }, basis: cost.upperBound ? "upper bound: the session's ceiling at list rates (the usage was not read or not settled)" : `the vendor's usage totals across the stage's session, at ${rv} ${plan} list rates (${region}) read ${date} from ${source}; the stop snapshot's storage for the stretch before it` };
   // The usage record the artifact carries: the vendor's dollars beside the harness's.
   let modelUsd = null;
   try {
     if (!usage) {
-      const dir = join(process.env.RUNNER_TEMP || tmpdir(), `factory-usage-${n}-${record.claim}`);
+      const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
       mkdirSync(dir, { recursive: true });
       // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
       writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
 `);
-      usage = { dir, name: record.stage === "review" ? `factory-usage-${n}-review` : `factory-usage-${n}` };
+      usage = { dir, name: record.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
     }
     const file = join(usage.dir, "result.json");
     const rec = JSON.parse(readFileSync(file, "utf8"));
@@ -618,7 +618,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
     try {
       const comments = (await api.rest(`repos/${repo.full}/issues/${n}/comments?per_page=100`, { ...opts, paginate: true })) || [];
       const mine = stageProgressComment(comments, n, record.stage, record.claim);
-      const key = (mine && /^<!-- factory:\d+:progress:([A-Za-z0-9:-]{1,100}) -->/.exec(mine.body)?.[1]) || `${record.stage}:${stageProgressKey(record.run, record.claim)}`;
+      const key = (mine && /^<!-- pendulum:\d+:progress:([A-Za-z0-9:-]{1,100}) -->/.exec(mine.body)?.[1]) || `${record.stage}:${stageProgressKey(record.run, record.claim)}`;
       const held = await takeLock(repo, lockRef(n, record.stage, `book-${record.claim}`), { ...opts, base: base ?? (await lockBase(repo, opts, api)), api });
       if (!held.taken) return log(`#${n}: the ${record.stage} stage's vendor cost is booked by another process; its comment is that one's`);
       const head = marker(n, "vendor", key);
@@ -661,7 +661,7 @@ export function launchCue(ev, stage, ctx) {
 
 /**
  * The lock a running stage's own request takes: one per token request (`ask`, when the stage asked) and one per end,
- * both of the claim the record carries. Null when the claim or the stage is not Factory's plain form.
+ * both of the claim the record carries. Null when the claim or the stage is not Pendulum's plain form.
  */
 export function stageLock(n, ev, record) {
   if (!/^[0-9a-f]{12}$/.test(String(ev.claim)) || !["work", "review"].includes(record?.stage)) return null;
@@ -739,8 +739,8 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
     // The answer check (lib/answer-check.mjs) on the AI Gateway, when this job has a key: a comment that gives no
     // decision on the Question keeps it open, with one notice; one judged no decision before never resumes it; a
     // decision is recorded for the work stage. A read that fails requeues it, as before: the work stage judges it.
-    const asked = await objectiveLabeledAt(repo, n, "factory:question", opts).catch(() => null);
-    const pr = asked ? await findPr(repo, `factory/${n}`, opts).then((p) => ({ p: p ?? null }), () => null) : null;
+    const asked = await objectiveLabeledAt(repo, n, "pendulum:question", opts).catch(() => null);
+    const pr = asked ? await findPr(repo, `pendulum/${n}`, opts).then((p) => ({ p: p ?? null }), () => null) : null;
     const decisions = pr ? await objectiveDecisions(repo, { issue: n, prNumber: pr.p?.number ?? null }, opts, { strict: true, quiet: true }).catch(() => null) : null;
     if (decisions) {
       const screen = await screenAnswer({ check: openAnswerCheck({ inputs }), repo, issue: n, since: asked, comments: ctx.comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || null, opts });
@@ -830,12 +830,12 @@ export function startFailure({ code }) {
 
 /**
  * A failed start's Block cause (logic.mjs BLOCK_CAUSES), by startFailure's answer: the sandbox vendor's plan quota still
- * used up after the bounded wait is a plan limit a person raises (`provider-quota`); any other failed start is Factory's.
+ * used up after the bounded wait is a plan limit a person raises (`provider-quota`); any other failed start is Pendulum's.
  */
-export const failedStartCause = (kind) => (kind === "quota" ? "provider-quota" : "factory");
+export const failedStartCause = (kind) => (kind === "quota" ? "provider-quota" : "pendulum");
 
-/** The Objective Blocked with Factory's own reason (codes and times) and its cause (logic.mjs BLOCK_CAUSES). */
-async function block({ repo, n, inputs, opts }, reason, cause = "factory", fix = null) {
+/** The Objective Blocked with Pendulum's own reason (codes and times) and its cause (logic.mjs BLOCK_CAUSES). */
+async function block({ repo, n, inputs, opts }, reason, cause = "pendulum", fix = null) {
   await applyExit(repo, { issue: n, pr: null, exit: "blocked", reason, cause, notify: inputs.notify, stage: "launch", ...(fix ? { fix } : {}) }, opts).catch((x) => log(`exit: ${x.message.slice(0, 120)}`));
   return { exit: "blocked", reason, failed: true };
 }
@@ -854,7 +854,7 @@ async function requeue({ repo, n, opts }, project, why) {
 export async function withLock({ repo, n, opts, base, out }, ref, fn) {
   if (!ref) return out({ exit: "skipped", reason: `#${n}: no stable cue to lock` });
   const held = await takeLock(repo, ref, { ...opts, base });
-  if (!held.taken) return out({ exit: "skipped", reason: `#${n}: ${held.foreign ? "a lock Factory did not make holds" : "another launcher holds"} ${ref.replace(/^refs\//, "")}` });
+  if (!held.taken) return out({ exit: "skipped", reason: `#${n}: ${held.foreign ? "a lock Pendulum did not make holds" : "another launcher holds"} ${ref.replace(/^refs\//, "")}` });
   if (held.tookOver) log(`#${n}: took over ${ref} (stale since ${held.tookOver})`);
   const hold = { keep: false };
   try {
@@ -875,7 +875,7 @@ function handOver(run, ctx) {
     const again = now.skip ? { skip: now.skip } : decide(now);
     if (!again.token) return out({ exit: "skipped", reason: `#${n}: under the lock the decision changed (${again.skip || "no hand-over"})` });
     const prior = now.record;
-    await adapter.run(prior.id, { argv: ["node", `${prior.home}/factory/plugin/scripts/stage.mjs`, "--deliver"], env: { FACTORY_APP_TOKEN: tokens.write, ...(tokens.read ? { FACTORY_READ_TOKEN: tokens.read } : {}), FACTORY_STAGE_CLAIM: prior.claim }, timeoutMs: 60_000 });
+    await adapter.run(prior.id, { argv: ["node", `${prior.home}/pendulum/plugin/scripts/stage.mjs`, "--deliver"], env: { PENDULUM_APP_TOKEN: tokens.write, ...(tokens.read ? { PENDULUM_READ_TOKEN: tokens.read } : {}), PENDULUM_STAGE_CLAIM: prior.claim }, timeoutMs: 60_000 });
     // Answered: the lock stays until stale (the dispatcher's tick clears it), so no second launcher answers this request.
     hold.keep = true;
     // The session is not extended: the stage's wall clock was fitted to it at the start (startInSandbox).
@@ -907,8 +907,8 @@ function endStage(run, ctx) {
     // still running (startInSandbox), and the sweep collects what was left.
     let stopError = null;
     try {
-      if (factorySandboxId(prior.id)) await adapter.stop(prior.id);
-      else for (const s of (await adapter.list({ tag: ["factory-issue", String(n)] })).filter((x) => x.state === "running" && x.tags?.["factory-repo"] === repoId)) await adapter.stop(s.id);
+      if (pendulumSandboxId(prior.id)) await adapter.stop(prior.id);
+      else for (const s of (await adapter.list({ tag: ["pendulum-issue", String(n)] })).filter((x) => x.state === "running" && x.tags?.["pendulum-repo"] === repoId)) await adapter.stop(s.id);
     } catch (e) {
       stopError = typeof e.code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(e.code) ? e.code : "error";
       log(`#${n}: the sandbox did not stop (${stopError}): ${String(e.message).slice(0, 200)}`);
@@ -918,7 +918,7 @@ function endStage(run, ctx) {
     // The stage's vendor cost, from the totals now that its session is over (the ceiling when they cannot be read). With
     // a stage due next, its progress comment's write runs on beside that start (detach); everything else is booked first.
     let booked = { usage, vendor: null, posted: null };
-    if (!prior.vendorBooked && factorySandboxId(prior.id)) {
+    if (!prior.vendorBooked && pendulumSandboxId(prior.id)) {
       let readError = null;
       const after = await adapter.usage(prior.id).catch((e) => {
         readError = typeof e.code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(e.code) ? e.code : "error";
@@ -934,7 +934,7 @@ function endStage(run, ctx) {
     // the sandbox, stopped, for the sweep, which collects it and then destroys it. A destroy that fails leaves the
     // sandbox for the sweep too. (No stage is due here, so the vendor cost above was booked in full, not detached.)
     let destroyedAt = null;
-    if (again.stop && now.issueClosed && factorySandboxId(prior.id)) {
+    if (again.stop && now.issueClosed && pendulumSandboxId(prior.id)) {
       if (usageFailed) log(`#${n}: the closed Objective's sandbox stays stopped: its usage did not come out; the sweep collects it and destroys it`);
       else {
         await adapter.destroy(prior.id).then(
@@ -999,12 +999,12 @@ export const startEntry = ({ stage, event, eventAt, run, cue }) => ({ stage, eve
 async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   const { inputs, eventName, runId, repo, n, ev, opts, adapter, repoId, out } = run;
   const watch = run.watch.phase("start");
-  // A review starts on its PR: the event's, else the Objective's open PR on its factory branch; without one nothing starts.
-  const pr = stage === "review" ? (wanted ?? (await findPr(repo, `factory/${n}`, opts))?.number ?? null) : null;
+  // A review starts on its PR: the event's, else the Objective's open PR on its pendulum branch; without one nothing starts.
+  const pr = stage === "review" ? (wanted ?? (await findPr(repo, `pendulum/${n}`, opts))?.number ?? null) : null;
   if (stage === "review" && !Number.isInteger(pr)) return out({ exit: "skipped", reason: `#${n}: a review is due but the Objective has no open PR` });
   // The harness and models this Objective runs on (objective-trust.mjs objectiveInputs), before the claim and any sandbox
   // call: a label no writer applied, two of one kind or a model its harness cannot run Blocks here, before any spend. The
-  // stage then gets that harness's credential, its CLI checked in the sandbox, and FACTORY_STAGE_HARNESS (stageEnvironment).
+  // stage then gets that harness's credential, its CLI checked in the sandbox, and PENDULUM_STAGE_HARNESS (stageEnvironment).
   await primeWriters(repo, opts, { maintainers: inputs.maintainers });
   // The gateway key from this launcher's inputs: main() has taken the secrets out of its environment by now.
   // Over the repository's defaults, never an earlier start's choice in `inputs`.
@@ -1032,7 +1032,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   // out. The cue's lock already keeps a second launcher of this cue out; the claim keeps out one of another cue.
   const { tokens } = run;
   // Reads only, beside the claim's write: the CI token check doctor makes before every job (here, with this
-  // job's token: the stage has none), the adopter's image (Factory's own record of it, confirmed by the vendor's; none
+  // job's token: the stage has none), the adopter's image (Pendulum's own record of it, confirmed by the vendor's; none
   // yet, or unreadable, starts from the base) and which account and plan the vendor credentials act for (names only:
   // the plan sets the session's ceiling). No sandbox is created, resumed or run before the claim is written and the
   // check has passed.
@@ -1057,11 +1057,11 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
 
   // The session asked for: the stage's wall clock and its reserve, plus room for the start; the vendor's plan may grant less.
   const budgetMs = inputs.timeoutMinutes * 60_000 + SESSION_RESERVE_MS + 10 * 60_000;
-  const vcpus = Number(process.env.FACTORY_SANDBOX_VCPUS) || 2;
+  const vcpus = Number(process.env.PENDULUM_SANDBOX_VCPUS) || 2;
   let result;
   try {
     // The vendor's list of the Objective's sandboxes, from after the claim, beside the check.
-    const listing = quiet(adapter.list({ tag: ["factory-issue", String(n)] }));
+    const listing = quiet(adapter.list({ tag: ["pendulum-issue", String(n)] }));
     const env = stageEnvironment({ inputs, defaults: run.defaults, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId });
     const plugin = pluginPackage();
     const failed = (await ciToken).filter((c) => c.status === "FAIL");
@@ -1159,7 +1159,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
 export function deferredNote({ stage, vendor, code, tries, next }) {
   const when = Number.isFinite(next) ? new Date(next).toISOString().slice(0, 16).replace("T", " ") + "Z" : "soon";
   const route = "Until another Objective starts on this route, new ones start one at a time, each once the try before it has its answer; once another starts, only this one's own tries go on.";
-  return `Factory: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
+  return `Pendulum: the ${plain(stage)} stage did not start: the ${plain(vendor)} sandbox refused it (\`${plain(code)}\`), ${Number(tries) || 1} time(s) in a row. The next try is after ${when}, then every 30 minutes; it is never handed back Blocked for this. ${route}`;
 }
 
 /** The deferral note, deleted once a stage starts; a failed delete is logged and left. */
@@ -1170,7 +1170,7 @@ async function dropDeferredNote({ repo, n, opts }) {
   }
 }
 
-/** The quota note on the Objective (Factory's own marker comment), deleted; a failed delete is logged and left. */
+/** The quota note on the Objective (Pendulum's own marker comment), deleted; a failed delete is logged and left. */
 async function dropQuotaNote({ repo, n, opts }, comments = null) {
   const head = marker(n, "quota");
   for (const c of (comments ?? (await listComments(repo, n, opts).catch(() => []))).filter((x) => isSelf(x) && (x.body || "").startsWith(head))) {
@@ -1198,13 +1198,13 @@ async function quotaWait(run, ctx, { stage, error, quota }) {
   const storage = await storageReport(adapter, repoId).catch(() => null);
   if (storage) log(`#${n}: storage after the quota sweep: ${storageLine(storage)}`);
   const code = `${error.code}${error.status ? `, HTTP ${error.status}` : ""}`;
-  const freed = `Factory destroyed ${sandboxes} sandbox(es) and ${images} image(s) no live Objective needs${storage ? `; ${storageLine(storage)}` : ""}.`;
+  const freed = `Pendulum destroyed ${sandboxes} sandbox(es) and ${images} image(s) no live Objective needs${storage ? `; ${storageLine(storage)}` : ""}.`;
   if (quota.giveUp) {
     await dropQuotaNote(run);
     return block(run, `launcher: the ${plain(inputs.sandbox)} sandbox's plan quota stayed used up (${code}) for ${quota.tries} tries over ${Math.round(quota.waitedMs / 60_000)} min after pruning; free the vendor's snapshot storage or raise its plan, then re-apply ${inputs.objectiveLabel}`, failedStartCause("quota"));
   }
   const until = new Date(Date.parse(quota.since) + QUOTA_WAIT_MS).toISOString();
-  const note = `Factory: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Factory frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;
+  const note = `Pendulum: the ${stage} stage did not start: the ${plain(inputs.sandbox)} sandbox's plan quota is used up (${code}). ${freed} Snapshot storage is the part Pendulum frees. Try ${quota.tries} failed; the next is after ${clock(quota.retryAt)}. If the quota still refuses at ${clock(until)}, the Objective is handed back Blocked. Freeing the vendor's snapshot storage or raising its plan lets it start sooner.`;
   await upsertComment(repo, n, marker(n, "quota"), note, opts).catch((e) => log(`#${n}: the quota note was not written (${e.status ?? "error"})`));
   const why = `the ${inputs.sandbox} sandbox's plan quota is used up (${code}); try ${quota.tries}, the next after ${clock(quota.retryAt)}`;
   // The launcher hands the wait to the dispatcher: its job ticks it on `queued` (a work stage, back to Queued) or
@@ -1226,9 +1226,9 @@ async function main() {
   if (!inputs.sandbox) throw new Error("mode launch needs the sandbox input (for example `vercel`); without one the work and review jobs run Objectives on the runner");
   const eventName = process.env.GITHUB_EVENT_NAME || "";
   const payload = process.env.GITHUB_EVENT_PATH ? JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")) : {};
-  // The Action leaves the SDK's install to this process (FACTORY_ADAPTER_INSTALL=1, action.yml), after the secrets left
+  // The Action leaves the SDK's install to this process (PENDULUM_ADAPTER_INSTALL=1, action.yml), after the secrets left
   // the environment above; anywhere else it is installed already.
-  const adapterReady = !gate && process.env.FACTORY_ADAPTER_INSTALL === "1" ? installAdapter() : null;
+  const adapterReady = !gate && process.env.PENDULUM_ADAPTER_INSTALL === "1" ? installAdapter() : null;
   let r;
   try {
     r = await launchOne({ inputs, eventName, payload, gate, runId: process.env.GITHUB_RUN_ID || "", repoId: process.env.GITHUB_REPOSITORY_ID || null, adapterReady });
@@ -1256,13 +1256,13 @@ async function main() {
   if (r.failed) process.exitCode = 1;
   if (r.exit === "started" && process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Factory launch #${r.issue}: ${r.stage}\n\nSandbox \`${r.sandboxId}\` (${r.found ? "the recorded one" : "created"}) · dispatch latency ${secs(r.latencyMs)}\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum launch #${r.issue}: ${r.stage}\n\nSandbox \`${r.sandboxId}\` (${r.found ? "the recorded one" : "created"}) · dispatch latency ${secs(r.latencyMs)}\n`);
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    process.stderr.write(`[factory] launch failed: ${e.message}\n`);
+    process.stderr.write(`[pendulum] launch failed: ${e.message}\n`);
     process.exit(1);
   });
 }

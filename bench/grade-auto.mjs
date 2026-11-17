@@ -11,7 +11,7 @@
  *                 BENCH_COMMIT, BENCH_OUT and BENCH_OBJECTIVE, the base
  *                 from BENCH_BASE (past the definition's base patches),
  *                 else BENCH_DEFINITION's `source.base`, and the declared
- *                 checks from its `factory.requiredCommands`. A flag wins.
+ *                 checks from its `pendulum.requiredCommands`. A flag wins.
  *
  *   --evidence DIR              each role's prompt, transcript and answer
  *                               (default: beside --out, <out>.evidence/)
@@ -143,7 +143,7 @@ try {
     model: values.model ?? DEFAULTS.model,
     effort: values.effort ?? DEFAULTS.effort,
     install: values.install ?? null,
-    checks: values.check ?? definition?.factory?.requiredCommands ?? [],
+    checks: values.check ?? definition?.pendulum?.requiredCommands ?? [],
     tests: values.test ?? null,
     criteria: given,
     store,

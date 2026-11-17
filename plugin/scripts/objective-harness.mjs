@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// The harness a work or review job installs (action.yml): the one the Objective's `factory:harness:<name>` label names,
+// The harness a work or review job installs (action.yml): the one the Objective's `pendulum:harness:<name>` label names,
 // read with the job's own token before the install, so the job installs that CLI rather than the repository's default.
 // Only the label's name is read here: the stage checks who applied it and Blocks when the harness it runs on is not the
-// one this job installed (objective-trust.mjs choiceGate, FACTORY_STAGE_HARNESS).
-//   node scripts/objective-harness.mjs --repo OWNER/NAME (--issue N | --branch factory/N)
+// one this job installed (objective-trust.mjs choiceGate, PENDULUM_STAGE_HARNESS).
+//   node scripts/objective-harness.mjs --repo OWNER/NAME (--issue N | --branch pendulum/N)
 // Writes `harness=<name>` to $GITHUB_OUTPUT: empty when no single harness label names one, or the read failed. The review
 // job names its PR's branch (GITHUB_HEAD_REF, from the event): no pull request read, which its token may not be allowed.
 import { pathToFileURL } from "node:url";
@@ -13,10 +13,10 @@ import { log, parseArgs, setOutput } from "./lib/inputs.mjs";
 
 /**
  * The harness the Objective's labels name, or "" for the repository's default: its issue (`issue`, or the one a
- * factory/<issue> `branch` is for) through choice.mjs choiceOf. `read` (issue) is a test's own.
+ * pendulum/<issue> `branch` is for) through choice.mjs choiceOf. `read` (issue) is a test's own.
  */
 export async function labelHarness({ repo, issue = null, branch = "", opts, read = {} }) {
-  const n = Number(issue) || Number(/^factory\/(\d+)$/.exec(String(branch || ""))?.[1]) || null;
+  const n = Number(issue) || Number(/^pendulum\/(\d+)$/.exec(String(branch || ""))?.[1]) || null;
   if (!n) return "";
   const c = choiceOf((await (read.issue ?? getIssue)(repo, n, opts))?.labels || []);
   return c.ok && c.choice.harness ? c.choice.harness : "";

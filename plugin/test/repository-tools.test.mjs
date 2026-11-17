@@ -68,11 +68,11 @@ test("a repository tool never opens the home, a credential store or what a sandb
   const cargo = tool(join(home, ".cargo", "bin"), "cargo");
   writeFileSync(join(home, ".cargo", "credentials.toml"), "token = 'x'\n");
   const own = tool(join(home, "bin"), "mine");
-  tool(join(home, ".config", "factory", "bin"), "leak");
+  tool(join(home, ".config", "pendulum", "bin"), "leak");
   const writable = join(home, "work");
   tool(join(writable, "bin"), "planted");
   const clone = mkdtempSync(join(home, "c-"));
-  const path = ["/usr/bin", join(home, ".cargo", "bin"), join(home, "bin"), join(home, ".config", "factory", "bin"), join(writable, "bin")].join(":");
+  const path = ["/usr/bin", join(home, ".cargo", "bin"), join(home, "bin"), join(home, ".config", "pendulum", "bin"), join(writable, "bin")].join(":");
   const r = repositoryTools({ clone, commands: { validation: ["cargo test", "mine", "leak", "planted", "ls"] }, path, off: [writable], home });
   assert.deepEqual(r.tools, [
     { word: "cargo", from: "validation", real: cargo, dirs: [cargo], denied: [], link: true },
@@ -90,7 +90,7 @@ test("local mode (#371), the real path: a validation tool outside node, npm, pnp
   mkdirSync(join(root, "stages"));
   const stageTmp = mkdtempSync(join(root, "stages", "s-"));
   const dev = mkdtempSync(join(root, "dev-"));
-  const local = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repoFull: "o/r", wf: { FACTORY_VALIDATION: "mytool check, npm test, nosuchtool-371 run" }, stopping: false, firstSetup: new Map(), children: new Set() });
+  const local = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repoFull: "o/r", wf: { PENDULUM_VALIDATION: "mytool check, npm test, nosuchtool-371 run" }, stopping: false, firstSetup: new Map(), children: new Set() });
   const clone = join(local.ws(8), "repo");
   mkdirSync(join(clone, ".git"), { recursive: true });
   pinGitDir(clone, gitPinFile(local.ws(8)));
@@ -119,11 +119,11 @@ test("local mode (#371), the real path: a validation tool outside node, npm, pnp
   assert.match(readFileSync(box.claudeEnv, "utf8"), new RegExp(`'${toolBin}'`), "the toolbin leads each command's PATH");
   assert.equal(lines.filter((l) => l.includes("nosuchtool-371")).length, 1, "named once per loop");
   assert.match(lines.find((l) => l.includes("nosuchtool-371")), /`nosuchtool-371` \(validation\) is not visible to Claude Code's commands: not on PATH/);
-  // Claude Code's settings: the tools readable, the credential stores and Factory's own settings still denied.
+  // Claude Code's settings: the tools readable, the credential stores and Pendulum's own settings still denied.
   const { args } = harnessCommand({ harness: "claude", prompt: "p", local: box });
   const fs = JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.filesystem;
   assert.ok(fs.allowRead.includes(join(root, "opt", "mytool", "bin")));
-  for (const secret of [".ssh", ".config/factory", ".cargo/credentials.toml"]) assert.ok(fs.denyRead.includes(join(homedir(), secret)), `${secret} stays denied`);
+  for (const secret of [".ssh", ".config/pendulum", ".cargo/credentials.toml"]) assert.ok(fs.denyRead.includes(join(homedir(), secret)), `${secret} stays denied`);
 });
 
 test("the probe's toolchain rule: a repository tool linked from the toolbin must be found and reach an executable", () => {
@@ -136,7 +136,7 @@ test("the probe's toolchain rule: a repository tool linked from the toolbin must
   symlinkSync(join(root, "gone", "other"), join(bin, "other"));
   const drive = (tools) => {
     const driver = probeDriver({ gitConfig: "", host: "", marker: "m9", toolchain: { tools }, copilotTmp: join(root, "no-copilot-tmp"), systemTmp: join(root, "system-tmp") });
-    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, FACTORY_PROBE_SCRIPT: CONFINEMENT_PROBE, FACTORY_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m9" } });
+    execFileSync("/bin/sh", ["-c", driver], { stdio: ["ignore", "pipe", "ignore"], env: { HOME: process.env.HOME, PATH: `${bin}:/usr/bin:/bin`, TMPDIR: tmp, PENDULUM_PROBE_SCRIPT: CONFINEMENT_PROBE, PENDULUM_PROBE_DECOY: "999999999", [PROBE_MARKER]: "m9" } });
     return readFileSync(join(tmp, PROBE_RESULT), "utf8");
   };
   assert.equal(drive([join(bin, "other")]), `4\n${TOOLCHAIN_RULE}\n`, "a link whose executable the sandbox does not show");
@@ -189,17 +189,17 @@ test("an install that is all the tool's own is bound whole but its etc, which is
   assert.deepEqual(got, { word: "tsx", from: "package.json scripts.test", real: t, dirs: [join(v22, "bin"), join(v22, "lib")], denied: [join(v22, "etc")], link: true });
 });
 
-test("a package.json script never makes Factory's front end, a harness or its sandbox visible, by name or by a link to one", () => {
+test("a package.json script never makes Pendulum's front end, a harness or its sandbox visible, by name or by a link to one", () => {
   const root = mkdtempSync(join(tmpdir(), "rharn-"));
   const bin = join(root, "opt", "bin");
   const claude = tool(bin, "claude");
-  for (const w of ["factory", "codex", "copilot", "srt", "bwrap"]) tool(bin, w);
+  for (const w of ["pendulum", "codex", "copilot", "srt", "bwrap"]) tool(bin, w);
   symlinkSync(claude, join(bin, "cc"));
   const clone = mkdtempSync(join(root, "c-"));
-  writeFileSync(join(clone, "package.json"), JSON.stringify({ scripts: { test: "factory run; claude -p x; codex; copilot; srt x; bwrap x; cc" } }));
+  writeFileSync(join(clone, "package.json"), JSON.stringify({ scripts: { test: "pendulum run; claude -p x; codex; copilot; srt x; bwrap x; cc" } }));
   const r = repositoryTools({ clone, commands: { validation: ["npm test"] }, path: bin, home: join(root, "h") });
   assert.deepEqual(r.tools, []);
-  assert.deepEqual(r.unresolved.map((u) => u.word), ["factory", "claude", "codex", "copilot", "srt", "bwrap", "cc"]);
+  assert.deepEqual(r.unresolved.map((u) => u.word), ["pendulum", "claude", "codex", "copilot", "srt", "bwrap", "cc"]);
   assert.match(r.unresolved[0].why, /never made visible from a package\.json script/);
 });
 

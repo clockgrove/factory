@@ -16,9 +16,9 @@ import { holdScope } from "../scripts/lib/session.mjs";
 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
-/** An origin whose main holds `files`, and the agent's clone on factory/1. */
+/** An origin whose main holds `files`, and the agent's clone on pendulum/1. */
 function repos(files) {
-  const root = mkdtempSync(join(tmpdir(), "factory-fence-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-fence-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
   const run = (...a) => execFileSync("git", ["-C", work, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet } }).trim();
@@ -32,7 +32,7 @@ function repos(files) {
   for (const [f, t] of Object.entries({ "app.txt": "v1\n", ...files })) put(f, t);
   run("commit", "-q", "-m", "base");
   run("push", "-q", "origin", "HEAD:main");
-  run("checkout", "-q", "-b", "factory/1");
+  run("checkout", "-q", "-b", "pendulum/1");
   const commit = (changes, msg = "change") => {
     for (const [f, t] of Object.entries(changes)) put(f, t);
     run("commit", "-q", "-m", msg);
@@ -42,7 +42,7 @@ function repos(files) {
 
 /** The repository after the work stage: its first push made, then the first fix pass fenced. */
 async function fenced(r, extra = {}, fence = {}) {
-  const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [".github/"], base: r.root, ...extra });
+  const box = await openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, protectedList: [".github/"], base: r.root, ...extra });
   r.commit({ "app.txt": "v2\n" }, "work");
   assert.equal(await box.push(), true, box.error);
   await box.fence({ plan: "1. owns `app.txt`", texts: ["FAIL app.txt:1 expected v3"], lead: "--- test: FAIL app.txt:1 expected v3", ...fence });
@@ -73,12 +73,12 @@ test("#414: a fenced toolchain change the fence check judges part of the fix goe
   assert.equal(v.asked.length, 1, "the same change is not asked about again at the push");
   // A lockfile judged to weaken the check: refused, with what the check said; the work's Block.
   r.commit({ "web/yarn.lock": "# pinned below the fix\n" }, "relock");
-  const before = execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim();
+  const before = execFileSync("git", ["-C", r.origin, "rev-parse", "pendulum/1"], { encoding: "utf8" }).trim();
   assert.equal(await box.push(), false);
   assert.match(box.error, /^a fix pass changed web\/yarn\.lock \(toolchain, lockfile or CI configuration\), which neither the plan nor the failing check names; the fence check: web\/yarn\.lock: judged to weaken or sidestep the check at 0\.95/);
   assert.equal(box.errorCause, null);
   assert.deepEqual(box.fenceVerdict().told, ["web/yarn.lock: judged to weaken or sidestep the check"], "the worker is told the verdict, not the confidence");
-  assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim(), before);
+  assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "pendulum/1"], { encoding: "utf8" }).trim(), before);
 });
 
 test("#414: only a lockfile is asked about; pins, CI, containers, package-manager configuration, protected and setup files never are", async () => {
@@ -108,7 +108,7 @@ test("#414: a lockfile the pass created or deleted is never asked about: it can 
   assert.deepEqual(box.fenceVerdict().judged, ["package-lock.json: not judged (created or deleted by the pass)", "pnpm-lock.yaml: not judged (created or deleted by the pass)"]);
 });
 
-test("#414: no answer refuses as Factory's or an outage's Block only when every refused file is undecided; a refusal to judge is the work's", async () => {
+test("#414: no answer refuses as Pendulum's or an outage's Block only when every refused file is undecided; a refusal to judge is the work's", async () => {
   const r = repos({ "package.json": "{}\n", "package-lock.json": "{}\n", "a/yarn.lock": "#\n", "b/yarn.lock": "#\n" });
   const v = vendor((input) => (input.includes("b/yarn.lock") ? { verdict: "weakens", confidence: 0.9 } : input.includes("a/yarn.lock") ? { verdict: null, confidence: null, error: "refused" } : { verdict: null, confidence: null, error: "unavailable" }));
   const box = await fenced(r);
@@ -234,7 +234,7 @@ test("#414: a yes holds for that change and that question; a changed file or ano
 
 /** A stage whose harness (a fake claude on PATH) answers every call with its usage limit; `calls()` counts its runs. */
 function limitedStage() {
-  const bin = mkdtempSync(join(tmpdir(), "factory-fence-claude-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-fence-claude-"));
   const fixture = join(import.meta.dirname, "fixtures", "claude-2.1.323-usage-limit.jsonl");
   const log = join(bin, "calls");
   writeFileSync(join(bin, "claude"), `#!/bin/sh\necho call >> '${log}'\ncat >/dev/null\ncat '${fixture}'\nexit 1\n`, { mode: 0o755 });
@@ -262,11 +262,11 @@ test("#414: a usage limit met in the fence check at the push pauses the stage th
   const box = await fenced(r);
   box.fenceCheck = openFenceCheck({ inputs: {}, env: {}, stage });
   r.commit({ "app.txt": "v3\n", "package-lock.json": '{"v":2}\n' }, "fix");
-  const before = execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim();
+  const before = execFileSync("git", ["-C", r.origin, "rev-parse", "pendulum/1"], { encoding: "utf8" }).trim();
   await assert.rejects(box.push(), (e) => e.code === USAGE_LIMIT);
   assert.equal(box.errorKind, "");
   assert.match(box.error, /^the fence check met claude's usage limit/);
-  assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "factory/1"], { encoding: "utf8" }).trim(), before);
+  assert.equal(execFileSync("git", ["-C", r.origin, "rev-parse", "pendulum/1"], { encoding: "utf8" }).trim(), before);
 });
 
 test("#414: the question's input is fenced; a missing failure or comment says so; an empty change is never asked about", async () => {

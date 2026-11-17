@@ -13,22 +13,22 @@ import { parseYaml } from "../scripts/lib/yaml.mjs";
 const REPO = "o/r";
 const human = { type: "User", login: "kirk" };
 
-test("launchEvent: each trigger names its Objective; other events, forks and Factory's own markers name none", () => {
+test("launchEvent: each trigger names its Objective; other events, forks and Pendulum's own markers name none", () => {
   assert.deepEqual(launchEvent("issues", {}, { issue: "7" }), { kind: "swept", issue: 7, at: null }, "the dispatcher's pick or re-launch, whatever ticked it");
   const c = launchEvent("issue_comment", { action: "created", issue: { number: 5 }, comment: { created_at: "2026-11-08T10:00:00Z", user: human, author_association: "OWNER", body: "go with option B" } });
   assert.deepEqual([c.kind, c.issue, c.at, c.human], ["comment", 5, "2026-11-08T10:00:00.000Z", true]);
-  assert.match(launchEvent("issue_comment", { action: "created", issue: { number: 5 }, comment: { user: human, body: "<!-- factory:5:progress:work:1 -->\nFactory work" } }).skip, /marker/, "a local loop's progress comment is not an answer");
+  assert.match(launchEvent("issue_comment", { action: "created", issue: { number: 5 }, comment: { user: human, body: "<!-- pendulum:5:progress:work:1 -->\nPendulum work" } }).skip, /marker/, "a local loop's progress comment is not an answer");
   assert.match(launchEvent("issue_comment", { action: "created", issue: { number: 5, pull_request: {} }, comment: {} }).skip, /pull request/);
   assert.match(launchEvent("issue_comment", { action: "edited", issue: { number: 5 }, comment: {} }).skip, /edited/);
 
-  const wr = launchEvent("workflow_run", { action: "completed", workflow_run: { head_branch: "factory/12", head_sha: "abc", head_repository: { full_name: REPO } } }, { repoFull: REPO });
+  const wr = launchEvent("workflow_run", { action: "completed", workflow_run: { head_branch: "pendulum/12", head_sha: "abc", head_repository: { full_name: REPO } } }, { repoFull: REPO });
   assert.deepEqual([wr.kind, wr.issue, wr.sha], ["checks", 12, "abc"]);
-  assert.match(launchEvent("workflow_run", { action: "completed", workflow_run: { head_branch: "factory/12", head_repository: { full_name: "fork/r" } } }, { repoFull: REPO }).skip, /another repository/);
-  assert.equal(launchEvent("check_suite", { action: "completed", check_suite: { head_branch: "factory/3", head_sha: "d" } }, { repoFull: REPO }).issue, 3);
-  assert.match(launchEvent("check_suite", { action: "completed", check_suite: { head_branch: "main" } }).skip, /not factory/);
+  assert.match(launchEvent("workflow_run", { action: "completed", workflow_run: { head_branch: "pendulum/12", head_repository: { full_name: "fork/r" } } }, { repoFull: REPO }).skip, /another repository/);
+  assert.equal(launchEvent("check_suite", { action: "completed", check_suite: { head_branch: "pendulum/3", head_sha: "d" } }, { repoFull: REPO }).issue, 3);
+  assert.match(launchEvent("check_suite", { action: "completed", check_suite: { head_branch: "main" } }).skip, /not pendulum/);
 
-  const pr = (action, extra = {}) => launchEvent("pull_request", { action, sender: { type: "Bot" }, pull_request: { number: 40, head: { ref: "factory/9", sha: "e", repo: { full_name: REPO } } }, ...extra }, { repoFull: REPO });
-  assert.deepEqual([pr("labeled", { label: { name: "factory:review" } }).kind, pr("labeled", { label: { name: "factory:review" } }).pr], ["review", 40]);
+  const pr = (action, extra = {}) => launchEvent("pull_request", { action, sender: { type: "Bot" }, pull_request: { number: 40, head: { ref: "pendulum/9", sha: "e", repo: { full_name: REPO } } }, ...extra }, { repoFull: REPO });
+  assert.deepEqual([pr("labeled", { label: { name: "pendulum:review" } }).kind, pr("labeled", { label: { name: "pendulum:review" } }).pr], ["review", 40]);
   assert.match(pr("labeled", { label: { name: "bug" } }).skip, /labeled/);
   assert.equal(pr("ready_for_review").ready, true);
   assert.match(launchEvent("schedule", {}).skip, /names no Objective/);
@@ -48,7 +48,7 @@ test("launchDecision: the stage each event starts; an answer requeues and never 
 
   const comment = { kind: "comment", issue: 1, human: true };
   assert.ok(launchDecision({ ev: comment, state: "Question", trusted: true }).requeue, "a maintainer's answer goes back to Queued for the dispatcher");
-  const asked = { labels: [{ name: "factory:question" }] };
+  const asked = { labels: [{ name: "pendulum:question" }] };
   assert.ok(launchDecision({ ev: comment, state: stateOf(asked, "In review"), trusted: true }).requeue, "on a board a Question's card is In review: the label says Question");
   assert.match(launchDecision({ ev: comment, state: stateOf(asked, "Running"), trusted: true }).skip, /starts nothing/, "a stale question label on a Running Objective is no answer");
   assert.match(launchDecision({ ev: comment, state: "Question", trusted: false }).skip, /not a maintainer/);
@@ -69,23 +69,23 @@ test("launchDecision: the stage each event starts; an answer requeues and never 
   assert.match(launchDecision({ ev: { ...review, ready: true }, state: "In review" }).skip, /not a review cue/, "the App marking its PR ready is not the cue");
 
   const now = Date.parse("2026-11-08T12:00:00Z");
-  const busy = { id: "factory-sb", stage: "work", state: "running", at: "2026-11-08T11:30:00Z" };
+  const busy = { id: "pendulum-sb", stage: "work", state: "running", at: "2026-11-08T11:30:00Z" };
   assert.match(launchDecision({ ev: review, state: "In review", record: busy, now, staleMs: 3600_000 }).skip, /is running in the sandbox/);
   assert.deepEqual(launchDecision({ ev: review, state: "In review", record: busy, now, staleMs: 600_000 }), { stage: "review", pr: null }, "a holder past the stage's wall clock counts as gone");
 });
 
 test("review requests: one request is one cue and one start, whichever event or process saw it", () => {
-  const bot = { type: "Bot", login: "acme-factory[bot]" };
+  const bot = { type: "Bot", login: "acme-pendulum[bot]" };
   const timeline = [
     { event: "ready_for_review", actor: bot, created_at: "2026-11-08T10:00:00Z" },
-    { event: "labeled", label: { name: "factory:review" }, actor: bot, created_at: "2026-11-08T10:00:05Z" },
+    { event: "labeled", label: { name: "pendulum:review" }, actor: bot, created_at: "2026-11-08T10:00:05Z" },
   ];
   // The worker marks its PR ready (an App's transition, not a cue) and labels it.
   assert.deepEqual(reviewRequestOf(timeline, { labelled: true }), { labelledAt: "2026-11-08T10:00:05Z", readyAt: null, since: "2026-11-08T10:00:05Z" });
   // A person marks a PR ready, then labels it within the minute: the later of the two is the request.
   const person = [
     { event: "ready_for_review", actor: human, created_at: "2026-11-08T11:00:00Z" },
-    { event: "labeled", label: { name: "factory:review" }, actor: human, created_at: "2026-11-08T11:00:40Z" },
+    { event: "labeled", label: { name: "pendulum:review" }, actor: human, created_at: "2026-11-08T11:00:40Z" },
   ];
   const req = { draft: false, labelled: true, ...reviewRequestOf(person, { labelled: true }) };
   assert.equal(req.since, "2026-11-08T11:00:40Z");
@@ -112,35 +112,35 @@ test("review requests: one request is one cue and one start, whichever event or 
   assert.equal(launchCue(readyEv, "review", { review: { labelled: false, since: null } }), null, "no request in the timeline: no lock, no start");
 });
 
-test("sandbox record: Factory's own comment only, escaped; only the recorded factory- sandbox is adopted", () => {
-  setSelf("factory-app[bot]");
-  const rec = { id: "factory-sb1", stage: "work", state: "stopped", note: "--> <img src=x>" };
+test("sandbox record: Pendulum's own comment only, escaped; only the recorded pendulum- sandbox is adopted", () => {
+  setSelf("pendulum-app[bot]");
+  const rec = { id: "pendulum-sb1", stage: "work", state: "stopped", note: "--> <img src=x>" };
   const line = sandboxMarkerLine(rec);
-  const json = line.slice("<!-- factory:sandbox ".length, -" -->".length);
+  const json = line.slice("<!-- pendulum:sandbox ".length, -" -->".length);
   assert.equal(/[<>]/.test(json), false, "no angle bracket in the JSON: no value closes the comment (any end form) or opens markup");
   const body = `${marker(4, "sandbox")}\n${line}\ntext`;
   const comments = [
-    { id: 1, user: { login: "someone" }, author_association: "OWNER", body: `${marker(4, "sandbox")}\n${sandboxMarkerLine({ id: "factory-evil" })}` },
-    { id: 3, user: { login: "factory-app[bot]" }, updated_at: "u3", body: `${marker(4, "sandbox")}\n${sandboxMarkerLine({ id: "factory-later" })}` },
-    { id: 2, user: { login: "factory-app[bot]" }, updated_at: "u2", body },
+    { id: 1, user: { login: "someone" }, author_association: "OWNER", body: `${marker(4, "sandbox")}\n${sandboxMarkerLine({ id: "pendulum-evil" })}` },
+    { id: 3, user: { login: "pendulum-app[bot]" }, updated_at: "u3", body: `${marker(4, "sandbox")}\n${sandboxMarkerLine({ id: "pendulum-later" })}` },
+    { id: 2, user: { login: "pendulum-app[bot]" }, updated_at: "u2", body },
   ];
-  assert.deepEqual(sandboxRecord(comments, 4), { ...rec, commentId: 2, updatedAt: "u2" }, "Factory's oldest marker comment, its JSON intact");
+  assert.deepEqual(sandboxRecord(comments, 4), { ...rec, commentId: 2, updatedAt: "u2" }, "Pendulum's oldest marker comment, its JSON intact");
   assert.equal(sandboxRecord(comments.slice(0, 1), 4), null);
 
   const tags = sandboxTags(99, 4);
   const listed = [
-    { id: "factory-old", state: "stopped", tags },
-    { id: "factory-new", state: "stopped", tags },
-    { id: "factory-dead", state: "failed", tags },
-    { id: "factory-other", state: "running", tags: sandboxTags(98, 4) },
-    { id: "nonfactory", state: "running", tags },
+    { id: "pendulum-old", state: "stopped", tags },
+    { id: "pendulum-new", state: "stopped", tags },
+    { id: "pendulum-dead", state: "failed", tags },
+    { id: "pendulum-other", state: "running", tags: sandboxTags(98, 4) },
+    { id: "nonpendulum", state: "running", tags },
   ];
-  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "factory-old" }), "factory-old");
+  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "pendulum-old" }), "pendulum-old");
   assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: null }), null, "no record: create, whatever the tags match");
-  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "factory-gone" }), null);
-  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "factory-dead" }), null);
-  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "factory-other" }), null, "another repository's");
-  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "nonfactory" }), null, "not a name Factory gives");
+  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "pendulum-gone" }), null);
+  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "pendulum-dead" }), null);
+  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "pendulum-other" }), null, "another repository's");
+  assert.equal(pickSandbox(listed, { repoId: 99, issue: 4, recordedId: "nonpendulum" }), null, "not a name Pendulum gives");
   assert.equal(launchedSince({ launches: [{ stage: "work", ok: true, at: "2026-11-08T10:00:01Z" }] }, "work", "2026-11-08T10:00:00Z"), true);
   assert.equal(launchedSince(null, "work", "2026-11-08T10:00:00Z"), false);
   assert.equal(stageHolds({ state: "running", at: "2026-11-08T10:00:00Z" }, Date.parse("2026-11-08T10:05:00Z"), 600_000), true);
@@ -150,17 +150,17 @@ test("sandbox record: Factory's own comment only, escaped; only the recorded fac
 
 test("record body: codes and times only, one human line", async () => {
   const { recordBody } = await import("../scripts/launch.mjs");
-  const text = recordBody({ vendor: "vercel", id: "factory-abc", stage: "work", state: "failed", error: { code: "auth", status: 403 }, run: "123", launches: [] });
+  const text = recordBody({ vendor: "vercel", id: "pendulum-abc", stage: "work", state: "failed", error: { code: "auth", status: 403 }, run: "123", launches: [] });
   assert.equal(text.split("\n").length, 2);
   assert.match(text, /failed to start \(auth, HTTP 403\)/);
-  assert.match(recordBody({ vendor: "vercel", id: "<script>", stage: "work", state: "stopped", exitCode: 0, launches: [{ event: "issues", latencyMs: 1500 }] }), /sandbox for this Objective: none/, "an id Factory did not make is not echoed");
+  assert.match(recordBody({ vendor: "vercel", id: "<script>", stage: "work", state: "stopped", exitCode: 0, launches: [{ event: "issues", latencyMs: 1500 }] }), /sandbox for this Objective: none/, "an id Pendulum did not make is not echoed");
 });
 
 test("workflow template: without a sandbox only the runner jobs; with one only the launch jobs and their triggers", () => {
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   const plain = renderWorkflow(template, values);
-  assert.doesNotMatch(plain, /(?<!\$)\{\{|launch|FACTORY_SANDBOX|issue_comment/);
+  assert.doesNotMatch(plain, /(?<!\$)\{\{|launch|PENDULUM_SANDBOX|issue_comment/);
   const runner = parseYaml(plain);
   assert.deepEqual(Object.keys(runner.jobs), ["dispatch", "queue-watch", "wake", "work", "review"]);
   const rendered = renderWorkflow(template, { ...values, sandbox: "vercel", maintainer_ids: "123,456", default_branch: "main" });
@@ -181,28 +181,28 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   assert.deepEqual(doc.jobs["launch-tick"].permissions, { actions: "write" });
   // gh outside a checkout names no repository on its own: every tick step says which.
   for (const job of ["launch-event", "launch-tick"]) for (const step of doc.jobs[job].steps.filter((x) => /gh workflow run/.test(x.run || ""))) assert.match(step.env.GH_REPO, /github\.repository/, `${job}: the tick names its repository`);
-  // The merge queue dropping a Factory PR ticks the dispatcher at once, on either route.
+  // The merge queue dropping a Pendulum PR ticks the dispatcher at once, on either route.
   for (const d of [runner, doc]) {
     assert.ok(d.on.pull_request.types.includes("dequeued"));
-    assert.match(d.jobs.dispatch.if, /github\.event\.action == 'dequeued' && startsWith\(github\.head_ref, 'factory\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
+    assert.match(d.jobs.dispatch.if, /github\.event\.action == 'dequeued' && startsWith\(github\.head_ref, 'pendulum\/'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
     // A queue commit with no check run is watched, on either route, and a stalled one ticks the dispatcher.
     const w = d.jobs["queue-watch"];
     assert.match(w.if, /needs\.dispatch\.outputs\.queue_watch != ''/);
     assert.match(d.jobs.dispatch.outputs.queue_watch, /steps\.f\.outputs\.queue_watch/);
     assert.deepEqual(w.permissions, { contents: "read", actions: "write" });
-    assert.deepEqual(w.concurrency, { group: "factory-queue-watch", "cancel-in-progress": "false" }, "one watch at a time; a newer one waits rather than cancelling");
+    assert.deepEqual(w.concurrency, { group: "pendulum-queue-watch", "cancel-in-progress": "false" }, "one watch at a time; a newer one waits rather than cancelling");
     assert.equal(w.steps[0].with.mode, "watch");
     assert.match(w.steps[1].if, /steps\.w\.outputs\.tick == 'true'/);
     assert.match(w.steps[1].env.GH_REPO, /github\.repository/);
     assert.deepEqual(d.on.workflow_run.workflows, ["Quality"]);
   }
-  // Without a sandbox, CI finishing on this repository's factory/ branch ticks the dispatcher's merge pass itself; with
+  // Without a sandbox, CI finishing on this repository's pendulum/ branch ticks the dispatcher's merge pass itself; with
   // one, the gate takes that event (launch-tick), so the dispatcher does not run twice for it.
-  assert.match(runner.jobs.dispatch.if, /\|\| \(github\.event_name == 'check_suite' && startsWith\(github\.event\.check_suite\.head_branch, 'factory\/'\)\) \|\|\s+\(github\.event_name == 'workflow_run' && startsWith\(github\.event\.workflow_run\.head_branch, 'factory\/'\) && github\.event\.workflow_run\.head_repository\.full_name == github\.repository\)$/);
+  assert.match(runner.jobs.dispatch.if, /\|\| \(github\.event_name == 'check_suite' && startsWith\(github\.event\.check_suite\.head_branch, 'pendulum\/'\)\) \|\|\s+\(github\.event_name == 'workflow_run' && startsWith\(github\.event\.workflow_run\.head_branch, 'pendulum\/'\) && github\.event\.workflow_run\.head_repository\.full_name == github\.repository\)$/);
   assert.doesNotMatch(doc.jobs.dispatch.if, /workflow_run|check_suite/);
   assert.match(doc.jobs["launch-event"].concurrency.group, /launch-gate\.outputs\.start == 'true'/, "the start job takes the Objective's group only when the gate said start");
   // Every Action output a job reads exists: an output it does not have reads empty, and an empty issue put every
-  // launch-event job in one group (`factory-launch-factory/`), where one Objective's launch replaced another's.
+  // launch-event job in one group (`pendulum-launch-pendulum/`), where one Objective's launch replaced another's.
   const outputs = Object.keys(parseYaml(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8")).outputs);
   for (const [, name] of rendered.matchAll(/steps\.[fw]\.outputs\.([a-z_0-9]+)/g)) assert.ok(outputs.includes(name), `the Action has an output ${name}`);
   assert.match(doc.jobs["launch-gate"].outputs.issue, /steps\.f\.outputs\.issue_number/);
@@ -212,11 +212,11 @@ test("workflow template: without a sandbox only the runner jobs; with one only t
   assert.deepEqual(Object.keys(runner.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "pull_request_review", "check_suite", "workflow_run"]);
   assert.deepEqual(Object.keys(doc.on), ["schedule", "workflow_dispatch", "issues", "pull_request", "push", "repository_dispatch", "issue_comment", "pull_request_review", "check_suite", "workflow_run"]);
   assert.deepEqual(doc.on.workflow_run.workflows, ["Quality"]);
-  assert.equal(doc.env.FACTORY_SANDBOX, "vercel");
+  assert.equal(doc.env.PENDULUM_SANDBOX, "vercel");
   assert.deepEqual(doc.jobs.launch.permissions, { contents: "read", actions: "write" }, "the job token reads and ticks the dispatcher; every other write is the App's");
   // A launch that fails, is cut off, requeues, Blocks or meets the vendor's quota ticks the dispatcher itself: no wait on the cron.
   for (const job of ["launch", "launch-event"]) {
-    const tick = doc.jobs[job].steps.find((x) => /gh workflow run factory\.yml/.test(x.run || ""));
+    const tick = doc.jobs[job].steps.find((x) => /gh workflow run pendulum\.yml/.test(x.run || ""));
     assert.match(tick.if, /^always\(\) && \(steps\.f\.outcome != 'success' \|\|/, `${job}: ticks on its own failure`);
     for (const exit of ["queued", "deferred", "blocked"]) assert.match(tick.if, new RegExp(`steps\\.f\\.outputs\\.exit == '${exit}'`), `${job}: ticks on ${exit}`);
     assert.match(tick.env.GH_REPO, /github\.repository/);
@@ -236,9 +236,9 @@ test("stage lifecycle: the lease, a stage's own requests, the next stage when on
   assert.equal(holds({ state: "running", at: "2026-11-08T08:00:00Z", leaseUntil: "2026-11-08T12:05:00Z" }, now, 600_000), true, "a lease the heartbeat renewed holds, however old the start");
   assert.equal(holds({ state: "running", at: "2026-11-08T11:59:00Z", leaseUntil: "2026-11-08T11:59:30Z" }, now, 4 * 3600_000), false, "a lapsed lease frees the Objective long before the stage's wall clock");
 
-  const ev = launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: 9, claim: "abc", want: "ended" }, sender: { login: "factory-app[bot]", type: "Bot" } });
+  const ev = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "ended" }, sender: { login: "pendulum-app[bot]", type: "Bot" } });
   assert.deepEqual([ev.kind, ev.issue, ev.claim, ev.want], ["stage", 9, "abc", "ended"]);
-  assert.match(launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: "9", claim: "abc", want: "ended" } }).skip, /without/);
+  assert.match(launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: "9", claim: "abc", want: "ended" } }).skip, /without/);
   assert.match(launchEvent("repository_dispatch", { action: "deploy", client_payload: {} }).skip, /deploy/);
   const ended = { state: "ended", claim: "abc", launches: [{ stage: "work", ok: true, at: "2026-11-08T10:00:00Z" }] };
   assert.match(launchDecision({ ev, state: "In review", record: ended, fromSelf: false }).skip, /did not send/);
@@ -264,29 +264,29 @@ test("secrets: every name a secret input can have leaves the launcher's environm
   const { isSecretEnv, stageEnvironment } = await import("../scripts/launch.mjs");
   const { SECRET_INPUTS } = await import("../scripts/lib/inputs.mjs");
   for (const name of [...SECRET_INPUTS, "vercel_token", "vercel_team_id", "vercel_project_id"]) {
-    for (const k of [`FACTORY_INPUT_${name.toUpperCase()}`, `FACTORY_${name.toUpperCase()}`]) assert.equal(isSecretEnv(k), true, k);
+    for (const k of [`PENDULUM_INPUT_${name.toUpperCase()}`, `PENDULUM_${name.toUpperCase()}`]) assert.equal(isSecretEnv(k), true, k);
   }
   for (const k of ["GITHUB_TOKEN", "VERCEL_TOKEN", "VERCEL_OIDC_TOKEN", "CODEX_API_KEY"]) assert.equal(isSecretEnv(k), true, k);
-  assert.equal(isSecretEnv("FACTORY_HARNESS"), false);
+  assert.equal(isSecretEnv("PENDULUM_HARNESS"), false);
   const inputs = { harness: "codex", model: "gpt-6.1-sol", reviewerEffort: "high", codexApiKey: "cx", claudeCodeOauthToken: "cl", copilotGithubToken: "cp", anthropicApiKey: "an", aiGatewayApiKey: "" };
-  const env = { FACTORY_HARNESS: "codex", FACTORY_MAX_USD: "20", FACTORY_APP_PRIVATE_KEY: "pem", FACTORY_INPUT_CODEX_API_KEY: "cx", GITHUB_REPOSITORY: "o/r", GITHUB_RUN_ID: "1", RUNNER_TEMP: "/r" };
-  const out = stageEnvironment({ inputs, env, stage: "work", issue: 9, claim: "abc", tokens: { write: "w", read: "r" }, appSlug: "factory-app" });
-  assert.equal(out.FACTORY_INPUT_CODEX_API_KEY, "cx");
-  assert.equal(out.FACTORY_MODEL, "gpt-6.1-sol", "the model as resolved for this run's harness");
-  assert.equal(out.FACTORY_REVIEWER_EFFORT, "high", "the reviewer's effort as resolved for this run's harness");
-  for (const k of ["FACTORY_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_INPUT_COPILOT_GITHUB_TOKEN", "FACTORY_INPUT_ANTHROPIC_API_KEY", "FACTORY_APP_PRIVATE_KEY", "RUNNER_TEMP"]) assert.equal(k in out, false, k);
-  assert.deepEqual([out.FACTORY_HARNESS, out.FACTORY_MAX_USD, out.FACTORY_APP_TOKEN, out.FACTORY_READ_TOKEN, out.FACTORY_STAGE, out.FACTORY_STAGE_CLAIM, out.GITHUB_REPOSITORY], ["codex", "20", "w", "r", "work", "abc", "o/r"]);
+  const env = { PENDULUM_HARNESS: "codex", PENDULUM_MAX_USD: "20", PENDULUM_APP_PRIVATE_KEY: "pem", PENDULUM_INPUT_CODEX_API_KEY: "cx", GITHUB_REPOSITORY: "o/r", GITHUB_RUN_ID: "1", RUNNER_TEMP: "/r" };
+  const out = stageEnvironment({ inputs, env, stage: "work", issue: 9, claim: "abc", tokens: { write: "w", read: "r" }, appSlug: "pendulum-app" });
+  assert.equal(out.PENDULUM_INPUT_CODEX_API_KEY, "cx");
+  assert.equal(out.PENDULUM_MODEL, "gpt-6.1-sol", "the model as resolved for this run's harness");
+  assert.equal(out.PENDULUM_REVIEWER_EFFORT, "high", "the reviewer's effort as resolved for this run's harness");
+  for (const k of ["PENDULUM_INPUT_CLAUDE_CODE_OAUTH_TOKEN", "PENDULUM_INPUT_COPILOT_GITHUB_TOKEN", "PENDULUM_INPUT_ANTHROPIC_API_KEY", "PENDULUM_APP_PRIVATE_KEY", "RUNNER_TEMP"]) assert.equal(k in out, false, k);
+  assert.deepEqual([out.PENDULUM_HARNESS, out.PENDULUM_MAX_USD, out.PENDULUM_APP_TOKEN, out.PENDULUM_READ_TOKEN, out.PENDULUM_STAGE, out.PENDULUM_STAGE_CLAIM, out.GITHUB_REPOSITORY], ["codex", "20", "w", "r", "work", "abc", "o/r"]);
 });
 
 test("namespace launcher: the agent's variables travel by name; the wrapper confines it as the systemd unit does", async () => {
   const { NAMESPACE_WRAP, asAgent, setAgent } = await import("../scripts/lib/proc.mjs");
-  setAgent({ user: "factory-agent", home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set(), launcher: "namespace" });
+  setAgent({ user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set(), launcher: "namespace" });
   try {
-    const [cmd, args, env] = asAgent("claude", ["-p"], { PATH: "/usr/bin", CODEX_API_KEY: "sekret", LANG: "C" }, ["CODEX_API_KEY"], "/home/factory-agent/repo");
+    const [cmd, args, env] = asAgent("claude", ["-p"], { PATH: "/usr/bin", CODEX_API_KEY: "sekret", LANG: "C" }, ["CODEX_API_KEY"], "/home/pendulum-agent/repo");
     assert.equal(cmd, "/usr/bin/sudo");
     assert.equal(args.join(" ").includes("sekret"), false, "no value on the command line");
     assert.ok(args.includes("--preserve-env=CODEX_API_KEY,LANG") || args.includes("--preserve-env=LANG,CODEX_API_KEY"));
-    assert.deepEqual(args.slice(args.indexOf("factory-agent-wrap") + 1, args.indexOf("factory-agent-wrap") + 4), ["/home/factory-agent", "/home/factory-agent/tmp", "/home/factory-agent/repo"]);
+    assert.deepEqual(args.slice(args.indexOf("pendulum-agent-wrap") + 1, args.indexOf("pendulum-agent-wrap") + 4), ["/home/pendulum-agent", "/home/pendulum-agent/tmp", "/home/pendulum-agent/repo"]);
     assert.equal(env.CODEX_API_KEY, "sekret");
     for (const want of ["--pid", "--mount", "--kill-child"]) assert.ok(args.includes(want), want);
     for (const want of ["findmnt -rno TARGET", "remount,bind,ro,nosuid,nodev", "remount,bind,nosuid,nodev \"$home\"", "--no-new-privs", "--bounding-set=-all", "umask 077", "cgroup.procs", "tmpfs"]) assert.ok(NAMESPACE_WRAP.includes(want), want);
@@ -302,24 +302,24 @@ test("namespace launcher: the agent's variables travel by name; the wrapper conf
 
 test("a harness override takes that harness's models, not the env block's (written for the env's harness)", async () => {
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const env = { GITHUB_REPOSITORY: "o/r", FACTORY_HARNESS: "claude", FACTORY_MODEL: "claude-opus-5-5", FACTORY_REVIEWER_MODEL: "claude-fable-5-1" };
-  const over = resolveInputs({ env: { ...env, FACTORY_INPUT_HARNESS: "codex" } });
+  const env = { GITHUB_REPOSITORY: "o/r", PENDULUM_HARNESS: "claude", PENDULUM_MODEL: "claude-opus-5-5", PENDULUM_REVIEWER_MODEL: "claude-fable-5-1" };
+  const over = resolveInputs({ env: { ...env, PENDULUM_INPUT_HARNESS: "codex" } });
   assert.deepEqual([over.harness, over.model, over.reviewerModel], ["codex", "gpt-6.1-sol", "gpt-6.1-sol"]);
-  const named = resolveInputs({ env: { ...env, FACTORY_INPUT_HARNESS: "codex", FACTORY_INPUT_MODEL: "gpt-x" } });
+  const named = resolveInputs({ env: { ...env, PENDULUM_INPUT_HARNESS: "codex", PENDULUM_INPUT_MODEL: "gpt-x" } });
   assert.equal(named.model, "gpt-x", "a model given with the override stands");
   const same = resolveInputs({ env });
   assert.deepEqual([same.harness, same.model, same.reviewerModel], ["claude", "claude-opus-5-5", "claude-fable-5-1"]);
-  const effort = resolveInputs({ env: { ...env, FACTORY_REVIEWER_EFFORT: "low", FACTORY_INPUT_HARNESS: "codex" } });
+  const effort = resolveInputs({ env: { ...env, PENDULUM_REVIEWER_EFFORT: "low", PENDULUM_INPUT_HARNESS: "codex" } });
   assert.equal(effort.reviewerEffort, "high", "the env block's reviewer effort belongs to its harness: Codex's own default");
 });
 
 test("a stage's end on a closed Objective stops; masking stays off a sandbox stage's log; a re-run keeps its own progress", async () => {
-  const ev = launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: 9, claim: "abc", want: "ended" } });
+  const ev = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "ended" } });
   const ended = { state: "ended", claim: "abc", launches: [] };
   assert.deepEqual(launchDecision({ ev, state: "In review", record: ended, fromSelf: true, closed: true, review: { pr: 1, draft: false, labelled: true, labelledAt: "2026-11-08T10:00:00Z", since: "2026-11-08T10:00:00Z" } }), { stop: true });
   const { maskable } = await import("../scripts/lib/inputs.mjs");
   assert.equal(maskable({ GITHUB_ACTIONS: "true" }), true);
-  assert.equal(maskable({ GITHUB_ACTIONS: "true", FACTORY_STAGE_SANDBOX: "1" }), false, "the stage's log is a file: no ::add-mask:: line with the value in it");
+  assert.equal(maskable({ GITHUB_ACTIONS: "true", PENDULUM_STAGE_SANDBOX: "1" }), false, "the stage's log is a file: no ::add-mask:: line with the value in it");
   const { progressRunId } = await import("../scripts/lib/session.mjs");
   assert.equal(progressRunId({ GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "1" }), "7");
   assert.equal(progressRunId({ GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "2" }), "7-2");
@@ -357,7 +357,7 @@ async function cappedVendor(capMin, { states = true, refuse = null } = {}) {
       if (spec.timeoutMs > capMin * 60_000) throw api("bad_request", states ? `\`timeout\` should be <= ${capMin}m` : "Invalid request");
       v.started = Date.now();
       v.end = v.started + spec.timeoutMs;
-      return { id: "factory-abc", expiresAt: new Date(v.end).toISOString() };
+      return { id: "pendulum-abc", expiresAt: new Date(v.end).toISOString() };
     },
     extend: async (id, ms) => {
       calls.push(["extend", ms]);
@@ -367,7 +367,7 @@ async function cappedVendor(capMin, { states = true, refuse = null } = {}) {
     },
     writeFiles: async () => {},
     run: async (id, spec) => {
-      if (spec.argv.includes("factory-probe")) spec.onStdout("/vercel\nhave\n");
+      if (spec.argv.includes("pendulum-probe")) spec.onStdout("/vercel\nhave\n");
       else {
         v.startEnv = spec.env;
         spec.onStdout(`${Date.now()}\n`);
@@ -377,15 +377,15 @@ async function cappedVendor(capMin, { states = true, refuse = null } = {}) {
   };
   return v;
 }
-const startFor = async (adapter, timeoutMinutes = 90) => (await import("../scripts/launch.mjs")).startInSandbox({ adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: null, baseImage: "base", claim: "c1", env: { FACTORY_TIMEOUT_MINUTES: String(timeoutMinutes) }, budgetMs: (timeoutMinutes + 16) * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } });
+const startFor = async (adapter, timeoutMinutes = 90) => (await import("../scripts/launch.mjs")).startInSandbox({ adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: null, baseImage: "base", claim: "c1", env: { PENDULUM_TIMEOUT_MINUTES: String(timeoutMinutes) }, budgetMs: (timeoutMinutes + 16) * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } });
 
 test("startInSandbox: a plan that grants the whole session gives the stage all of timeout_minutes, with no extend and no cap note", async () => {
   const v = await cappedVendor(1440);
   const r = await startFor(v.adapter, 90);
   assert.deepEqual(v.calls, [["create", 106 * 60_000]], "one create, for timeout_minutes plus the reserve and the start");
   assert.equal(r.minutes, 90, "the stage keeps its setting");
-  assert.equal(v.startEnv.FACTORY_TIMEOUT_MINUTES, "90");
-  assert.equal(v.startEnv.FACTORY_STAGE_SESSION_CAP, undefined, "nothing cut, so a time cap there is a plain time cap");
+  assert.equal(v.startEnv.PENDULUM_TIMEOUT_MINUTES, "90");
+  assert.equal(v.startEnv.PENDULUM_STAGE_SESSION_CAP, undefined, "nothing cut, so a time cap there is a plain time cap");
 });
 
 test("startInSandbox: a plan capped at 45 minutes refuses the create; it is asked once more at the stated cap, extended, and the stage is fitted to what was granted", async () => {
@@ -400,9 +400,9 @@ test("startInSandbox: a plan capped at 45 minutes refuses the create; it is aske
   assert.equal(r.sessionEnd, granted, "the session's end is the vendor's, not what was asked for");
   assert.ok(r.minutes <= 45 - SESSION_RESERVE_MS / 60_000, `the wall clock fits the session (${r.minutes} min)`);
   assert.ok(Date.parse(r.deadlineAt) <= Date.parse(granted) - SESSION_RESERVE_MS, "the recorded deadline lands the reserve before the session ends");
-  assert.equal(v.startEnv.FACTORY_TIMEOUT_MINUTES, String(r.minutes));
-  assert.equal(v.startEnv.FACTORY_STAGE_SESSION_END, granted, "the stage gets the session's end for its own watchdog");
-  assert.deepEqual(JSON.parse(v.startEnv.FACTORY_STAGE_SESSION_CAP), { vendor: "vercel", setting: 90, minutes: r.minutes }, "the stage knows the vendor's session cut its wall clock, so a time cap names it");
+  assert.equal(v.startEnv.PENDULUM_TIMEOUT_MINUTES, String(r.minutes));
+  assert.equal(v.startEnv.PENDULUM_STAGE_SESSION_END, granted, "the stage gets the session's end for its own watchdog");
+  assert.deepEqual(JSON.parse(v.startEnv.PENDULUM_STAGE_SESSION_CAP), { vendor: "vercel", setting: 90, minutes: r.minutes }, "the stage knows the vendor's session cut its wall clock, so a time cap names it");
 
   // A cap between: the retry takes the stated 60 minutes and the extend is refused past it.
   const mid = await cappedVendor(60);
@@ -442,11 +442,11 @@ test("startInSandbox: a stage's end hands over the settled usage and the listing
   const { stopwatch, timingLine } = await import("../scripts/lib/logic.mjs");
   const { VERCEL_RATES } = await import("../scripts/lib/adapters/sandbox-vercel.mjs");
   const calls = [];
-  const tags = { factory: "objective", "factory-repo": "1", "factory-issue": "7" };
+  const tags = { pendulum: "objective", "pendulum-repo": "1", "pendulum-issue": "7" };
   const after = { wallMs: 9_000, activeCpuMs: 4_000, vcpus: 2, memoryMb: 4096, storedBytes: 1e9 };
   const adapter = {
     rates: VERCEL_RATES,
-    list: async () => (calls.push("list"), [{ id: "factory-abc", state: "stopped", tags }]),
+    list: async () => (calls.push("list"), [{ id: "pendulum-abc", state: "stopped", tags }]),
     usage: async () => (calls.push("usage"), after),
     resume: async () => (calls.push("resume"), { expiresAt: new Date(Date.now() + 45 * 60_000).toISOString() }),
     extend: async () => {
@@ -454,22 +454,22 @@ test("startInSandbox: a stage's end hands over the settled usage and the listing
     },
     writeFiles: async () => calls.push("upload"),
     run: async (id, spec) => {
-      calls.push(spec.argv.includes("factory-probe") ? "probe" : "command");
-      spec.onStdout(spec.argv.includes("factory-probe") ? "/vercel\nneed\n" : `${Date.now()}\n`);
+      calls.push(spec.argv.includes("pendulum-probe") ? "probe" : "command");
+      spec.onStdout(spec.argv.includes("pendulum-probe") ? "/vercel\nneed\n" : `${Date.now()}\n`);
       return { exitCode: 0 };
     },
   };
   const watch = stopwatch();
-  const common = { adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: "factory-abc", baseImage: "base", claim: "c1", env: { FACTORY_TIMEOUT_MINUTES: "30" }, budgetMs: 50 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } }; // 5 min past the resumed session's 45, so the extend is always due however slow the run
+  const common = { adapter, repo: { owner: "o", name: "r", full: "o/r" }, repoId: "1", issue: 7, recordedId: "pendulum-abc", baseImage: "base", claim: "c1", env: { PENDULUM_TIMEOUT_MINUTES: "30" }, budgetMs: 50 * 60_000, vcpus: 2, harness: "claude", plugin: { digest: "d", tgz: Buffer.from("") } }; // 5 min past the resumed session's 45, so the extend is always due however slow the run
   const listing = adapter.list();
   calls.length = 0;
-  const r = await startInSandbox({ ...common, listing, settled: { id: "factory-abc", usage: after }, watch, image: Promise.reject(new Error("an image read a found sandbox never needs")).catch(() => null) });
+  const r = await startInSandbox({ ...common, listing, settled: { id: "pendulum-abc", usage: after }, watch, image: Promise.reject(new Error("an image read a found sandbox never needs")).catch(() => null) });
   assert.deepEqual(calls, ["resume", "probe", "upload", "command"], "no second list and no second usage read: the end's are taken");
   assert.equal(r.before, after);
   assert.deepEqual(Object.keys(watch.ms), ["list", "usage", "resume", "extend", "probe", "upload", "command"]);
   assert.ok(Object.values(watch.ms).every((v) => Number.isInteger(v) && v >= 0));
   calls.length = 0;
-  await startInSandbox({ ...common, settled: { id: "factory-other", usage: after } });
+  await startInSandbox({ ...common, settled: { id: "pendulum-other", usage: after } });
   assert.deepEqual(calls, ["list", "usage", "resume", "probe", "upload", "command"], "another sandbox's reading is not taken");
   assert.match(timingLine({ mint: 1200, read: 3100 }), /^mint 1\.2 s, read 3\.1 s; total 4\.3 s$/);
   assert.equal(timingLine({}), "");
@@ -531,16 +531,16 @@ test("a stage that ends its child still counts its spend; a token request names 
   const said = `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\\"type\\":\\"collab_tool_call\\"}"}}\n${turn}`;
   assert.deepEqual([spawned(12, said).usd, spawned(12, said).usdUpperBound], [codex.usd, undefined]);
   assert.equal(killedUsage({ harness: "claude", model: null, events: "", maxUsd: 0 }).usd, null);
-  const ask = launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: 9, claim: "abc", want: "token", ask: 1794175200 } });
+  const ask = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "token", ask: 1794175200 } });
   assert.equal(ask.ask, 1794175200);
-  assert.equal(launchEvent("repository_dispatch", { action: "factory-stage", client_payload: { issue: 9, claim: "abc", want: "ended", ask: 5 } }).ask, null);
+  assert.equal(launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "ended", ask: 5 } }).ask, null);
 });
 
 test("vendor session cap: a stage the session cut Blocks naming the vendor's cap; doctor does not guess the plan's cap", async () => {
   const { decideExit, sessionCapEnv, sessionCapNote } = await import("../scripts/lib/logic.mjs");
   const { runnerChecks } = await import("../scripts/doctor.mjs");
   const env = sessionCapEnv({ vendor: "vercel", setting: "240", minutes: 37 });
-  const note = sessionCapNote(env.FACTORY_STAGE_SESSION_CAP);
+  const note = sessionCapNote(env.PENDULUM_STAGE_SESSION_CAP);
   assert.match(note, /the vercel sandbox's session cap: one vendor session gave this stage 37 of timeout_minutes 240/);
   assert.deepEqual(sessionCapEnv({ vendor: "vercel", setting: "30", minutes: 30 }), {}, "a stage the session did not cut carries nothing");
   assert.equal(sessionCapNote(""), "");
@@ -571,8 +571,8 @@ test("a sandbox stage's start: apt, npm and the CLI's version check get no crede
   stub("git");
   stub("npm", '[ "$1" = view ] && echo 9.9.9; exit 0');
   stub("node");
-  const secrets = { ANTHROPIC_API_KEY: "sekrit-1", FACTORY_INPUT_ANTHROPIC_API_KEY: "sekrit-2", FACTORY_APP_TOKEN: "sekrit-3", FACTORY_READ_TOKEN: "sekrit-4" };
-  const out = execFileSync("/usr/bin/bash", ["-c", START, "factory-stage-start", "c1", "", "d", "factory-test-cli", "@x/cli", "latest"], { env: { HOME: home, PATH: bin, ...secrets }, encoding: "utf8" });
+  const secrets = { ANTHROPIC_API_KEY: "sekrit-1", PENDULUM_INPUT_ANTHROPIC_API_KEY: "sekrit-2", PENDULUM_APP_TOKEN: "sekrit-3", PENDULUM_READ_TOKEN: "sekrit-4" };
+  const out = execFileSync("/usr/bin/bash", ["-c", START, "pendulum-stage-start", "c1", "", "d", "pendulum-test-cli", "@x/cli", "latest"], { env: { HOME: home, PATH: bin, ...secrets }, encoding: "utf8" });
   assert.match(out.trim().split("\n").at(-1), /^\d+$/, "the VM's clock, printed last");
   // The stage starts detached: wait for it.
   for (let i = 0; i < 100 && !(existsSync(log) && readFileSync(log, "utf8").includes("== node ")); i++) await new Promise((r) => setTimeout(r, 50));

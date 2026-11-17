@@ -11,7 +11,7 @@
 // the review label goes back on and the review stage's answer pass applies them.
 // Where it runs: the merge pass (session.mjs mergeReadyOne). The dispatcher's and a local loop's have no stage harness,
 // so only the AI Gateway answers there; the review stage's own merge pass asks on the stage's decider. This runs in
-// Factory's own process, never in a harness: the texts are data between random-tag markers, never instructions.
+// Pendulum's own process, never in a harness: the texts are data between random-tag markers, never instructions.
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
@@ -127,7 +127,7 @@ export async function judgeUnread({ check, repo, issue, issueData, pr, unread })
   if (!c?.judge) return { clear: false, why: `comment check off (${c?.off || "no decider here"})` };
   if (!commentsFit(unread)) return { clear: false, why: `the unread comments are longer than one question shows whole (${INPUT_CAPS.comment} characters each, ${INPUT_CAPS.comments} in all)` };
   const labels = (issueData?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
-  const input = commentInput({ repo: repo.full, issue, title: issueData?.title, body: issueData?.body, pr: { number: pr.number, title: pr.title, state: "open, reviewed, its required checks green, about to merge" }, questionOpen: labels.includes("factory:question"), comments: unread });
+  const input = commentInput({ repo: repo.full, issue, title: issueData?.title, body: issueData?.body, pr: { number: pr.number, title: pr.title, state: "open, reviewed, its required checks green, about to merge" }, questionOpen: labels.includes("pendulum:question"), comments: unread });
   const v = await c.judge(input);
   const newest = unread.at(-1);
   const floor = c.floor?.() ?? confidenceFloor();

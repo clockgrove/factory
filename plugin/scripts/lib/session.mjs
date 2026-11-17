@@ -1,5 +1,5 @@
 // What the worker job and the review job share: the App identity in git, the
-// protected-path commit guard, the PR, Factory's own validation passes with the
+// protected-path commit guard, the PR, Pendulum's own validation passes with the
 // failure sent back to the same harness, the usage record, and the three exits
 // applied to GitHub (card, label, draft, comment, review request).
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -58,7 +58,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, factoryReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -93,10 +93,10 @@ export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", 
 
 /**
  * A stage's GitHub access. The write token (minted from the App, or local mode's token, handed over on a pipe that is
- * read once and closed) lives in the keeper's memory: github.mjs and Factory's own git take it per call, and no env or
+ * read once and closed) lives in the keeper's memory: github.mjs and Pendulum's own git take it per call, and no env or
  * file the agent can reach holds it. On Actions the harness, the install and the validation run as the agent uid
  * (agent.mjs) in a clone in its own home, with a read-only token; locally they run in the sandboxes with no token, and
- * Factory's own git in the clone gets the write token by env config. Returns {keeper, agent, checkout}: `checkout` is
+ * Pendulum's own git in the clone gets the write token by env config. Returns {keeper, agent, checkout}: `checkout` is
  * where the agent works (the agent's clone on Actions, else `given`).
  */
 export async function openAccess({ inputs, repo, args, given }) {
@@ -108,8 +108,8 @@ export async function openAccess({ inputs, repo, args, given }) {
   }
   const onActions = backend().name === "actions" && !!process.env.GITHUB_ACTIONS;
   // A cloud sandbox stage's read-only token (stage.mjs): in memory from here on, gone from the environment.
-  const fixedRead = process.env.FACTORY_READ_TOKEN || null;
-  delete process.env.FACTORY_READ_TOKEN;
+  const fixedRead = process.env.PENDULUM_READ_TOKEN || null;
+  delete process.env.PENDULUM_READ_TOKEN;
   // A runner without sudo or systemd: no agent and no harness; the caller Blocks with the reason.
   const agentError = onActions ? await agentPrereqs() : null;
   const agent = onActions && !agentError ? await prepareAgent() : null;
@@ -119,7 +119,7 @@ export async function openAccess({ inputs, repo, args, given }) {
     owner: repo.owner,
     repo: repo.name,
     fixedToken: fixed,
-    // A fixed token (FACTORY_APP_TOKEN) cannot mint a narrower one: the agent then gets no token at all and can clone a
+    // A fixed token (PENDULUM_APP_TOKEN) cannot mint a narrower one: the agent then gets no token at all and can clone a
     // public repository only, unless the caller minted a read-only one beside it (a cloud sandbox stage's launcher).
     // A private repository needs app_id and app_private_key on Actions, or that pair.
     fixedReadToken: agent && fixed ? fixedRead : null,
@@ -127,22 +127,22 @@ export async function openAccess({ inputs, repo, args, given }) {
     onRefresh: agent ? (k) => (k.readToken ? putFiles(agent.home, replaceAll(readTokenFiles(agent.home, k.readToken).files), process.env) : Promise.resolve()) : null,
   }).start();
   // A cloud sandbox stage's launcher minted the token and says whose it is: commits and markers are the App's bot's.
-  if (fixed && process.env.FACTORY_APP_SLUG && /^[a-z0-9-]{1,100}$/.test(process.env.FACTORY_APP_SLUG)) {
-    keeper.app = { appSlug: process.env.FACTORY_APP_SLUG, missing: [], extra: [] };
-    setSelf(`${process.env.FACTORY_APP_SLUG}[bot]`);
+  if (fixed && process.env.PENDULUM_APP_SLUG && /^[a-z0-9-]{1,100}$/.test(process.env.PENDULUM_APP_SLUG)) {
+    keeper.app = { appSlug: process.env.PENDULUM_APP_SLUG, missing: [], extra: [] };
+    setSelf(`${process.env.PENDULUM_APP_SLUG}[bot]`);
   }
-  // Local mode with a Factory App (#2522): the notice token comes from the parent (local.mjs), which alone holds the
+  // Local mode with a Pendulum App (#2522): the notice token comes from the parent (local.mjs), which alone holds the
   // App's key, over the stage's IPC channel when a notice is posted; into the keeper's list of every token held (masking).
   const notice = args.notice === "ipc" ? noticeFromParent({ issued: keeper.issued }) : null;
   if (agentError) return { keeper, notice, agent: null, checkout: given, agentError };
   if (!agent) {
-    // Factory's own git in the local clone (fetch, Git LFS): the token by env config for those processes only;
+    // Pendulum's own git in the local clone (fetch, Git LFS): the token by env config for those processes only;
     // scrubbedEnv strips it from every child.
     Object.assign(process.env, addGitConfig(process.env, gitCredentialEnv(keeper.token)));
     return { keeper, notice, agent, checkout: given };
   }
   const checkout = join(agent.home, "repo");
-  // The agent clones for itself, with its read-only token: Factory runs no git command in this checkout.
+  // The agent clones for itself, with its read-only token: Pendulum runs no git command in this checkout.
   const r = await exec("git", ["clone", "-q", "--no-tags", `https://github.com/${repo.full}.git`, "repo"], { cwd: agent.home, env: process.env });
   if (r.code !== 0) throw new Error(`the agent could not clone ${repo.full}: ${String(r.stderr).trim().split("\n").at(-1)?.slice(0, 200)}`);
   return { keeper, notice, agent, checkout, readHelper: readTokenFiles(agent.home, "").helper };
@@ -270,7 +270,7 @@ function savedRecord({ harness, sessionId, saved, checkout }) {
 /** A plain relative path: letters, digits, `.`, `_`, `-` and `/`, no `..`, no leading `/`. */
 const plainRelative = (p) => typeof p === "string" && /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(p) && !p.split("/").includes("..");
 
-/** Every regular file and directory under the saved names in Factory's own copy, as relative paths; links never. */
+/** Every regular file and directory under the saved names in Pendulum's own copy, as relative paths; links never. */
 function savedEntries(root, names) {
   const out = [];
   const walk = (rel) => {
@@ -287,15 +287,15 @@ function savedEntries(root, names) {
 }
 
 /** Where each harness keeps its sessions, relative to the agent's home (the agent uid runs with its own HOME). */
-// Each is its runner state's (lib/claude-runner.mjs, lib/codex-runner.mjs, lib/copilot-runner.mjs), which Factory makes
+// Each is its runner state's (lib/claude-runner.mjs, lib/codex-runner.mjs, lib/copilot-runner.mjs), which Pendulum makes
 // afresh before every start.
 const AGENT_SESSION_ROOT = { claude: RUNNER_SESSION_ROOT, codex: CODEX_RUNNER_SESSION_ROOT, copilot: COPILOT_RUNNER_SESSION_ROOT };
-/** The harnesses whose runner state Factory resets before every start, putting back only the sessions it holds. */
+/** The harnesses whose runner state Pendulum resets before every start, putting back only the sessions it holds. */
 const HELD = new Set(["claude", "codex", "copilot"]);
 
 /**
  * saveTranscript for the agent uid (Actions): each session's files are listed and archived by the agent, the archive
- * read through a pipe and unpacked by Factory into an empty directory (no owners, no symlinks kept), then masked.
+ * read through a pipe and unpacked by Pendulum into an empty directory (no owners, no symlinks kept), then masked.
  */
 export async function saveAgentTranscript({ harness, sessionId, also = [], usageDir, checkout, secrets = [] }) {
   const agent = agentUser();
@@ -307,8 +307,8 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   let work = null;
   const saved = [];
   for (const id of ids) {
-    // Listed and archived by the agent, names NUL-separated; Factory keeps only plain relative names.
-    // The session as Factory captured it right after its run (claude-runner.mjs captureSession), never what the agent's
+    // Listed and archived by the agent, names NUL-separated; Pendulum keeps only plain relative names.
+    // The session as Pendulum captured it right after its run (claude-runner.mjs captureSession), never what the agent's
     // home holds by now.
     const held = HELD.has(harness) ? capturedSession(id) : null;
     let files = held?.files || [];
@@ -377,16 +377,16 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     if (!s?.id || !s.files?.length) continue;
     if (s.harness !== harness) return { id: null, from: src.name, reason: `the earlier session is ${s.harness ?? "another harness"}'s; this stage runs ${harness}` };
     if (s.checkout !== checkout) return { id: null, from: src.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
-    if (!s.files.every(plainRelative)) return { id: null, from: src.name, reason: "the saved session lists a name Factory will not use" };
+    if (!s.files.every(plainRelative)) return { id: null, from: src.name, reason: "the saved session lists a name Pendulum will not use" };
     for (const rel of s.files) if (!existsSync(join(dir, "transcript", rel))) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
     // Locally the live session is resumed when it is in place, and it may hold passes of a later stage that was killed
     // before it wrote a result.json: that stage's last persisted total for the session is the seed, so the passes its
-    // spend line already counts are not counted again here. Factory wrote it; it wins over the saved copy's.
+    // spend line already counts are not counted again here. Pendulum wrote it; it wins over the saved copy's.
     if (fromStageDirs && !agentUser()) {
       const root = sessionRoot(harness);
       if (s.files.every((rel) => existsSync(join(root, rel)))) {
         let later = laterSessionTotal(workDir, { harness, id: s.id, after: src.at });
-        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Factory's reading was
+        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Pendulum's reading was
         // priced from its table. The lower of the two: a seed above the session's own total would make the next pass's
         // total read as no running total at all (usage.mjs sinceSession), and count the whole session again.
         if (later && harness === "claude") {
@@ -406,22 +406,22 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       if (main && lstatSync(join(dir, "transcript", main)).isFile()) seedSessionTotal(s.id, transcriptTotal(readFileSync(join(dir, "transcript", main), "utf8")));
     }
     // Copilot does the same: its saved session's last accounting snapshot is the prior total. The harness wrote that
-    // file, so the total is bounded by what Factory recorded for the stage (clampTotal).
+    // file, so the total is bounded by what Pendulum recorded for the stage (clampTotal).
     if (harness === "copilot" && plainRelative(s.id)) {
       const events = join(dir, "transcript", s.id, "events.jsonl");
       if (existsSync(events) && lstatSync(events).isFile()) seedSessionTotal(s.id, clampTotal(copilotSessionTotal(readFileSync(events, "utf8"), copilotCreditUsd()), recorded));
     }
-    // Codex too (its thread's token totals): the prior total is the one Factory recorded for the stage.
+    // Codex too (its thread's token totals): the prior total is the one Pendulum recorded for the stage.
     if (harness === "codex" && typeof recorded.sessionTotal?.usd === "number") seedSessionTotal(s.id, recorded.sessionTotal);
     // And each sub-agent thread the session had spawned, at the total that stage counted: a resumed parent's rollout
     // still names them, and they are never counted twice.
     if (harness === "codex" && recorded.sessionTotal?.children && typeof recorded.sessionTotal.children === "object") for (const [id, t] of Object.entries(recorded.sessionTotal.children)) if (plainThread(id) && t?.tokens) seedSessionTotal(id, t);
     const agent = agentUser();
     if (agent) {
-      // Factory's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
+      // Pendulum's own saved copy (unpacked into an empty directory, links removed), archived by name and unpacked into
       // the agent's home by the agent, from a pipe; a file already there is kept.
       const tar = await exec("tar", ["-C", join(dir, "transcript"), "--null", "--no-recursion", "-T", "-", "-cf", "-"], { encoding: "buffer", input: `${savedEntries(join(dir, "transcript"), s.files).join("\0")}\0` });
-      // The harness's state is made afresh before every start, which puts Factory's held copy back.
+      // The harness's state is made afresh before every start, which puts Pendulum's held copy back.
       if (HELD.has(harness) && tar.code === 0) {
         holdSession(s.id, tar.stdout);
         return { id: s.id, from: src.name, reason: "" };
@@ -479,7 +479,7 @@ function localSessionSources(workDir) {
 /** Actions: the Objective's work and review usage artifacts, newest first, each downloaded on demand. */
 async function artifactSessionSources({ repo, issue, token, workDir }) {
   const arts = [];
-  for (const name of [`factory-usage-${issue}`, `factory-usage-${issue}-review`]) {
+  for (const name of [`pendulum-usage-${issue}`, `pendulum-usage-${issue}-review`]) {
     const r = await rest(`repos/${repo.full}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=20`, { token }).catch(() => null);
     arts.push(...(r?.artifacts || []).filter((a) => !a.expired && a.workflow_run?.id));
   }
@@ -489,7 +489,7 @@ async function artifactSessionSources({ repo, issue, token, workDir }) {
       name: a.name,
       error: null,
       dir: async () => {
-        const dir = join(workDir, `factory-restore-${a.id}`);
+        const dir = join(workDir, `pendulum-restore-${a.id}`);
         const d = await exec("gh", ["run", "download", String(a.workflow_run.id), "-n", a.name, "-D", dir, "-R", repo.full], { env: { ...process.env, GH_TOKEN: typeof token === "function" ? token() : token }, timeoutMs: 120_000 });
         if (d.code === 0) return dir;
         src.error = `artifact download failed (exit ${d.code ?? "timeout"})`;
@@ -505,11 +505,11 @@ export const GITHUB_HELPER_SCOPE = "https://github.com";
 
 export const remainingMs = (deadlineAt) => Math.max(0, deadlineAt - Date.now());
 
-/** Git in the agent's checkout, in its sandbox: Factory's identity, the read-only credential helper (Actions) or none, and the hook. */
+/** Git in the agent's checkout, in its sandbox: Pendulum's identity, the read-only credential helper (Actions) or none, and the hook. */
 export async function configureGit(checkout, { appSlug, botId, login, id, protectedList, credentialHelper, env = process.env }) {
-  const name = appSlug ? `${appSlug}[bot]` : login || "factory[bot]";
-  const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "factory[bot]@users.noreply.github.com";
-  // In the agent's sandbox (backend.mjs sandbox.git): Factory runs no git on the host in the agent's checkout.
+  const name = appSlug ? `${appSlug}[bot]` : login || "pendulum[bot]";
+  const email = botId && appSlug ? `${botId}+${appSlug}[bot]@users.noreply.github.com` : login ? `${id ? `${id}+` : ""}${login}@users.noreply.github.com` : "pendulum[bot]@users.noreply.github.com";
+  // In the agent's sandbox (backend.mjs sandbox.git): Pendulum runs no git on the host in the agent's checkout.
   // `ok`: the exit codes that are an answer, not a failure (5: `--unset-all` of a key the checkout does not have).
   const sandboxGit = async (_, args, { ok = [0] } = {}) => {
     const r = await exec(...backend(env).sandbox.git(["git", "-C", checkout, ...args], env), { env });
@@ -527,14 +527,14 @@ export async function configureGit(checkout, { appSlug, botId, login, id, protec
   // host a planted .lfsconfig names get no token. A rerun in the same checkout already has these, so replace-all.
   await sandboxGit(checkout, ["config", "--replace-all", "credential.helper", ""]);
   await sandboxGit(checkout, ["config", "--replace-all", `credential.${GITHUB_HELPER_SCOPE}.helper`, ""]);
-  // On Actions the agent's read-only helper; locally none (Factory's own git gets the token by env config, openAccess).
+  // On Actions the agent's read-only helper; locally none (Pendulum's own git gets the token by env config, openAccess).
   if (credentialHelper) await sandboxGit(checkout, ["config", "--add", `credential.${GITHUB_HELPER_SCOPE}.helper`, credentialHelper]);
   await sandboxGit(checkout, ["config", "--unset-all", "http.https://github.com/.extraheader"], { ok: [0, 5] }).catch(() => {});
-  // The job refuses a commit on a protected path; Factory's push refuses it again (outbox.mjs).
+  // The job refuses a commit on a protected path; Pendulum's push refuses it again (outbox.mjs).
   // A rule keeps a leading `/` (root-anchored, logic.mjs protectedCovers); `./` is dropped.
   const rules = protectedList.map((p) => p.replace(/^\.\//, "")).filter((p) => p.replace(/^\/+/, ""));
   const script = `#!/usr/bin/env bash
-# Written by Factory per run. Refuses a commit that touches a protected path.
+# Written by Pendulum per run. Refuses a commit that touches a protected path.
 set -e
 protected=(${rules.map((r) => JSON.stringify(r)).join(" ")})
 bad=""
@@ -549,8 +549,8 @@ while IFS= read -r f; do
   done
 done < <(git diff --cached --name-only)
 if [ -n "$bad" ]; then
-  echo "factory: refusing commit on protected path(s):$bad" >&2
-  case "$bad" in *" ${WORKFLOWS_DIR}"*) echo "factory: Factory never pushes a workflow file; keep the change out of your commits and hand it over in \\$FACTORY_OUT/${HANDOVER_FILE} (factory-deliver-pr)" >&2 ;; esac
+  echo "pendulum: refusing commit on protected path(s):$bad" >&2
+  case "$bad" in *" ${WORKFLOWS_DIR}"*) echo "pendulum: Pendulum never pushes a workflow file; keep the change out of your commits and hand it over in \\$PENDULUM_OUT/${HANDOVER_FILE} (pendulum-deliver-pr)" >&2 ;; esac
   exit 1
 fi
 ${lfsHook()}`;
@@ -585,15 +585,15 @@ export async function gitIdentity(app, token) {
   return { appSlug: null, botId: null };
 }
 
-/** The name and email of a commit Factory makes itself (its rebase, its merge of the default branch), from gitIdentity. */
+/** The name and email of a commit Pendulum makes itself (its rebase, its merge of the default branch), from gitIdentity. */
 export const commitAuthor = (identity) =>
-  identity?.appSlug ? { name: `${identity.appSlug}[bot]`, email: `${identity.botId}+${identity.appSlug}[bot]@users.noreply.github.com` } : { name: identity?.login || "factory[bot]", email: `${identity?.id ? `${identity.id}+` : ""}${identity?.login || "factory[bot]"}@users.noreply.github.com` };
+  identity?.appSlug ? { name: `${identity.appSlug}[bot]`, email: `${identity.botId}+${identity.appSlug}[bot]@users.noreply.github.com` } : { name: identity?.login || "pendulum[bot]", email: `${identity?.id ? `${identity.id}+` : ""}${identity?.login || "pendulum[bot]"}@users.noreply.github.com` };
 
 /** Render the task card and append the issue verbatim: the prompt the harness gets. */
 /**
  * The maintainers' decisions on an Objective: comments on its issue and PR, the PR's review bodies and inline review
  * comments, by people with write access or more to the repository (checked per author: an author association of
- * COLLABORATOR or MEMBER can be read-only), oldest first, minus Factory's own review threads. A failed read keeps
+ * COLLABORATOR or MEMBER can be read-only), oldest first, minus Pendulum's own review threads. A failed read keeps
  * nothing from that list or author; with `strict` it throws instead, for a caller that must not merge on a partial read.
  * `quiet` (a dispatcher tick's read, every tick) logs its count line only when a read failed.
  */
@@ -631,8 +631,8 @@ export async function objectiveDecisions(repo, { issue, prNumber = null }, opts,
 }
 
 /**
- * The decisions no pass has read yet (logic.mjs unreadDecisions), against the read records in Factory's own progress
- * comments (by `self`, the login Factory posts as: progress.self()) plus `alsoRead` (what this job's own pass read).
+ * The decisions no pass has read yet (logic.mjs unreadDecisions), against the read records in Pendulum's own progress
+ * comments (by `self`, the login Pendulum posts as: progress.self()) plus `alsoRead` (what this job's own pass read).
  * Throws when anything cannot be read: the caller Blocks, never merges.
  */
 export async function unreadNow(repo, { issue, prNumber, self }, opts, alsoRead = {}) {
@@ -666,13 +666,13 @@ export async function questionRaisedAt(repo, pr, opts) {
  */
 export function fixClosingText({ commands = [], setupGuard = null } = {}) {
   const note = setupFilesNote(setupGuard);
-  return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Factory pushes it. Then update the Validation section of \`$FACTORY_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
+  return `Fix the cause in the code (never weaken, skip or delete a test unless the issue asks)${commands.length ? ", run the validation commands yourself" : ""} and commit on the same branch; Pendulum pushes it. Then update the Validation section of \`$PENDULUM_OUT/pr.md\`. A failing policy check (license allowlist, vulnerability or supply-chain policy, budget, required CI configuration) is fixed by meeting it, never by removing, overriding or pinning away a dependency the change needs or by editing the policy; if meeting it needs a policy change, change nothing for it, say so in pr.md, and your exit record asks that Question.${note ? ` ${note}` : ""} Ask no other questions.`;
 }
 
 export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd, timeoutMinutes, validation, budgetCommand, protectedList, ciChecks = [], decisions = [], harness = null, services = [], shellSecrets = [], setupGuard = null, maxParts = undefined }) {
   const template = readFileSync(templatePath, "utf8");
   const card = renderTaskCard(template, taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budgetCommand, protectedPaths: protectedList, ciChecks, setupGuard, maxParts }));
-  // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through factory-db).
+  // What the backend's sandbox asks of the model (local: scratch files under TMPDIR, databases through pendulum-db).
   const recorded = decisionsSection(decisions);
   return `${card.trimEnd()}${backend().sandbox.cardNotes(process.env, harness, services)}${shellSecretsNote(shellSecrets)}\n\n---\n\nIssue #${issue}: ${issueTitle}\n\n${issueBody || "(no body)"}\n${recorded ? `\n${recorded}\n` : ""}`;
 }
@@ -680,30 +680,30 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
  * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
- * answered when a person answered it (a reply by someone who can push but Factory's own answer on the reviewer's
- * comment, since the factory-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
- * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Factory's own
- * answer (logic.mjs factoryReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
- * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Factory's own reviews on the PR) decides which roots are the reviewer's by structure, which
+ * answered when a person answered it (a reply by someone who can push but Pendulum's own answer on the reviewer's
+ * comment, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
+ * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
+ * answer (logic.mjs pendulumReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
+ * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Pendulum's own reviews on the PR) decides which roots are the reviewer's by structure, which
  * also holds in local mode, where reviewer and developer are one login. Findings GitHub took in no line (postReview set
- * them out in the body of Factory's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
- * is answered once a comment under Factory's resolved marker for it (finding-check.mjs) is on the PR. Factory's own
- * reviews and markers are those by Factory or someone who can push (trustedAuthor). An open finding Factory answered
+ * them out in the body of Pendulum's own review, under markers) are listed too, each with the id `r<review id>-<n>`: one
+ * is answered once a comment under Pendulum's resolved marker for it (finding-check.mjs) is on the PR. Pendulum's own
+ * reviews and markers are those by Pendulum or someone who can push (trustedAuthor). An open finding Pendulum answered
  * before carries `earlier`, that answer's text, for the next answer pass, and each carries `raisedOn`, the commit it was
  * raised on, and `raisedAt`, when, as far as GitHub gives them.
  */
 export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, { token, reviewIds = null, thirdParty = [] }) {
   const comments = await listReviewComments(repo, prNumber, { token });
   const byId = new Map(comments.map((c) => [c.id, c]));
-  // A named reviewer's comment is never Factory's own, even where the author filter stands in for the review ids.
+  // A named reviewer's comment is never Pendulum's own, even where the author filter stands in for the review ids.
   const ours = (c) => !namedReviewer(c, thirdParty) && (reviewIds ? reviewIds.has(c.pull_request_review_id) : !reviewerLogin || c.user?.login === reviewerLogin);
   const roots = comments.filter((c) => !c.in_reply_to_id && ours(c) && !isPlaceholder(c.body));
   const theirs = thirdParty.length ? comments.filter((c) => !c.in_reply_to_id && namedReviewer(c, thirdParty)) : [];
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
-  // A person's answer, as ever; Factory's own answer, its latest per comment (the finding check's to judge).
-  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? trustedAuthor(c) && !factoryReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
-  const answer = new Map(replies.filter(factoryReply).map((c) => [c.in_reply_to_id, c.body]));
+  // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
+  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? trustedAuthor(c) && !pendulumReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const answer = new Map(replies.filter(pendulumReply).map((c) => [c.in_reply_to_id, c.body]));
   const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.
   const resolved = candidates.length ? new Set((await reviewThreads(repo, prNumber, 0, { token })).filter((t) => t.resolved).map((t) => t.rootId)) : new Set();
@@ -711,7 +711,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   // `raisedAt`: when it was raised, which the finding check sets beside the decisions' times.
   const earlier = (c) => ({ ...(c.original_commit_id ? { raisedOn: c.original_commit_id } : {}), ...(c.created_at ? { raisedAt: c.created_at } : {}), ...(answer.has(c.id) ? { earlier: answerText(answer.get(c.id)) } : {}) });
   const open = candidates.filter((c) => !resolved.has(c.id)).map((c) => (ourIds.has(c.id) ? { ...c, ...earlier(c) } : { ...thirdPartyComment(c, namedReviewer(c, thirdParty)), ...earlier(c) }));
-  // Factory's own reviews (its marker at the start, by Factory or someone who can push), and the findings in their bodies.
+  // Pendulum's own reviews (its marker at the start, by Pendulum or someone who can push), and the findings in their bodies.
   const reviews = (await rest(`repos/${repo.full}/pulls/${prNumber}/reviews?per_page=100`, { token, paginate: true })) || [];
   const own = reviews.filter((r) => REVIEW_AT_START.test(r.body || "") && trustedAuthor(r) && (reviewIds ? reviewIds.has(r.id) : !reviewerLogin || r.user?.login === reviewerLogin));
   const inBody = own.flatMap((r) => bodyFindings(r.body).map((f) => ({ id: bodyFindingId(r.id, f.n), path: f.path, line: f.line, body: f.body, inBody: true, ...(r.commit_id ? { raisedOn: r.commit_id } : {}), ...(r.submitted_at ? { raisedAt: r.submitted_at } : {}) })));
@@ -721,18 +721,18 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const said = new Map(trusted.map((c) => [BODY_REPLY.exec(c.body || "")?.[1], c.body]).filter(([id]) => id));
   return [...open, ...inBody.filter((f) => !done.has(f.id)).map((f) => (said.has(f.id) ? { ...f, earlier: answerText(said.get(f.id)) } : f))];
 }
-/** Factory's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
+/** Pendulum's earlier answer as the next answer pass reads it: its marker and heading off, sanitised and cut. */
 const answerText = (body) =>
   sanitize(
     String(body || "")
-      .replace(/^<!-- factory:\d+:reply:\S+ -->\n?/, "")
+      .replace(/^<!-- pendulum:\d+:reply:\S+ -->\n?/, "")
       .replace(/^On review finding r\d+-\d+ \(in the review body\):\n+/, "")
       .trim(),
     { max: 4000 },
   );
-const REVIEW_AT_START = /^<!-- factory:\d+:review -->/;
-const BODY_REPLY = /^<!-- factory:\d+:reply:(r\d+-\d+) -->/;
-const BODY_RESOLVED = /^<!-- factory:\d+:resolved:(r\d+-\d+) -->/;
+const REVIEW_AT_START = /^<!-- pendulum:\d+:review -->/;
+const BODY_REPLY = /^<!-- pendulum:\d+:reply:(r\d+-\d+) -->/;
+const BODY_RESOLVED = /^<!-- pendulum:\d+:resolved:(r\d+-\d+) -->/;
 
 /**
  * A run that ended without a harness result: a signal, or a non-zero exit with no turn and no result subtype. The
@@ -752,11 +752,11 @@ export const crashed = (rec) => !rec.ok && !rec.timedOut && !rec.budgetExceeded 
  */
 export function shellSecretsNote(names = []) {
   // The worker's own state directory (harness.mjs workerStateDir), on every card.
-  const state = "\n\nKeep your own state between commands (a run ledger, caches) in `$FACTORY_STATE_DIR`: outside the checkout, kept for this stage. A ledger there is advisory; Factory's own count caps spend.";
+  const state = "\n\nKeep your own state between commands (a run ledger, caches) in `$PENDULUM_STATE_DIR`: outside the checkout, kept for this stage. A ledger there is advisory; Pendulum's own count caps spend.";
   if (!names.length) return state;
   const them = names.length === 1 ? "it" : "them";
-  // An AI Gateway key is relayed (gateway-relay.mjs): the name holds the relay's token, the address is FACTORY_GATEWAY_URL.
-  const relayed = names.includes("AI_GATEWAY_API_KEY") ? " `AI_GATEWAY_API_KEY` holds a relay token, not the key: Factory relays each call to the AI Gateway, counts it against the Objective's max_usd and refuses calls once it is reached (stop then, and say so). Point the gateway client at `$FACTORY_GATEWAY_URL` (the AI SDK: `createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY, baseURL: process.env.FACTORY_GATEWAY_URL + \"/v4/ai\" })`); a client that ignores it reaches nothing." : "";
+  // An AI Gateway key is relayed (gateway-relay.mjs): the name holds the relay's token, the address is PENDULUM_GATEWAY_URL.
+  const relayed = names.includes("AI_GATEWAY_API_KEY") ? " `AI_GATEWAY_API_KEY` holds a relay token, not the key: Pendulum relays each call to the AI Gateway, counts it against the Objective's max_usd and refuses calls once it is reached (stop then, and say so). Point the gateway client at `$PENDULUM_GATEWAY_URL` (the AI SDK: `createGateway({ apiKey: process.env.AI_GATEWAY_API_KEY, baseURL: process.env.PENDULUM_GATEWAY_URL + \"/v4/ai\" })`); a client that ignores it reaches nothing." : "";
   return `${state}\n\nThe repository gave your shell ${names.map((n) => `\`${n}\``).join(", ")}, for what the Objective needs: every command you run can read and spend ${them}. Use ${them} only for the Objective's own steps, never print ${them}, and never write ${them} into a file or a commit.${relayed}`;
 }
 
@@ -766,7 +766,7 @@ export function shellSecretsNote(names = []) {
  * pushes none of it and the stage Blocks with the reason. A turn that put them back and asks a Question in its exit
  * record (the fix needs that change) stops the stage there, so no further fix pass makes the change again and the
  * Question reaches the exit. The fence check (fence-check.mjs, through the outbox) has already let go each file it
- * judged part of the fix; a refusal that stands only because it gave no answer carries `cause` (`factory`, `outage`),
+ * judged part of the fix; a refusal that stands only because it gave no answer carries `cause` (`pendulum`, `outage`),
  * and the stage harness's usage limit that stopped its questions ends the stage on it (UsageLimitReached), with nothing
  * of the pass pushed. Returns {usage, refused?: reason, cause?, question?: true, harness?: record} (harness when that
  * turn hit a cap or died; question with refused naming the files the fix needs).
@@ -796,8 +796,8 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     // What the fence check said, without the model's confidence: the worker is told the verdict, never how near it was.
     const told = verdict?.told ?? [];
     const ask = [
-      `Factory will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.${told.length ? ` Factory's fence check: ${told.join("; ")}.` : ""}`,
-      `Put each of those files back as it was at ${since} (\`git checkout ${since} -- <file>\`, or \`git rm\` a file that commit lacks) and commit; keep the rest of the fix. If the fix cannot work without that change, put the files back anyway, say so in \`$FACTORY_OUT/pr.md\`, and your exit record asks that Question, naming each file and why. Change nothing else.`,
+      `Pendulum will not push this: it changes ${out.join(", ")}, toolchain, lockfile or CI configuration that neither the plan nor the failing check (or the review comment) names.${told.length ? ` Pendulum's fence check: ${told.join("; ")}.` : ""}`,
+      `Put each of those files back as it was at ${since} (\`git checkout ${since} -- <file>\`, or \`git rm\` a file that commit lacks) and commit; keep the rest of the fix. If the fix cannot work without that change, put the files back anyway, say so in \`$PENDULUM_OUT/pr.md\`, and your exit record asks that Question, naming each file and why. Change nothing else.`,
     ].join("\n\n");
     const resume = session?.canResume ? session.id : null;
     const live = liveActivity(progress, { harness, model, tick: io?.tick });
@@ -841,10 +841,10 @@ export function scopeTurnResult({ first, out, verdict = null, rec, exitBefore, e
 }
 
 /**
- * Factory's own validation: run the commands; on red, send the failure back to the
+ * Pendulum's own validation: run the commands; on red, send the failure back to the
  * same harness (resume where the harness can) and run them once more, for as long as each fix pass makes progress
  * (fix-progress.mjs: the exact checks, then `progressCheck`'s decision call), within max_usd and the wall clock. A red
- * on a catch-up merge of Factory's own is not the change's: it gets its fix pass unjudged. A fix pass that commits nothing on a red that is the work's
+ * on a catch-up merge of Pendulum's own is not the change's: it gets its fix pass unjudged. A fix pass that commits nothing on a red that is the work's
  * gets one fresh worker pass, a new session, before the stage Blocks (logic.mjs freshPassDenied): once per head, not
  * counted as a pass. `spentUsd` is what the job has spent before this loop; each fix run gets what is left of `maxUsd`,
  * and nothing is run once it is gone. Returns {green, passes, lastOutput, usage: [records], harness?:
@@ -861,12 +861,12 @@ export function scopeTurnResult({ first, out, verdict = null, rec, exitBefore, e
  */
 export const progressRunId = (env = process.env) =>
   // A stage in a cloud sandbox is keyed by the launcher (launch.mjs stageProgressKey), which books its vendor cost there.
-  /^[A-Za-z0-9-]{1,60}$/.test(env.FACTORY_PROGRESS_RUN || "") ? env.FACTORY_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
+  /^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") ? env.PENDULUM_PROGRESS_RUN : env.GITHUB_RUN_ID ? `${env.GITHUB_RUN_ID}${Number(env.GITHUB_RUN_ATTEMPT) > 1 ? `-${env.GITHUB_RUN_ATTEMPT}` : ""}` : String(Date.now());
 /** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
 export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
   `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
-export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`factory:host:\` labels).` : "");
+export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`pendulum:host:\` labels).` : "");
 /**
  * A send-back rebase stage's end (#277): its rebase line (`cost`, logic.mjs rebaseCost: its dollars and bound marks;
  * `conflict`) is set on the progress comment first, so a stop's write (progress.flushNow) carries it even when the read
@@ -897,7 +897,7 @@ export const STOP_WRITE_MS = 5_000;
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
  * progress.spend records the final figure, so a stage that dies (killed, the machine restarted) still leaves the spend
- * Factory last knew: marked `usdLowerBound`, or `usdUpperBound` when part of it is priced at the table's dearest rates.
+ * Pendulum last knew: marked `usdLowerBound`, or `usdUpperBound` when part of it is priced at the table's dearest rates.
  * Null when the stage records no spend in its progress comment (backend.mjs spendInProgress), or for a `--here` run.
  * `soFarNow`: the same read at once (harness.mjs stageSpendNow). A stage stopped by a signal (proc.mjs atStop: its
  * harness's group already killed) writes it into the comment one last time, within STOP_WRITE_MS, when it is more than
@@ -936,7 +936,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    return `${head}Factory ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
+    return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
   };
   /**
    * Stopped by a signal, the harness already killed: the live reading once more, if it is more than the line shows. The
@@ -1060,7 +1060,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     await write();
   };
   /**
-   * The login Factory posts as: its token's own identity (the App's bot on Actions, the token's user in local mode),
+   * The login Pendulum posts as: its token's own identity (the App's bot on Actions, the token's user in local mode),
    * never the author of a comment that carries a marker. Only records under this login count (logic.mjs decisionsReadOf).
    * Null when the token's identity cannot be read.
    */
@@ -1114,7 +1114,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
 }
 
 /**
- * Factory's validation of the branch (the commands, or the required checks on the head it pushed), each red handed to a
+ * Pendulum's validation of the branch (the commands, or the required checks on the head it pushed), each red handed to a
  * fix pass until green or a fix pass makes no progress (fix-progress.mjs) or max_usd or the wall clock runs out; a green result's `given` is each red a fix pass was handed (its `tail`).
  * Three options let a stage take the checks' wait apart from the fix passes:
  * - `handOff`: with required checks, the first head whose local part is green (the commands first on the local route)
@@ -1167,7 +1167,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // Each red a fix pass was handed, as its failure lines and output's end (`tail`): what those passes were asked to fix
   // (review.mjs answerGate), returned as `given` once the checks are green.
   const given = [];
-  // With required checks configured, the repository's CI is Factory's validation: the head is
+  // With required checks configured, the repository's CI is Pendulum's validation: the head is
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
   const byChecks = !!(checks && checks.names?.length && checks.prNumber);
@@ -1184,14 +1184,14 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // The commands on this pass: not on a first pass that reads the checks only (checksOnlyFirst).
     const commandsNow = localFirst && !(checksOnlyFirst && passes === 1);
     // A spent deadline is a 1 s cap, never 0 (exec reads 0 as no limit at all). A failed command's output stays in
-    // memory and reaches the fix run in $FACTORY_IN/checks/; the prompt carries each one's tail.
+    // memory and reaches the fix run in $PENDULUM_IN/checks/; the prompt carries each one's tail.
     if (!byChecks || commandsNow) await begin();
     if (!byChecks) return runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
     if (commandsNow) {
       const local = await runValidation(checkout, commands, { timeoutMs: Math.max(1000, remainingMs(deadlineAt)), env });
       if (!local.green) return local;
     }
-    // The checks run on the head Factory pushed (outbox.mjs); a refused push ends the loop, and the stage Blocks.
+    // The checks run on the head Pendulum pushed (outbox.mjs); a refused push ends the loop, and the stage Blocks.
     if (outbox && !(await outbox.push())) return { green: false, pushRefused: outbox.error };
     const sha = outbox ? outbox.expected() : (await git(checkout, ["rev-parse", "HEAD"])).stdout.trim();
     // Handed off: the checks on this head are the review stage's to wait for, beside its reviewer.
@@ -1394,7 +1394,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
    */
   // A red that would be all the default branch's but for jobs whose same-failure judgement got no answer (reds.mjs
   // undecidedOnBase): no fix pass is spent on what may be the base's. The stage ends on the stage harness's usage limit
-  // that stopped the question; otherwise it Blocks as Factory's (or the outage's), never as the work's.
+  // that stopped the question; otherwise it Blocks as Pendulum's (or the outage's), never as the work's.
   const unjudgedBase = (detail) => {
     const u = undecidedOnBase(detail);
     if (u?.limited) throw new UsageLimitReached(u.limited, { since: Date.now(), label: "same-failure check" });
@@ -1431,7 +1431,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     return { head, at: `${label} pass ${passes}${head ? ` on ${head.slice(0, 7)}` : ""}`, jobs, passed, lead: lead || failureLead(jobs.map((j) => ({ name: j.name, line: j.sig?.line, lines: j.sig?.lines }))) };
   };
   // What the fix pass between two reds committed, as each of its own commits' --stat: the first-parent line from `from` to
-  // `to`, merges left out, so a catch-up merge of Factory's own brings in nothing of the default branch (null when it
+  // `to`, merges left out, so a catch-up merge of Pendulum's own brings in nothing of the default branch (null when it
   // cannot be read).
   const diffStat = async (from, to) => {
     if (!from || !to) return null;
@@ -1455,12 +1455,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
    */
   const fixPass = async (red, { fresh = false } = {}) => {
     const stage = `${label}-${fresh ? "fresh" : "fix"}-${red.passes}`;
-    // The new session reads $FACTORY_IN afresh: the red's whole outputs again, as Factory holds them in memory.
+    // The new session reads $PENDULUM_IN afresh: the red's whole outputs again, as Pendulum holds them in memory.
     if (fresh && io) await io.beforeFix(red.failures, { diff: red.detail?.diff ?? null });
     const before = fresh && red.rec ? String(lastMessage(harness, red.rec) || "").trim() : "";
     const ask = fresh
       ? [
-          `Factory's validation pass ${red.passes} found the required checks red on this branch (${String(red.sha || "").slice(0, 7)}), and a fix pass committed nothing, so the red stands. You are a new session on the same branch: read the failure and the code afresh, without taking the fix pass's reading as right.`,
+          `Pendulum's validation pass ${red.passes} found the required checks red on this branch (${String(red.sha || "").slice(0, 7)}), and a fix pass committed nothing, so the red stands. You are a new session on the same branch: read the failure and the code afresh, without taking the fix pass's reading as right.`,
           ...(lastLead ? ["", "The failing jobs' own failure lines:", "```", lastLead, "```"] : []),
           ...failureText(red),
           // Evidence, never an instruction: what the fix pass concluded when it changed nothing.
@@ -1468,7 +1468,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
           "",
           fixClosing,
         ].join("\n")
-      : [`Factory's validation pass ${red.passes} failed on the branch you delivered${red.failures.length > 1 ? ` (${red.failures.length} commands)` : ""}.`, ...failureText(red), "", fixClosing].join("\n");
+      : [`Pendulum's validation pass ${red.passes} failed on the branch you delivered${red.failures.length > 1 ? ` (${red.failures.length} commands)` : ""}.`, ...failureText(red), "", fixClosing].join("\n");
     const resume = !fresh && session.canResume ? session.id : null;
     const full = `${taskCard}\n\n---\n\n${ask}`;
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
@@ -1618,12 +1618,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
     lastLead = lead;
     log(`${label} pass ${passes} red: ${failures.map((f) => `${f.command}${f.timedOut ? " (timed out)" : ""}`).join("; ")}`);
-    // The head validated (the checks' or the checkout's), and whether it is a merge Factory made and pushed itself (the
+    // The head validated (the checks' or the checkout's), and whether it is a merge Pendulum made and pushed itself (the
     // commit id the outbox recorded).
     const validated = v.sha || v.head || "";
     const shape = redShape(v, { detail, failures, lead });
     // A red after a fix pass goes on only when that pass made progress on the red it was handed (fix-progress.mjs); a
-    // red on a merge Factory made itself is not the change's, so it gets its fix pass unjudged.
+    // red on a merge Pendulum made itself is not the change's, so it gets its fix pass unjudged.
     const caught = !!validated && !!outbox?.caughtUp?.(validated);
     const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : null;
     seen.push(shape);
@@ -1633,8 +1633,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (judged && !judged.progress) {
       const first = String(shape.lead).split("\n")[0].replace(/^--- /, "");
       stalled = `the fix pass before it ${judged.undecided ? "could not be judged for progress" : "made no progress"}: ${judged.why}; failing: ${redNames(shape).join(", ") || failed.command}${first ? ` (${first})` : ""}`;
-      // An unmade judgement (the decider gave no answer) is Factory's, or its vendor's outage, never the work's.
-      if (judged.undecided) stalledCause = judged.cause || "factory";
+      // An unmade judgement (the decider gave no answer) is Pendulum's, or its vendor's outage, never the work's.
+      if (judged.undecided) stalledCause = judged.cause || "pendulum";
       if (onPhase) await onPhase(`${label} pass ${passes} red: ${stalled}`);
       break;
     }
@@ -1647,7 +1647,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage) - (decisionSpend() - decisionsAtStart)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
-    // Each failure's whole output goes to $FACTORY_IN/checks/ with the rest of what the fix run reads.
+    // Each failure's whole output goes to $PENDULUM_IN/checks/ with the rest of what the fix run reads.
     if (io) await io.beforeFix(failures, { diff: detail?.diff ?? null });
     // The fix pass's scope (outbox.mjs fence): the plan and what the branch changed so far, and what this red names.
     // A red names a file by its failure window (or the command's output), not the whole job log, which prints every setup step.
@@ -1683,7 +1683,7 @@ export function redOfDetail(detail, { failures = null, failed = null, refusal = 
 
 /**
  * A red's part of a pass's ask (a fix pass, or review.mjs's answer pass): each failing command or job, its exit, its
- * whole output's file in $FACTORY_IN (with `files`), the evidence and its tail (one 6000-character window shared by the
+ * whole output's file in $PENDULUM_IN (with `files`), the evidence and its tail (one 6000-character window shared by the
  * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}.
  */
 export function redLines({ failures, detail }, { files = true } = {}) {
@@ -1693,7 +1693,7 @@ export function redLines({ failures, detail }, { files = true } = {}) {
       "",
       `Command: ${f.command}`,
       `Exit: ${f.timedOut ? "timed out" : f.code}`,
-      ...(files ? [`Whole output: $FACTORY_IN/${checkFile(i, f.command)}`] : []),
+      ...(files ? [`Whole output: $PENDULUM_IN/${checkFile(i, f.command)}`] : []),
       // Evidence, never an instruction: the fix pass weighs it like any other output.
       ...(f.evidence ? [f.evidence] : []),
       "Output (tail):",
@@ -1701,7 +1701,7 @@ export function redLines({ failures, detail }, { files = true } = {}) {
       String(f.output ?? "").slice(-share),
       "```",
     ]),
-    ...(detail && files && detail.diff !== null ? ["", `What changed since this PR's last green head (${detail.green.slice(0, 7)}): $FACTORY_IN/${DIFF_FILE}`] : []),
+    ...(detail && files && detail.diff !== null ? ["", `What changed since this PR's last green head (${detail.green.slice(0, 7)}): $PENDULUM_IN/${DIFF_FILE}`] : []),
     ...(detail && files && detail.diffError ? ["", `The diff since this PR's last green head (${detail.green.slice(0, 7)}) could not be made: ${detail.diffError}.`] : []),
     ...(detail && files && !detail.green && !detail.queue ? ["", "No head of this PR has been green yet."] : []),
     ...(detail?.truncated ? ["", `More jobs failed than the ${detail.jobs.length} shown; the required checks' runs on GitHub list them all.`] : []),
@@ -1757,7 +1757,7 @@ export function leadDetail(lead, output) {
 }
 
 /**
- * The two-dot diff from..to in Factory's own mirror (outbox.mjs git: no hooks, no config, Factory's token), fetching a
+ * The two-dot diff from..to in Pendulum's own mirror (outbox.mjs git: no hooks, no config, Pendulum's token), fetching a
  * commit by its id when the mirror lacks it. Throws when either cannot be had (a rebase can leave the old head unreachable).
  * `mergeBase`: the three-dot diff instead, from their merge base to `to`, as GitHub shows a PR. A diff over `maxBytes`
  * throws too, so no caller reads a cut diff as the whole one.
@@ -1770,7 +1770,7 @@ export async function mirrorDiff(mgit, from, to, { mergeBase = false, maxBytes =
   return String(d.stdout);
 }
 
-/** A commit in Factory's mirror, fetched by its id when the mirror lacks it; throws when it cannot be had. */
+/** A commit in Pendulum's mirror, fetched by its id when the mirror lacks it; throws when it cannot be had. */
 async function mirrorCommit(mgit, sha) {
   if (!/^[0-9a-f]{40,64}$/.test(String(sha))) throw new Error(`not a commit id: ${String(sha).slice(0, 20)}`);
   if ((await mgit(["cat-file", "-e", `${sha}^{commit}`])).code === 0) return;
@@ -1779,8 +1779,8 @@ async function mirrorCommit(mgit, sha) {
 }
 
 /**
- * The head Factory's review covers (#350): the later, by GitHub's times, of the head its last review read (the review's
- * `commit_id`; reviews from Factory or someone who can push, carrying the review marker) and Factory's own covered record
+ * The head Pendulum's review covers (#350): the later, by GitHub's times, of the head its last review read (the review's
+ * `commit_id`; reviews from Pendulum or someone who can push, carrying the review marker) and Pendulum's own covered record
  * (recordCovered). `{sha, at, answer}`, or null with neither. `answer`: the record says the commits after it are an
  * answer pass's that the answer gate held for review (review.mjs answerGate): the pass that reads them is that answer's review.
  */
@@ -1799,7 +1799,7 @@ export function coveredHead({ reviews = [], comments = [], issue }) {
 
 /**
  * The covered head's own change, from where it left the default branch (`base`, its head now), replayed onto `head`'s
- * merge base with it (git merge-tree), in Factory's mirror: `{tree, headTree}`, or `{why}` when a commit cannot be had or
+ * merge base with it (git merge-tree), in Pendulum's mirror: `{tree, headTree}`, or `{why}` when a commit cannot be had or
  * the replay conflicts.
  */
 async function replayOnto(mgit, { base, covered, head }) {
@@ -1822,7 +1822,7 @@ async function replayOnto(mgit, { base, covered, head }) {
 }
 
 /**
- * What the PR's `head` adds to the head Factory's review covers (`covered`, coveredHead), decided on trees in Factory's
+ * What the PR's `head` adds to the head Pendulum's review covers (`covered`, coveredHead), decided on trees in Pendulum's
  * mirror (#350, replayOnto). `{rebase: true}`: head is the covered head, or exactly its replay (a clean rebase, GitHub's
  * update-branch merge). Else `{rebase: false, diff}`: head against the replay, which is the commits written since without
  * the default branch's changes, or `diff` null when the replay conflicts or a commit cannot be had (then the whole PR is
@@ -1877,8 +1877,8 @@ export async function answerDiff(mgit, { base, from, head, maxBytes = 1024 * 102
 }
 
 /**
- * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Factory review yet), `covered`
- * (the head is the head Factory's review covers, or only a rebase of it: no second pass), or neither, when commits were
+ * Whether the PR's head still needs a review pass (#350), on every route: `first` (no Pendulum review yet), `covered`
+ * (the head is the head Pendulum's review covers, or only a rebase of it: no second pass), or neither, when commits were
  * written after it (the work stage answering a Question, a maintainer's push, an answer pass that applied maintainers'
  * decisions or that the answer gate held): then `since` is the covered head and `diff` the changes since it
  * (sinceReview), or null for the whole PR. `head`: the head it was decided for; `answer`: coveredHead's.
@@ -1906,7 +1906,7 @@ function lineageTotal(id, records) {
 
 /**
  * Until when (ms) the stage's prompt cache stays warm: its last harness pass that ran's end plus its cache's lifetime
- * (harness.mjs cacheLifetimeMs); null when no pass ran or its harness has none Factory sets. A decision record
+ * (harness.mjs cacheLifetimeMs); null when no pass ran or its harness has none Pendulum sets. A decision record
  * (harness.mjs runDecision: no session, so no cache the next stage reads) is no pass.
  */
 export function cacheWarmUntil(records = []) {
@@ -1916,7 +1916,7 @@ export function cacheWarmUntil(records = []) {
 
 /**
  * Whether a stage's record (writeUsage's) shows its provider served a harness pass (`servedPasses`: a decision call's
- * output is no pass, and Factory reads no quota from one), no usage limit or refusal ending it, and no quota reading
+ * output is no pass, and Pendulum reads no quota from one), no usage limit or refusal ending it, and no quota reading
  * reported: the account's harness or credential reports none (holds.mjs silent).
  */
 export const servedSilent = (r) => !!r && !r.quota && !r.usageLimit && !r.limitRefused && Number(r.servedPasses) > 0;
@@ -1932,7 +1932,7 @@ export function stageQuota(records = []) {
   const windows = {};
   let harness = null;
   for (const r of records || []) {
-    // A decision record (harness.mjs runDecision) carries no reading Factory reads: only the stage's harness passes.
+    // A decision record (harness.mjs runDecision) carries no reading Pendulum reads: only the stage's harness passes.
     if (!r?.quota?.windows || r.decision) continue;
     harness = r.quota.harness;
     Object.assign(windows, r.quota.windows);
@@ -2032,7 +2032,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,
-    // The saved session's running total as Factory last read it (runHarness), for the stage that restores it (clampTotal).
+    // The saved session's running total as Pendulum last read it (runHarness), for the stage that restores it (clampTotal).
     // Not this stage's spend: it is one session's total as its harness reports it, so it spans every earlier stage that
     // ran the session, leaves out the other sessions this stage ran (a reviewer's own, a fresh thread), a Codex session's
     // sub-agent threads (each in `children`) and the worker key, and after a pass with no total stays at the last one.
@@ -2098,20 +2098,20 @@ export function questionNotice({ at = "", stage = "work", reason, pr = null, ask
 
 /**
  * Whether a Blocked notice's way on is a resume or a restart, said plainly, since the two look alike and a restart
- * throws away paid work: re-applying `factory:objective` resumes from `factory/<issue>` and its PR; `factory:restart`
+ * throws away paid work: re-applying `pendulum:objective` resumes from `pendulum/<issue>` and its PR; `pendulum:restart`
  * discards them (stop.mjs restartObjective, whose record names the commit that restores the branch). `next`, decided on
  * structure: `resume` (the stop is outside the work: every cause but `work`), `work` (the work itself stopped: resume
  * once its cause is fixed, restart only to redo it), `restart` (a restart was asked for and could not finish), `none`
  * (neither gets past the stop: an untrusted author). A `delivered` PR (out of draft when the stage Blocked) is named so.
  */
 export function nextStep({ issue, pr = null, next = "resume", delivered = false }) {
-  const branch = `\`factory/${issue}\``;
+  const branch = `\`pendulum/${issue}\``;
   const kept = pr ? `${branch} and PR #${pr.number}` : branch;
   const lost = pr ? `${delivered ? "the delivered " : ""}PR #${pr.number} with its review, the commits on ${branch} and the spend on them` : `the commits on ${branch}, if any, and the spend on them`;
   if (next === "none") return "Neither a resume nor a restart gets past this: both check the issue's author again.";
-  if (next === "restart") return `To keep the work instead of restarting, re-apply \`factory:objective\`: that resumes from ${kept}.`;
-  if (next === "work") return `Resume once the cause is fixed: re-apply \`factory:objective\` to go on from ${kept}. Restart (\`factory:restart\`) only when the work itself must be redone from the issue's text: a restart discards ${lost}.`;
-  return `Resume, don't restart: the stop is outside the work. Once its cause is fixed or has passed, re-apply \`factory:objective\` to go on from ${kept}. \`factory:restart\` would discard ${lost}, and gain nothing.`;
+  if (next === "restart") return `To keep the work instead of restarting, re-apply \`pendulum:objective\`: that resumes from ${kept}.`;
+  if (next === "work") return `Resume once the cause is fixed: re-apply \`pendulum:objective\` to go on from ${kept}. Restart (\`pendulum:restart\`) only when the work itself must be redone from the issue's text: a restart discards ${lost}.`;
+  return `Resume, don't restart: the stop is outside the work. Once its cause is fixed or has passed, re-apply \`pendulum:objective\` to go on from ${kept}. \`pendulum:restart\` would discard ${lost}, and gain nothing.`;
 }
 
 /** The way on (nextStep) a Block's cause (logic.mjs BLOCK_CAUSES) gives: `work` for the work's own, `resume` for any other. */
@@ -2122,8 +2122,8 @@ export const nextOf = (cause) => (cause === "work" ? "work" : "resume");
  * push or an edit (objective-trust.mjs AUTHOR_FIX: an untrusted author is fixed by no edit), and whether to resume or
  * restart (nextStep; `next` defaults to the cause's, nextOf).
  */
-export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false, cause = "factory", next = null }) =>
-  `Blocked (${stage}): ${reason}${pr || /[.!?]$/.test(reason) ? "" : "."}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`factory/${issue}\` or editing the issue, then re-apply \`factory:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
+export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, delivered = false, cause = "pendulum", next = null }) =>
+  `Blocked (${stage}): ${reason}${pr || /[.!?]$/.test(reason) ? "" : "."}${pr ? (delivered ? ` — PR #${pr.number} was delivered; it is a draft until this is fixed.` : ` — PR #${pr.number} is a draft with what exists.`) : ""} ${fix || `Fix by pushing to \`pendulum/${issue}\` or editing the issue, then re-apply \`pendulum:objective\`.`}\n\n${nextStep({ issue, pr, delivered, next: next || nextOf(cause) })}`;
 
 /**
  * The Block doctor's FAIL rows (doctor.mjs: name, detail, fix) make, cause `setup`: the reason names each failing check
@@ -2133,23 +2133,23 @@ export const blockedLine = ({ issue, pr = null, stage, reason, fix = null, deliv
 export function doctorBlock(rows) {
   const reason = rows.map((c) => (c.detail ? `${c.name}: ${c.detail}` : c.name)).join("; ");
   const steps = rows.map((c) => String(c.fix || "").trim().replace(/[.\s]+$/, "")).filter(Boolean);
-  const fix = `Fix: ${steps.length ? steps.join("; ") : "the step `/factory:factory-doctor` names"}; then re-apply \`factory:objective\`.`;
+  const fix = `Fix: ${steps.length ? steps.join("; ") : "the step `/pendulum:pendulum-doctor` names"}; then re-apply \`pendulum:objective\`.`;
   return { reason, fix, cause: "setup", stage: "doctor" };
 }
 
 /**
  * Apply an exit to GitHub: card, fallback label, draft state, the one comment,
  * the review request. `where` is the issue number; `pr` may be null on blocked.
- * `notice` (local mode with a Factory App, app-token.mjs noticeMinter): the notices that @mention `notify` post as the
+ * `notice` (local mode with a Pendulum App, app-token.mjs noticeMinter): the notices that @mention `notify` post as the
  * App, since local mode writes as the operator and GitHub notifies no one of their own mention (#2522).
  * `cause` (logic.mjs BLOCK_CAUSES) goes on a Blocked notice as its cause line (blockMarker), for the bench scorer, and
  * decides whether the notice says to resume or restart (nextStep), unless `next` says it. Returns the exit applied and
- * its reason: a Question whose PR GitHub would not draft is applied as a Block (cause `factory`).
+ * its reason: a Question whose PR GitHub would not draft is applied as a Block (cause `pendulum`).
  */
-export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "factory", next = null }, { token, notice = null }) {
+export async function applyExit(repo, { issue, pr, exit, reason, detail = "", notify, stage = "work", key = null, askOnIssue = false, fix = null, cause = "pendulum", next = null }, { token, notice = null }) {
   const project = await findProject(repo, { token }).catch(() => null);
   // The reason and the output can carry the harness's words (its exit record, a command's output): published as
-  // Factory, they are sanitised like every other harness text (handoff.mjs sanitize).
+  // Pendulum, they are sanitised like every other harness text (handoff.mjs sanitize).
   reason = sanitize(reason || "", { max: 2000 });
   detail = sanitize(detail || "", { max: 4000 });
   const at = notify ? `@${notify} ` : "";
@@ -2176,8 +2176,8 @@ export async function applyExit(repo, { issue, pr, exit, reason, detail = "", no
       log(`draft: ${String(undrafted.message || undrafted).slice(0, 120)}`);
       const why = `PR #${pr.number} could not be made a draft for its Question (${code}), so the Question is not asked; the question was: ${reason.replace(/^question:\s*/i, "")}`;
       // No PR to the Block: it would try the same draft again, and say the PR is one.
-      const fix = `Fix by letting Factory's token convert PR #${pr.number} to a draft, or by making it one by hand, then re-apply \`factory:objective\`.`;
-      return applyExit(repo, { issue, pr: null, exit: "blocked", reason: why, notify, stage, cause: "factory", fix }, { token, notice });
+      const fix = `Fix by letting Pendulum's token convert PR #${pr.number} to a draft, or by making it one by hand, then re-apply \`pendulum:objective\`.`;
+      return applyExit(repo, { issue, pr: null, exit: "blocked", reason: why, notify, stage, cause: "pendulum", fix }, { token, notice });
     }
     await setStateLabel(repo, issue, "question", { token });
     await moveCard(project, repo, issue, "In review", { token }).catch((e) => log(`card: ${e.message.slice(0, 120)}`));
@@ -2276,7 +2276,7 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
  * RELAUNCH_MAX), so the notice mentions no one (the stage passes no `notify`); the dispatcher's own notice does, once
  * the relaunches are used up.
  */
-export const RELAUNCH_NOTE = `Factory relaunches a stage lost to its network, at most ${RELAUNCH_MAX} times since the Objective was last started; past that it Blocks it for you.`;
+export const RELAUNCH_NOTE = `Pendulum relaunches a stage lost to its network, at most ${RELAUNCH_MAX} times since the Objective was last started; past that it Blocks it for you.`;
 
 /**
  * The outage record a paused or ended stage writes in result.json (outageOf's fields as ISO times; `reset` and `quota`
@@ -2396,14 +2396,14 @@ export async function earlyOutageEnd(e, { local, usageDir = null, harness, model
 
 /**
  * One GitHub step of a stage's exit (a delivery write, a read the merge needs): run `step`; when it fails, `decision`
- * becomes a Block with the cause `factory`, `what` and the error, and with `outage`, the outage the step met
+ * becomes a Block with the cause `pendulum`, `what` and the error, and with `outage`, the outage the step met
  * (network.mjs outageMet), if any, for outageFirst. Returns what `step` returned, or undefined when it failed.
  */
 export async function exitStep(decision, what, step) {
   try {
     return await step();
   } catch (e) {
-    Object.assign(decision, { exit: "blocked", cause: "factory", reason: `${what}: ${String(e?.stderr || e?.message || e).slice(0, 160)}`, outage: outageMet(e) });
+    Object.assign(decision, { exit: "blocked", cause: "pendulum", reason: `${what}: ${String(e?.stderr || e?.message || e).slice(0, 160)}`, outage: outageMet(e) });
     return undefined;
   }
 }
@@ -2427,14 +2427,14 @@ export async function markRunning(repo, issue, { token }) {
 }
 
 /**
- * The harness's exit record: `text`, the exit.json it left in $FACTORY_OUT (handoff.mjs readOut),
+ * The harness's exit record: `text`, the exit.json it left in $PENDULUM_OUT (handoff.mjs readOut),
  * else one more harness call answering EXIT_PROMPT (resumed where the harness can), parsed as
  * JSON. Neither reads the PR body or the plan comment. Returns {record, usage: [records], basis, checked};
  * `record` is {exit: "blocked", reason} when the harness left nothing and could not answer. With no record left while a
  * host this process gave up on still does not answer (network.mjs givenUp), nothing is asked: it throws that outage.
  * A question exit whose questions name no test of the Question rule (parseExitRecord `unfounded`) gets one more
  * call, questionCheckPrompt: the harness keeps what meets a test and records the rest as assumptions in pr.md and
- * plan.md. `checked` is true when that call ran, so the caller re-reads $FACTORY_OUT and updates the PR body.
+ * plan.md. `checked` is true when that call ran, so the caller re-reads $PENDULUM_OUT and updates the PR body.
  */
 export async function exitRecord({ text, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0, unmetered = false }) {
   const usage = [];
@@ -2453,7 +2453,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   let record = null;
   let basis = "exit file";
   if (typeof text === "string") record = parseExitRecord(text);
-  const missing = typeof text === "string" ? "$FACTORY_OUT/exit.json is not a JSON object with exit in delivered|question|blocked" : "no $FACTORY_OUT/exit.json";
+  const missing = typeof text === "string" ? "$PENDULUM_OUT/exit.json is not a JSON object with exit in delivered|question|blocked" : "no $PENDULUM_OUT/exit.json";
   // A host this process gave up on still does not answer (network.mjs givenUp): that is what ended the run, so the harness
   // is not asked, and its own account of an interrupted run cannot stand in for the outage. The stage ends on it
   // (outageExit). A host that answers again leaves the ask as ever.
@@ -2492,7 +2492,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
 
 /**
  * Re-read the PR and the branch after a push. The branch's own commits and the paths this stage changed come from
- * Factory's mirror (outbox.mjs), as GitHub has the branch now, never from the agent's checkout.
+ * Pendulum's mirror (outbox.mjs), as GitHub has the branch now, never from the agent's checkout.
  */
 export async function observe(repo, outbox, { branch, prNumber }, { token }) {
   const pr = prNumber ? await getPr(repo, prNumber, { token }) : await findPr(repo, branch, { token });
@@ -2507,7 +2507,7 @@ export const lastMessage = (harness, rec) => rec?.finalText ?? finalText(harness
 export const validatedMarker = (issue, sha) => marker(issue, "validated", sha);
 
 export async function postValidated(repo, prNumber, issue, sha, { token }) {
-  await prComment(repo, prNumber, `${validatedMarker(issue, sha)}\nFactory: validation green on ${sha.slice(0, 7)}; ready for the reviewer.`, { token });
+  await prComment(repo, prNumber, `${validatedMarker(issue, sha)}\nPendulum: validation green on ${sha.slice(0, 7)}; ready for the reviewer.`, { token });
 }
 
 export async function isValidated(repo, prNumber, issue, sha, { token }) {
@@ -2518,7 +2518,7 @@ export async function isValidated(repo, prNumber, issue, sha, { token }) {
 export const handedOffMarker = (issue, sha) => marker(issue, "handed-off", sha);
 
 export async function postHandedOff(repo, prNumber, issue, sha, { token }) {
-  await prComment(repo, prNumber, `${handedOffMarker(issue, sha)}\nFactory: ${sha.slice(0, 7)} goes to the review while its required checks run; the review stage waits for them beside its reviewer.`, { token });
+  await prComment(repo, prNumber, `${handedOffMarker(issue, sha)}\nPendulum: ${sha.slice(0, 7)} goes to the review while its required checks run; the review stage waits for them beside its reviewer.`, { token });
 }
 
 /**
@@ -2528,11 +2528,11 @@ export async function postHandedOff(repo, prNumber, issue, sha, { token }) {
 export const noProgressMarker = (issue, sha) => marker(issue, "no-progress", sha);
 
 export async function postNoProgress(repo, prNumber, issue, sha, { token }) {
-  await prComment(repo, prNumber, `${noProgressMarker(issue, sha)}\nFactory: a required check on ${sha.slice(0, 7)} made no progress; re-applying the label waits for it up to the stage's wall clock.`, { token });
+  await prComment(repo, prNumber, `${noProgressMarker(issue, sha)}\nPendulum: a required check on ${sha.slice(0, 7)} made no progress; re-applying the label waits for it up to the stage's wall clock.`, { token });
 }
 
 /**
- * What Factory recorded on the PR about `sha`, from Factory's own comments or those of someone who can push, in one
+ * What Pendulum recorded on the PR about `sha`, from Pendulum's own comments or those of someone who can push, in one
  * read: `validated` (its validation was green), `handedOff` (the worker handed it to the review with its checks running,
  * after its commands, if any, ran green) and `noProgress` (a stage Blocked on it for no progress). An unreadable list is none. `comments`: the list read, for the other
  * records on it (coveredHead).
@@ -2545,41 +2545,41 @@ export async function headMarks(repo, prNumber, issue, sha, { token }) {
 
 // ------------------------------------------------------------------ the merge
 
-const MERGEABLE = (issue) => `<!-- factory:${issue}:mergeable:`;
+const MERGEABLE = (issue) => `<!-- pendulum:${issue}:mergeable:`;
 
-/** Record on the PR the head Factory reviewed and validated: the only head it merges (or GitHub's update of it). */
+/** Record on the PR the head Pendulum reviewed and validated: the only head it merges (or GitHub's update of it). */
 export async function recordMergeable(repo, prNumber, issue, sha, opts) {
-  const body = `${MERGEABLE(issue)}${sha} -->\nFactory: ${sha.slice(0, 7)} is reviewed and validated; it merges once its required checks are green.`;
+  const body = `${MERGEABLE(issue)}${sha} -->\nPendulum: ${sha.slice(0, 7)} is reviewed and validated; it merges once its required checks are green.`;
   const mine = (await listComments(repo, prNumber, opts)).find((c) => isSelf(c) && (c.body || "").startsWith(MERGEABLE(issue)));
   if (mine) return rest(`repos/${repo.full}/issues/comments/${mine.id}`, { ...opts, method: "PATCH", body: { body } });
   return prComment(repo, prNumber, body, opts);
 }
 
-const COVERED = (issue) => `<!-- factory:${issue}:covered:`;
-const COVERED_RE = /^<!-- factory:(\d+):covered:([0-9a-f]{40,64})(:answer)? -->/;
+const COVERED = (issue) => `<!-- pendulum:${issue}:covered:`;
+const COVERED_RE = /^<!-- pendulum:(\d+):covered:([0-9a-f]{40,64})(:answer)? -->/;
 
 /**
- * Record on the PR the head Factory's review covers (#350, coveredHead): the head its review stage leaves after its own
+ * Record on the PR the head Pendulum's review covers (#350, coveredHead): the head its review stage leaves after its own
  * answer and fix passes, which answer the reviewer's findings and the red checks and get no review of their own. A
  * later commit beyond a rebase of it gets a review pass before the merge (reviewScope). `answer`: the commits after `sha`
  * are an answer pass's that the answer gate held for review (review.mjs answerGate), which the next pass reads. One comment, edited in place.
  */
 export async function recordCovered(repo, prNumber, issue, sha, opts, { answer = false } = {}) {
   const said = answer
-    ? `Factory: ${sha.slice(0, 7)} is covered by Factory's review; the answer and fix passes' commits after it do more than the review's findings and the failing checks asked (or that could not be told), so they get a review pass before the merge.`
-    : `Factory: ${sha.slice(0, 7)} is covered by Factory's review (its reviewed head with the answer and fix passes that followed); later commits beyond a rebase get a review pass before the merge.`;
+    ? `Pendulum: ${sha.slice(0, 7)} is covered by Pendulum's review; the answer and fix passes' commits after it do more than the review's findings and the failing checks asked (or that could not be told), so they get a review pass before the merge.`
+    : `Pendulum: ${sha.slice(0, 7)} is covered by Pendulum's review (its reviewed head with the answer and fix passes that followed); later commits beyond a rebase get a review pass before the merge.`;
   await upsertComment(repo, prNumber, COVERED(issue), said, opts, { head: `${sha}${answer ? ":answer" : ""} -->` });
 }
 
-/** The head recorded as mergeable on the PR, from Factory's own comment only, or null. */
+/** The head recorded as mergeable on the PR, from Pendulum's own comment only, or null. */
 export async function recordedMergeable(repo, prNumber, issue, opts) {
   const mine = (await listComments(repo, prNumber, opts)).find((c) => isSelf(c) && (c.body || "").startsWith(MERGEABLE(issue)));
-  return /^<!-- factory:\d+:mergeable:([0-9a-f]{40,64}) -->/.exec(mine?.body || "")?.[1] ?? null;
+  return /^<!-- pendulum:\d+:mergeable:([0-9a-f]{40,64}) -->/.exec(mine?.body || "")?.[1] ?? null;
 }
 
 const errCode = (e) => (Number.isInteger(e?.status) && e.status > 0 ? `HTTP ${e.status}` : e?.transport ? "network" : "error");
 
-/** A check's name as Factory quotes it in a notice: one line, no backticks, at most 80 characters. */
+/** A check's name as Pendulum quotes it in a notice: one line, no backticks, at most 80 characters. */
 const checkName = (n) => `\`${String(n).replace(/[`\r\n]/g, "").slice(0, 80)}\``;
 
 const mins = (ms) => Math.max(1, Math.round(ms / 60_000));
@@ -2599,21 +2599,21 @@ export const hungChecks = (hung) =>
     })
     .join("; ");
 
-/** The marker of Factory's structured record of one drop it re-enqueued after, inside its requeue comment. */
-const REQUEUE_RECORD = (issue) => `<!-- factory:${issue}:requeue-drop `;
+/** The marker of Pendulum's structured record of one drop it re-enqueued after, inside its requeue comment. */
+const REQUEUE_RECORD = (issue) => `<!-- pendulum:${issue}:requeue-drop `;
 
 /**
- * The issue's comment when Factory puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, with
+ * The issue's comment when Pendulum puts a dropped PR back in the merge queue: a record line (`{at, code}` as JSON, with
  * `hung` for a HUNG_CODE removal: each step it judged hung, `{name, job, step, number, head, elapsedMs, baselineMs, by}`; read back
- * by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Factory itself for
+ * by requeueRecords) and one line of codes and times, saying who removed the PR (the queue, or Pendulum itself for
  * a stalled entry) and, for a check that hung on the queue's commit (HUNG_CODE), the check's name.
  */
 export const requeueLine = (prNumber, last, tryNo, hung = null) => {
   const t = Date.parse(last.at);
   const at = Number.isFinite(t) ? new Date(t).toISOString().replace(/\.\d{3}Z$/, "Z") : null;
   const named = hung?.length ? `; no progress: ${hungChecks(hung)}` : "";
-  const who = last.factory ? `Factory took PR #${Number(prNumber)} out of the merge queue` : `the merge queue dropped PR #${Number(prNumber)}`;
-  return `Factory: ${who} (${last.code}${named}) at ${at ?? "an unknown time"}; enqueued again (try ${Number(tryNo)}).`;
+  const who = last.pendulum ? `Pendulum took PR #${Number(prNumber)} out of the merge queue` : `the merge queue dropped PR #${Number(prNumber)}`;
+  return `Pendulum: ${who} (${last.code}${named}) at ${at ?? "an unknown time"}; enqueued again (try ${Number(tryNo)}).`;
 };
 
 /**
@@ -2631,19 +2631,19 @@ export const requeueBody = (issue, prNumber, last, tryNo, hung = null) => `${req
 export const requeueWaitMarker = (issue) => marker(issue, "requeue", "wait");
 
 /**
- * The comment body when Factory took the PR out for a hung step (`removal`: `{at, code}`, `hung` its steps) and whether
+ * The comment body when Pendulum took the PR out for a hung step (`removal`: `{at, code}`, `hung` its steps) and whether
  * that removal counts as a try waits for the step's job, at the latest until `by`: the record line requeueRecords reads
  * back, so the next pass knows what that removal judged hung, then one line saying so.
  */
 export const requeueWaitBody = (issue, prNumber, removal, hung, by) => {
   const at = (t) => (Number.isFinite(Date.parse(t)) ? new Date(Date.parse(t)).toISOString().replace(/\.\d{3}Z$/, "Z") : "an unknown time");
-  return `${requeueRecord(issue, removal, hung)}\nFactory: Factory took PR #${Number(prNumber)} out of the merge queue (${removal.code}; no progress: ${hungChecks(hung)}) at ${at(removal.at)}. Whether that counts as a try waits for the step's job to finish, at the latest until ${at(by)}, the queue's own deadline for it.`;
+  return `${requeueRecord(issue, removal, hung)}\nPendulum: Pendulum took PR #${Number(prNumber)} out of the merge queue (${removal.code}; no progress: ${hungChecks(hung)}) at ${at(removal.at)}. Whether that counts as a try waits for the step's job to finish, at the latest until ${at(by)}, the queue's own deadline for it.`;
 };
 
 /**
- * The drops Factory recorded in its own requeue comments on the issue (requeueBody): `{at, code}`, with `hung` when the
- * record has it. A removal Factory made on an earlier pass reads its code from here, since GitHub's timeline cannot say
- * why Factory removed it.
+ * The drops Pendulum recorded in its own requeue comments on the issue (requeueBody): `{at, code}`, with `hung` when the
+ * record has it. A removal Pendulum made on an earlier pass reads its code from here, since GitHub's timeline cannot say
+ * why Pendulum removed it.
  */
 export function requeueRecords(comments, issue) {
   const out = [];
@@ -2717,7 +2717,7 @@ export async function hangsOn(repo, sha, { names, headAt, now = Date.now(), hung
 }
 
 /**
- * Decides Factory's HUNG_CODE removals after `since` whose record names the steps they judged hung (logic.mjs
+ * Decides Pendulum's HUNG_CODE removals after `since` whose record names the steps they judged hung (logic.mjs
  * hungOutcome, against the required checks `names`), oldest first, until QUEUE_CLEARED_MAX are cleared: a "green" one is
  * marked `cleared` (queueRetry counts it toward no try). Each job (`actions/jobs/{id}`, with `actionsToken`; with none,
  * as on the local route, nothing is read or cleared) and each queue commit's checks (queueCommitChecks) are read at most
@@ -2757,7 +2757,7 @@ export async function clearSlowHangs(repo, { issue, prNumber, removals, since, n
     r.cleared = true;
     out.cleared = true;
     clears += 1;
-    log(`#${issue}: the step Factory judged hung when it took PR #${prNumber} out of the merge queue at ${r.at} then finished green, and its job too, before the queue's own deadline; that removal counts toward no try`);
+    log(`#${issue}: the step Pendulum judged hung when it took PR #${prNumber} out of the merge queue at ${r.at} then finished green, and its job too, before the queue's own deadline; that removal counts toward no try`);
   }
   return out;
 }
@@ -2800,15 +2800,15 @@ export function rebaseBlock({ issue, pr, why, record = null, since = null, notif
 
 /**
  * The rebase send-backs on the Objective's PR (PLAN.md "Merge") since the issue's last objective label (a human
- * recovery starts the count over): the marker comments Factory left and the worker's records of the rebases that
+ * recovery starts the count over): the marker comments Pendulum left and the worker's records of the rebases that
  * conflicted (logic.mjs ontoRecord). `effective` counts the markers whose send-back pushed (one that names the PR's
  * head now produced no push: its worker never ran or died, so it is sent again), `recent` those of the last
  * REBASE_WINDOW_MS (staleDecision's bound); `already` says a marker names the head now, so no second comment is posted
  * for it. `record` is the newest rebase record of a pass that pushed, and `stuck` that record when the PR still needs
  * a rebase and the default branch is still the base it was made onto: the conflict came back after its resolution,
  * with nothing merged since (a failed read of the branch leaves `stuck` null: the send-back goes ahead, and the worker
- * Blocks a conflict it cannot resolve itself). `since` is that label's time. Only Factory's own comments count (isSelf);
- * `unread` says the label's time, Factory's login or the comments could not be read: the caller holds the PR this tick.
+ * Blocks a conflict it cannot resolve itself). `since` is that label's time. Only Pendulum's own comments count (isSelf);
+ * `unread` says the label's time, Pendulum's login or the comments could not be read: the caller holds the PR this tick.
  */
 export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, now = Date.now()) {
   const prefix = marker(issue, "rebase").replace(/ -->$/, "");
@@ -2817,8 +2817,8 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
   let unread = null;
   const since = await objectiveLabeledAt(repo, issue, objectiveLabel, opts).catch((e) => ((unread = e), null));
   if (!pr) return { ...none, since };
-  // Only Factory's own comments: a writer's pasted marker is no send-back or rebase of Factory's.
-  if (!unread && !(selfLogin() || (await primeSelf(opts)))) unread = new Error("Factory's own login is unknown");
+  // Only Pendulum's own comments: a writer's pasted marker is no send-back or rebase of Pendulum's.
+  if (!unread && !(selfLogin() || (await primeSelf(opts)))) unread = new Error("Pendulum's own login is unknown");
   const listed = unread ? [] : await listComments(repo, pr.number, opts).catch((e) => ((unread = e), []));
   if (unread) {
     log(`#${issue}: the send-backs on PR #${pr.number} could not be read (${errCode(unread)}); held this tick`);
@@ -2847,7 +2847,7 @@ export async function rebaseMarkers(repo, { issue, pr, objectiveLabel }, opts, n
  * `limit` send-backs in 24 h (rebase_limit) this is (`recent`, rebaseMarkers: the ones before it that pushed).
  */
 export function rebaseNotice(issue, pr, recent = 0, limit = REBASE_LIMIT) {
-  return `${marker(issue, "rebase", pr.head.sha)}\nFactory: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${limit} in 24 h; the issue's progress comments show each rebase's cost).`;
+  return `${marker(issue, "rebase", pr.head.sha)}\nPendulum: the branch ${pr.mergeable_state === "dirty" ? "conflicts with" : "is behind"} \`${pr.base?.ref || "main"}\` after other PRs merged; sending it back to the worker to rebase and revalidate (rebase ${recent + 1} of at most ${limit} in 24 h; the issue's progress comments show each rebase's cost).`;
 }
 
 /**
@@ -2885,8 +2885,8 @@ export const QUEUE_RED_LOOKBACK_MS = 6 * 3600_000;
 
 /** The most characters of a queue red's failure lines its record keeps (the progress question's before-red). */
 export const QUEUE_LEAD_CHARS = 1200;
-const QUEUE_RED_RECORD = (issue) => `<!-- factory:${issue}:queue-red-record `;
-/** The marker of Factory's record of one red queue drop on the issue, keyed by the drop's time (one comment per drop). */
+const QUEUE_RED_RECORD = (issue) => `<!-- pendulum:${issue}:queue-red-record `;
+/** The marker of Pendulum's record of one red queue drop on the issue, keyed by the drop's time (one comment per drop). */
 export const queueRedMarker = (issue, at) => marker(issue, "queue-red", String(at).replace(/[^0-9TZ:.-]/g, ""));
 /** How far a record's state has come, so of two records of one drop (two writers) the later one counts. */
 const QUEUE_RED_RANK = { handed: 0, superseded: 1, requeued: 1, fixed: 1, blocked: 1 };
@@ -2912,11 +2912,11 @@ export function queueRedBody(issue, prNumber, rec) {
     superseded: "the PR's head moved on before it was read: nothing to do for it",
   }[rec.state] || rec.state;
   const json = { at: rec.at, state: rec.state, ...(rec.head ? { head: rec.head } : {}), ...(rec.after ? { after: rec.after } : {}), ...(rec.kind ? { kind: rec.kind } : {}), ...(rec.sigs?.length ? { sigs: rec.sigs } : {}), ...(rec.jobs?.length ? { jobs: rec.jobs } : {}), ...(rec.lead ? { lead: String(rec.lead).slice(0, QUEUE_LEAD_CHARS) } : {}), ...(rec.tries ? { tries: rec.tries } : {}), ...(Array.isArray(rec.ends) ? { ends: rec.ends } : {}), ...(rec.reads ? { reads: rec.reads } : {}) };
-  return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nFactory: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
+  return `${QUEUE_RED_RECORD(issue)}${JSON.stringify(json)} -->\nPendulum: the merge queue's run of PR #${Number(prNumber)}'s required checks failed (${QUEUE_RED_CODE}) at ${at}; ${said}.`;
 }
 
 /**
- * The records of red queue drops on the issue (queueRedBody), oldest first: `{at, state, head, kind, sigs}`. Factory's own
+ * The records of red queue drops on the issue (queueRedBody), oldest first: `{at, state, head, kind, sigs}`. Pendulum's own
  * comments or those of someone who can push (trustedAuthor): a merge pass and a review stage of one Objective can run
  * under different logins (`serve --all` beside the Action's dispatcher). Two records of one drop: the one further on.
  */
@@ -3051,7 +3051,7 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
  * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`.
  * A record of another head than the PR's `head` now is `superseded` (the head moved on: a fix, a person's push). Else the
  * drop is read (queueRedOf) and: `requeued` (written now: not known to be the PR's change), `blocked` (the PR's own change,
- * and the last fix pass since the Objective's last re-entry, its Objective label, `factory:restart` or a Block, made no
+ * and the last fix pass since the Objective's last re-entry, its Objective label, `pendulum:restart` or a Block, made no
  * progress on the red it was handed: fix-progress.mjs, `progressCheck`'s judge, with every red fixed since the re-entry
  * as the ones seen; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
  * answer pass gets `red`; the record stays `handed`, its `tries` counted, until recordQueueFix writes `fixed` once that
@@ -3059,7 +3059,7 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
  * `idle` in `ends` (recordQueueIdle), Blocks, as no progress; a record without `ends` Blocks at two tries). Null when nothing is pending. `names()` gives the required checks,
  * read only then.
  */
-export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, diffStat = null, token, actionsToken = token, objectiveLabel = "factory:objective" }) {
+export async function readQueueRed({ repo, issue, prNumber, base, head, names = async () => [], triage = null, progressCheck = null, diffStat = null, token, actionsToken = token, objectiveLabel = "pendulum:objective" }) {
   const records = queueRedRecords(await listComments(repo, issue, { token }), issue);
   const pending = records.at(-1);
   if (pending?.state !== "handed") return null;
@@ -3084,7 +3084,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     return { state: "requeued", line: `merge queue run red${where}: ${q.reason}; not known to be the PR's change (${q.kind}), enqueued again as any drop` };
   }
   // The fix passes since the Objective's last re-entry (an unread timeline counts every one).
-  const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:restart", "factory:blocked"], { token }).catch(() => null);
+  const entered = await objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:restart", "pendulum:blocked"], { token }).catch(() => null);
   const fixes = records.filter((r) => r.state === "fixed" && !(Date.parse(entered) > Date.parse(r.at)));
   // The red the last fix pass was handed, and every one fixed since the re-entry, against this one (fix-progress.mjs),
   // with what passed on the queue's commit, and for a decision call the before-red's failure lines and the fix pass's own
@@ -3103,8 +3103,8 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   const over = p && !p.progress ? `fix pass, which ${p.undecided ? "could not be judged for progress" : "made no progress"}: ${p.why}` : idle ? (Array.isArray(pending.ends) ? "fix pass that ran and committed nothing for it" : `${pending.tries} fix passes that committed nothing for it`) : "";
   if (over) {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead }, { token });
-    // An unmade judgement (the decider gave no answer) is Factory's, or its vendor's outage, never the work's.
-    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "factory" : "work", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Factory's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Factory's ${over}; fix it on the branch, then re-apply the label` };
+    // An unmade judgement (the decider gave no answer) is Pendulum's, or its vendor's outage, never the work's.
+    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Pendulum's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
   const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [] };
@@ -3142,7 +3142,7 @@ export async function recordQueueTry(repo, issue, prNumber, record, pass, opts) 
   return end;
 }
 
-/** What a fix pass committed between two heads in Factory's mirror: its own commits' --stat, first-parent with merges left out (a catch-up merge brings in nothing of the default branch). */
+/** What a fix pass committed between two heads in Pendulum's mirror: its own commits' --stat, first-parent with merges left out (a catch-up merge brings in nothing of the default branch). */
 export async function mirrorOwnStat(mgit, from, to) {
   for (const sha of [from, to]) await mirrorCommit(mgit, sha);
   const r = await mgit(["log", "--first-parent", "--no-merges", "--stat", "--no-color", "--format=%h %s", `${from}..${to}`], { maxBytes: 1024 * 1024 });
@@ -3174,7 +3174,7 @@ export async function queueFailureLines(repo, { prNumber, base, since, actionsTo
  * The Block's words and cause for drops that reached the queue's bound, from what the review stage recorded of the red
  * ones (queueRedRecords `kind`, the newest counted one): GitHub's side (`infra`, `not-started`) is an outage, the default
  * branch's own failure (`base`) and a flake read twice (`flaky`) are named as such, a base failure the decision model
- * could not judge (`unjudged`) is Factory's, or the outage's (`unjudged-outage`), and anything else, with the failed jobs' first lines (`lines`,
+ * could not judge (`unjudged`) is Pendulum's, or the outage's (`unjudged-outage`), and anything else, with the failed jobs' first lines (`lines`,
  * queueFailureLines), is the work's. Null when nothing was recorded and no line was read.
  */
 export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
@@ -3183,16 +3183,16 @@ export function queueDropBlock({ drops, codes, kinds = [], lines = "" }) {
   const kind = kinds.at(-1) ?? null;
   if (kind === "infra" || kind === "not-started") return { cause: "outage", reason: `${head}${failed}. Triage read the failure as GitHub's side (${kind}); rerun the queue's jobs or wait for GitHub, then re-apply the label` };
   if (kind === "base") return { cause: "work", reason: `${head}${failed}. The default branch fails the same way: fix it there, then re-apply the label` };
-  if (kind === "unjudged" || kind === "unjudged-outage") return { cause: kind === "unjudged-outage" ? "outage" : "factory", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer${kind === "unjudged-outage" ? ": its vendor's outage" : ""}); check the default branch's runs of the failing jobs, then re-apply the label` };
+  if (kind === "unjudged" || kind === "unjudged-outage") return { cause: kind === "unjudged-outage" ? "outage" : "pendulum", reason: `${head}${failed}. Whether the default branch fails the same way could not be judged (the decision model gave no answer${kind === "unjudged-outage" ? ": its vendor's outage" : ""}); check the default branch's runs of the failing jobs, then re-apply the label` };
   if (kind === "flaky") return { cause: "work", reason: `${head}${failed}. Triage read the failure as a flake each time: fix or steady that test on the branch or the default branch, then re-apply the label` };
   if (!lines) return null;
   return { cause: "work", reason: `${head}${failed}. Fix that on the branch (a job the PR's checks do not run, such as another OS, fails only there), then re-apply the label` };
 }
 
-const QUEUE_CONFLICT_LINE = /^<!-- factory:queue-conflict (\{[^\n]*\}) -->$/m;
+const QUEUE_CONFLICT_LINE = /^<!-- pendulum:queue-conflict (\{[^\n]*\}) -->$/m;
 
 /**
- * Factory's record of the last time a PR the queue took out for a conflict went back in (queueConflictWait), from the
+ * Pendulum's record of the last time a PR the queue took out for a conflict went back in (queueConflictWait), from the
  * issue's comments: `{pr, head, removal, queue}`, `queue` the default branch's head and the queue's entries then
  * (queueState), or null.
  */
@@ -3216,7 +3216,7 @@ export const queueState = ({ base, entries }) => [base ?? "", ...entries.map((e)
  * by a trial merge of the two heads against the default branch (overlap.mjs siblingTrials, git merge-tree in a scratch
  * mirror); a sibling's merge or drop ticks the dispatcher. Pairwise trials cannot see every conflict (one with the
  * queue's merge group, or a trial that cannot be computed: then the queue itself answers), so each time it goes back in,
- * Factory records on the issue the queue's state then (queueState: the default branch's head and every entry's head):
+ * Pendulum records on the issue the queue's state then (queueState: the default branch's head and every entry's head):
  * taken out again for a conflict, it goes back in only once that state has changed, never on the same queue twice.
  * Returns null to enqueue it now, "queue-wait" while it waits, or "pending" when the queue or the record could not be
  * read or written.
@@ -3235,7 +3235,7 @@ export async function queueConflictWait(repo, { issue, prNumber, head, base, rem
   }
   const back = async (why) => {
     const rec = { pr: prNumber, head, removal, queue: state };
-    const text = `<!-- factory:queue-conflict ${JSON.stringify(rec)} -->\nFactory: the merge queue took PR #${prNumber} out at ${removal} for a conflict; it goes back in (${why}). Taken out again for a conflict, it waits until the queue changes.`;
+    const text = `<!-- pendulum:queue-conflict ${JSON.stringify(rec)} -->\nPendulum: the merge queue took PR #${prNumber} out at ${removal} for a conflict; it goes back in (${why}). Taken out again for a conflict, it waits until the queue changes.`;
     const ok = await upsertComment(repo, issue, marker(issue, "queue-conflict"), text, opts).then(() => true, (e) => (log(`#${issue}: the queue-conflict record could not be written (${errCode(e)}); next tick`), false));
     if (!ok) return "pending";
     log(`#${issue}: the merge queue took PR #${prNumber} out at ${removal} for a conflict; ${why}, so it goes back in`);
@@ -3262,20 +3262,20 @@ export async function queueConflictWait(repo, { issue, prNumber, head, base, rem
 /**
  * Why the merge pass's answer Blocks the Objective, or null when it does not: a red required check on the reviewed head,
  * an unresolved review conversation the base's rules require resolved (conversationsGate), or the merge queue dropping
- * the PR again after Factory re-enqueued it (`report` as mergeReadyOne filled it).
+ * the PR again after Pendulum re-enqueued it (`report` as mergeReadyOne filled it).
  */
-/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check or an unresolved conversation is the work's; a drop is `report.cause`, else Factory's. */
-export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" || how === "threads" ? "work" : report.cause ?? "factory");
+/** The cause of a Block mergeBlockReason words (logic.mjs BLOCK_CAUSES): a red check or an unresolved conversation is the work's; a drop is `report.cause`, else Pendulum's. */
+export const mergeBlockCause = (how, report = {}) => (how === "red" || how === "edited" || how === "threads" ? "work" : report.cause ?? "pendulum");
 
 export function mergeBlockReason(how, report = {}) {
   if (how === "red") return "a required check is red on the reviewed head";
   if (how === "edited") return EDITED_REASON;
   if (how === "threads") return report.reason || "a review conversation is unresolved and the default branch's rules require every conversation resolved before a merge";
-  if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Factory re-enqueued it";
+  if (how === "dropped") return report.reason || "the merge queue dropped the reviewed PR again after Pendulum re-enqueued it";
   return null;
 }
 
-/** How long a merge refused just after Factory resolved threads waits before its one more try (mergeReadyOne). */
+/** How long a merge refused just after Pendulum resolved threads waits before its one more try (mergeReadyOne). */
 const RESOLVED_SETTLE_MS = 5_000;
 /** The most unresolved conversations a Block names one by one. */
 const THREADS_NAMED = 5;
@@ -3289,17 +3289,17 @@ export const ANSWER_ROUNDS = 2;
 /** The most review stages in a row whose finding check got no verdict (the gateway failed) before the stage Blocks. */
 export const FINDING_CHECK_TRIES = 2;
 
-const ROUNDS_RECORD = (issue) => `<!-- factory:${issue}:answer-rounds-record `;
+const ROUNDS_RECORD = (issue) => `<!-- pendulum:${issue}:answer-rounds-record `;
 
 /**
- * Factory's record of the answer rounds on `prNumber`, on the issue (one comment, marker(issue, "answer-rounds"); a
- * record by Factory or someone who can push, since two routes can write it), as far as it counts since the Objective's
+ * Pendulum's record of the answer rounds on `prNumber`, on the issue (one comment, marker(issue, "answer-rounds"); a
+ * record by Pendulum or someone who can push, since two routes can write it), as far as it counts since the Objective's
  * last re-entry (its label applied again, a restart or a Block, from the issue's timeline): `rounds`, the times of each
  * answer round started; `checks`, each review stage's finding check that left findings without a verdict
  * ({at, ids, error}) or, after one, judged them all ({at, ids: []}), oldest first. Throws when it cannot be read.
  */
 export async function readAnswerRounds(repo, { issue, prNumber, objectiveLabel }, opts) {
-  const [comments, since] = await Promise.all([listComments(repo, issue, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked", "factory:restart"], opts)]);
+  const [comments, since] = await Promise.all([listComments(repo, issue, opts), objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:blocked", "pendulum:restart"], opts)]);
   const after = (t) => Number.isFinite(Date.parse(t)) && (!since || Date.parse(t) > Date.parse(since));
   const rounds = [];
   const checks = [];
@@ -3337,7 +3337,7 @@ export const checkState = (rec) => {
 };
 
 const writeAnswerRecord = (repo, { issue, prNumber }, rec, opts) =>
-  upsertComment(repo, issue, marker(issue, "answer-rounds"), `${ROUNDS_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds: rec.rounds, checks: rec.checks.slice(-FINDING_CHECK_TRIES - 1) })} -->\nFactory: PR #${Number(prNumber)} had review findings still open after its answer pass; the review ran again to answer them ${rec.rounds.length} time(s) since its last re-entry (at most ${ANSWER_ROUNDS}).`, opts);
+  upsertComment(repo, issue, marker(issue, "answer-rounds"), `${ROUNDS_RECORD(issue)}${JSON.stringify({ pr: Number(prNumber), rounds: rec.rounds, checks: rec.checks.slice(-FINDING_CHECK_TRIES - 1) })} -->\nPendulum: PR #${Number(prNumber)} had review findings still open after its answer pass; the review ran again to answer them ${rec.rounds.length} time(s) since its last re-entry (at most ${ANSWER_ROUNDS}).`, opts);
 
 /**
  * Start one more answer round on `prNumber` when the bound allows: under ANSWER_ROUNDS since the last re-entry
@@ -3358,7 +3358,7 @@ export async function takeAnswerRound(repo, ctx, opts, { check = null, rec = nul
 
 const placeOf = (t) => `${t.path ?? "the PR"}${Number.isInteger(t.line) ? `:${t.line}` : ""}`;
 const listed = (items) => `${items.slice(0, THREADS_NAMED).join("; ")}${items.length > THREADS_NAMED ? `, and ${items.length - THREADS_NAMED} more` : ""}`;
-const RESUME = "re-apply `factory:objective` to resume";
+const RESUME = "re-apply `pendulum:objective` to resume";
 
 /** The Block cause of a finding check the decider answered with no verdict, from its code (adapters/decider.mjs). */
 const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limited" || error === "billing" ? "provider-quota" : "outage");
@@ -3417,7 +3417,7 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const round = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be recorded`, () => takeAnswerRound(repo, ctx, opts, { check, rec }));
   if (!round) return decision;
   if (!round.taken) {
-    Object.assign(decision, { exit: "blocked", cause: "work", reason: `${judged.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${where(judged)}. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting \`<!-- factory:${issue}:resolved:<finding id> -->\`); then ${RESUME}` });
+    Object.assign(decision, { exit: "blocked", cause: "work", reason: `${judged.length} reviewer finding(s) still open on PR #${prNumber} after ${round.rounds} answer round(s): ${where(judged)}. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting \`<!-- pendulum:${issue}:resolved:<finding id> -->\`); then ${RESUME}` });
     return decision;
   }
   Object.assign(decision, { exit: "delivered", rerun: true, reason: `${judged.length} reviewer finding(s) still open after the answer pass (${where(judged)})${pending.length ? `, and ${pending.length} answer(s) still to be judged` : ""}; the review runs again to answer them (round ${round.round} of ${ANSWER_ROUNDS})` });
@@ -3428,7 +3428,7 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
 }
 
 /**
- * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Factory
+ * The PR's review conversations just before a merge (#331), on every route's merge pass. Answered threads Pendulum
  * handles (its reviewer's, the named reviewers' and code scanning's: answeredReviewers, `thirdParty` the named ones) are
  * resolved now (`resolvedNow` counts them). Code scanning's open comment (unanswered, or answered and not resolved by
  * the finding check) is the answer pass's: the review label goes back on and this returns "code-scanning", within the
@@ -3488,7 +3488,7 @@ async function conversationsGate(repo, ctx, report, opts) {
     return null;
   }
   if (!rule) return null;
-  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.by === "named" && !t.answered ? " (posted after the answer pass)" : t.answered ? " (answered; Factory could not resolve it)" : ""}`;
+  const what = (t) => `${t.author ?? "a deleted account"} on ${placeOf(t)}${t.by === "named" && !t.answered ? " (posted after the answer pass)" : t.answered ? " (answered; Pendulum could not resolve it)" : ""}`;
   report.reason = `PR #${prNumber} cannot merge: ${rule} on ${base} requires every review conversation resolved, and ${open.length} ${open.length === 1 ? "is" : "are"} open: ${listed(open.map(what))}. Answer or resolve each on the PR, then ${RESUME}`;
   return "threads";
 }
@@ -3573,7 +3573,7 @@ async function textEdit(repo, issue, prNumber, opts) {
  * `watch: true` whenever the PR is left in the queue, so the caller has it watched until it merges or leaves
  * (dispatch.mjs watchQueue) rather than waiting for an event GitHub may hold for approval, or a cron.
  */
-export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "factory:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
+export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames = null, report = {}, hungMs = null, queueTimeout = undefined, actionsToken = null, cache = {}, stall = STALL_DEFAULTS, objectiveLabel = "pendulum:objective", issueData = null, thirdParty = [], editCheck = null, commentCheck = null }, opts) {
   const pr = await getPr(repo, prNumber, opts);
   if (pr.state !== "open" || pr.draft) return "not-open";
   // A stopped Objective (its label removed, its issue closed, a restart asked for, a draft: stop.mjs stopCause) never merges, whoever runs this pass:
@@ -3690,14 +3690,14 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       return null;
     });
     if (!removals) return "pending";
-    // Factory's earlier removals read their codes back from its own requeue records (requeueRecords).
+    // Pendulum's earlier removals read their codes back from its own requeue records (requeueRecords).
     const records = removals.length ? requeueRecords(await listComments(repo, issue, opts).catch(() => []), issue) : [];
     for (const r of removals) {
       const rec = records.find((x) => Math.abs(Date.parse(x.at) - Date.parse(r.at)) <= 60_000);
       if (rec && !r.code) r.code = rec.code;
       if (rec?.hung && !r.hung) r.hung = rec.hung;
     }
-    // Factory's own removal just now, which the timeline may not show yet, counts once and with its own code.
+    // Pendulum's own removal just now, which the timeline may not show yet, counts once and with its own code.
     if (stalledAt) {
       const recent = removals.filter((r) => Date.parse(r.at) >= Date.parse(stalledAt) - 60_000).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
       if (recent.length) removals.splice(removals.indexOf(recent.at(-1)), 1);
@@ -3709,7 +3709,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     let since = reviewedAt;
     if (removals.length) {
       let unread = null;
-      const marks = await objectiveLabeledAt(repo, issue, [objectiveLabel, "factory:blocked"], opts).catch((e) => ((unread = e), null));
+      const marks = await objectiveLabeledAt(repo, issue, [objectiveLabel, "pendulum:blocked"], opts).catch((e) => ((unread = e), null));
       const head = await getCommit(repo, pr.head.sha, opts).catch((e) => ((unread = e), null));
       if (unread) {
         log(`#${issue}: the issue's timeline or PR #${prNumber}'s head is unreadable (${errCode(unread)}); next tick`);
@@ -3733,7 +3733,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
           const by = hung.map((h) => h.by).filter(Boolean).sort()[0] ?? null;
           await upsertComment(repo, issue, requeueWaitMarker(issue), requeueWaitBody(issue, prNumber, { at: stalledAt, code: HUNG_CODE }, hung, by), opts).catch((e) => log(`#${issue}: hung removal record: ${errCode(e)}`));
         }
-        log(`#${issue}: whether Factory's removal of PR #${prNumber} from the merge queue at ${slow.pending.at} counts as a try waits for its hung step's job, at the latest until ${slow.pending.by}; the PR stays out until then`);
+        log(`#${issue}: whether Pendulum's removal of PR #${prNumber} from the merge queue at ${slow.pending.at} counts as a try waits for its hung step's job, at the latest until ${slow.pending.by}; the PR stays out until then`);
         return "pending";
       }
       if (slow.cleared) retry = queueRetry(removals, { since, self });
@@ -3752,9 +3752,9 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       if (wait) return wait;
     }
     // The newest drop is a red run on the queue's commit (QUEUE_RED_CODE): the review stage reads it first, once per drop
-    // (Factory's record on the issue), as a red PR check is read: a failure in the PR's own change gets one fix pass there;
+    // (Pendulum's record on the issue), as a red PR check is read: a failure in the PR's own change gets one fix pass there;
     // a flake, GitHub's side or the default branch's goes back here, enqueued again or Blocked as any drop.
-    if (retry.last?.code === QUEUE_RED_CODE && !retry.last.factory) {
+    if (retry.last?.code === QUEUE_RED_CODE && !retry.last.pendulum) {
       const mine = queueRedRecords(await listComments(repo, issue, opts), issue).find((r) => sameDrop(r.at, retry.last.at));
       // Handed before and not read yet (the label taken off, a stage that ended first): handed again, one record.
       if (!mine || mine.state === "handed") {
@@ -3775,7 +3775,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       // The hung steps the Block names: this pass's, or those of the newest removal's record (a Block whose decision waited).
       const hungNow = hung ?? lastHung;
       const stuck = hungNow ? [] : await queueNotStarted(repo, { prNumber, base: pr.base?.ref, since, names, tries: retry.drops, actionsToken }, opts);
-      // GitHub never started the queue's jobs, through Factory's re-enqueue: an outage handled by the rules.
+      // GitHub never started the queue's jobs, through Pendulum's re-enqueue: an outage handled by the rules.
       if (!hungNow && stuck.length) report.cause = "outage";
       // The queue's jobs ran and failed: the Block names the failed jobs and their first failure lines, with the cause and
       // advice the review stage's reading of the red drops recorded (queueDropBlock).
@@ -3786,7 +3786,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
       report.reason = said
         ? said.reason
         : hungNow
-        ? `a required check made no progress on the merge queue's commit (${hungChecks(hungNow)}), again after Factory re-enqueued the PR ${retry.cleared ? `${retry.cleared + 1} times (one removal was a step that proved slow, not hung)` : "once"} (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
+        ? `a required check made no progress on the merge queue's commit (${hungChecks(hungNow)}), again after Pendulum re-enqueued the PR ${retry.cleared ? `${retry.cleared + 1} times (one removal was a step that proved slow, not hung)` : "once"} (drops counted: ${retry.codes.join(", ")}). Find what holds that step (a hung command or a runner that never frees), then re-apply the label`
         : stuck.length
           ? `the merge queue dropped the reviewed PR ${retry.drops} times without merging it (${retry.codes.join(", ")}): ${notStartedReason(stuck)}. GitHub never started the job on the queue's merge_group commit: infrastructure, not the change; fix that, then re-apply the label`
           : retry.block;
@@ -3799,7 +3799,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
   const conversations = { issue, prNumber, base: pr.base?.ref || "main", thirdParty, objectiveLabel };
   const held = await conversationsGate(repo, conversations, report, opts);
   if (held) return held;
-  // The squash commit says what Factory says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
+  // The squash commit says what Pendulum says: the PR's title, and the Objective's closing line (or `Refs` for a split part).
   const parts = await partsRecord(repo, issue, opts).catch(() => null);
   let how;
   try {
@@ -3833,7 +3833,7 @@ export async function mergeReadyOne(repo, { issue, prNumber, queue, checkNames =
     // The queue's commit is made in a moment: the caller has it watched for a check run to start.
     report.watch = true;
     // A re-enqueue is said on the issue (codes and times), so a drop is visible before any Block.
-    // Its try counts every removal Factory put it back after, a cleared one included, so no notice takes another's place.
+    // Its try counts every removal Pendulum put it back after, a cleared one included, so no notice takes another's place.
     if ((retry?.drops || retry?.cleared) && retry.last) {
       const tryNo = retry.drops + (retry.cleared || 0) + 1;
       await upsertComment(repo, issue, marker(issue, "requeue", String(tryNo)), requeueBody(issue, prNumber, retry.last, tryNo, lastHung), opts).catch((e) => log(`#${issue}: re-enqueue notice: ${errCode(e)}`));

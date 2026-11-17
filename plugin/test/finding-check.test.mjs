@@ -1,4 +1,4 @@
-// #368: a reviewer finding counts as answered only when the finding check (a decision model) reads Factory's answer as
+// #368: a reviewer finding counts as answered only when the finding check (a decision model) reads Pendulum's answer as
 // resolving it, or a person answered it. A no, or no verdict, keeps it open for another answer round within the bound;
 // without a decider key, a reply answers its finding as before.
 import "./temp.mjs";
@@ -21,18 +21,18 @@ import { CODE_SCANNING, answeredReviewers } from "../scripts/lib/third-party-rev
 import { answerPrompt } from "../scripts/review.mjs";
 
 RETRY.sleep = async () => {};
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 const app = { login: SELF, type: "Bot" };
 
 /**
- * GitHub for Objective 7's PR 12: Factory's review (id 1) and its line comments, code scanning's, the PR's and the issue's
+ * GitHub for Objective 7's PR 12: Pendulum's review (id 1) and its line comments, code scanning's, the PR's and the issue's
  * comments, the review threads (one per root line comment, resolved as `resolved` says) and the writes made.
  */
-function github({ lineComments = [], reviews = [{ id: 1, user: app, author_association: "NONE", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass." }], writers = null, me = app } = {}) {
+function github({ lineComments = [], reviews = [{ id: 1, user: app, author_association: "NONE", body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass." }], writers = null, me = app } = {}) {
   const state = { lineComments, reviews, prComments: [], issueComments: [], resolved: new Set(), labels: [], writes: [], writers, me };
   let id = 50_000;
-  const node = (c) => ({ databaseId: c.id, body: c.body, authorAssociation: c.author_association || "NONE", author: { __typename: c.user.type === "Bot" ? "Bot" : "User", login: c.user.login.replace(/\[bot\]$/, "") }, pullRequestReview: c.pull_request_review_id ? { body: state.reviews.find((r) => r.id === c.pull_request_review_id)?.body || "", authorAssociation: "NONE", author: { __typename: "Bot", login: "factory-app" } } : null });
+  const node = (c) => ({ databaseId: c.id, body: c.body, authorAssociation: c.author_association || "NONE", author: { __typename: c.user.type === "Bot" ? "Bot" : "User", login: c.user.login.replace(/\[bot\]$/, "") }, pullRequestReview: c.pull_request_review_id ? { body: state.reviews.find((r) => r.id === c.pull_request_review_id)?.body || "", authorAssociation: "NONE", author: { __typename: "Bot", login: "pendulum-app" } } : null });
   const threads = () =>
     state.lineComments
       .filter((c) => !c.in_reply_to_id)
@@ -150,7 +150,7 @@ test("#368: only the finding check's yes resolves a finding's thread; a no keeps
     assert.equal(fake.asked[0].question, FINDING_QUESTION);
     const input = fake.asked[0].input;
     const tag = /<<<BEGIN ([0-9a-f]{16})>>>/.exec(input)[1];
-    assert.match(input, new RegExp(`Finding by Factory's reviewer, at src/a\\.ts:5:\\n<<<BEGIN ${tag}>>>\\nacceptance 1 not met: FINDING-A, null input crashes\\n<<<END ${tag}>>>`));
+    assert.match(input, new RegExp(`Finding by Pendulum's reviewer, at src/a\\.ts:5:\\n<<<BEGIN ${tag}>>>\\nacceptance 1 not met: FINDING-A, null input crashes\\n<<<END ${tag}>>>`));
     assert.match(input, new RegExp(`The author's reply:\\n<<<BEGIN ${tag}>>>\\nFixed in abc1234`));
     assert.match(input, /in src\/a\.ts since the finding was raised[^\n]*\n<<<BEGIN \w+>>>\ndiff --git a\/src\/a\.ts b\/src\/a\.ts[\s\S]*\+  return guard\(x\);\n<<<END/);
     assert.match(input, /in its other files since then:\n<<<BEGIN \w+>>>\ndiff --git a\/src\/guard\.ts/);
@@ -158,14 +158,14 @@ test("#368: only the finding check's yes resolves a finding's thread; a no keeps
     assert.doesNotMatch(input, /Intro\./, "the entries, not the issue's opening");
     assert.match(input, /rules:\n<<<BEGIN \w+>>>\nAGENTS\.md:\nrule 3: every branch has a test/);
     // Code scanning's comment has no commit of its own here: the change since the stage's reviewed head (`since`).
-    assert.match(fake.asked[2].input, /Finding by github-advanced-security\[bot\], a reviewer outside Factory/);
+    assert.match(fake.asked[2].input, /Finding by github-advanced-security\[bot\], a reviewer outside Pendulum/);
     assert.match(fake.asked[2].input, /\+export const guard/);
     assert.deepEqual(progress, ["finding check (fake/decider): 1 of 3 answer(s) resolve their findings; still open: src/b.ts:9, src/merge.ts:8; no verdict on 1 (unavailable)"]);
     // The next answer pass gets the two still open, each with the answer the check did not accept.
     const open = await list();
     assert.deepEqual(open.map((c) => [c.id, c.earlier]), [[200, "Acceptance 3 does not require this."], [300, "Not reachable: the key is checked."]]);
     const prompt = answerPrompt({ taskCard: "", prNumber: 12, comments: open.map((c) => ({ id: c.id, path: c.path, line: c.line, body: c.body, earlier: c.earlier, ...(c.from ? { from: c.from } : {}) })) });
-    assert.match(prompt, /\(comment id 200\): AGENTS\.md rule 3: FINDING-B, no test for the new branch\n {2}Still open: Factory's check read your earlier answer as not resolving it: "Acceptance 3 does not require this\."/);
+    assert.match(prompt, /\(comment id 200\): AGENTS\.md rule 3: FINDING-B, no test for the new branch\n {2}Still open: Pendulum's check read your earlier answer as not resolving it: "Acceptance 3 does not require this\."/);
   });
 });
 
@@ -205,7 +205,7 @@ test("#368: without a decider key a reply answers its finding as before, said on
   assert.equal(findingCheckRow({ inputs: {}, env: {}, home }).status, "PASS");
   const row = findingCheckRow({ inputs: { decisionRoute: "gateway" }, env: {}, home });
   assert.deepEqual([row.status, row.name], ["WARN", "finding check"]);
-  assert.match(row.detail, /^off \(no-key\): reviewer findings are not judged; Factory's reply answers each one$/);
+  assert.match(row.detail, /^off \(no-key\): reviewer findings are not judged; Pendulum's reply answers each one$/);
   assert.match(findingCheckRow({ inputs: { decisionRoute: "gateway" }, env: { GITHUB_ACTIONS: "true" } }).fix, /ai_gateway_api_key/);
   assert.equal(findingCheckRow({ inputs: { aiGatewayApiKey: "k" }, env: { GITHUB_ACTIONS: "true" } }).status, "PASS");
 });
@@ -252,7 +252,7 @@ test("#368: a rebuttal resolves only at triage's confidence floor; a fix needs n
   assert.equal(resolves({ verdict: "decided", confidence: null }), false);
 });
 
-test("#368: only a reply by someone who can push answers Factory's finding; a stranger's does not", async () => {
+test("#368: only a reply by someone who can push answers Pendulum's finding; a stranger's does not", async () => {
   const stranger = { id: 150, in_reply_to_id: 100, user: { login: "mallory", type: "User" }, author_association: "NONE", body: "looks fine to me" };
   const gh = github({ lineComments: [root(100, "src/a.ts", 5, "FINDING-A"), stranger] });
   await withGitHub(gh, async () => {
@@ -262,9 +262,9 @@ test("#368: only a reply by someone who can push answers Factory's finding; a st
   });
 });
 
-test("#368: a finding in the review body is resolved by Factory's resolved marker on the check's yes; a no leaves it open", async () => {
+test("#368: a finding in the review body is resolved by Pendulum's resolved marker on the check's yes; a no leaves it open", async () => {
   // As postReview sets out the findings GitHub took in no line.
-  const body = reviewBody("<!-- factory:7:review -->\nFactory reviewer: one comment-only pass.", [{ path: "src/c.ts", line: 4, body: "FINDING-D, acceptance 2" }, { path: "src/d.ts", line: 6, body: "FINDING-E, rule 1" }]);
+  const body = reviewBody("<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass.", [{ path: "src/c.ts", line: 4, body: "FINDING-D, acceptance 2" }, { path: "src/d.ts", line: 6, body: "FINDING-E, rule 1" }]);
   const gh = github({ reviews: [{ id: 1, user: app, author_association: "NONE", body, commit_id: RAISED }] });
   await withGitHub(gh, async () => {
     const toAnswer = await list();
@@ -296,25 +296,25 @@ test("#368: findings still open after the answer pass get another answer round w
   const gh = github();
   const open = [{ id: 200, path: "src/b.ts", line: 9 }, { id: "r1-1", path: "src/c.ts", line: 4 }];
   await withGitHub(gh, async () => {
-    const stage = () => openFindingsExit(exitFor(open.length), { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective", open }, { token: "t" });
+    const stage = () => openFindingsExit(exitFor(open.length), { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective", open }, { token: "t" });
     for (let round = 1; round <= ANSWER_ROUNDS; round += 1) {
       const d = await stage();
       assert.deepEqual(d, { exit: "delivered", rerun: true, reason: `2 reviewer finding(s) still open after the answer pass (src/b.ts:9; src/c.ts:4); the review runs again to answer them (round ${round} of ${ANSWER_ROUNDS})` });
     }
-    assert.deepEqual(gh.state.labels, ["factory:review", "factory:review"]);
+    assert.deepEqual(gh.state.labels, ["pendulum:review", "pendulum:review"]);
     assert.equal(gh.state.issueComments.filter((c) => c.body.startsWith(marker(7, "answer-rounds"))).length, 1, "one record on the issue");
     const d = await stage();
-    assert.deepEqual(d, { exit: "blocked", cause: "work", reason: "2 reviewer finding(s) still open on PR #12 after 2 answer round(s): src/b.ts:9; src/c.ts:4. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting `<!-- factory:7:resolved:<finding id> -->`); then re-apply `factory:objective` to resume" });
+    assert.deepEqual(d, { exit: "blocked", cause: "work", reason: "2 reviewer finding(s) still open on PR #12 after 2 answer round(s): src/b.ts:9; src/c.ts:4. Fix them on the branch, or answer each on the PR: a reply by someone who can push in its thread, or resolve the thread (for a finding in the review body, a comment by someone who can push starting `<!-- pendulum:7:resolved:<finding id> -->`); then re-apply `pendulum:objective` to resume" });
     assert.equal(gh.state.labels.length, 2, "no third round");
     // A re-entry (the Objective label applied again) starts the count over.
-    gh.state.timeline = [{ event: "labeled", label: { name: "factory:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
+    gh.state.timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
     assert.equal((await stage()).rerun, true);
   });
 });
 
 test("#368: an answer the gateway gave no verdict on costs no answer round: the next stage judges it again with no worker pass, and the second stage in a row Blocks naming the gateway's failure", async () => {
   const gh = github();
-  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
+  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective" };
   const open = [{ id: 300, path: "src/merge.ts", line: 8 }];
   await withGitHub(gh, async () => {
     const d1 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "unavailable" }] }, { token: "t" });
@@ -324,7 +324,7 @@ test("#368: an answer the gateway gave no verdict on costs no answer round: the 
     assert.deepEqual(checkState(rec), { unjudged: [300], failed: 1, error: "unavailable", judgeOnly: true }, "the next stage only judges: no worker pass for them");
     // The next stage judged it again and the gateway failed again: Blocked, its cause from the code.
     const d2 = await openFindingsExit(exitFor(1), { ...ctx, open, unjudged: [{ id: 300, error: "rate_limited" }] }, { token: "t" });
-    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the AI Gateway's decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then re-apply `factory:objective` to resume" });
+    assert.deepEqual(d2, { exit: "blocked", cause: "provider-quota", reason: "the AI Gateway's decision model gave no verdict (rate_limited) on the answers to 1 reviewer finding(s) on PR #12 in 2 review stages in a row: src/merge.ts:8. Check the AI Gateway key, its budget and the gateway's status, then re-apply `pendulum:objective` to resume" });
     assert.equal(gh.state.labels.length, 1);
   });
   // A stage that judged them, with others open, ends the run of failures and takes an answer round.
@@ -347,7 +347,7 @@ test("#368: an answer the gateway gave no verdict on costs no answer round: the 
 
 test("#379: the stage harness's usage limit in the finding check ends the stage as a pass meeting it does, counts as no try, and a Block names the harness asked", async () => {
   const gh = github();
-  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
+  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective" };
   const open = [{ id: 300, path: "src/merge.ts", line: 8 }];
   const limit = { harness: "claude", status: 429, type: "rate_limit_error", code: "usage_limit_reached", message: "limit", resetAt: Date.parse("2026-11-16T23:00:00Z") };
   const decider = { name: "harness", model: "claude claude-fable-5-2" };
@@ -387,10 +387,10 @@ test("#368: the check reads what changed since the finding was raised: a fix mad
   put("src/m.ts", "main\n");
   run("commit", "-q", "-m", "base");
   run("push", "-q", "origin", "HEAD:main");
-  run("checkout", "-q", "-b", "factory/7");
+  run("checkout", "-q", "-b", "pendulum/7");
   put("src/a.ts", "export const read = (x) => x.value;\n");
   run("commit", "-q", "-m", "work");
-  run("push", "-q", "origin", "HEAD:factory/7");
+  run("push", "-q", "origin", "HEAD:pendulum/7");
   // The head the reviewer read: its finding on src/a.ts was raised on it.
   const raised = run("rev-parse", "HEAD");
   // A sibling merged on main; round 1's answer pass rebased onto it and fixed the finding through a guard in another file.
@@ -398,14 +398,14 @@ test("#368: the check reads what changed since the finding was raised: a fix mad
   put("src/m.ts", "main moved\n");
   run("commit", "-q", "-m", "sibling");
   run("push", "-q", "origin", "HEAD:main");
-  run("checkout", "-q", "factory/7");
+  run("checkout", "-q", "pendulum/7");
   run("rebase", "-q", "main");
   put("src/guard.ts", "export const guard = (x) => { if (x == null) throw new Error('x'); return x; };\n");
   put("src/a.ts", "import { guard } from './guard';\nexport const read = (x) => guard(x).value;\n");
   run("commit", "-q", "-m", "round 1 answer");
-  run("push", "-q", "-f", "origin", "HEAD:factory/7");
+  run("push", "-q", "-f", "origin", "HEAD:pendulum/7");
   const gh = github({ lineComments: [{ ...root(100, "src/a.ts", 1, "acceptance 1 not met: FINDING-A, null input crashes"), original_commit_id: raised }] });
-  const box = await openOutbox({ branch: "factory/7", defaultBranch: "main", checkout: work, remote: origin, agentEnv: { ...process.env, ...quiet }, protectedList: [], base: rootDir });
+  const box = await openOutbox({ branch: "pendulum/7", defaultBranch: "main", checkout: work, remote: origin, agentEnv: { ...process.env, ...quiet }, protectedList: [], base: rootDir });
   try {
     const head = box.expected();
     const whole = await answerDiff(box.git, { base: box.base, from: raised, head });
@@ -438,7 +438,7 @@ test("#368: the review stage judges answers the last stage got no verdict on fir
   assert.match(src, /const held = new Set\(\[\.\.\.unjudged\.map\(\(u\) => String\(u\.id\)\), \.\.\.\(lastCheck\.judgeOnly \? again\.map\(\(c\) => String\(c\.id\)\) : \[\]\)\]\);/);
   assert.match(src, /\.filter\(\(c\) => !held\.has\(String\(c\.id\)\)\);/);
   const judged = src.indexOf("if (repliesPosted && !outbox.failed) await judgeAnswers(toAnswer, repliesPosted);");
-  assert.ok(judged > listed && judged < src.indexOf("await resolveFactoryThreads(repo, pr.number"), "judged before the threads are resolved");
+  assert.ok(judged > listed && judged < src.indexOf("await resolvePendulumThreads(repo, pr.number"), "judged before the threads are resolved");
   assert.match(src, /diffOf: \(from\) => answerDiff\(outbox\.git, \{ base: outbox\.base, from, head \}\), since: reviewedAt/);
   assert.match(src, /if \(decision\.findingsOpen && [^\n]*decideExit\(\{ \.\.\.exitArgs, reviewUnaddressed: 0 \}\)\.exit === "delivered"\) await openFindingsExit\(decision, \{[^\n]*unjudged, decider: findingCheck\.asked\?\.\(\) \?\? null, limit: findingCheck\.limited\?\.\(\) \?\? null \}, token\);\n[^\n]*\n[^\n]*\n  if \(decision\.usageLimit\) throw new UsageLimitReached\(decision\.usageLimit/);
 });
@@ -472,7 +472,7 @@ function decisionReader(phrase = SETTLES, unless = null) {
  * #474, as on clockgrove#355: the reviewer's finding (`finding`, by default one on an acceptance entry no commit can meet,
  * an edit to another issue) is still open after both answer rounds; `author` then posts `decision` on the issue, the
  * worker's reply cites it, and the last stage judges the reply with the decisions the stage read (objectiveDecisions).
- * `self` and `me`: the login Factory posts as (local mode: the developer's). Returns what the check was asked, what it
+ * `self` and `me`: the login Pendulum posts as (local mode: the developer's). Returns what the check was asked, what it
  * resolved, the findings left open and the stage's exit.
  */
 async function decisionAfterRounds(author, { decision = `Owner decision (2026-11-16): the owner session ticks #347's five items after the PR merges. ${SETTLES}, say so in the PR body, and go on without asking.`, finding = null, phrase = SETTLES, unless = null, self = SELF, me = app, writers = ["owner-kim"], reviews = undefined, issueComments = [], prComments = [] } = {}) {
@@ -481,7 +481,7 @@ async function decisionAfterRounds(author, { decision = `Owner decision (2026-11
   gh.state.issueComments.push({ id: 900, user: OWNER, author_association: "MEMBER", body: "Owner: the merge queue's red is main's own, not this PR's.", created_at: "2026-11-16T18:57:12Z" }, ...issueComments);
   gh.state.prComments.push(...prComments);
   gh.state.issueComments.push({ id: 901, user: author, author_association: writers.includes(author.login) ? "MEMBER" : "NONE", body: decision, created_at: "2026-11-16T22:37:31Z" });
-  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
+  const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "pendulum:objective" };
   const where = { id: raised.id, path: raised.path, line: raised.line };
   return withGitHub(
     gh,
@@ -513,7 +513,7 @@ test("#474: a recorded owner decision settles a finding re-raised past the answe
   // The check is given the decisions as data, each with its author, time and place, in their own fenced part, and the
   // finding with the time it was raised, so the model can weigh one against the other.
   assert.match(partOf(input) ?? "", /^owner-kim, 2026-11-16 18:57Z, on the issue:\nOwner: the merge queue's red is main's own[\s\S]*\n\nowner-kim, 2026-11-16 22:37Z, on the issue:\nOwner decision \(2026-11-16\)/);
-  assert.match(input, /Finding by Factory's reviewer, at docs\/review\.md:88, raised 2026-11-16 21:57Z:\n/);
+  assert.match(input, /Finding by Pendulum's reviewer, at docs\/review\.md:88, raised 2026-11-16 21:57Z:\n/);
   assert.ok(FINDING_QUESTION.choices.some((c) => c.value === "decided"));
   assert.deepEqual(out, { resolved: [100], open: [], unjudged: [] });
   assert.deepEqual([...gh.state.resolved], ["T100"]);
@@ -573,13 +573,13 @@ test("#474: a maintainer's decision never settles code scanning's alert, whateve
   });
 });
 
-test("#474: in local mode, where Factory posts as the developer, the developer's own decision settles the finding; Factory's review, replies and progress are not decisions", async () => {
+test("#474: in local mode, where Pendulum posts as the developer, the developer's own decision settles the finding; Pendulum's review, replies and progress are not decisions", async () => {
   const dev = { login: "kirk", type: "User", id: 9 };
-  const reviews = [{ id: 1, user: dev, author_association: "OWNER", body: "<!-- factory:7:review -->\nFactory reviewer: one comment-only pass.", submitted_at: "2026-11-16T21:57:00Z", state: "COMMENTED" }];
+  const reviews = [{ id: 1, user: dev, author_association: "OWNER", body: "<!-- pendulum:7:review -->\nPendulum reviewer: one comment-only pass.", submitted_at: "2026-11-16T21:57:00Z", state: "COMMENTED" }];
   const finding = { ...root(100, "docs/review.md", 88, "acceptance 2: #347's five items are not ticked. FINDING-TICK"), user: dev, author_association: "OWNER", created_at: "2026-11-16T21:57:33Z" };
-  const progressComment = { id: 899, user: dev, author_association: "OWNER", body: "<!-- factory:7:progress:review:1 -->\nFactory review run 1: started.", created_at: "2026-11-16T21:50:00Z" };
+  const progressComment = { id: 899, user: dev, author_association: "OWNER", body: "<!-- pendulum:7:progress:review:1 -->\nPendulum review run 1: started.", created_at: "2026-11-16T21:50:00Z" };
   const { gh, decisions, out, exit } = await decisionAfterRounds(dev, { finding, self: "kirk", me: dev, writers: ["kirk", "owner-kim"], reviews, issueComments: [progressComment] });
-  assert.ok(gh.state.lineComments.some((c) => c.in_reply_to_id === 100 && c.user.login === "kirk" && c.body.startsWith("<!-- factory:7:reply:100 -->")), "Factory's reply is posted as the developer");
+  assert.ok(gh.state.lineComments.some((c) => c.in_reply_to_id === 100 && c.user.login === "kirk" && c.body.startsWith("<!-- pendulum:7:reply:100 -->")), "Pendulum's reply is posted as the developer");
   assert.deepEqual(decisions.map((d) => d.key), ["comment:900", "comment:901"], "only the people's plain comments: no review, finding, reply or progress comment");
   assert.deepEqual(out.resolved, [100]);
   assert.equal(exit.exit, "delivered");

@@ -5,31 +5,31 @@
 //
 // The opt-in is the `worker_secrets` input: names, each `NAME` (the shell gets the secret SOURCE=NAME) or `NAME=SOURCE`
 // (the shell gets SOURCE's value as NAME, so `AI_GATEWAY_API_KEY=WORKER_AI_GATEWAY_API_KEY` hands the adopter's own key
-// to a pipeline that reads AI_GATEWAY_API_KEY, while Factory's drift key keeps its name and stays Factory's). The values:
+// to a pipeline that reads AI_GATEWAY_API_KEY, while Pendulum's drift key keeps its name and stays Pendulum's). The values:
 // on Actions and in a cloud sandbox the `worker_secret_values` input, `SOURCE=value` lines, which the workflow template
-// passes from the one secret FACTORY_WORKER_SECRET_VALUES (so a re-render of the workflow keeps it); in local mode the
-// shell that runs `factory serve`, packed into the work stage's env the same way.
+// passes from the one secret PENDULUM_WORKER_SECRET_VALUES (so a re-render of the workflow keeps it); in local mode the
+// shell that runs `pendulum serve`, packed into the work stage's env the same way.
 //
-// Never the model's credential, Factory's or the runner's tokens, a name the harness or the runner reads, or a name
-// that changes how commands run: such an entry is refused. Factory's own AI_GATEWAY_API_KEY is refused as a SOURCE, and
-// a value that equals Factory's key is withheld (compared in constant time, in this process, never printed).
+// Never the model's credential, Pendulum's or the runner's tokens, a name the harness or the runner reads, or a name
+// that changes how commands run: such an entry is refused. Pendulum's own AI_GATEWAY_API_KEY is refused as a SOURCE, and
+// a value that equals Pendulum's key is withheld (compared in constant time, in this process, never printed).
 //
 // Only the work lineage's harness gets them: the work stage's passes, and the fix and answer passes that continue the
 // worker's session in the review stage. They travel in one variable (SHELL_SECRETS_ENV) that runHarness unpacks for the
 // harness child alone and scrubbedEnv removes everywhere else: the repository's setup, install and validation and
-// Factory's own git never see them. The reviewer never does either: its calls are marked `reviewer` and runHarness
+// Pendulum's own git never see them. The reviewer never does either: its calls are marked `reviewer` and runHarness
 // strips them there (harnessShell), whatever env it is handed.
 import { timingSafeEqual } from "node:crypto";
-import { FACTORY_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets, holdSecrets, log, mask } from "./inputs.mjs";
+import { PENDULUM_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, heldSecrets, holdSecrets, log, mask } from "./inputs.mjs";
 
 /** The one variable that carries the worker's shell secrets (JSON {NAME: value}) from worker.mjs to runHarness. */
-export const SHELL_SECRETS_ENV = "FACTORY_SHELL_SECRETS";
+export const SHELL_SECRETS_ENV = "PENDULUM_SHELL_SECRETS";
 /** At most this many worker secrets. */
 export const WORKER_SECRETS_MAX = 20;
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Prefixes Factory, the runner or a harness CLI reads its own settings or credentials from. */
-const OWNED_PREFIX = /^(FACTORY|GITHUB|GH|ACTIONS|RUNNER|ANTHROPIC|CLAUDE|CODEX|OPENAI|COPILOT)_/;
+/** Prefixes Pendulum, the runner or a harness CLI reads its own settings or credentials from. */
+const OWNED_PREFIX = /^(PENDULUM|GITHUB|GH|ACTIONS|RUNNER|ANTHROPIC|CLAUDE|CODEX|OPENAI|COPILOT)_/;
 /** Names that change how a process or a command runs, whatever their value. */
 export const PROCESS_NAMES = new Set(["PATH", "HOME", "TMPDIR", "SHELL", "USER", "LOGNAME", "PWD", "CI", "BASH_ENV", "ENV", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "BUN_OPTIONS", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PERL5LIB", "PERL5OPT", "RUBYOPT", "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]);
 const PROCESS_PREFIX = /^(LD_|DYLD_|GIT_|NPM_CONFIG_|SUDO_)/;
@@ -61,15 +61,15 @@ export function shellNameRefusal(name) {
   if (keyShaped(name)) return "looks-like-key";
   const up = name.toUpperCase();
   if (MODEL_SECRET_KEYS.includes(up)) return "model-credential";
-  if (RUNNER_SECRET_KEYS.includes(up) || GITHUB_TOKEN_KEYS.includes(up)) return "factory-token";
+  if (RUNNER_SECRET_KEYS.includes(up) || GITHUB_TOKEN_KEYS.includes(up)) return "pendulum-token";
   if (OWNED_PREFIX.test(up)) return "reserved-name";
   if (PROCESS_NAMES.has(up) || PROCESS_PREFIX.test(up)) return "process-setting";
   return null;
 }
 
-/** Why `name` may not be a SOURCE (where a value comes from), or null: shellNameRefusal, and Factory's own service keys. */
+/** Why `name` may not be a SOURCE (where a value comes from), or null: shellNameRefusal, and Pendulum's own service keys. */
 export function sourceRefusal(name) {
-  return shellNameRefusal(name) || (FACTORY_SECRET_KEYS.includes(String(name).toUpperCase()) ? "factory-key" : null);
+  return shellNameRefusal(name) || (PENDULUM_SECRET_KEYS.includes(String(name).toUpperCase()) ? "pendulum-key" : null);
 }
 
 /** What each refusal code means, for the log and doctor. */
@@ -77,10 +77,10 @@ export const REFUSAL_TEXT = {
   "not-a-name": "not NAME or NAME=SOURCE with environment variable names",
   "looks-like-key": "it looks like a key, not a name: put the key's value in the secret, and its name here",
   "model-credential": "a model credential, which never reaches a command",
-  "factory-token": "one of Factory's or the runner's tokens",
-  "reserved-name": "a name Factory, the runner or a harness reads its own settings from",
+  "pendulum-token": "one of Pendulum's or the runner's tokens",
+  "reserved-name": "a name Pendulum, the runner or a harness reads its own settings from",
   "process-setting": "a name that changes how commands run",
-  "factory-key": "Factory's own AI Gateway key; pass a dedicated key under another secret name (NAME=SOURCE)",
+  "pendulum-key": "Pendulum's own AI Gateway key; pass a dedicated key under another secret name (NAME=SOURCE)",
   duplicate: "named twice",
   "too-many": `more than ${WORKER_SECRETS_MAX} worker secrets`,
 };
@@ -141,10 +141,10 @@ export function sameSecret(a, b) {
 
 /**
  * The worker's shell secrets: {env: {NAME: value}, entries, refused, missing: [NAME whose SOURCE has no value],
- * factoryKey: [NAME whose value is Factory's own key, withheld]}. `lookup(source)` gives a value; `factoryKey` is
- * Factory's own AI Gateway key ("" when none).
+ * pendulumKey: [NAME whose value is Pendulum's own key, withheld]}. `lookup(source)` gives a value; `pendulumKey` is
+ * Pendulum's own AI Gateway key ("" when none).
  */
-export function workerSecrets({ spec, lookup, factoryKey = "" }) {
+export function workerSecrets({ spec, lookup, pendulumKey = "" }) {
   const { entries, refused } = parseWorkerSecrets(spec);
   const env = {};
   const missing = [];
@@ -153,14 +153,14 @@ export function workerSecrets({ spec, lookup, factoryKey = "" }) {
     const v = lookup(source);
     // Named by NAME: a SOURCE could be a key pasted into the wrong place, and is never printed.
     if (typeof v !== "string" || !v || v.includes("\n")) missing.push(name);
-    else if (sameSecret(v, factoryKey)) same.push(name);
+    else if (sameSecret(v, pendulumKey)) same.push(name);
     else env[name] = v;
   }
-  return { env, entries, refused, missing, factoryKey: same };
+  return { env, entries, refused, missing, pendulumKey: same };
 }
 
 /**
- * Local mode: the work stage's `worker_secret_values`, from the shell that runs `factory serve` (`env`): one
+ * Local mode: the work stage's `worker_secret_values`, from the shell that runs `pendulum serve` (`env`): one
  * `SOURCE=value` line for each opted-in source set there on one line. "" when none is.
  */
 export function localSecretValues(spec, env = process.env) {
@@ -218,19 +218,19 @@ export function harnessShell(given = {}, { reviewer = false } = {}) {
  * harness's shell, each value masked in the job log and held (never posted, stored, sent to the gateway or pushed). The
  * log names what reaches the shell and what was refused, never a value. Values come from `worker_secret_values` (on
  * Actions and in a cloud sandbox the workflow's, in local mode the one `serve` packed from its shell); one equal to
- * Factory's own AI Gateway key (`factoryKey()`) is withheld.
+ * Pendulum's own AI Gateway key (`pendulumKey()`) is withheld.
  */
-export function openWorkerSecrets(inputs, { factoryKey }) {
+export function openWorkerSecrets(inputs, { pendulumKey }) {
   if (!String(inputs.workerSecrets || "").trim()) return {};
   const values = parseSecretValues(inputs.workerSecretValues);
   // The opted-in values this process holds (withheld ones too). A line no entry names is no secret of the worker's.
   const opted = optedValues(inputs.workerSecrets, inputs.workerSecretValues);
   holdSecrets(opted);
-  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), factoryKey: factoryKey() });
+  const ws = workerSecrets({ spec: inputs.workerSecrets, lookup: (s) => values.get(s), pendulumKey: pendulumKey() });
   for (const v of opted) mask(v);
   for (const r of ws.refused) log(`worker secrets: refused ${refusedEntry(r)}: ${REFUSAL_TEXT[r.code]}`);
   for (const n of ws.missing) log(`worker secrets: no value for ${nameLabel(n)}; the worker's shell runs without it`);
-  for (const n of ws.factoryKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Factory's own AI Gateway key (pass a dedicated key with a budget of its own)`);
+  for (const n of ws.pendulumKey) log(`worker secrets: ${nameLabel(n)} withheld: its value is Pendulum's own AI Gateway key (pass a dedicated key with a budget of its own)`);
   const given = ws.entries.filter((e) => ws.env[e.name] !== undefined);
   if (given.length) log(`worker secrets: ${given.map(secretLabel).join(", ")} reach the worker's shell; any command it runs can read and spend them`);
   return ws.env;
@@ -257,10 +257,10 @@ export function missingSecretsFix(names, spec = "", route = "runner") {
   const { entries } = parseWorkerSecrets(spec);
   const opted = left.filter((n) => entries.some((e) => e.name === n));
   const named = (list) => list.map((n) => `\`${n}\``).join(", ");
-  const where = route === "local" ? "exported in the shell that runs `factory serve` (a running `serve` reads it when it restarts)" : "as a `SOURCE=value` line of the repository secret `FACTORY_WORKER_SECRET_VALUES`, which the workflow passes as `worker_secret_values`";
+  const where = route === "local" ? "exported in the shell that runs `pendulum serve` (a running `serve` reads it when it restarts)" : "as a `SOURCE=value` line of the repository secret `PENDULUM_WORKER_SECRET_VALUES`, which the workflow passes as `worker_secret_values`";
   const parts = [];
   const fresh = left.filter((n) => !opted.includes(n));
-  if (fresh.length) parts.push(`The worker's shell lacked ${named(fresh)}. If the Objective needs ${fresh.length === 1 ? "it" : "them"}, opt ${fresh.length === 1 ? "it" : "them"} in with the \`worker_secrets\` input (\`FACTORY_WORKER_SECRETS\` in the workflow's env block) as \`NAME=SOURCE\`, with SOURCE's value ${where}.`);
-  if (opted.length) parts.push(`${named(opted)} ${opted.length === 1 ? "is" : "are"} opted in with \`worker_secrets\` but had no value: set ${opted.length === 1 ? "its" : "their"} SOURCE ${where}, as a key of its own (never Factory's \`AI_GATEWAY_API_KEY\`).`);
-  return `${parts.join(" ")} Any code the worker runs can read and spend such a key: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Then re-apply \`factory:objective\`.`;
+  if (fresh.length) parts.push(`The worker's shell lacked ${named(fresh)}. If the Objective needs ${fresh.length === 1 ? "it" : "them"}, opt ${fresh.length === 1 ? "it" : "them"} in with the \`worker_secrets\` input (\`PENDULUM_WORKER_SECRETS\` in the workflow's env block) as \`NAME=SOURCE\`, with SOURCE's value ${where}.`);
+  if (opted.length) parts.push(`${named(opted)} ${opted.length === 1 ? "is" : "are"} opted in with \`worker_secrets\` but had no value: set ${opted.length === 1 ? "its" : "their"} SOURCE ${where}, as a key of its own (never Pendulum's \`AI_GATEWAY_API_KEY\`).`);
+  return `${parts.join(" ")} Any code the worker runs can read and spend such a key: use a dedicated key with a budget the provider enforces (docs/PLAN.md, Worker secrets). Then re-apply \`pendulum:objective\`.`;
 }

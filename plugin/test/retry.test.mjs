@@ -20,7 +20,7 @@ function fakeClock() {
   const waits = [];
   let t = 1_000_000;
   const saved = { sleep: RETRY.sleep, now: RETRY.now, random: RETRY.random };
-  // The middle of the jitter: Factory's own backoffs come out unspread, a wait GitHub asked for 15% longer.
+  // The middle of the jitter: Pendulum's own backoffs come out unspread, a wait GitHub asked for 15% longer.
   RETRY.random = () => 0.5;
   RETRY.sleep = async (ms) => {
     waits.push(ms);
@@ -167,7 +167,7 @@ test("rest: a 5xx or a 422 is no rate limit whatever its headers, so a create th
   );
 });
 
-test("rest: jitter spreads Factory's backoff both ways and GitHub's ask only upward; noRateWait throws a rate limit at once", async () => {
+test("rest: jitter spreads Pendulum's backoff both ways and GitHub's ask only upward; noRateWait throws a rate limit at once", async () => {
   for (const [r, want] of [[0, [1400, 5000]], [1, [2600, 6500]]]) {
     await withFetch(
       (req, n) => (n === 1 ? json({ message: "Bad Gateway" }, 502) : n === 2 ? json({ message: "x" }, 429, { "retry-after": "5" }) : json({ ok: true })),
@@ -253,11 +253,11 @@ test("graphql: a query is retried; a mutation is not resent after a 502, but is 
 test("#353: a label write GitHub answers 500 is sent again and lands; one it refuses (422) is sent once and thrown as it is", async () => {
   await withFetch(
     (req, n) => {
-      if (req.path === "/repos/o/r/issues/7/labels") return n === 1 ? json({ message: "Server Error" }, 500) : json([{ name: "factory:in-review" }]);
+      if (req.path === "/repos/o/r/issues/7/labels") return n === 1 ? json({ message: "Server Error" }, 500) : json([{ name: "pendulum:in-review" }]);
       return json({ message: "Validation Failed" }, 422);
     },
     async ({ seen, waits, lines }) => {
-      assert.deepEqual(await rest("repos/o/r/issues/7/labels", { method: "POST", body: { labels: ["factory:in-review"] } }), [{ name: "factory:in-review" }]);
+      assert.deepEqual(await rest("repos/o/r/issues/7/labels", { method: "POST", body: { labels: ["pendulum:in-review"] } }), [{ name: "pendulum:in-review" }]);
       assert.deepEqual(waits, [2000]);
       assert.match(lines.find((l) => /GitHub POST/.test(l)) || "", /POST repos\/o\/r\/issues\/7\/labels: HTTP 500; try 2 of 4/);
       await assert.rejects(rest("repos/o/r/issues/8/labels", { method: "POST", body: { labels: ["x"] } }), (e) => e.status === 422 && e.offline === undefined);
@@ -274,23 +274,23 @@ test("#353: a comment GitHub answers 500 is looked for before it is sent again: 
       const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
       if (req.method === "GET") return json(comments[issue]);
       // #1: GitHub made the comment, then answered 500. #2: the 500 made nothing; the second try is made.
-      if (issue === 1 || n > 1) comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "factory[bot]" } });
+      if (issue === 1 || n > 1) comments[issue].push({ id: (id += 1), body: req.body.body, user: { login: "pendulum[bot]" } });
       return n === 1 ? json({ message: "Server Error" }, 500) : json(comments[issue].at(-1), 201);
     },
     async ({ seen }) => {
-      assert.deepEqual(await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: "handed to review" } }), { id: 101, body: "handed to review", user: { login: "factory[bot]" } });
+      assert.deepEqual(await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: "handed to review" } }), { id: 101, body: "handed to review", user: { login: "pendulum[bot]" } });
       assert.equal(comments[1].length, 1, "posted once");
-      assert.deepEqual(await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "handed to review" } }), { id: 102, body: "handed to review", user: { login: "factory[bot]" } });
+      assert.deepEqual(await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "handed to review" } }), { id: 102, body: "handed to review", user: { login: "pendulum[bot]" } });
       assert.equal(comments[2].length, 1, "posted once");
       assert.deepEqual(seen, ["POST /repos/o/r/issues/1/comments", "GET /repos/o/r/issues/1/comments", "POST /repos/o/r/issues/2/comments", "GET /repos/o/r/issues/2/comments", "POST /repos/o/r/issues/2/comments"]);
     },
   );
 });
 
-test("#353 review: a comment's check finds a notice the App posted (its marker, not Factory's login), whatever its line ends; a bare body by someone else is no find; 502 waits for GitHub first; reads keep the deadline", async () => {
+test("#353 review: a comment's check finds a notice the App posted (its marker, not Pendulum's login), whatever its line ends; a bare body by someone else is no find; 502 waits for GitHub first; reads keep the deadline", async () => {
   const comments = { 1: [], 2: [], 3: [] };
   let id = 200;
-  const notice = "<!-- factory:1:blocked:x -->\nBlocked: the review label   \nRe-apply it.";
+  const notice = "<!-- pendulum:1:blocked:x -->\nBlocked: the review label   \nRe-apply it.";
   const gets = [];
   setSelf("kirk");
   try {
@@ -299,8 +299,8 @@ test("#353 review: a comment's check finds a notice the App posted (its marker, 
         const issue = Number(/\/issues\/(\d+)\/comments$/.exec(req.path)?.[1]);
         if (req.method === "GET") return gets.push(issue), json(comments[issue]);
         // #1: the notice App's comment landed, stored with CRLF line ends and its trailing blanks gone, before a 502.
-        if (issue === 1 && n === 1) return comments[1].push({ id: (id += 1), body: req.body.body.replace(/[ \t]+$/gm, "").replace(/\n/g, "\r\n"), user: { login: "factory-notices[bot]" } }), json({ message: "Bad Gateway" }, 502);
-        // #2: someone else wrote the same words (no marker) just before; Factory's 500 made nothing.
+        if (issue === 1 && n === 1) return comments[1].push({ id: (id += 1), body: req.body.body.replace(/[ \t]+$/gm, "").replace(/\n/g, "\r\n"), user: { login: "pendulum-notices[bot]" } }), json({ message: "Bad Gateway" }, 502);
+        // #2: someone else wrote the same words (no marker) just before; Pendulum's 500 made nothing.
         if (issue === 2 && n === 1) return comments[2].push({ id: (id += 1), body: "ok", user: { login: "someone" } }), json({ message: "Server Error" }, 500);
         // #3: answered 502 every time; the check's read keeps the call's deadline.
         if (issue === 3) return json({ message: "Bad Gateway" }, 502);
@@ -308,11 +308,11 @@ test("#353 review: a comment's check finds a notice the App posted (its marker, 
         return json(comments[issue].at(-1), 201);
       },
       async ({ seen, waits, now }) => {
-        assert.equal((await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: notice } })).user.login, "factory-notices[bot]");
+        assert.equal((await rest("repos/o/r/issues/1/comments", { method: "POST", body: { body: notice } })).user.login, "pendulum-notices[bot]");
         assert.equal(comments[1].length, 1, "the notice is not posted twice");
         assert.deepEqual(waits, [RETRY.gatewayMs], "a gateway's 502: the check waits for GitHub to finish first");
         assert.equal((await rest("repos/o/r/issues/2/comments", { method: "POST", body: { body: "ok" } })).user.login, "kirk");
-        assert.equal(comments[2].length, 2, "someone else's words are not Factory's comment: posted once");
+        assert.equal(comments[2].length, 2, "someone else's words are not Pendulum's comment: posted once");
         waits.length = 0;
         const deadlineAt = now() + RETRY.gatewayMs + 1000;
         await assert.rejects(rest("repos/o/r/issues/3/comments", { method: "POST", body: { body: "late" }, deadlineAt }), (e) => e.status === 502);
@@ -331,7 +331,7 @@ test("#353 review: a comment's check finds a notice the App posted (its marker, 
 const quiet = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 
 function repos() {
-  const root = mkdtempSync(join(tmpdir(), "factory-retry-"));
+  const root = mkdtempSync(join(tmpdir(), "pendulum-retry-"));
   const origin = join(root, "origin.git");
   const work = join(root, "work");
   const run = (cwd, ...a) => execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { encoding: "utf8", env: { ...process.env, ...quiet } }).trim();
@@ -341,7 +341,7 @@ function repos() {
   run(work, "add", "app.txt");
   run(work, "commit", "-q", "-m", "base");
   run(work, "push", "-q", "origin", "HEAD:main");
-  run(work, "checkout", "-q", "-b", "factory/1");
+  run(work, "checkout", "-q", "-b", "pendulum/1");
   writeFileSync(join(work, "app.txt"), "v2\n");
   run(work, "commit", "-q", "-am", "work");
   return { root, origin, work, run };
@@ -356,7 +356,7 @@ function dropConnection(r, hook, times) {
   writeFileSync(join(r.origin, "hooks", hook), `#!/bin/sh\n${read}if [ -s "${count}" ]; then sed -i 1d "${count}"; kill -9 $PPID; sleep 1; exit 1; fi\nexit 0\n`, { mode: 0o755 });
 }
 
-const open = (r) => openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root });
+const open = (r) => openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root });
 
 test("outbox: a push whose connection drops is retried and lands; the outbox takes later pushes", async () => {
   const r = repos();
@@ -366,7 +366,7 @@ test("outbox: a push whose connection drops is retried and lands; the outbox tak
     box = await open(r);
     dropConnection(r, "pre-receive", 2);
     assert.equal(await box.push(), true, box.error);
-    assert.equal(r.run(r.origin, "rev-parse", "factory/1"), r.run(r.work, "rev-parse", "HEAD"));
+    assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
     assert.deepEqual(clock.waits, [2000, 4000]);
     assert.equal(box.failed, false);
     writeFileSync(join(r.work, "app.txt"), "v3\n");
@@ -383,7 +383,7 @@ test("outbox: a push after the work's deadline (in the stage's exit reserve) is 
   const clock = fakeClock();
   try {
     // A minute past the work's deadline, by the retry clock: a timed-out stage's last push.
-    const box = await openOutbox({ branch: "factory/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root, deadlineAt: clock.now() - 60_000 });
+    const box = await openOutbox({ branch: "pendulum/1", defaultBranch: "main", checkout: r.work, remote: r.origin, agentEnv: { ...process.env, ...quiet }, base: r.root, deadlineAt: clock.now() - 60_000 });
     dropConnection(r, "pre-receive", 1);
     assert.equal(await box.push(), true, box.error);
     assert.deepEqual(clock.waits, [2000]);
@@ -404,7 +404,7 @@ test("outbox: a push that landed though its answer was lost is not sent again", 
     assert.equal(await box.push(), true, box.error);
     assert.equal(readFileSync(sends, "utf8"), "x\n", "sent once");
     assert.deepEqual(clock.waits, [2000]);
-    assert.equal(r.run(r.origin, "rev-parse", "factory/1"), r.run(r.work, "rev-parse", "HEAD"));
+    assert.equal(r.run(r.origin, "rev-parse", "pendulum/1"), r.run(r.work, "rev-parse", "HEAD"));
     box.close();
   } finally {
     clock.restore();
@@ -442,7 +442,7 @@ test("#420 gitTransport: a failure goes again unless the remote answered: the re
   // git's own porcelain status for a remote that never reported the ref's outcome: no answer.
   assert.equal(gitTransport(fail("fatal: the remote end hung up unexpectedly", "To o\n!\trefs/heads/incoming:refs/heads/f\t[remote failure] (remote failed to report status)\nDone\n"), "refs/heads/f"), true);
   assert.equal(gitTransport({ code: 0, stdout: "", stderr: "" }), false);
-  assert.equal(gitTransport({ code: null, stdout: "", stderr: "", timedOut: true }), false, "a command Factory timed out is not sent again");
+  assert.equal(gitTransport({ code: null, stdout: "", stderr: "", timedOut: true }), false, "a command Pendulum timed out is not sent again");
 });
 
 // ------------------------------------------------------------------ serve and a 401
@@ -452,8 +452,8 @@ test("#420 gitTransport: a failure goes again unless the remote answered: the re
  * once the refusal is logged; the loop stops after its first dispatch read GitHub answers, or after `stopMs`.
  */
 async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = null }) {
-  const home = mkdtempSync(join(tmpdir(), "factory-home-"));
-  const file = join(home, ".config", "factory", "tokens", "o", "r");
+  const home = mkdtempSync(join(tmpdir(), "pendulum-home-"));
+  const file = join(home, ".config", "pendulum", "tokens", "o", "r");
   mkdirSync(join(file, ".."), { recursive: true });
   writeFileSync(file, "github_pat_old\n");
   let reads = 0;
@@ -468,25 +468,25 @@ async function serveThrough401({ refuses, onRefused, stopMs = 5000, answer = nul
     return send(200, req.method === "POST" ? { message: "Validation Failed" } : url.pathname === "/repos/o/r" ? { full_name: "o/r" } : []);
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-  const env = { HOME: process.env.HOME, GITHUB_API_URL: process.env.GITHUB_API_URL, FACTORY_LOCAL: process.env.FACTORY_LOCAL, FACTORY_LOCAL_TOKEN: process.env.FACTORY_LOCAL_TOKEN };
+  const env = { HOME: process.env.HOME, GITHUB_API_URL: process.env.GITHUB_API_URL, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL, PENDULUM_LOCAL_TOKEN: process.env.PENDULUM_LOCAL_TOKEN };
   const probe = REFUSED_PROBE.ms;
   REFUSED_PROBE.ms = 20;
   process.env.HOME = home;
   process.env.GITHUB_API_URL = `http://127.0.0.1:${server.address().port}`;
-  process.env.FACTORY_LOCAL = "1";
-  delete process.env.FACTORY_LOCAL_TOKEN;
+  process.env.PENDULUM_LOCAL = "1";
+  delete process.env.PENDULUM_LOCAL_TOKEN;
   const lines = [];
   const loop = Object.assign(Object.create(Local.prototype), {
     repo: { owner: "o", name: "r", full: "o/r" },
     repoFull: "o/r",
     token: "github_pat_old",
     notice: null,
-    wf: { FACTORY_LOCAL_MAX_CONCURRENT: "1" },
+    wf: { PENDULUM_LOCAL_MAX_CONCURRENT: "1" },
     // A machine of its own (lib/machine.mjs): this one's slots and load are never read or held.
     machine: { home: mkdtempSync(join(tmpdir(), "home-")), proc: fakeProc(mkdtempSync(join(tmpdir(), "proc-"))) },
     opts: { token: "github_pat_old" },
     children: new Set(),
-    baseEnv: () => ({ FACTORY_INPUT_MAX_CONCURRENT: "1" }),
+    baseEnv: () => ({ PENDULUM_INPUT_MAX_CONCURRENT: "1" }),
     cleanup: async () => {},
     pausedHere: async () => {
       if (reads > 0) loop.stopping = true;

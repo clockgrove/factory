@@ -36,19 +36,19 @@ test("REST blocked-by relations win over body lines when present", () => {
 });
 
 test("Running, Blocked, Question and In review are excluded, from the card first, then the label", () => {
-  const issues = [issue(1), issue(2, ["factory:running"]), issue(3, ["factory:blocked"]), issue(4, ["factory:question"]), issue(5), issue(6, ["factory:in-review"])];
+  const issues = [issue(1), issue(2, ["pendulum:running"]), issue(3, ["pendulum:blocked"]), issue(4, ["pendulum:question"]), issue(5), issue(6, ["pendulum:in-review"])];
   const statuses = { 1: "Queued", 5: "Running" };
   const { ready, running, skipped } = selectReady({ issues, statuses, maxConcurrent: 10, dailyUsd: 100 });
   assert.deepEqual(ready, [1]);
   assert.equal(running, 2);
   assert.deepEqual(skipped.map((s) => s.reason), ["Running", "Blocked", "Question", "Running", "In review"]);
-  assert.equal(stateOf(issue(9, ["factory:blocked"]), "Queued"), "Blocked", "a Queued card with a blocked label: the label wins");
-  assert.equal(stateOf(issue(9, ["factory:blocked"]), "Running"), "Running", "a non-Queued card wins over the label");
+  assert.equal(stateOf(issue(9, ["pendulum:blocked"]), "Queued"), "Blocked", "a Queued card with a blocked label: the label wins");
+  assert.equal(stateOf(issue(9, ["pendulum:blocked"]), "Running"), "Running", "a non-Queued card wins over the label");
   // The board has no Question column: a Question's card sits in In review, and its label says Question (#57).
-  assert.equal(stateOf(issue(9, ["factory:question"]), "In review"), "Question");
-  assert.equal(stateOf(issue(9, ["factory:in-review"]), "In review"), "In review");
-  assert.equal(stateOf(issue(9, ["factory:question"]), "Running"), "Running", "a stale question label on a Running card is no Question");
-  assert.deepEqual(selectReady({ issues: [issue(4, ["factory:question"])], statuses: { 4: "In review" }, maxConcurrent: 10, dailyUsd: 100 }).skipped, [{ number: 4, reason: "Question" }]);
+  assert.equal(stateOf(issue(9, ["pendulum:question"]), "In review"), "Question");
+  assert.equal(stateOf(issue(9, ["pendulum:in-review"]), "In review"), "In review");
+  assert.equal(stateOf(issue(9, ["pendulum:question"]), "Running"), "Running", "a stale question label on a Running card is no Question");
+  assert.deepEqual(selectReady({ issues: [issue(4, ["pendulum:question"])], statuses: { 4: "In review" }, maxConcurrent: 10, dailyUsd: 100 }).skipped, [{ number: 4, reason: "Question" }]);
 });
 
 test("a held Queued issue (a requeue's backoff) is skipped with its reason and takes no slot", () => {
@@ -59,7 +59,7 @@ test("a held Queued issue (a requeue's backoff) is skipped with its reason and t
 });
 
 test("max_concurrent minus running caps the start list", () => {
-  const issues = [issue(1), issue(2), issue(3), issue(4, ["factory:running"]), issue(5, ["factory:running"])];
+  const issues = [issue(1), issue(2), issue(3), issue(4, ["pendulum:running"]), issue(5, ["pendulum:running"])];
   const r = selectReady({ issues, maxConcurrent: 4, dailyUsd: 100 });
   assert.deepEqual(r.ready, [1, 2]);
   assert.equal(r.running, 2);
@@ -177,43 +177,43 @@ test("queueRetry: a PR the merge queue dropped goes back in once; dropped again 
   assert.equal(queueRetry([{ at: "2026-11-09T10:40:04Z", reason: "checks_timed_out", actor: null }], { since }).drops, 1, "a removal with no actor is the queue's");
   assert.equal(queueRetry([{ at: "2026-11-09T10:40:04Z", reason: "dequeued", actor: "some-automation", person: false }], { since }).drops, 1, "a bot's removal is a drop: only a person's is a hold");
 
-  // A person's removal (a writer's dequeue) is a hold: Factory neither puts it back nor counts it toward the Block.
+  // A person's removal (a writer's dequeue) is a hold: Pendulum neither puts it back nor counts it toward the Block.
   const manual = { at: "2026-11-09T10:50:00Z", reason: "dequeued", actor: "kirk", person: true };
   assert.deepEqual(queueRetry([manual], { since }), { hold: { at: manual.at, code: "dequeued" }, drops: 0 }, "a hand removal stays out");
-  assert.deepEqual(queueRetry([timedOut, manual], { since, self: "factory-app[bot]" }).hold, { at: manual.at, code: "dequeued" }, "a hand removal after a drop is still a hold");
+  assert.deepEqual(queueRetry([timedOut, manual], { since, self: "pendulum-app[bot]" }).hold, { at: manual.at, code: "dequeued" }, "a hand removal after a drop is still a hold");
   assert.deepEqual(queueRetry([manual, { at: "2026-11-09T11:30:00Z", reason: "failed_checks", actor: q }], { since }), { enqueue: true, drops: 1, last: { at: "2026-11-09T11:30:00Z", code: "failed_checks" } }, "re-enqueued by the person and dropped by the queue: one drop, the hold not counted");
   assert.equal(queueRetry([manual, manual], { since: "2026-11-09T11:00:00Z" }).enqueue, true, "a new review after the hold puts it back");
 
-  // Factory's own removal of a stalled entry is a drop, by its login (the timeline names the App without [bot]) or
+  // Pendulum's own removal of a stalled entry is a drop, by its login (the timeline names the App without [bot]) or
   // marked `self` before the timeline shows it.
-  const stalled = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "factory-app", person: false };
-  assert.deepEqual(queueRetry([stalled], { since, self: "factory-app[bot]" }), { enqueue: true, drops: 1, last: { at: stalled.at, code: STALL_CODE, factory: true } });
-  // #2683 F2: an earlier removal of a hung entry, its code read back from Factory's requeue record, keeps that code.
+  const stalled = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "pendulum-app", person: false };
+  assert.deepEqual(queueRetry([stalled], { since, self: "pendulum-app[bot]" }), { enqueue: true, drops: 1, last: { at: stalled.at, code: STALL_CODE, pendulum: true } });
+  // #2683 F2: an earlier removal of a hung entry, its code read back from Pendulum's requeue record, keeps that code.
   const hungBefore = { ...stalled, code: HUNG_CODE };
-  const hungTwice = queueRetry([hungBefore, { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true }], { since, self: "factory-app[bot]" });
+  const hungTwice = queueRetry([hungBefore, { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true }], { since, self: "pendulum-app[bot]" });
   assert.deepEqual(hungTwice.codes, [HUNG_CODE], "never read as checks_never_started");
-  const twice = queueRetry([stalled, { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, self: true }], { since, self: "factory-app[bot]" });
+  const twice = queueRetry([stalled, { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, self: true }], { since, self: "pendulum-app[bot]" });
   assert.match(twice.block, new RegExp(`2 times without merging it \\(${STALL_CODE}\\)`));
-  assert.deepEqual(queueRetry([stalled], { since }), { enqueue: true, drops: 1, last: { at: stalled.at, code: "dequeued" } }, "without Factory's login known, its App is still a bot: a drop, never a hold that leaves the PR out");
+  assert.deepEqual(queueRetry([stalled], { since }), { enqueue: true, drops: 1, last: { at: stalled.at, code: "dequeued" } }, "without Pendulum's login known, its App is still a bot: a drop, never a hold that leaves the PR out");
 });
 
-test("queueRetry: a hung removal of Factory's whose step then finished green in time counts toward no try; anything else counts (#437)", async () => {
+test("queueRetry: a hung removal of Pendulum's whose step then finished green in time counts toward no try; anything else counts (#437)", async () => {
   const { HUNG_CODE, STALL_CODE, queueRetry } = await import("../scripts/lib/logic.mjs");
   const since = "2026-11-09T09:30:00Z";
-  const self = "factory-app[bot]";
-  const hung = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE };
+  const self = "pendulum-app[bot]";
+  const hung = { at: "2026-11-09T09:47:00Z", reason: "dequeued", actor: "pendulum-app", person: false, code: HUNG_CODE };
   const again = { at: "2026-11-09T09:58:00Z", reason: STALL_CODE, code: HUNG_CODE, self: true };
   assert.ok(queueRetry([hung, again], { since, self }).block, "both count: two drops Block");
-  assert.deepEqual(queueRetry([{ ...hung, cleared: true }, again], { since, self }), { enqueue: true, drops: 1, last: { at: again.at, code: HUNG_CODE, factory: true }, cleared: 1 }, "the slow step's removal leaves the tries as they were");
-  assert.deepEqual(queueRetry([{ ...hung, cleared: true }], { since, self }), { enqueue: true, drops: 0, last: { at: hung.at, code: HUNG_CODE, factory: true, cleared: true }, cleared: 1 }, "a cleared removal is never a hold: the PR goes back");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }, again], { since, self }), { enqueue: true, drops: 1, last: { at: again.at, code: HUNG_CODE, pendulum: true }, cleared: 1 }, "the slow step's removal leaves the tries as they were");
+  assert.deepEqual(queueRetry([{ ...hung, cleared: true }], { since, self }), { enqueue: true, drops: 0, last: { at: hung.at, code: HUNG_CODE, pendulum: true, cleared: true }, cleared: 1 }, "a cleared removal is never a hold: the PR goes back");
   assert.ok(queueRetry([{ ...hung, code: STALL_CODE, cleared: true }, again], { since, self }).block, "only a hung removal can be cleared");
   const person = { at: "2026-11-09T09:40:00Z", reason: "dequeued", actor: "kirk", person: true, code: HUNG_CODE, cleared: true };
   assert.deepEqual(queueRetry([person], { since, self }).hold, { at: person.at, code: "dequeued" }, "a person's removal stays a hold");
   const queue = { at: "2026-11-09T09:50:00Z", reason: "checks_timed_out", actor: "github-merge-queue", code: HUNG_CODE, cleared: true };
   assert.ok(queueRetry([queue, again], { since, self }).block, "the queue's own drop counts whatever it carries");
   // A step slow on every try: one removal at most is cleared, so the third hung removal Blocks, never an endless loop.
-  const slow = (min) => ({ at: `2026-11-09T${String(9 + Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}:00Z`, reason: "dequeued", actor: "factory-app", person: false, code: HUNG_CODE, cleared: true });
-  assert.deepEqual(queueRetry([slow(40), slow(80)], { since, self }), { enqueue: true, drops: 1, last: { at: slow(80).at, code: HUNG_CODE, factory: true }, cleared: 1 });
+  const slow = (min) => ({ at: `2026-11-09T${String(9 + Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}:00Z`, reason: "dequeued", actor: "pendulum-app", person: false, code: HUNG_CODE, cleared: true });
+  assert.deepEqual(queueRetry([slow(40), slow(80)], { since, self }), { enqueue: true, drops: 1, last: { at: slow(80).at, code: HUNG_CODE, pendulum: true }, cleared: 1 });
   const thrice = queueRetry([slow(40), slow(80), slow(120)], { since, self });
   assert.equal(thrice.drops, 2);
   assert.equal(thrice.cleared, 1);
@@ -309,7 +309,7 @@ test("jobStall: a job is stalled only when its current step runs past max(3 x it
     ...extra,
   });
   const at = (m) => ({ now: t0 + m * min, fallbackMs: QUEUE_HUNG_MS });
-  // Tonight's case (factory-scratch run 42759031247): setup.sh normally about a minute, running 15.
+  // Tonight's case (the scratch repository's run 42759031247): setup.sh normally about a minute, running 15.
   const setup = job("Run scripts/ci/setup.sh");
   // Stalled past max(3 x baseline, baseline + 15 min): 16 minutes for a 1-minute step.
   assert.equal(jobStall(setup, { ...at(15.1), baselineMs: 1 * min }), null, "15 minutes of a normal 1: not yet");
@@ -436,8 +436,8 @@ test("gateStarted: an empty gate counts any check run, any status, or any suite 
 
 test("requeueLine: the issue's one line at a re-enqueue, codes and times only", async () => {
   const { requeueLine } = await import("../scripts/lib/session.mjs");
-  assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04Z", code: "checks_timed_out" }, 2), "Factory: the merge queue dropped PR #300 (checks_timed_out) at 2026-11-09T10:40:04Z; enqueued again (try 2).");
-  assert.equal(requeueLine(300, { at: "<b>", code: "unknown" }, 2), "Factory: the merge queue dropped PR #300 (unknown) at an unknown time; enqueued again (try 2).");
+  assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04Z", code: "checks_timed_out" }, 2), "Pendulum: the merge queue dropped PR #300 (checks_timed_out) at 2026-11-09T10:40:04Z; enqueued again (try 2).");
+  assert.equal(requeueLine(300, { at: "<b>", code: "unknown" }, 2), "Pendulum: the merge queue dropped PR #300 (unknown) at an unknown time; enqueued again (try 2).");
   assert.equal(requeueLine(300, { at: "2026-11-09T10:40:04.123Z", code: "failed_checks" }, 2).includes("\n"), false);
 });
 
@@ -445,7 +445,7 @@ test("mergeTickCheck: an installed workflow without the merge pass's ticks is na
   const { mergeTickCheck } = await import("../scripts/doctor.mjs");
   const { renderWorkflow } = await import("../scripts/setup.mjs");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) assert.equal(mergeTickCheck(renderWorkflow(template, v), {}).status, "PASS");
   // A workflow rendered before this change: scratch's and clockgrove's `types: [labeled, ready_for_review, closed]`.
   const old = renderWorkflow(template, values).replace("[labeled, ready_for_review, closed, dequeued]", "[labeled, ready_for_review, closed]").replace(/\n {2}queue-watch:[\s\S]*?(?=\n {2}work:)/, "");
@@ -476,7 +476,7 @@ test("mergeBlockReason: which merge answers Block, and with what", async () => {
 
 test("activeWorkIssues: a failed Actions listing throws, so the dispatcher leaves a Running Objective alone instead of Blocking it as vanished", async () => {
   const { createServer } = await import("node:http");
-  const { activeFactoryJobs, activeWorkIssues } = await import("../scripts/lib/github.mjs");
+  const { activePendulumJobs, activeWorkIssues } = await import("../scripts/lib/github.mjs");
   let fail = true;
   const server = createServer((req, res) => {
     if (fail) return res.writeHead(502, { "content-type": "application/json" }).end('{"message":"Server Error"}');
@@ -490,7 +490,7 @@ test("activeWorkIssues: a failed Actions listing throws, so the dispatcher leave
   const repo = { owner: "o", name: "r", full: "o/r" };
   try {
     await assert.rejects(activeWorkIssues(repo, { token: "t" }), /failed \(502\)/, "a failed listing is no answer, never 'no job alive'");
-    assert.equal((await activeFactoryJobs(repo, { token: "t" })).work.size, 0, "the lenient listing still reads a failure as none");
+    assert.equal((await activePendulumJobs(repo, { token: "t" })).work.size, 0, "the lenient listing still reads a failure as none");
     fail = false;
     assert.deepEqual([...(await activeWorkIssues(repo, { token: "t" }))], [12]);
   } finally {
@@ -504,7 +504,7 @@ test("workflow template: every job has a timeout, the dispatcher's included (one
   const { renderWorkflow } = await import("../scripts/setup.mjs");
   const { parseYaml } = await import("../scripts/lib/yaml.mjs");
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
     const jobs = parseYaml(renderWorkflow(template, v)).jobs;
     assert.ok(jobs.dispatch, "the dispatch job renders");
@@ -512,7 +512,7 @@ test("workflow template: every job has a timeout, the dispatcher's included (one
   }
 });
 
-test("local loop: every sweep pass acts only on the Objectives it routes; its Done pass records each removal as Factory's first (#2668)", async () => {
+test("local loop: every sweep pass acts only on the Objectives it routes; its Done pass records each removal as Pendulum's first (#2668)", async () => {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const { BACKENDS } = await import("../scripts/lib/backend.mjs");
   const { doneRecord, doneTidies } = await import("../scripts/lib/logic.mjs");
@@ -523,16 +523,16 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
   // #373's shape: an Actions/sandbox Objective merged and closed, still In review; #380 the local loop's own; #5 an
   // Actions Objective Running for an hour with no Actions job listed (its sandbox holds it); #6 one a loop with --all
   // claimed and left away over a day, which a loop without --all still Blocks.
-  const open = [iss(5, ["factory:objective", "factory:running"]), iss(6, ["factory:objective", "factory:running"])];
+  const open = [iss(5, ["pendulum:objective", "pendulum:running"]), iss(6, ["pendulum:objective", "pendulum:running"])];
   const daysAgo = (d) => new Date(now - d * 86_400_000).toISOString();
-  const claim = { id: 66, user: { login: "maintainer", type: "User" }, body: `<!-- factory:6:local -->\n${claimBody("box-a", new Date(daysAgo(1.5)))}` };
-  const closed = [iss(373, ["factory:objective", "factory:in-review"], "closed"), iss(380, ["factory:objective", "factory:local", "factory:in-review"], "closed")];
+  const claim = { id: 66, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:6:local -->\n${claimBody("box-a", new Date(daysAgo(1.5)))}` };
+  const closed = [iss(373, ["pendulum:objective", "pendulum:in-review"], "closed"), iss(380, ["pendulum:objective", "pendulum:local", "pendulum:in-review"], "closed")];
   const tick = async (env, { failRecord = false } = {}) => {
     const writes = [];
     const realFetch = globalThis.fetch;
-    const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+    const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
     Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
-    for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+    for (const k of ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
     globalThis.fetch = async (url, init = {}) => {
       const u = new URL(url);
       const method = init.method || "GET";
@@ -540,7 +540,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
       if (method !== "GET" && !u.pathname.endsWith("/graphql")) writes.push(`${method} ${u.pathname.replace("/repos/acme/app", "")}${method === "POST" ? ` ${JSON.parse(init.body).body ?? ""}` : ""}`);
       if (method === "GET" && u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("state") === "closed" ? closed : open);
       if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
-      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "factory:running" }, created_at: u.pathname.includes("/issues/6/") ? daysAgo(2) : hourAgo }]);
+      if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json([{ event: "labeled", label: { name: "pendulum:running" }, created_at: u.pathname.includes("/issues/6/") ? daysAgo(2) : hourAgo }]);
       if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
       if (method === "GET" && /\/comments$/.test(u.pathname)) return json(u.pathname.includes("/issues/6/") ? [claim] : []);
       if (method === "POST" && /\/comments$/.test(u.pathname)) return failRecord && JSON.parse(init.body).body?.includes(":done -->") ? json({ message: "Bad Gateway" }, 502) : json({ id: 1 }, 201);
@@ -548,7 +548,7 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
       return json({ message: "Not Found" }, 404);
     };
     try {
-      const r = await dispatch({ repo: "acme/app", objectiveLabel: "factory:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t", localSlots: 2 });
+      const r = await dispatch({ repo: "acme/app", objectiveLabel: "pendulum:objective", maxConcurrent: 2, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60 }, { token: "t", localSlots: 2 });
       return { r, writes };
     } finally {
       globalThis.fetch = realFetch;
@@ -559,23 +559,23 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
   const on = (writes, n) => writes.filter((w) => w.includes(`/issues/${n}/`));
 
   // A local loop: #373 and #5 are another route's, untouched in every pass; #380 is its own, recorded before any removal.
-  const local = await tick({ FACTORY_LOCAL: "1" });
+  const local = await tick({ PENDULUM_LOCAL: "1" });
   assert.deepEqual(local.r.done, [380]);
   assert.deepEqual(local.r.vanished, [6], "another route's Running Objective is that route's to judge, unless a local loop claimed it");
   assert.ok(local.writes.includes("DELETE /issues/comments/66"), "the expired claim goes with the Block");
   assert.deepEqual(on(local.writes, 373), [], "no label, card or comment change on another route's Objective");
   assert.deepEqual(on(local.writes, 5), []);
   const own = on(local.writes, 380);
-  assert.equal(own[0], `POST /issues/380/comments <!-- factory:380:done -->\n${doneRecord(["factory:in-review"])}`, "the record comes first");
+  assert.equal(own[0], `POST /issues/380/comments <!-- pendulum:380:done -->\n${doneRecord(["pendulum:in-review"])}`, "the record comes first");
   assert.ok(own.slice(1).every((w) => w.startsWith("DELETE /issues/380/labels/")) && own.length > 1);
   // The record could not be posted: no label leaves #380 unmarked; they wait for the next tick.
-  const failed = await tick({ FACTORY_LOCAL: "1" }, { failRecord: true });
+  const failed = await tick({ PENDULUM_LOCAL: "1" }, { failRecord: true });
   assert.deepEqual(failed.r.done, []);
   assert.ok(!on(failed.writes, 380).some((w) => w.startsWith("DELETE")), "no removal without its record");
   // With --all the loop routes every Objective, so it tends #373 too, recorded the same way.
-  const all = await tick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" });
+  const all = await tick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" });
   assert.deepEqual(all.r.done, [373, 380]);
-  assert.match(on(all.writes, 373)[0], /^POST \/issues\/373\/comments <!-- factory:373:done -->\n[^]*\nremoved: factory:in-review$/);
+  assert.match(on(all.writes, 373)[0], /^POST \/issues\/373\/comments <!-- pendulum:373:done -->\n[^]*\nremoved: pendulum:in-review$/);
   // The Action tends every route's closed Objectives, as its App: no record.
   const actions = await tick({});
   assert.deepEqual(actions.r.done, [373, 380]);
@@ -583,16 +583,16 @@ test("local loop: every sweep pass acts only on the Objectives it routes; its Do
 
   // The pure pieces: which closed Objectives the pass tidies, per backend, and what it removes.
   const tends = (env) => (i) => BACKENDS.local.trigger.tends(i, env);
-  assert.deepEqual(doneTidies(closed, { tends: tends({}) }), [{ number: 380, labels: ["factory:in-review"] }]);
-  assert.deepEqual(doneTidies(closed, { tends: tends({ FACTORY_LOCAL_ALL: "1" }) }).map((d) => d.number), [373, 380]);
+  assert.deepEqual(doneTidies(closed, { tends: tends({}) }), [{ number: 380, labels: ["pendulum:in-review"] }]);
+  assert.deepEqual(doneTidies(closed, { tends: tends({ PENDULUM_LOCAL_ALL: "1" }) }).map((d) => d.number), [373, 380]);
   assert.deepEqual(doneTidies(closed, { tends: BACKENDS.actions.trigger.tends }).map((d) => d.number), [373, 380]);
-  assert.deepEqual(doneTidies([iss(9, ["factory:objective", "factory:local"], "closed")], { tends: tends({}), project: true, cards: { 9: "In review" } }), [{ number: 9, labels: [] }], "a card left behind moves, with nothing to record");
+  assert.deepEqual(doneTidies([iss(9, ["pendulum:objective", "pendulum:local"], "closed")], { tends: tends({}), project: true, cards: { 9: "In review" } }), [{ number: 9, labels: [] }], "a card left behind moves, with nothing to record");
   assert.equal(BACKENDS.local.trigger.asPerson, true);
   assert.equal(BACKENDS.actions.trigger.asPerson, false);
 });
 
 /**
- * One dispatcher tick on the Action's route over factory:local Objectives (#167). `open`: the open issues; `timeline(n)`:
+ * One dispatcher tick on the Action's route over pendulum:local Objectives (#167). `open`: the open issues; `timeline(n)`:
  * each one's label events; `comments(n)`: its comments, or a status to fail the read with; `pulls(n)`: its open PRs;
  * `writers`: the collaborators read, or a status to fail it with.
  */
@@ -600,9 +600,9 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const writes = [];
   const realFetch = globalThis.fetch;
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
-  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  for (const k of ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method || "GET";
@@ -620,13 +620,13 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
       const c = comments(n);
       return Array.isArray(c) ? json(c) : json({ message: "Server Error" }, c);
     }
-    if (method === "GET" && u.pathname === `/repos/${repo}/pulls`) return json(pulls(Number(/factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1])));
+    if (method === "GET" && u.pathname === `/repos/${repo}/pulls`) return json(pulls(Number(/pendulum\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1])));
     if (method === "POST" && /\/comments$/.test(u.pathname)) return json({ id: 1 }, 201);
     if (method === "DELETE" || method === "POST") return json({}, 200);
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo, objectiveLabel: "factory:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t", ...opts });
+    const r = await dispatch({ repo, objectiveLabel: "pendulum:objective", maxConcurrent, dailyUsd: 0, ciChecks: [], timeoutMinutes: 60, ...inputs }, { token: "t", ...opts });
     return { r, writes, blocked: (n) => writes.find((w) => w.startsWith(`POST /issues/${n}/comments`) && /blocked/i.test(w)) };
   } finally {
     globalThis.fetch = realFetch;
@@ -637,15 +637,15 @@ async function localTick({ repo = "acme/app", open, timeline, comments = () => [
 
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 const HOUR = 3600_000;
-const localIssue = (number, state, labels = ["factory:local"]) => ({ number, state: "open", labels: ["factory:objective", ...labels, state].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
+const localIssue = (number, state, labels = ["pendulum:local"]) => ({ number, state: "open", labels: ["pendulum:objective", ...labels, state].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
 const labelled = (name, at) => [{ event: "labeled", label: { name }, created_at: at }];
 
 test("local claim read: a failed read is unread, never 'no claim'; the next tick reads it and the Objective runs on (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
   // Running 40 minutes, a fresh claim; the first tick's claim read fails, the second's answers.
-  const claim = { id: 77, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 30_000))}`, updated_at: ago(30_000) };
+  const claim = { id: 77, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 30_000))}`, updated_at: ago(30_000) };
   let fail = true;
-  const tick = () => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(40 * 60_000)), comments: (n) => (n === 7 && fail ? 502 : n === 7 ? [claim] : []) });
+  const tick = () => localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => labelled("pendulum:running", ago(40 * 60_000)), comments: (n) => (n === 7 && fail ? 502 : n === 7 ? [claim] : []) });
   const first = await tick();
   assert.deepEqual(first.r.vanished, [], "no Block rests on a failed read");
   assert.equal(first.blocked(7), undefined);
@@ -659,9 +659,9 @@ test("local claim read: a failed read is unread, never 'no claim'; the next tick
 
 test("local claim read: an author that cannot be checked (the writer list unread) is unread; a stranger's marker never holds (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const body = (holder) => `<!-- factory:7:local -->\n${claimBody(holder, new Date())}`;
-  const open = [{ ...localIssue(7, "factory:running", []), labels: ["factory:objective", "factory:running"].map((name) => ({ name })) }];
-  const timeline = () => labelled("factory:running", ago(2 * HOUR));
+  const body = (holder) => `<!-- pendulum:7:local -->\n${claimBody(holder, new Date())}`;
+  const open = [{ ...localIssue(7, "pendulum:running", []), labels: ["pendulum:objective", "pendulum:running"].map((name) => ({ name })) }];
+  const timeline = () => labelled("pendulum:running", ago(2 * HOUR));
   // A repository whose writer list cannot be read: the developer's claim is unread, so nothing Blocks this tick.
   const unread = await localTick({ repo: "acme/unread", open, timeline, writers: 502, comments: (n) => (n === 7 ? [{ id: 5, user: { login: "dev", type: "User" }, body: body("box-a:1:abc:m:b"), updated_at: ago(0) }] : []) });
   assert.deepEqual(unread.r.vanished, []);
@@ -670,46 +670,46 @@ test("local claim read: an author that cannot be checked (the writer list unread
   // job, relaunched (its Block once the relaunches are used, relaunch.test.mjs).
   const stranger = await localTick({ open, timeline, comments: (n) => (n === 7 ? [{ id: 6, user: { login: "stranger", type: "User" }, body: body("box-x:1:abc:m:b"), updated_at: ago(0) }] : []) });
   assert.deepEqual([stranger.r.vanished, stranger.r.relaunched], [[], [7]]);
-  assert.ok(!stranger.writes.includes("DELETE /issues/comments/6"), "a stranger's comment is not Factory's to delete");
+  assert.ok(!stranger.writes.includes("DELETE /issues/comments/6"), "a stranger's comment is not Pendulum's to delete");
 });
 
-test("local deadlines: a factory:local Objective with no claim waits a day, Running or in review, then Blocks naming factory serve (#167)", async () => {
-  const pr = (n) => [{ number: 100 + n, draft: false, labels: [{ name: "factory:review" }], head: { ref: `factory/${n}` } }];
+test("local deadlines: a pendulum:local Objective with no claim waits a day, Running or in review, then Blocks naming pendulum serve (#167)", async () => {
+  const pr = (n) => [{ number: 100 + n, draft: false, labels: [{ name: "pendulum:review" }], head: { ref: `pendulum/${n}` } }];
   // #7 Running 2 hours and #8 in review for 2 hours, neither claimed: they wait, with a wake at the day's end.
   const young = await localTick({
-    open: [localIssue(7, "factory:running"), localIssue(8, "factory:in-review")],
-    timeline: (n) => labelled(n === 7 ? "factory:running" : n === 8 ? "factory:in-review" : "factory:review", ago(2 * HOUR)),
+    open: [localIssue(7, "pendulum:running"), localIssue(8, "pendulum:in-review")],
+    timeline: (n) => labelled(n === 7 ? "pendulum:running" : n === 8 ? "pendulum:in-review" : "pendulum:review", ago(2 * HOUR)),
     pulls: (n) => (n === 8 ? pr(8) : []),
   });
   assert.deepEqual(young.r.vanished, [], "no 15-minute grace for a local Objective");
   assert.deepEqual(young.r.deadlines.filter((d) => d.kind === "local-pause").map((d) => d.issue).sort(), [7, 8]);
   // Past a day: both Block, and the reason names the fix.
   const old = await localTick({
-    open: [localIssue(7, "factory:running"), localIssue(8, "factory:in-review")],
+    open: [localIssue(7, "pendulum:running"), localIssue(8, "pendulum:in-review")],
     // The PR's (#108) review label is as old as its In-review entry.
-    timeline: (n) => labelled(n === 7 ? "factory:running" : n === 8 ? "factory:in-review" : "factory:review", ago(25 * HOUR)),
+    timeline: (n) => labelled(n === 7 ? "pendulum:running" : n === 8 ? "pendulum:in-review" : "pendulum:review", ago(25 * HOUR)),
     pulls: (n) => (n === 8 ? pr(8) : []),
   });
   assert.deepEqual(old.r.vanished.sort(), [7, 8]);
-  for (const n of [7, 8]) assert.match(old.blocked(n), /no local loop[^]*start `factory serve` on the machine that runs it[^]*<!-- factory:block \{"cause":"setup"\} -->/);
-  // In review for three days, but factory:review re-applied to its PR 2 hours ago (a maintainer's comment, a re-review):
+  for (const n of [7, 8]) assert.match(old.blocked(n), /no local loop[^]*start `pendulum serve` on the machine that runs it[^]*<!-- pendulum:block \{"cause":"setup"\} -->/);
+  // In review for three days, but pendulum:review re-applied to its PR 2 hours ago (a maintainer's comment, a re-review):
   // a new review is owed, and its day counts from that label.
-  const rereview = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: (n) => labelled(n === 8 ? "factory:in-review" : "factory:review", ago(n === 8 ? 72 * HOUR : 2 * HOUR)), pulls: pr });
+  const rereview = await localTick({ open: [localIssue(8, "pendulum:in-review")], timeline: (n) => labelled(n === 8 ? "pendulum:in-review" : "pendulum:review", ago(n === 8 ? 72 * HOUR : 2 * HOUR)), pulls: pr });
   assert.deepEqual(rereview.r.vanished, []);
   assert.equal(rereview.r.deadlines.find((d) => d.issue === 8 && d.kind === "local-pause")?.at.slice(0, 13), new Date(Date.now() + 22 * HOUR).toISOString().slice(0, 13));
   // In review with no review owed (reviewed, waiting on a person): no deadline.
-  const reviewed = await localTick({ open: [localIssue(8, "factory:in-review")], timeline: () => labelled("factory:in-review", ago(25 * HOUR)), pulls: () => [{ ...pr(8)[0], labels: [] }] });
+  const reviewed = await localTick({ open: [localIssue(8, "pendulum:in-review")], timeline: () => labelled("pendulum:in-review", ago(25 * HOUR)), pulls: () => [{ ...pr(8)[0], labels: [] }] });
   assert.deepEqual(reviewed.r.vanished, []);
   // An unlabelled Objective's runner job still gets 15 minutes; then it is lost, and relaunched (relaunch.test.mjs).
-  const runner = await localTick({ open: [{ ...localIssue(9, "factory:running", []) }], timeline: () => labelled("factory:running", ago(20 * 60_000)) });
+  const runner = await localTick({ open: [{ ...localIssue(9, "pendulum:running", []) }], timeline: () => labelled("pendulum:running", ago(20 * 60_000)) });
   assert.deepEqual([runner.r.vanished, runner.r.relaunched], [[], [9]]);
-  assert.ok(!runner.writes.some((w) => w.includes("<!-- factory:9:blocked:")), "no Block notice");
+  assert.ok(!runner.writes.some((w) => w.includes("<!-- pendulum:9:blocked:")), "no Block notice");
 });
 
 test("local claim age: GitHub's update time, not the machine's clock in the body; an expired claim's Block names its holder (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const comment = (written, updated) => ({ id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(written))}`, updated_at: updated });
-  const run = (c) => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(3 * 24 * HOUR)), comments: (n) => (n === 7 ? [c] : []) });
+  const comment = (written, updated) => ({ id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(written))}`, updated_at: updated });
+  const run = (c) => localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => labelled("pendulum:running", ago(3 * 24 * HOUR)), comments: (n) => (n === 7 ? [c] : []) });
   // A machine whose clock runs an hour behind wrote its heartbeat seconds ago by GitHub's clock: alive.
   const slow = await run(comment(Date.now() - HOUR, ago(10_000)));
   assert.deepEqual(slow.r.vanished, []);
@@ -720,40 +720,40 @@ test("local claim age: GitHub's update time, not the machine's clock in the body
   // Two days without a heartbeat: Blocked, naming the loop and the fix, and the claim goes with it.
   const expired = await run(comment(Date.now(), ago(2 * 24 * HOUR)));
   assert.deepEqual(expired.r.vanished, [7]);
-  assert.match(expired.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over a day; start `factory serve`[^]*"cause":"setup"/);
+  assert.match(expired.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over a day; start `pendulum serve`[^]*"cause":"setup"/);
   assert.ok(expired.writes.includes("DELETE /issues/comments/70"));
 });
 
 test("#423: claim_pause_hours is the dispatcher's bound for a quiet local claim: a loop away five hours Blocks at four, a run with no claim too, and both wait at the default day", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const four = { claimPauseMs: resolveInputs({ env: { FACTORY_CLAIM_PAUSE_HOURS: "4" } }).claimPauseMs };
-  const claim = { id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 5 * HOUR))}`, updated_at: ago(5 * HOUR) };
-  const away = (inputs) => localTick({ open: [localIssue(7, "factory:running")], timeline: () => labelled("factory:running", ago(6 * HOUR)), comments: (n) => (n === 7 ? [claim] : []), inputs });
+  const four = { claimPauseMs: resolveInputs({ env: { PENDULUM_CLAIM_PAUSE_HOURS: "4" } }).claimPauseMs };
+  const claim = { id: 70, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date(Date.now() - 5 * HOUR))}`, updated_at: ago(5 * HOUR) };
+  const away = (inputs) => localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => labelled("pendulum:running", ago(6 * HOUR)), comments: (n) => (n === 7 ? [claim] : []), inputs });
   const day = await away({});
   assert.deepEqual([day.r.paused, day.r.vanished], [[7], []]);
   const blocked = await away(four);
   assert.deepEqual(blocked.r.vanished, [7]);
-  assert.match(blocked.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over 4 h; start `factory serve`[^]*"cause":"setup"/);
+  assert.match(blocked.blocked(7), /the local loop holding it \(box-a:1:abc:m:b\) has been away over 4 h; start `pendulum serve`[^]*"cause":"setup"/);
   // No claim at all, Running five hours: waits for the day by default, Blocks at four.
-  const bare = (inputs) => localTick({ open: [localIssue(8, "factory:running")], timeline: () => labelled("factory:running", ago(5 * HOUR)), inputs });
+  const bare = (inputs) => localTick({ open: [localIssue(8, "pendulum:running")], timeline: () => labelled("pendulum:running", ago(5 * HOUR)), inputs });
   assert.deepEqual((await bare({})).r.vanished, []);
   const none = await bare(four);
   assert.deepEqual(none.r.vanished, [8]);
   assert.match(none.blocked(8), /Running with no local loop holding it for over 4 h \(no claim\)/);
 });
 
-test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause factory); younger, or a marked comment updated within the day, waits (#167)", async () => {
+test("local claim read: unread for over a day since the Objective began waiting Blocks naming the read (cause pendulum); younger, or a marked comment updated within the day, waits (#167)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const open = [localIssue(7, "factory:running")];
-  const tick = (runningFor, comments, repo = "acme/app", writers) => localTick({ repo, open, writers, timeline: () => labelled("factory:running", ago(runningFor)), comments: (n) => (n === 7 ? comments : []) });
+  const open = [localIssue(7, "pendulum:running")];
+  const tick = (runningFor, comments, repo = "acme/app", writers) => localTick({ repo, open, writers, timeline: () => labelled("pendulum:running", ago(runningFor)), comments: (n) => (n === 7 ? comments : []) });
   const young = await tick(2 * HOUR, 502);
   assert.deepEqual(young.r.vanished, [], "a failed read inside the day only waits");
   // Past the day with the comments still failing: the Block is due, and a tick whose Block cannot be written goes on.
   const old = await tick(25 * HOUR, 502);
   assert.deepEqual(old.r.vanished, [7]);
   // The writer list never loads, but the marked comment was updated minutes ago: maybe a live loop, so it waits.
-  const marked = (at, association = "COLLABORATOR") => [{ id: 5, user: { login: "dev", type: "User" }, author_association: association, body: `<!-- factory:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date())}`, updated_at: at }];
+  const marked = (at, association = "COLLABORATOR") => [{ id: 5, user: { login: "dev", type: "User" }, author_association: association, body: `<!-- pendulum:7:local -->\n${claimBody("box-a:1:abc:m:b", new Date())}`, updated_at: at }];
   const live = await tick(25 * HOUR, marked(ago(60_000)), "acme/nowriters", 502);
   assert.deepEqual(live.r.vanished, []);
   // An outsider's look-alike, edited a minute ago, delays nothing.
@@ -761,7 +761,7 @@ test("local claim read: unread for over a day since the Objective began waiting 
   assert.deepEqual(outsider.r.vanished, [7]);
   const dead = await tick(25 * HOUR, marked(ago(26 * HOUR)), "acme/nowriters2", 502);
   assert.deepEqual(dead.r.vanished, [7]);
-  assert.match(dead.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's claim author could not be checked[^]*"cause":"factory"/);
+  assert.match(dead.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's claim author could not be checked[^]*"cause":"pendulum"/);
 });
 
 test("claimedLocally: a runner job steps aside only for a marked claim whose author cannot be checked; a comments read that keeps failing is not claimed (#167)", async () => {
@@ -771,7 +771,7 @@ test("claimedLocally: a runner job steps aside only for a marked claim whose aut
   const realFetch = globalThis.fetch;
   const saved = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
-  const claim = (at, login = "maintainer") => [{ id: 1, user: { login, type: "User" }, body: `<!-- factory:7:local -->\n${claimBody("box:1:a:m:b", new Date())}`, updated_at: at }];
+  const claim = (at, login = "maintainer") => [{ id: 1, user: { login, type: "User" }, body: `<!-- pendulum:7:local -->\n${claimBody("box:1:a:m:b", new Date())}`, updated_at: at }];
   let comments = [];
   globalThis.fetch = async (url) => {
     const u = new URL(url);
@@ -803,34 +803,34 @@ test("claimedLocally: a runner job steps aside only for a marked claim whose aut
   }
 });
 
-test("local claim read: an unread claim Blocks only when Factory wrote nothing on the issue for the day; a live stage's progress keeps it waiting (#167)", async () => {
+test("local claim read: an unread claim Blocks only when Pendulum wrote nothing on the issue for the day; a live stage's progress keeps it waiting (#167)", async () => {
   // Running 30 hours (a multi-part Objective), and this tick's claim read fails; the Block's own reads answer.
   const tick = (timeline) => {
     let reads = 0;
     // The claim read fails through every one of the client's tries; the Block's own read of the comments then answers.
-    return localTick({ open: [localIssue(7, "factory:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads <= RETRY.tries ? 502 : []) });
+    return localTick({ open: [localIssue(7, "pendulum:running")], timeline: () => timeline, comments: (n) => (n === 7 && ++reads <= RETRY.tries ? 502 : []) });
   };
-  const running = labelled("factory:running", ago(30 * HOUR));
-  // Its progress comment, by Factory's login, was updated 5 minutes ago: a live stage, so it waits.
+  const running = labelled("pendulum:running", ago(30 * HOUR));
+  // Its progress comment, by Pendulum's login, was updated 5 minutes ago: a live stage, so it waits.
   const live = await tick([...running, { event: "commented", user: { login: "maintainer" }, actor: { login: "maintainer" }, created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
   assert.deepEqual(live.r.vanished, []);
   assert.equal(live.blocked(7), undefined);
-  // On the Action, a local loop writes as its developer: a Factory marker comment by a person with push access counts.
-  const developer = await tick([...running, { event: "commented", user: { login: "dev" }, author_association: "MEMBER", body: "<!-- factory:7:progress -->\nworking", created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
+  // On the Action, a local loop writes as its developer: a Pendulum marker comment by a person with push access counts.
+  const developer = await tick([...running, { event: "commented", user: { login: "dev" }, author_association: "MEMBER", body: "<!-- pendulum:7:progress -->\nworking", created_at: ago(29 * HOUR), updated_at: ago(5 * 60_000) }]);
   assert.deepEqual(developer.r.vanished, []);
-  // A label event by Factory within the day counts too.
-  const labelledLately = await tick([...running, { event: "labeled", label: { name: "factory:in-review" }, actor: { login: "maintainer" }, created_at: ago(3 * HOUR) }]);
+  // A label event by Pendulum within the day counts too.
+  const labelledLately = await tick([...running, { event: "labeled", label: { name: "pendulum:in-review" }, actor: { login: "maintainer" }, created_at: ago(3 * HOUR) }]);
   assert.deepEqual(labelledLately.r.vanished, []);
   // Someone else's comment is no sign of a live stage.
   const quiet = await tick([...running, { event: "commented", user: { login: "stranger" }, actor: { login: "stranger" }, created_at: ago(HOUR), updated_at: ago(HOUR) }, { event: "commented", user: { login: "maintainer" }, created_at: ago(26 * HOUR), updated_at: ago(25 * HOUR) }]);
   assert.deepEqual(quiet.r.vanished, [7]);
-  assert.match(quiet.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's comments could not be read \(502\)\)[^]*"cause":"factory"/);
+  assert.match(quiet.blocked(7), /Running for over a day and its local claim cannot be read or checked \(#7's comments could not be read \(502\)\)[^]*"cause":"pendulum"/);
 });
 
 /**
  * One dispatcher tick on a repository whose workflow sets a cloud sandbox and which runs both routes (#235): #50 a
- * factory:local Objective Running on a live local claim, whose record holds three dispatch markers from 20 to 40
- * minutes old naming no run (a local loop wrote them before #235); #51 a factory:local Objective
+ * pendulum:local Objective Running on a live local claim, whose record holds three dispatch markers from 20 to 40
+ * minutes old naming no run (a local loop wrote them before #235); #51 a pendulum:local Objective
  * Queued; #60 a sandbox-route Objective Queued, with a stale launch lock. Record writes go through writeSandboxRecord
  * into `store`; the lock pass goes through lib/lock.mjs against the same fake GitHub.
  */
@@ -841,11 +841,11 @@ async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra
   const { BASE, BOT, REPO, githubStore } = await import("./fixtures/github-records.mjs");
   const now = Date.now();
   const iso = (ms) => new Date(ms).toISOString();
-  const iss = (number, labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
+  const iss = (number, labels) => ({ number, state: "open", labels: ["pendulum:objective", ...labels].map((name) => ({ name })), body: "", updated_at: iso(now), user: { login: "maintainer" } });
   // `extra`: more Objectives for one test, `{ open, comments, timeline, failComments }` from this tick's helpers;
   // `failComments`: how many comment-list reads of an issue fail (502) before one answers.
   const more = extra({ now, iso, iss, marker, sandboxMarkerLine, BOT });
-  const open = [iss(50, ["factory:local", "factory:running"]), iss(51, ["factory:local"]), iss(60, []), ...(more.open || [])];
+  const open = [iss(50, ["pendulum:local", "pendulum:running"]), iss(51, ["pendulum:local"]), iss(60, []), ...(more.open || [])];
   const named = (ago) => ({ stage: "work", event: "dispatch", ok: null, run: "", at: iso(now - ago) });
   const lostRecord = { vendor: "vercel", stage: "work", state: "named", at: iso(now - 50 * 60_000), launches: [named(40 * 60_000), named(30 * 60_000), named(20 * 60_000)] };
   const comments = {
@@ -855,16 +855,16 @@ async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra
     ],
     ...more.comments,
   };
-  const timeline = { 50: [{ event: "labeled", label: { name: "factory:running" }, created_at: iso(now - 60 * 60_000) }], ...more.timeline };
-  const LOCK = "refs/factory-launch/60/work-book-abc";
+  const timeline = { 50: [{ event: "labeled", label: { name: "pendulum:running" }, created_at: iso(now - 60 * 60_000) }], ...more.timeline };
+  const LOCK = "refs/pendulum-launch/60/work-book-abc";
   const refs = new Map([[LOCK, "c".repeat(40)]]);
   const calls = [];
   const store = githubStore({ seed: 5 });
   setSelf(BOT.login);
   const realFetch = globalThis.fetch;
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
-  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  for (const k of ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method || "GET";
@@ -883,9 +883,9 @@ async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra
       return json({});
     }
     if (p.startsWith("git/")) calls.push(`${method} ${p}`);
-    if (method === "GET" && p === "git/matching-refs/factory-launch/") return json([...refs].map(([ref, sha]) => ({ ref, object: { sha, type: "commit" } })));
-    if (method === "GET" && p.startsWith("git/ref/factory-launch/")) return refs.has(`refs/${p.slice(8)}`) ? json({ ref: `refs/${p.slice(8)}`, object: { sha: refs.get(`refs/${p.slice(8)}`), type: "commit" } }) : json({ message: "Not Found" }, 404);
-    if (method === "GET" && p === `git/commits/${"c".repeat(40)}`) return json({ sha: "c".repeat(40), message: `${LOCK}\n\n0123`, author: { name: "Factory", email: "factory@users.noreply.github.com", date: iso(now - 60 * 60_000) } });
+    if (method === "GET" && p === "git/matching-refs/pendulum-launch/") return json([...refs].map(([ref, sha]) => ({ ref, object: { sha, type: "commit" } })));
+    if (method === "GET" && p.startsWith("git/ref/pendulum-launch/")) return refs.has(`refs/${p.slice(8)}`) ? json({ ref: `refs/${p.slice(8)}`, object: { sha: refs.get(`refs/${p.slice(8)}`), type: "commit" } }) : json({ message: "Not Found" }, 404);
+    if (method === "GET" && p === `git/commits/${"c".repeat(40)}`) return json({ sha: "c".repeat(40), message: `${LOCK}\n\n0123`, author: { name: "Pendulum", email: "pendulum@users.noreply.github.com", date: iso(now - 60 * 60_000) } });
     if (method === "GET" && u.pathname === "/user") return json({ login: "maintainer", type: "User" });
     if (method === "GET" && p === "issues") return json(u.searchParams.get("state") === "closed" ? [] : open);
     const one = /^issues\/(\d+)$/.exec(p) && open.find((i) => i.number === Number(p.slice(7)));
@@ -902,7 +902,7 @@ async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra
     return json({ message: "Not Found" }, 404);
   };
   try {
-    const r = await dispatch({ repo: REPO.full, objectiveLabel: "factory:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, localLive, recordWrites: { api: store.api, base: BASE } });
+    const r = await dispatch({ repo: REPO.full, objectiveLabel: "pendulum:objective", maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60, sandbox: "vercel" }, { token: "t", localSlots, localLive, recordWrites: { api: store.api, base: BASE } });
     const markers = (k) => store.bodyOf(k, marker(k, "sandbox"));
     return { r, calls, refs, markers };
   } finally {
@@ -914,28 +914,28 @@ async function sandboxRepoTick(env, { localSlots = null, localLive = null, extra
 }
 
 test("serve on a repository with a cloud sandbox: no sandbox record or launch entry on a local Objective (#235)", async () => {
-  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  const serve = await sandboxRepoTick({ PENDULUM_LOCAL: "1" }, { localSlots: 2 });
   assert.deepEqual(serve.r.ready, [51], "the local loop picks its Queued Objective");
   assert.equal(serve.markers(51), null, "no sandbox record for the local pick");
   assert.equal(serve.markers(50), null, "no launch entry added to the local Running one");
   // --all routes every Objective to the loop, which runs each on its box: still no record.
-  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3 });
+  const all = await sandboxRepoTick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, { localSlots: 3 });
   assert.deepEqual(all.r.ready, [51, 60]);
   for (const n of [50, 51, 60]) assert.equal(all.markers(n), null, `#${n}`);
 });
 
 test("serve leaves the sandbox route's launch locks to that route; the Action's dispatcher still clears them (#235)", async () => {
-  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  const serve = await sandboxRepoTick({ PENDULUM_LOCAL: "1" }, { localSlots: 2 });
   assert.deepEqual(serve.calls, [], "no lock listed, read or released");
-  assert.ok(serve.refs.has("refs/factory-launch/60/work-book-abc"));
+  assert.ok(serve.refs.has("refs/pendulum-launch/60/work-book-abc"));
   const actions = await sandboxRepoTick({});
-  assert.ok(actions.calls.includes("updateRefs refs/factory-launch/60/work-book-abc"), "the sandbox route releases its stale lock");
+  assert.ok(actions.calls.includes("updateRefs refs/pendulum-launch/60/work-book-abc"), "the sandbox route releases its stale lock");
   assert.equal(actions.refs.size, 0);
 });
 
 test("lost launch entries never count as failed starts for a local Objective; the Action's dispatcher still marks its own picks (#235)", async () => {
   // serve: #50's three lost entries are no failed starts: it is not named again and holds nothing; its live claim keeps it.
-  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 2 });
+  const serve = await sandboxRepoTick({ PENDULUM_LOCAL: "1" }, { localSlots: 2 });
   assert.deepEqual(serve.r.relaunch, []);
   assert.deepEqual(serve.r.vanished, []);
   assert.ok(!serve.r.deadlines.some((d) => d.issue === 50 && d.kind === "start-retry"), "no retry wake for a start the sandbox route never made");
@@ -951,16 +951,16 @@ test("lost launch entries never count as failed starts for a local Objective; th
 });
 
 /** A sandbox stage of Objective `n` holding its lease for another half hour: the record a launcher writes as it starts one. */
-const leased = ({ now, iso, marker, sandboxMarkerLine, BOT }, n) => [{ id: 900 + n, user: BOT, updated_at: iso(now), body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", id: `factory-${n}`, stage: "work", state: "running", claim: "abcabcabcabc", at: iso(now - 20 * 60_000), leaseUntil: iso(now + 30 * 60_000), launches: [{ stage: "work", event: "issues", ok: true, run: "1", at: iso(now - 20 * 60_000) }] })}` }];
+const leased = ({ now, iso, marker, sandboxMarkerLine, BOT }, n) => [{ id: 900 + n, user: BOT, updated_at: iso(now), body: `${marker(n, "sandbox")}\n${sandboxMarkerLine({ vendor: "vercel", id: `pendulum-${n}`, stage: "work", state: "running", claim: "abcabcabcabc", at: iso(now - 20 * 60_000), leaseUntil: iso(now + 30 * 60_000), launches: [{ stage: "work", event: "issues", ok: true, run: "1", at: iso(now - 20 * 60_000) }] })}` }];
 
-test("serve waits out a live sandbox lease before it restarts an Objective relabelled factory:local mid-stage (#235)", async () => {
-  // #63 ran on the sandbox route; a person relabelled it factory:local and asked for a restart while its stage still holds its lease.
+test("serve waits out a live sandbox lease before it restarts an Objective relabelled pendulum:local mid-stage (#235)", async () => {
+  // #63 ran on the sandbox route; a person relabelled it pendulum:local and asked for a restart while its stage still holds its lease.
   const extra = (h) => ({
-    open: [h.iss(63, ["factory:local", "factory:running", "factory:restart"])],
+    open: [h.iss(63, ["pendulum:local", "pendulum:running", "pendulum:restart"])],
     comments: { 63: leased(h, 63) },
-    timeline: { 63: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }, { event: "labeled", label: { name: "factory:restart" }, actor: { login: "maintainer", type: "User" }, created_at: h.iso(h.now - 60_000) }] },
+    timeline: { 63: [{ event: "labeled", label: { name: "pendulum:running" }, created_at: h.iso(h.now - 20 * 60_000) }, { event: "labeled", label: { name: "pendulum:restart" }, actor: { login: "maintainer", type: "User" }, created_at: h.iso(h.now - 60_000) }] },
   });
-  const serve = await sandboxRepoTick({ FACTORY_LOCAL: "1" }, { localSlots: 3, extra });
+  const serve = await sandboxRepoTick({ PENDULUM_LOCAL: "1" }, { localSlots: 3, extra });
   assert.deepEqual(serve.r.restarted, [], "not restarted while the sandbox still runs it");
   assert.ok(!serve.r.ready.includes(63), "nor picked here");
   assert.ok(serve.r.deadlines.some((d) => d.issue === 63 && d.kind === "retry"), "held until its stage stops: looked at again next tick");
@@ -971,11 +971,11 @@ test("serve waits out a live sandbox lease before it restarts an Objective relab
 test("serve --all keeps a sandbox-route Objective whose stage holds a live lease: no 'worker job vanished' Block (#235)", async () => {
   // #62: Running on the sandbox route for 20 minutes, no Actions job, no local claim, its sandbox stage within its lease.
   const extra = (h) => ({
-    open: [h.iss(62, ["factory:running"])],
+    open: [h.iss(62, ["pendulum:running"])],
     comments: { 62: leased(h, 62) },
-    timeline: { 62: [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }] },
+    timeline: { 62: [{ event: "labeled", label: { name: "pendulum:running" }, created_at: h.iso(h.now - 20 * 60_000) }] },
   });
-  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, extra });
+  const all = await sandboxRepoTick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, { localSlots: 3, extra });
   assert.deepEqual(all.r.vanished, []);
   assert.ok(all.r.deadlines.some((d) => d.issue === 62 && d.kind === "lease"), "looked at again when its lease ends");
   assert.equal(all.markers(62), null, "no record written for it here");
@@ -983,39 +983,39 @@ test("serve --all keeps a sandbox-route Objective whose stage holds a live lease
 });
 
 test("serve on a repository with a cloud sandbox: an unread sandbox record is no absent lease; the Objective is neither Blocked nor sent back to Queued that tick (#430)", async () => {
-  // #62: Running on the sandbox route for 20 minutes (serve --all routes it), and #63: relabelled factory:local mid-stage,
+  // #62: Running on the sandbox route for 20 minutes (serve --all routes it), and #63: relabelled pendulum:local mid-stage,
   // Running for 20 minutes. Each stage holds a live lease and no local claim. The first comments read of each (the lease
   // read, after its retries) fails; the reads after it answer, so the local claim read finds no claim.
   const extra = (h) => ({
-    open: [h.iss(62, ["factory:running"]), h.iss(63, ["factory:local", "factory:running"])],
+    open: [h.iss(62, ["pendulum:running"]), h.iss(63, ["pendulum:local", "pendulum:running"])],
     comments: { 62: leased(h, 62), 63: leased(h, 63) },
-    timeline: Object.fromEntries([62, 63].map((n) => [n, [{ event: "labeled", label: { name: "factory:running" }, created_at: h.iso(h.now - 20 * 60_000) }]])),
+    timeline: Object.fromEntries([62, 63].map((n) => [n, [{ event: "labeled", label: { name: "pendulum:running" }, created_at: h.iso(h.now - 20 * 60_000) }]])),
     failComments: { 62: RETRY.tries, 63: RETRY.tries },
   });
-  const all = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra });
+  const all = await sandboxRepoTick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra });
   assert.deepEqual(all.r.vanished, [], "a live sandbox stage is not Blocked as vanished");
   assert.deepEqual(all.r.unclaimed, [], "nor sent back to Queued for a second stage here");
   assert.ok(!all.r.ready.includes(62) && !all.r.ready.includes(63), "nor picked");
   assert.ok(all.r.deadlines.some((d) => d.kind === "retry"), "read again soon");
   // The next tick reads each record: its live lease holds the Objective until the lease ends.
-  const next = await sandboxRepoTick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra: (h) => ({ ...extra(h), failComments: {} }) });
+  const next = await sandboxRepoTick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, { localSlots: 3, localLive: () => false, extra: (h) => ({ ...extra(h), failComments: {} }) });
   assert.deepEqual([next.r.vanished, next.r.unclaimed], [[], []]);
   for (const n of [62, 63]) assert.ok(next.r.deadlines.some((d) => d.issue === n && d.kind === "lease"), `#${n} looked at again when its lease ends`);
 });
 
 test("max_concurrent caps the repository as a whole: every route's Running Objectives count, each route picks only its own (#240)", async () => {
   const { claimBody } = await import("../scripts/lib/local.mjs");
-  const obj = (number, ...labels) => ({ number, state: "open", labels: ["factory:objective", ...labels].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
+  const obj = (number, ...labels) => ({ number, state: "open", labels: ["pendulum:objective", ...labels].map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" } });
   // #1 the Action's, Running five minutes (its job inside the start grace); #2 a local loop's, paused (its machine away an
   // hour); #3 a local loop's, alive. #4 the Action's and #5 a local loop's, Queued. #6 a draft still labelled Running.
-  const open = [obj(1, "factory:running"), obj(2, "factory:local", "factory:running"), obj(3, "factory:local", "factory:running"), obj(4), obj(5, "factory:local"), obj(6, "factory:running", "factory:draft")];
-  const claim = (n, at) => ({ id: 70 + n, user: { login: "maintainer", type: "User" }, body: `<!-- factory:${n}:local -->\n${claimBody(`box-a:${n}:abc:m:b`, new Date(at))}`, updated_at: new Date(at).toISOString() });
+  const open = [obj(1, "pendulum:running"), obj(2, "pendulum:local", "pendulum:running"), obj(3, "pendulum:local", "pendulum:running"), obj(4), obj(5, "pendulum:local"), obj(6, "pendulum:running", "pendulum:draft")];
+  const claim = (n, at) => ({ id: 70 + n, user: { login: "maintainer", type: "User" }, body: `<!-- pendulum:${n}:local -->\n${claimBody(`box-a:${n}:abc:m:b`, new Date(at))}`, updated_at: new Date(at).toISOString() });
   const comments = (n) => (n === 2 ? [claim(2, Date.now() - HOUR)] : n === 3 ? [claim(3, Date.now() - 30_000)] : []);
-  const timeline = (n) => labelled("factory:running", ago(n === 1 ? 5 * 60_000 : 2 * HOUR));
+  const timeline = (n) => labelled("pendulum:running", ago(n === 1 ? 5 * 60_000 : 2 * HOUR));
   const tick = (env, maxConcurrent) => localTick({ open, timeline, comments, env, maxConcurrent });
 
   // At the cap (three Running across both routes, the paused one among them; the draft not counted): neither route picks.
-  for (const env of [{}, { FACTORY_LOCAL: "1" }, { FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }]) {
+  for (const env of [{}, { PENDULUM_LOCAL: "1" }, { PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }]) {
     const { r } = await tick(env, 3);
     assert.deepEqual(r.ready, [], `${JSON.stringify(env)}: nothing starts at the cap`);
     assert.equal(r.running, 3);
@@ -1025,28 +1025,28 @@ test("max_concurrent caps the repository as a whole: every route's Running Objec
   }
   // One slot free: each route takes it with its own Objective; serve --all routes both and takes the first.
   assert.deepEqual((await tick({}, 4)).r.ready, [4]);
-  assert.deepEqual((await tick({ FACTORY_LOCAL: "1" }, 4)).r.ready, [5]);
-  assert.deepEqual((await tick({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, 4)).r.ready, [4]);
+  assert.deepEqual((await tick({ PENDULUM_LOCAL: "1" }, 4)).r.ready, [5]);
+  assert.deepEqual((await tick({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, 4)).r.ready, [4]);
 });
 
-test("local loop where no Action runs (adopt): a pick without factory:local is labelled first, and Factory's mark names that exact label event, before the Running mark (#455)", async () => {
+test("local loop where no Action runs (adopt): a pick without pendulum:local is labelled first, and Pendulum's mark names that exact label event, before the Running mark (#455)", async () => {
   const fresh = new Date().toISOString();
-  const queued = { number: 9, state: "open", labels: [{ name: "factory:objective" }], body: "", updated_at: fresh, user: { login: "maintainer" } };
-  // The timeline after the label write: the filing, a stranger's earlier factory:local event, and this login's own.
+  const queued = { number: 9, state: "open", labels: [{ name: "pendulum:objective" }], body: "", updated_at: fresh, user: { login: "maintainer" } };
+  // The timeline after the label write: the filing, a stranger's earlier pendulum:local event, and this login's own.
   const timeline = () => [
-    { id: 4000, event: "labeled", label: { name: "factory:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(HOUR) },
-    { id: 4100, event: "labeled", label: { name: "factory:local" }, actor: { login: "other", type: "User" }, created_at: ago(HOUR / 2) },
-    { id: 4242, event: "labeled", label: { name: "factory:local" }, actor: { login: "maintainer", type: "User" }, created_at: fresh },
+    { id: 4000, event: "labeled", label: { name: "pendulum:objective" }, actor: { login: "maintainer", type: "User" }, created_at: ago(HOUR) },
+    { id: 4100, event: "labeled", label: { name: "pendulum:local" }, actor: { login: "other", type: "User" }, created_at: ago(HOUR / 2) },
+    { id: 4242, event: "labeled", label: { name: "pendulum:local" }, actor: { login: "maintainer", type: "User" }, created_at: fresh },
   ];
   // A writer (who started it), and today's spend read as none (the usage artifacts and the local spend comments).
   // `now`: the issue as GitHub has it when read again just before the label.
   let now = queued;
-  const tick = (opts) => localTick({ open: [queued], timeline, writers: [{ login: "maintainer", permissions: { push: true } }], env: { FACTORY_LOCAL: "1" }, inputs: { dailyUsd: 50 }, opts, extra: (u, method) => (method !== "GET" ? null : u.pathname.endsWith("/actions/artifacts") ? { artifacts: [] } : u.pathname.endsWith("/issues/comments") ? [] : u.pathname.endsWith("/collaborators/maintainer/permission") ? { permission: "write" } : u.pathname === "/repos/acme/app/issues/9" ? now : null) });
+  const tick = (opts) => localTick({ open: [queued], timeline, writers: [{ login: "maintainer", permissions: { push: true } }], env: { PENDULUM_LOCAL: "1" }, inputs: { dailyUsd: 50 }, opts, extra: (u, method) => (method !== "GET" ? null : u.pathname.endsWith("/actions/artifacts") ? { artifacts: [] } : u.pathname.endsWith("/issues/comments") ? [] : u.pathname.endsWith("/collaborators/maintainer/permission") ? { permission: "write" } : u.pathname === "/repos/acme/app/issues/9" ? now : null) });
   const t = await tick({ adopt: true, localSlots: 2 });
   assert.deepEqual(t.r.ready, [9]);
   const on9 = t.writes.filter((w) => w.startsWith("POST /issues/9/"));
-  assert.equal(on9[0], "POST /issues/9/labels ", "factory:local first");
-  assert.match(on9[1], /^POST \/issues\/9\/comments <!-- factory:9:local-route:4242 -->\nFactory: no Action runs Objectives in this repository/, "the mark names this login's newest factory:local event");
+  assert.equal(on9[0], "POST /issues/9/labels ", "pendulum:local first");
+  assert.match(on9[1], /^POST \/issues\/9\/comments <!-- pendulum:9:local-route:4242 -->\nPendulum: no Action runs Objectives in this repository/, "the mark names this login's newest pendulum:local event");
   assert.ok(on9.slice(2).includes("POST /issues/9/labels "), "then the Running mark");
   assert.deepEqual(t.r.unrouted, []);
   // Without adopt (an Action runs, or it is unknown): not picked, not labelled, and counted for the start line.
@@ -1055,7 +1055,7 @@ test("local loop where no Action runs (adopt): a pick without factory:local is l
   assert.deepEqual(live.writes.filter((w) => w.startsWith("POST /issues/9/")), []);
   assert.deepEqual(live.r.unrouted, [9]);
   // The Action, turned on mid-tick, took it before the label: read again, it is Running, so it is neither labelled nor started.
-  now = { ...queued, labels: [...queued.labels, { name: "factory:running" }] };
+  now = { ...queued, labels: [...queued.labels, { name: "pendulum:running" }] };
   const raced = await tick({ adopt: true, localSlots: 2 });
   assert.deepEqual(raced.r.ready, []);
   assert.deepEqual(raced.writes.filter((w) => w.startsWith("POST /issues/9/")), []);

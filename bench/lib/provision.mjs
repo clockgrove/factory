@@ -1,4 +1,4 @@
-// Path fix for lib/judge.mjs, which is kept unchanged from Factory 0.5's
+// Path fix for lib/judge.mjs, which is kept unchanged from Pendulum 0.5's
 // bench: the one export it needs from the 0.5 provisioning module, which
 // otherwise pulled in the 0.5 build (dist/). Copied verbatim.
 import { createHash } from "node:crypto";

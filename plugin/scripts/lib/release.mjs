@@ -1,5 +1,5 @@
-// The Factory release a repository's workflow pins (`uses: clockgrove/factory@<ref>`), for a running `factory serve` to
-// take at a stage boundary instead of a restart (#276): which checkout of Factory this process runs, whether a pin is
+// The Pendulum release a repository's workflow pins (`uses: clockgrove/pendulum@<ref>`), for a running `pendulum serve` to
+// take at a stage boundary instead of a restart (#276): which checkout of Pendulum this process runs, whether a pin is
 // one serve follows, and a verified checkout of that release to run from.
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -7,27 +7,27 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FACTORY_VERSION } from "./inputs.mjs";
+import { PENDULUM_VERSION } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 
-/** Factory's own repository: the only place serve fetches a release from, whatever else the workflow names. */
-export const RELEASES_URL = "https://github.com/clockgrove/factory.git";
+/** Pendulum's own repository: the only place serve fetches a release from, whatever else the workflow names. */
+export const RELEASES_URL = "https://github.com/clockgrove/pendulum.git";
 const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 
 /** The checkout this process runs from: <root>/plugin/scripts/local.mjs is its loop. */
 const OWN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-/** Where serve keeps the releases it fetched, a fresh checkout per switch (Factory's cache, read-only in every sandbox). */
-export const releasesDir = (home = homedir()) => join(home, ".cache", "factory", "releases");
+/** Where serve keeps the releases it fetched, a fresh checkout per switch (Pendulum's cache, read-only in every sandbox). */
+export const releasesDir = (home = homedir()) => join(home, ".cache", "pendulum", "releases");
 
 /**
- * This process's Factory: the release its plugin.json names; its commit when its root is a git checkout of its own (a
- * repository that vendors Factory has no commit of Factory's); and whether it is a release, which serve keeps current
+ * This process's Pendulum: the release its plugin.json names; its commit when its root is a git checkout of its own (a
+ * repository that vendors Pendulum has no commit of Pendulum's); and whether it is a release, which serve keeps current
  * with the workflow's pin (Local.followPin): a checkout serve fetched (releasesDir), or one at its own release's tag with
  * no tracked file changed. A branch, a commit between releases or a change of the developer's own is not.
  * {version, commit, root, release}.
  */
-export function runningFactory(root = OWN_ROOT, version = FACTORY_VERSION, home = homedir()) {
+export function runningPendulum(root = OWN_ROOT, version = PENDULUM_VERSION, home = homedir()) {
   const git = (args) => {
     // No hook or file monitor a checkout's own config names runs here.
     const r = spawnSync("git", ["-C", root, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", ...args], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "ignore"] });
@@ -48,7 +48,7 @@ export function runningFactory(root = OWN_ROOT, version = FACTORY_VERSION, home 
   return { version, commit, root, release: !!commit && (fetched || atTag) };
 }
 
-/** How this Factory names itself in serve's log: its release, and its commit when known. */
+/** How this Pendulum names itself in serve's log: its release, and its commit when known. */
 export const runningName = (running) => `v${running.version}${running.commit ? ` (${running.commit.slice(0, 7)})` : ""}`;
 
 /** A release tag's version as numbers, for order. */
@@ -60,11 +60,11 @@ export const olderRelease = (a, b) => {
   return false;
 };
 
-/** What serve says of a pin to an older Factory, which it never takes by itself. */
+/** What serve says of a pin to an older Pendulum, which it never takes by itself. */
 export const DOWNGRADE_LINE = "the pin is older than what serve runs; start serve from it yourself to downgrade";
 
 /**
- * What serve does with the workflow's Factory pins (lib/local.mjs workflowPins) against the Factory it runs:
+ * What serve does with the workflow's Pendulum pins (lib/local.mjs workflowPins) against the Pendulum it runs:
  * `{same: true}` (nothing to take: the same release or commit, or no pin), `{follow: true, ref}` (a later release tag
  * vX.Y.Z, or a full commit SHA, which releaseCheckout takes only when it comes after the running commit), or
  * `{follow: false, ref, why}` (a pin serve runs no code from: a branch, a short SHA, a moving tag, steps that disagree,
@@ -72,14 +72,14 @@ export const DOWNGRADE_LINE = "the pin is older than what serve runs; start serv
  */
 export function pinDecision(pins, running) {
   if (!pins?.length) return { same: true };
-  if (pins.length > 1) return { follow: false, ref: pins.join(", "), why: `the workflow's steps call clockgrove/factory at more than one ref (${pins.join(", ")})` };
+  if (pins.length > 1) return { follow: false, ref: pins.join(", "), why: `the workflow's steps call clockgrove/pendulum at more than one ref (${pins.join(", ")})` };
   const [ref] = pins;
   if (RELEASE_TAG.test(ref)) {
     if (ref === `v${running.version}`) return { same: true };
-    return olderRelease(ref, running.version) ? { follow: false, ref, older: true, why: `clockgrove/factory@${ref}: ${DOWNGRADE_LINE}` } : { follow: true, ref };
+    return olderRelease(ref, running.version) ? { follow: false, ref, older: true, why: `clockgrove/pendulum@${ref}: ${DOWNGRADE_LINE}` } : { follow: true, ref };
   }
   if (COMMIT.test(ref)) return ref === running.commit ? { same: true } : { follow: true, ref };
-  return { follow: false, ref, why: `clockgrove/factory@${ref} is neither a release tag (vX.Y.Z) nor a full commit SHA` };
+  return { follow: false, ref, why: `clockgrove/pendulum@${ref} is neither a release tag (vX.Y.Z) nor a full commit SHA` };
 }
 
 /**
@@ -104,7 +104,7 @@ const defaultGit =
     exec("git", [...GIT_SAFE, ...args], { cwd, env: releaseGitEnv(home), timeoutMs, group: true });
 
 /**
- * Why the checkout at `dir`, just fetched, is not exactly `ref` of Factory, or null: HEAD the commit fetched, every
+ * Why the checkout at `dir`, just fetched, is not exactly `ref` of Pendulum, or null: HEAD the commit fetched, every
  * tracked file plain (no assume-unchanged or skip-worktree flag), none changed, none added (ignored ones included), and a
  * tag's plugin.json naming that release. Run on a checkout serve made a moment ago with a config of its own.
  */
@@ -248,16 +248,16 @@ export function pruneReleases(home = homedir(), keep = []) {
 }
 
 /**
- * A fresh checkout of Factory at `ref` (a release tag or a full SHA the workflow names, pinDecision), fetched from
- * Factory's own repository only, into a new directory of releasesDir each time: nothing kept from an earlier fetch is
- * trusted. A tag's one commit; for a SHA, Factory's main, which must contain it and the commit serve runs (`running`), so
+ * A fresh checkout of Pendulum at `ref` (a release tag or a full SHA the workflow names, pinDecision), fetched from
+ * Pendulum's own repository only, into a new directory of releasesDir each time: nothing kept from an earlier fetch is
+ * trusted. A tag's one commit; for a SHA, Pendulum's main, which must contain it and the commit serve runs (`running`), so
  * serve never moves back to an earlier one by itself. Throws with what failed (`code` "older" for a downgrade, "refused"
  * for a SHA not on main: neither is tried again until the pin changes); the checkouts past the newest few go
  * (pruneReleases). {dir, commit, ref, version, manifest} (treeManifest, taken once the checkout is verified).
  */
 export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_URL, timeoutMs = 5 * 60_000, git = defaultGit(home, timeoutMs), running = null } = {}) {
   const tag = RELEASE_TAG.test(ref);
-  if (!tag && !COMMIT.test(ref)) throw new Error(`clockgrove/factory@${ref} is neither a release tag nor a full commit SHA`);
+  if (!tag && !COMMIT.test(ref)) throw new Error(`clockgrove/pendulum@${ref} is neither a release tag nor a full commit SHA`);
   const root = releasesDir(home);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const dir = join(root, `${ref}-${Date.now().toString(36)}${randomBytes(3).toString("hex")}`);
@@ -274,8 +274,8 @@ export async function releaseCheckout(ref, { home = homedir(), url = RELEASES_UR
     else {
       await must(part, ["fetch", "-q", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], `fetching main from ${url}`);
       // Not there at all, or not on main: not taken until the pin changes (a fetch of all of main each time would follow).
-      if ((await git(part, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"])).code !== 0) throw Object.assign(new Error(`clockgrove/factory@${ref} is not a commit on ${url}'s main`), { code: "refused" });
-      if (!running?.commit || (await git(part, ["merge-base", "--is-ancestor", running.commit, ref])).code !== 0) throw Object.assign(new Error(`clockgrove/factory@${ref}: ${DOWNGRADE_LINE} (it does not come after ${running?.commit ? running.commit.slice(0, 7) : "the commit serve runs"} on Factory's main)`), { code: "older" });
+      if ((await git(part, ["merge-base", "--is-ancestor", ref, "refs/remotes/origin/main"])).code !== 0) throw Object.assign(new Error(`clockgrove/pendulum@${ref} is not a commit on ${url}'s main`), { code: "refused" });
+      if (!running?.commit || (await git(part, ["merge-base", "--is-ancestor", running.commit, ref])).code !== 0) throw Object.assign(new Error(`clockgrove/pendulum@${ref}: ${DOWNGRADE_LINE} (it does not come after ${running?.commit ? running.commit.slice(0, 7) : "the commit serve runs"} on Pendulum's main)`), { code: "older" });
     }
     const commit = String((await must(part, ["rev-parse", "--verify", tag ? `refs/tags/${ref}^{commit}` : `${ref}^{commit}`], `resolving ${ref}`)).stdout).trim();
     await must(part, ["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit], `checking out ${ref}`);

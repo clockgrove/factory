@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { CODEX_PRICES, codexRate, jsonLines, parseCodex, parseUsage, priceCodex, providerRefusal, rotatedPin, sinceSession } from "../scripts/lib/usage.mjs";
 import { SHELL_SECRET_KEYS, codexGatewayArgs, credentialEnv, gatewaySession, harnessCommand, hiddenFromShell, runHarness, scrubbedEnv } from "../scripts/lib/harness.mjs";
-import { CODEX_GATEWAY_ENV, FACTORY_SECRET_KEYS, MODEL_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
+import { CODEX_GATEWAY_ENV, PENDULUM_SECRET_KEYS, MODEL_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { parseWorkerSecrets } from "../scripts/lib/worker-secrets.mjs";
 import { isSecretEnv, stageEnvironment } from "../scripts/launch.mjs";
 import { gatewayKeyProbe, neededSecrets } from "../scripts/doctor.mjs";
@@ -101,20 +101,20 @@ test("Codex through the gateway: cache writes parsed, priced at the write rate, 
 });
 
 test("the gateway route's Codex flags: provider, key name, session header, and the model as openai/<id> on a resume too", () => {
-  const args = codexGatewayArgs({ session: "factory-abc" });
+  const args = codexGatewayArgs({ session: "pendulum-abc" });
   assert.deepEqual(args, [
     "-c", 'model_provider="vercel"',
     "-c", 'model_providers.vercel.name="Vercel AI Gateway"',
     "-c", 'model_providers.vercel.base_url="https://ai-gateway.vercel.sh/codex/v1"',
-    "-c", 'model_providers.vercel.env_key="FACTORY_CODEX_GATEWAY_KEY"',
+    "-c", 'model_providers.vercel.env_key="PENDULUM_CODEX_GATEWAY_KEY"',
     "-c", 'model_providers.vercel.wire_api="responses"',
-    "-c", 'model_providers.vercel.env_http_headers={ "x-session-id" = "FACTORY_GATEWAY_SESSION" }',
+    "-c", 'model_providers.vercel.env_http_headers={ "x-session-id" = "PENDULUM_GATEWAY_SESSION" }',
   ]);
-  const gateway = { session: "factory-abc" };
+  const gateway = { session: "pendulum-abc" };
   const fresh = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", gateway });
   for (const a of args) assert.ok(fresh.args.includes(a), a);
   assert.deepEqual(fresh.args.slice(fresh.args.indexOf("-m"), fresh.args.indexOf("-m") + 2), ["-m", "openai/gpt-6.1-sol"]);
-  assert.deepEqual(fresh.env, { FACTORY_GATEWAY_SESSION: "factory-abc" }, "the session id travels with the key to the agent uid");
+  assert.deepEqual(fresh.env, { PENDULUM_GATEWAY_SESSION: "pendulum-abc" }, "the session id travels with the key to the agent uid");
   const resumed = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", resume: "t-1", gateway });
   assert.deepEqual(resumed.args.slice(resumed.args.indexOf("-m"), resumed.args.indexOf("-m") + 2), ["-m", "openai/gpt-6.1-sol"], "a resume keeps the thread's model");
   const prefixed = harnessCommand({ harness: "codex", model: "openai/gpt-5.5", prompt: "P", gateway });
@@ -125,23 +125,23 @@ test("the gateway route's Codex flags: provider, key name, session header, and t
   assert.deepEqual(direct.env, {});
   // Locally the gateway's host is among Codex's own API hosts and the flags are the same.
   const local = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", gateway, local: { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: [] } });
-  assert.ok(local.args.includes('model_provider="vercel"') && local.env.FACTORY_GATEWAY_SESSION === "factory-abc");
+  assert.ok(local.args.includes('model_provider="vercel"') && local.env.PENDULUM_GATEWAY_SESSION === "pendulum-abc");
 });
 
 test("the gateway credential: preferred over CODEX_API_KEY, alone in the child, a stint's session id, never on a login run", async () => {
   const env = { GITHUB_ACTIONS: "true" };
-  const both = await credentialEnv({ harness: "codex", credential: "api", inputs: { codexGatewayKey: "vck_g", codexApiKey: "sk-c" }, env, session: "factory-s" });
-  assert.deepEqual(both.env, { FACTORY_CODEX_GATEWAY_KEY: "vck_g", FACTORY_GATEWAY_SESSION: "factory-s" });
-  assert.equal(both.basis, "FACTORY_CODEX_GATEWAY_KEY (Vercel AI Gateway, step-scoped)");
+  const both = await credentialEnv({ harness: "codex", credential: "api", inputs: { codexGatewayKey: "vck_g", codexApiKey: "sk-c" }, env, session: "pendulum-s" });
+  assert.deepEqual(both.env, { PENDULUM_CODEX_GATEWAY_KEY: "vck_g", PENDULUM_GATEWAY_SESSION: "pendulum-s" });
+  assert.equal(both.basis, "PENDULUM_CODEX_GATEWAY_KEY (Vercel AI Gateway, step-scoped)");
   const direct = await credentialEnv({ harness: "codex", credential: "api", inputs: { codexApiKey: "sk-c" }, env });
   assert.deepEqual(direct.env, { CODEX_API_KEY: "sk-c" });
   const noSession = await credentialEnv({ harness: "codex", credential: "api", inputs: { codexGatewayKey: "vck_g" }, env });
-  assert.match(noSession.env.FACTORY_GATEWAY_SESSION, /^factory-[0-9a-f]{32}$/, "a stage that cannot read its stint gets its own");
-  const login = await credentialEnv({ harness: "codex", credential: "login", inputs: {}, env: { CODEX_API_KEY: "sk-c", FACTORY_CODEX_GATEWAY_KEY: "vck_g" } });
+  assert.match(noSession.env.PENDULUM_GATEWAY_SESSION, /^pendulum-[0-9a-f]{32}$/, "a stage that cannot read its stint gets its own");
+  const login = await credentialEnv({ harness: "codex", credential: "login", inputs: {}, env: { CODEX_API_KEY: "sk-c", PENDULUM_CODEX_GATEWAY_KEY: "vck_g" } });
   assert.deepEqual(login.env, { CODEX_API_KEY: "sk-c" }, "a CLI-login run stays on the CLI's own provider");
   // The input reads the secret's own name, under the action's and the workflow's names.
-  assert.equal(resolveInputs({ env: { FACTORY_INPUT_CODEX_GATEWAY_KEY: "a" } }).codexGatewayKey, "a");
-  assert.equal(resolveInputs({ env: { FACTORY_CODEX_GATEWAY_KEY: "b" } }).codexGatewayKey, "b");
+  assert.equal(resolveInputs({ env: { PENDULUM_INPUT_CODEX_GATEWAY_KEY: "a" } }).codexGatewayKey, "a");
+  assert.equal(resolveInputs({ env: { PENDULUM_CODEX_GATEWAY_KEY: "b" } }).codexGatewayKey, "b");
   // One stint, one id; another stint or Objective, another. Opaque: no repository name in it.
   const a = gatewaySession({ repo: "o/r", issue: 7, since: "2026-11-11T10:00:00Z" });
   assert.equal(a, gatewaySession({ repo: "o/r", issue: 7, since: "2026-11-11T10:00:00Z" }));
@@ -151,27 +151,27 @@ test("the gateway credential: preferred over CODEX_API_KEY, alone in the child, 
 });
 
 test("the gateway key reaches the Codex child only: out of every shell, every other child and the worker's secrets; never AI_GATEWAY_API_KEY", () => {
-  assert.equal(CODEX_GATEWAY_ENV, "FACTORY_CODEX_GATEWAY_KEY");
-  assert.ok(MODEL_SECRET_KEYS.includes(CODEX_GATEWAY_ENV) && !FACTORY_SECRET_KEYS.includes(CODEX_GATEWAY_ENV) && FACTORY_SECRET_KEYS.includes("AI_GATEWAY_API_KEY"));
+  assert.equal(CODEX_GATEWAY_ENV, "PENDULUM_CODEX_GATEWAY_KEY");
+  assert.ok(MODEL_SECRET_KEYS.includes(CODEX_GATEWAY_ENV) && !PENDULUM_SECRET_KEYS.includes(CODEX_GATEWAY_ENV) && PENDULUM_SECRET_KEYS.includes("AI_GATEWAY_API_KEY"));
   assert.ok(SHELL_SECRET_KEYS.includes(CODEX_GATEWAY_ENV) && hiddenFromShell([CODEX_GATEWAY_ENV]).includes(CODEX_GATEWAY_ENV), "no opt-in unhides it");
   for (const local of [null, { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: [] }]) {
     const x = harnessCommand({ harness: "codex", prompt: "P", local, gateway: { session: "s" } });
-    assert.match(x.args.find((a) => a.startsWith("shell_environment_policy.exclude=")), /"FACTORY_CODEX_GATEWAY_KEY"/);
+    assert.match(x.args.find((a) => a.startsWith("shell_environment_policy.exclude=")), /"PENDULUM_CODEX_GATEWAY_KEY"/);
     const p = harnessCommand({ harness: "copilot", prompt: "P", local });
     assert.ok(p.args.find((a) => a.startsWith("--secret-env-vars=")).split(/[=,]/).includes(CODEX_GATEWAY_ENV));
   }
-  const e = scrubbedEnv({ PATH: "/bin", FACTORY_CODEX_GATEWAY_KEY: "k", FACTORY_INPUT_CODEX_GATEWAY_KEY: "k" });
+  const e = scrubbedEnv({ PATH: "/bin", PENDULUM_CODEX_GATEWAY_KEY: "k", PENDULUM_INPUT_CODEX_GATEWAY_KEY: "k" });
   assert.deepEqual(e, { PATH: "/bin" });
-  const ws = parseWorkerSecrets("FACTORY_CODEX_GATEWAY_KEY X=FACTORY_CODEX_GATEWAY_KEY");
+  const ws = parseWorkerSecrets("PENDULUM_CODEX_GATEWAY_KEY X=PENDULUM_CODEX_GATEWAY_KEY");
   assert.deepEqual(ws.entries, []);
   assert.equal(ws.refused.length, 2, "refused as a NAME and as a SOURCE");
   // The cloud sandbox: only the key the stage's Codex runs on goes into the VM.
-  assert.equal(isSecretEnv("FACTORY_INPUT_CODEX_GATEWAY_KEY") && isSecretEnv("FACTORY_CODEX_GATEWAY_KEY"), true);
+  assert.equal(isSecretEnv("PENDULUM_INPUT_CODEX_GATEWAY_KEY") && isSecretEnv("PENDULUM_CODEX_GATEWAY_KEY"), true);
   const inputs = { harness: "codex", model: "gpt-6.1-sol", codexApiKey: "sk-c", codexGatewayKey: "vck_g", aiGatewayApiKey: "" };
-  const out = stageEnvironment({ inputs, env: { FACTORY_CODEX_GATEWAY_KEY: "vck_g" }, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
-  assert.equal(out.FACTORY_INPUT_CODEX_GATEWAY_KEY, "vck_g");
-  assert.ok(!("FACTORY_INPUT_CODEX_API_KEY" in out) && !("FACTORY_CODEX_GATEWAY_KEY" in out));
-  assert.equal(stageEnvironment({ inputs: { ...inputs, codexGatewayKey: "" }, env: {}, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } }).FACTORY_INPUT_CODEX_API_KEY, "sk-c");
+  const out = stageEnvironment({ inputs, env: { PENDULUM_CODEX_GATEWAY_KEY: "vck_g" }, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } });
+  assert.equal(out.PENDULUM_INPUT_CODEX_GATEWAY_KEY, "vck_g");
+  assert.ok(!("PENDULUM_INPUT_CODEX_API_KEY" in out) && !("PENDULUM_CODEX_GATEWAY_KEY" in out));
+  assert.equal(stageEnvironment({ inputs: { ...inputs, codexGatewayKey: "" }, env: {}, stage: "work", issue: 7, claim: "c", tokens: { write: "w" } }).PENDULUM_INPUT_CODEX_API_KEY, "sk-c");
 });
 
 test("the gateway's error body: a budget or payment refusal Blocks, with or without a status; a rate limit and a bare 400 type do not", () => {
@@ -197,7 +197,7 @@ test("a Codex resume refused for a rotated credential runs one fresh thread with
   assert.equal(rotatedPin("codex", jsonLines(pin("codex_byok_restricted_by_api_credit_promo"))), false);
   assert.equal(rotatedPin("claude", jsonLines(pin("invalid_encrypted_content"))), false);
   assert.equal(parseCodex(pin("invalid_encrypted_content"), "gpt-6.1-sol").pinRotated, true);
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-pin-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-pin-"));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "pin.jsonl"), `${pin("invalid_encrypted_content")}\n`);
   // A fake codex: a resume (exec resume <id>) is refused for the rotated pin, a fresh exec completes; each call is logged.
@@ -205,21 +205,21 @@ test("a Codex resume refused for a rotated credential runs one fresh thread with
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const stdin = fs.readFileSync(0, "utf8");
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ resume: args[1] === "resume", stdin, session: process.env.FACTORY_GATEWAY_SESSION || null, key: process.env.FACTORY_CODEX_GATEWAY_KEY || null }) + "\\n");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ resume: args[1] === "resume", stdin, session: process.env.PENDULUM_GATEWAY_SESSION || null, key: process.env.PENDULUM_CODEX_GATEWAY_KEY || null }) + "\\n");
 if (args[1] === "resume") { process.stdout.write(fs.readFileSync(${JSON.stringify(join(bin, "pin.jsonl"))}, "utf8")); process.exit(1); }
 process.stdout.write(fs.readFileSync(${JSON.stringify(join(fixtures, "codex-0.167-gateway-thread.jsonl"))}, "utf8"));
 `, { mode: 0o755 });
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
   try {
-    const env = { PATH: process.env.PATH, FACTORY_CODEX_GATEWAY_KEY: "vck_g", FACTORY_GATEWAY_SESSION: "factory-s" };
+    const env = { PATH: process.env.PATH, PENDULUM_CODEX_GATEWAY_KEY: "vck_g", PENDULUM_GATEWAY_SESSION: "pendulum-s" };
     const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the ask", freshPrompt: "card\n\n---\n\nthe ask", resume: "00000000-0000-0000-0000-000000000003", maxUsd: 0, cwd: bin, env, timeoutMs: 60_000, label: "validation-fix-1" });
     assert.equal(rec.ok, true);
     assert.equal(rec.refusal, undefined);
     assert.equal(rec.resumed, false);
     assert.deepEqual(rec.resumeRefused, { session: "00000000-0000-0000-0000-000000000003", status: 400, type: "invalid_request_error", code: "invalid_encrypted_content" });
     const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.deepEqual(calls.map((c) => [c.resume, c.stdin, c.session, c.key]), [[true, "the ask", "factory-s", "vck_g"], [false, "card\n\n---\n\nthe ask", "factory-s", "vck_g"]]);
+    assert.deepEqual(calls.map((c) => [c.resume, c.stdin, c.session, c.key]), [[true, "the ask", "pendulum-s", "vck_g"], [false, "card\n\n---\n\nthe ask", "pendulum-s", "vck_g"]]);
     // A fresh run refused the same way is a refusal, run once.
     writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
@@ -246,13 +246,13 @@ test("doctor: the gateway key is checked free against its Codex model list; eith
   assert.equal((await gatewayKeyProbe("vck_g", { fetchFn: at(401) })).status, "FAIL");
   assert.equal((await gatewayKeyProbe("vck_g", { fetchFn: at(503) })).status, "WARN");
   assert.equal((await gatewayKeyProbe("vck_g", { fetchFn: async () => { throw new Error("offline"); } })).status, "WARN");
-  assert.deepEqual(neededSecrets({ harness: "codex" }), ["FACTORY_APP_ID", "FACTORY_APP_PRIVATE_KEY", ["FACTORY_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]]);
+  assert.deepEqual(neededSecrets({ harness: "codex" }), ["PENDULUM_APP_ID", "PENDULUM_APP_PRIVATE_KEY", ["PENDULUM_CODEX_GATEWAY_KEY", "CODEX_API_KEY"]]);
 });
 
 // A fake codex in its own directory: a resume (`exec resume <id>`) is refused for a rotated pin, a fresh exec completes;
 // each call's resume flag and the env names it got are logged.
 function fakeCodex() {
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-review-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-review-"));
   const log = join(bin, "calls.jsonl");
   const refused = `{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000003"}\n${JSON.stringify({ type: "turn.failed", error: { message: JSON.stringify({ type: "error", error: { type: "invalid_request_error", code: "invalid_encrypted_content", message: "m" }, status: 400 }) } })}\n`;
   writeFileSync(join(bin, "pin.jsonl"), refused);
@@ -274,7 +274,7 @@ test("no fresh prompt, no fallback: the exit-record ask's refused resume Blocks 
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
   try {
-    const env = { PATH: process.env.PATH, FACTORY_CODEX_GATEWAY_KEY: "vck_g", FACTORY_GATEWAY_SESSION: "factory-s" };
+    const env = { PATH: process.env.PATH, PENDULUM_CODEX_GATEWAY_KEY: "vck_g", PENDULUM_GATEWAY_SESSION: "pendulum-s" };
     const rec = await runHarness({ harness: "codex", model: "gpt-6.1-sol", prompt: "the ask", resume: "00000000-0000-0000-0000-000000000003", maxUsd: 0, cwd: bin, env, timeoutMs: 60_000, label: "exit" });
     assert.equal(rec.refusal?.code, "invalid_encrypted_content");
     assert.equal(rec.resumeRefused, undefined);
@@ -297,19 +297,19 @@ test("the review's answer pass runs at most twice: no second fresh run after run
   assert.equal(answerFreshAfter(null, died), false, "a fresh pass that died is not run again here");
 });
 
-test("doctor --probe runs the harness on a scrubbed env plus its one credential: no Factory key, no unused CODEX_API_KEY", async () => {
+test("doctor --probe runs the harness on a scrubbed env plus its one credential: no Pendulum key, no unused CODEX_API_KEY", async () => {
   const { probeHarness } = await import("../scripts/doctor.mjs");
   const { bin, calls } = fakeCodex();
   // The CLI is found on this process's PATH (proc.mjs onPath), as on a runner.
   const saved = process.env.PATH;
   process.env.PATH = `${bin}:${saved}`;
   try {
-    const env = { PATH: process.env.PATH, HOME: bin, AI_GATEWAY_API_KEY: "vck_factory", CODEX_API_KEY: "sk-unused", FACTORY_INPUT_AI_GATEWAY_API_KEY: "vck_factory", GH_TOKEN: "ghs_x" };
+    const env = { PATH: process.env.PATH, HOME: bin, AI_GATEWAY_API_KEY: "vck_pendulum", CODEX_API_KEY: "sk-unused", PENDULUM_INPUT_AI_GATEWAY_API_KEY: "vck_pendulum", GH_TOKEN: "ghs_x" };
     const out = await probeHarness({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g" }, env });
     assert.equal(out.status, "PASS", out.detail);
     const [call] = calls();
-    for (const k of ["AI_GATEWAY_API_KEY", "FACTORY_INPUT_AI_GATEWAY_API_KEY", "CODEX_API_KEY", "GH_TOKEN"]) assert.ok(!call.env.includes(k), `${k} kept out`);
-    for (const k of ["FACTORY_CODEX_GATEWAY_KEY", "FACTORY_GATEWAY_SESSION", "PATH"]) assert.ok(call.env.includes(k), `${k} given`);
+    for (const k of ["AI_GATEWAY_API_KEY", "PENDULUM_INPUT_AI_GATEWAY_API_KEY", "CODEX_API_KEY", "GH_TOKEN"]) assert.ok(!call.env.includes(k), `${k} kept out`);
+    for (const k of ["PENDULUM_CODEX_GATEWAY_KEY", "PENDULUM_GATEWAY_SESSION", "PATH"]) assert.ok(call.env.includes(k), `${k} given`);
   } finally {
     process.env.PATH = saved;
   }
@@ -318,11 +318,11 @@ test("doctor --probe runs the harness on a scrubbed env plus its one credential:
 test("doctor: a job-level CODEX_API_KEY is warned beside the gateway key; an unpriced Codex model says max_usd cannot stop it", async () => {
   const { credentialChecks } = await import("../scripts/doctor.mjs");
   const { unpricedCodex } = await import("../scripts/lib/usage.mjs");
-  const env = { GITHUB_ACTIONS: "true", CODEX_API_KEY: "sk-c", FACTORY_INPUT_CODEX_GATEWAY_KEY: "vck_g" };
+  const env = { GITHUB_ACTIONS: "true", CODEX_API_KEY: "sk-c", PENDULUM_INPUT_CODEX_GATEWAY_KEY: "vck_g" };
   const checks = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "gpt-6.1-sol", codexGatewayKey: "vck_g", codexApiKey: "" }, env });
   assert.ok(checks.some((c) => c.status === "WARN" && /CODEX_API_KEY is a job-level variable/.test(c.detail)));
   assert.ok(!checks.some((c) => c.name === "codex model"), "a priced model: no warning");
-  const unpriced = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "openai/gpt-5.5-pro", codexGatewayKey: "vck_g" }, env: { GITHUB_ACTIONS: "true", FACTORY_INPUT_CODEX_GATEWAY_KEY: "vck_g" } });
+  const unpriced = await credentialChecks({ inputs: { harness: "codex", credential: "api", model: "openai/gpt-5.5-pro", codexGatewayKey: "vck_g" }, env: { GITHUB_ACTIONS: "true", PENDULUM_INPUT_CODEX_GATEWAY_KEY: "vck_g" } });
   assert.match(unpriced.find((c) => c.name === "codex model")?.detail ?? "", /^gpt-5\.5-pro has no row .* max_usd cannot stop them and daily_usd counts them only from a local or sandbox stage's spend line, at an estimate \(the table's dearest rates\); only the AI Gateway key's budget bounds them$/);
   assert.equal(unpricedCodex("codex", "gpt-6.1-sol"), null);
   assert.equal(unpricedCodex("claude", "anything"), null);

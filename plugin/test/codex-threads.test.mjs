@@ -13,9 +13,9 @@ import { restoreTranscript, saveTranscript, stageThreads, writeUsage } from "../
 import { costOf } from "../../bench/lib/cost.mjs";
 
 // Real codex-cli 0.167 rollouts, trimmed to the lines codex-threads.mjs reads (ids, sources, models, token counts):
-// - a local Factory worker thread that spawned an implementer (`spawn-parent`) and that implementer's own rollout
+// - a local Pendulum worker thread that spawned an implementer (`spawn-parent`) and that implementer's own rollout
 //   (`spawn-child`), as Codex wrote them side by side under CODEX_HOME/sessions;
-// - the factory-scratch #129 worker's thread on the AI Gateway (`spawn-gateway-parent`, from the v0.9.10 gate's
+// - the scratch repository's #129 worker's thread on the AI Gateway (`spawn-gateway-parent`, from the v0.9.10 gate's
 //   artifact), whose implementer's rollout was never saved;
 // - a forked sub-agent (`spawn-forked-child`) whose rollout starts with a copy of its parent's history.
 const fixture = (f) => readFileSync(join(import.meta.dirname, "fixtures", f), "utf8");
@@ -168,7 +168,7 @@ process.stdout.write(fs.readFileSync(${JSON.stringify(join(next, "stdout.jsonl")
     writeFileSync(join(next, "stdout.jsonl"), out);
   };
   const home = join(work, "codex");
-  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
   process.env.PATH = `${bin}:${saved.PATH}`;
   process.env.CODEX_HOME = home;
   const run = (resume, label) => runHarness({ harness: "codex", model: MODEL, prompt: "p", maxUsd: 0, resume, cwd: work, env: { HOME: process.env.HOME, PATH: process.env.PATH, CODEX_HOME: home }, timeoutMs: 60_000, label });
@@ -220,9 +220,9 @@ test("a Codex run counts its sub-agents in this pass, on a resume, and in a late
     writeFileSync(join(ws2, "transcript", rel(P2, "21-47-43")), parent2);
     const total = { usd: parentUsd, tokens: PARENT_TOKENS, children: { [C2]: { usd: 0.2907, tokens: CHILD_TOKENS, model: MODEL } } };
     writeFileSync(join(ws2, "result.json"), JSON.stringify({ session: { harness: "codex", id: P2, files: [rel(P2, "21-47-43")], checkout: "/c" }, sessionTotal: total }));
-    process.env.FACTORY_LOCAL = "1";
+    process.env.PENDULUM_LOCAL = "1";
     assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(work, "ws2"), harness: "codex" })).id, P2);
-    delete process.env.FACTORY_LOCAL;
+    delete process.env.PENDULUM_LOCAL;
     const more = { input: CHILD_TOKENS.input + 30000, cached: CHILD_TOKENS.cached + 20000, written: 0, output: CHILD_TOKENS.output + 400 };
     const tick = JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: more.input, cached_input_tokens: more.cached, cache_write_input_tokens: 0, output_tokens: more.output }, last_token_usage: { input_tokens: 30000, cached_input_tokens: 20000, output_tokens: 400 } } } });
     const grownParent = { ...PARENT_TOKENS, input: PARENT_TOKENS.input + 5000, output: PARENT_TOKENS.output + 50 };
@@ -255,7 +255,7 @@ test("on a runner (Actions, a cloud sandbox) the threads are read from archives 
     assert.deepEqual(capturedSession(CHILD).files, [rel(CHILD)]);
     assert.deepEqual(capturedSession(GRAND).files, [rel(GRAND, "21-49-00")]);
     assert.equal(SESSIONS_HELD().length, 3);
-    // The run's own thread is read from Factory's captured copy, not from what the agent's home holds by now.
+    // The run's own thread is read from Pendulum's captured copy, not from what the agent's home holds by now.
     appendFileSync(join(layout.sessions, rel(PARENT, "21-47-43")), named(PARENT, "01a1ce4d-0000-7000-8000-000000000009"));
     assert.equal((await subAgentThreads(PARENT, layout, process.env)).threads.length, 2);
   } finally {
@@ -289,9 +289,9 @@ test("a resumed pass that ends without a total keeps the session's and its threa
     writeFileSync(join(usageDir, "result.json"), JSON.stringify(usage));
     // A later stage is a fresh process: it knows only what the saved stage recorded. Locally Codex's sessions persist.
     dropSessionTotals();
-    process.env.FACTORY_LOCAL = "1";
+    process.env.PENDULUM_LOCAL = "1";
     assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(work, "ws"), harness: "codex" })).id, PARENT);
-    delete process.env.FACTORY_LOCAL;
+    delete process.env.PENDULUM_LOCAL;
     pass(files, stream(PARENT, PARENT_TOKENS));
     const later = await run(PARENT, "review-fix-1");
     assert.equal(later.usd, 0, "neither the thread nor its implementer counted again");

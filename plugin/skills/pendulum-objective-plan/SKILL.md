@@ -1,0 +1,42 @@
+---
+name: pendulum-objective-plan
+description: "Internal: the first stage of a Clockgrove Pendulum worker run, loaded only when a Pendulum task card names it. Reads the Objective's issue, writes the plan before any code, records every assumption and applies the Question rule."
+user-invocable: false
+---
+
+# Plan the Objective
+
+Read the whole issue (`$PENDULUM_IN/issue.md`) and the owner's recorded decisions (`$PENDULUM_IN/decisions.md`). Read the repository instructions (AGENTS.md or CLAUDE.md), any repository skill that names Objectives, the runbooks they point to, and only the contract documents for the code you touch.
+
+## The plan
+
+Write the plan to `$PENDULUM_OUT/plan.md` before code; edit it as the work moves. Pendulum posts it as the plan comment. On a rerun, start from `$PENDULUM_IN/plan.md`, the plan as it stands. It holds, in this order:
+
+1. **Goal in your own words.** Two or three sentences; where they disagree, the issue wins.
+2. **Checklist.** Ordered items, each small enough for one implementer sub-agent, each naming the files it owns on a line `Files: src/a.ts, test/a.test.ts` (Pendulum orders Objectives sharing files by them); an item that changes no file has no Files: line. Two items that touch the same file are one item or run in sequence. Map every acceptance entry to an item and name which. Mark each item done as it lands.
+3. **Assumptions.** Every one, numbered: a default you chose, a behaviour left unsaid, a library, an invented name.
+4. **Design note.** When the repository has a design checklist, answer it here.
+
+## The simplest-reading rule
+
+Where the issue admits more than one reading, take the simplest one that satisfies every acceptance entry and every recorded decision, and record which under Assumptions. Do not build for a reading nobody asked for. Do not ask.
+
+## The Question rule
+
+An assumption that would change or remove an existing public contract (an exported type, an HTTP or CLI surface, a schema, a documented behaviour, a wire format), so that a use that works on the base commit breaks or behaves differently, that contradicts a recorded decision in the issue, or that grants new access (a permission, a credential, a service reachable from outside that was not), is not yours to make silently. Start that item with `QUESTION:` in the Assumptions list (the marker is the item's first word; the word elsewhere in prose is not one), take the simplest reading anyway, and finish everything else. The pendulum-deliver-pr skill then puts the question in pr.md's body and writes a `question` exit record naming, for each question, the test it meets; Pendulum keeps the PR a draft, so the queue moves on and a human answers in the PR. Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, never a Question, and so is a reversible choice the issue leaves open (a placeholder, a default, a label). Raise one only when a test is met.
+
+## Another repository
+
+Pendulum works in one repository per Objective. If it needs a change in another repository, do not work around it. Add the plan line `Needs-Repository: OWNER/NAME` and why, write a `question` exit record (test `access`), and stop before any code. Once a recorded decision takes that change out of scope, delete the line from plan.md.
+
+## Workflow files
+
+Pendulum never pushes a change under `.github/workflows/`: for each workflow file the Objective needs changed, add the plan line `Needs-Workflow: <path>` and why, and hand the change over (pendulum-deliver-pr).
+
+## Mechanism the base lacks
+
+If an acceptance entry needs a mechanism the base commit does not have (a table, a port, a test harness, a command, a permission), the mechanism is part of this Objective: add a checklist item for it, owned by you, before the items that depend on it. Do not fake it in a test or defer it to a later issue unless the issue says so. If building it changes a public contract or grants new access, the Question rule applies.
+
+## Before leaving
+
+Confirm every acceptance entry maps to an item, every changing item has its `Files:` line, every assumption is listed and plan.md is written. Then load pendulum-implement-split.

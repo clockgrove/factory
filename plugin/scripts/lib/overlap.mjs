@@ -9,8 +9,8 @@
 // queued at once, and each waiting PR rebases once, onto every merge before it. The send-backs of conflicting In-review
 // PRs go in the release order too (sendBackOrder): one is sent back only when no sibling ahead of it, which merges first,
 // would make it conflict again. A start beside a sibling that shares files says so on the issue. Files come only from
-// structure Factory already has: an open PR's changed files (GitHub's list) and the plan comment's `Files:` lines
-// (factory-objective-plan). An Objective with neither (a first run before its plan) has unknown files: it overlaps
+// structure Pendulum already has: an open PR's changed files (GitHub's list) and the plan comment's `Files:` lines
+// (pendulum-objective-plan). An Objective with neither (a first run before its plan) has unknown files: it overlaps
 // nothing at its start.
 import { addLabels, getIssue, listComments, listIssuesByLabel, objectiveLabeledAt, removeLabel, rest, upsertComment } from "./github.mjs";
 import { planOf } from "./handoff.mjs";
@@ -19,7 +19,7 @@ import { accountWaitOf } from "./account-wait.mjs";
 import { TrialUnread, trialMerges } from "./outbox.mjs";
 import { waitOf, waitUntil } from "./third-party-review.mjs";
 
-/** The plan line that names a checklist item's files (factory-objective-plan): `Files: a/b.mjs, c.md`. */
+/** The plan line that names a checklist item's files (pendulum-objective-plan): `Files: a/b.mjs, c.md`. */
 export const PLAN_FILES_KEY = "Files";
 /** At most this many paths are kept per Objective: a plan line or a PR past it is read as its first ones. */
 export const FILES_MAX = 200;
@@ -39,7 +39,7 @@ export const WAIT_MAX_MS = 6 * 3600_000;
 
 /**
  * The states of the siblings a starting Objective's note names: Running (a worker is on it), and In review only when
- * Factory merges reviewed PRs itself (`autoMerge`); without that, an In-review PR waits for a person, as long as they take.
+ * Pendulum merges reviewed PRs itself (`autoMerge`); without that, an In-review PR waits for a person, as long as they take.
  */
 export const activeStates = (autoMerge) => new Set(autoMerge ? ["Running", "In review"] : ["Running"]);
 
@@ -121,7 +121,7 @@ export const waitReason = (w) => `its review waits for #${w.on} to merge${causeO
 
 /** The overlap comment's text on an Objective whose hand-off to review waits (its marker added by the caller). */
 export function waitNote(w, prNumber, waitMaxMs = WAIT_MAX_MS) {
-  return `Factory: PR #${prNumber} is ready, and its review waits for #${w.on} to merge${causeOf(w)}${found(w, 5)}. Reviewed together, the one that merges second would rebase over the other after its review. Once #${w.on} merges or stops (Blocked, a Question, its label removed), and no sibling that waited longer is still ahead of it, or after ${hours(waitMaxMs)} h of waiting at most since its first wait, the dispatcher's next tick puts \`${REVIEW_LABEL}\` on the PR, or first sends it back for its rebase when it conflicts. Putting \`${REVIEW_LABEL}\` on the PR yourself starts its review now.`;
+  return `Pendulum: PR #${prNumber} is ready, and its review waits for #${w.on} to merge${causeOf(w)}${found(w, 5)}. Reviewed together, the one that merges second would rebase over the other after its review. Once #${w.on} merges or stops (Blocked, a Question, its label removed), and no sibling that waited longer is still ahead of it, or after ${hours(waitMaxMs)} h of waiting at most since its first wait, the dispatcher's next tick puts \`${REVIEW_LABEL}\` on the PR, or first sends it back for its rebase when it conflicts. Putting \`${REVIEW_LABEL}\` on the PR yourself starts its review now.`;
 }
 
 /** Why a conflicting PR's rebase waits (sendBackOrder; the dispatcher's log line and its PR record). */
@@ -129,20 +129,20 @@ export const rebaseWaitReason = (w) => `its rebase waits for #${w.on} to merge f
 
 /** The overlap comment's text on an Objective whose conflicting PR's rebase waits (its marker added by the caller). */
 export const rebaseWaitNote = (w, prNumber, waitMaxMs = WAIT_MAX_MS) =>
-  `Factory: PR #${prNumber} conflicts with the default branch, and its rebase waits for #${w.on} to merge first${causeOf(w)}${found(w, 5)}. Rebased now, it would need another rebase once #${w.on} merges. Once #${w.on} merges or stops, or after ${hours(waitMaxMs)} h of waiting at most (counted with any wait of its review before), the dispatcher sends it back for its rebase.`;
+  `Pendulum: PR #${prNumber} conflicts with the default branch, and its rebase waits for #${w.on} to merge first${causeOf(w)}${found(w, 5)}. Rebased now, it would need another rebase once #${w.on} merges. Once #${w.on} merges or stops, or after ${hours(waitMaxMs)} h of waiting at most (counted with any wait of its review before), the dispatcher sends it back for its rebase.`;
 
 /**
  * The overlap comment's text on an Objective that starts beside siblings it shares files with; `hold` when a hand-off
- * waits for a sibling it conflicts with (Factory merges, sibling_hold on).
+ * waits for a sibling it conflicts with (Pendulum merges, sibling_hold on).
  */
 export function besideNote(n, hold = false) {
   const each = n.with.map((o) => `#${o.number} (${list(o.shared, 3)})`).join("; ");
   const wait = hold ? " Where their changes conflict, whichever is handed to review second waits until the other merges, then rebases once before its review." : "";
-  return `Factory: this Objective starts beside ${each}, which change some of the same files. Whichever merges second rebases onto the other when they conflict; each rebase and its cost show in that stage's progress comment.${wait}`;
+  return `Pendulum: this Objective starts beside ${each}, which change some of the same files. Whichever merges second rebases onto the other when they conflict; each rebase and its cost show in that stage's progress comment.${wait}`;
 }
 
 /** The overlap comment's text once a waiting Objective's wait is over. */
-export const clearedNote = (on, gaveUp = false, waitMaxMs = WAIT_MAX_MS) => (gaveUp ? `Factory: this Objective stopped waiting for #${on} after ${hours(waitMaxMs)} h, the longest Factory holds a review for a sibling; its review goes on beside it.` : `Factory: this Objective no longer waits for #${on}: no sibling ahead of it conflicts with it now.`);
+export const clearedNote = (on, gaveUp = false, waitMaxMs = WAIT_MAX_MS) => (gaveUp ? `Pendulum: this Objective stopped waiting for #${on} after ${hours(waitMaxMs)} h, the longest Pendulum holds a review for a sibling; its review goes on beside it.` : `Pendulum: this Objective no longer waits for #${on}: no sibling ahead of it conflicts with it now.`);
 
 // What was read, across ticks of one process (a local loop's serve keeps its process; an Actions tick starts empty):
 // an issue's comments while its `updated_at` and comment count stay, a PR's files while its head stays.
@@ -219,9 +219,9 @@ async function prFiles(repo, pr, opts) {
 }
 
 /**
- * The open `factory/<n>` PR of an issue: from `known` (the PRs this tick's review pass already read, by issue; null
+ * The open `pendulum/<n>` PR of an issue: from `known` (the PRs this tick's review pass already read, by issue; null
  * for none), else from one listing of the repository's open PRs, made at most once per call of this function's
- * result. Only PRs from this repository's own branches count: a fork's branch of the same name is no Factory PR.
+ * result. Only PRs from this repository's own branches count: a fork's branch of the same name is no Pendulum PR.
  */
 export function prFinder(repo, opts, known = {}) {
   let listed = null;
@@ -230,7 +230,7 @@ export function prFinder(repo, opts, known = {}) {
     listed ??= rest(`repos/${repo.full}/pulls?state=open&per_page=100`, { ...opts, paginate: true }).then((all) => {
       const out = new Map();
       for (const pr of all || []) {
-        const m = /^factory\/(\d+)$/.exec(pr?.head?.ref || "");
+        const m = /^pendulum\/(\d+)$/.exec(pr?.head?.ref || "");
         if (m && pr.head?.repo?.full_name?.toLowerCase() === repo.full.toLowerCase()) out.set(Number(m[1]), pr);
       }
       return out;
@@ -240,8 +240,8 @@ export function prFinder(repo, opts, known = {}) {
 }
 
 /**
- * The files Factory knows an Objective will change: its open PR's changed files (the first 100) and its plan comment's
- * `Files:` lines, joined; null when it has neither. An issue with no comments has no plan and no Factory PR (a PR
+ * The files Pendulum knows an Objective will change: its open PR's changed files (the first 100) and its plan comment's
+ * `Files:` lines, joined; null when it has neither. An issue with no comments has no plan and no Pendulum PR (a PR
  * comes with progress comments), so it costs no read. `prOf` is a prFinder.
  */
 export async function knownFiles(repo, issue, opts, prOf) {
@@ -257,10 +257,10 @@ export async function knownFiles(repo, issue, opts, prOf) {
 /** The overlap comment's marker: its kind (`waits-<sibling>-<since, epoch s>`, `beside`, `cleared`), read by overlapOf. */
 export const overlapMarker = (n, kind) => marker(n, "overlap", kind);
 
-/** Factory's own overlap comment on issue `n` among `comments`: {id, body, kind, on, since (ms)}, or null. */
+/** Pendulum's own overlap comment on issue `n` among `comments`: {id, body, kind, on, since (ms)}, or null. */
 export function overlapOf(comments, n) {
   const prefix = marker(n, "overlap").replace(/ -->$/, ":");
-  // Only Factory's own comment (anyone can paste the marker); before Factory knows its login, one by a writer (as upsertComment).
+  // Only Pendulum's own comment (anyone can paste the marker); before Pendulum knows its login, one by a writer (as upsertComment).
   const c = (comments || []).find((x) => (selfLogin() ? isSelf(x) : trustedAuthor(x)) && (x.body || "").startsWith(prefix));
   if (!c) return null;
   const kind = /^([a-z]+)(?:-(\d+))?(?:-(\d+))? -->/.exec(c.body.slice(prefix.length));
@@ -324,7 +324,7 @@ const readFiles = (repo, issue, opts, prOf, log) =>
  */
 const recordPrefix = (n, kind) => marker(n, kind).replace(/ -->$/, ":");
 
-/** The newest record of `kind` on a PR among its comments (Factory's own, or one by a writer who can push). */
+/** The newest record of `kind` on a PR among its comments (Pendulum's own, or one by a writer who can push). */
 function waitRecordOf(comments, n, kind) {
   const prefix = recordPrefix(n, kind);
   const c = [...(comments || [])].reverse().find((x) => trustedAuthor(x) && String(x.body || "").startsWith(prefix));
@@ -334,14 +334,14 @@ function waitRecordOf(comments, n, kind) {
 
 /**
  * The PR's review-wait record (reviewHold) among its comments: `{id, on, since (ms), unread, released, at (ms, its last
- * write)}`, or null. Factory's own, or one by a writer who can push: a local loop writes as its developer, the Action as
+ * write)}`, or null. Pendulum's own, or one by a writer who can push: a local loop writes as its developer, the Action as
  * its App, and either reads the other's.
  */
 export const reviewWaitOf = (comments, n) => waitRecordOf(comments, n, "review-wait");
 /** The PR's sendback-wait record (sendBackOrder), as reviewWaitOf. */
 export const rebaseWaitOf = (comments, n) => waitRecordOf(comments, n, "sendback-wait");
 
-/** Write issue `n`'s PR record of `kind` (waitRecordOf's form), over Factory's earlier one. */
+/** Write issue `n`'s PR record of `kind` (waitRecordOf's form), over Pendulum's earlier one. */
 function writeRecord(repo, n, prNumber, kind, { on, since, unread = [], released = false, over = false }, text, opts) {
   return upsertComment(repo, prNumber, recordPrefix(n, kind), text, opts, { head: `${on}-${Math.floor(since / 1000)}${unread?.length ? `-u${unread.join(".")}` : ""}${over ? "-over" : released ? "-released" : ""} -->` });
 }
@@ -545,7 +545,7 @@ export async function sayWaiting(repo, issue, prNumber, wait, since, opts, { log
  */
 export async function sayRebaseWait(repo, { issue, prNumber, wait, record }, opts, { log = () => {}, waitMaxMs = WAIT_MAX_MS } = {}) {
   const head = { on: wait.on, since: wait.since, unread: wait.unread ?? [] };
-  if (!record || record.released || record.on !== head.on || record.since !== Math.floor(head.since / 1000) * 1000 || record.unread.join(".") !== head.unread.join(".")) await writeRecord(repo, issue.number, prNumber, "sendback-wait", head, `Factory: ${rebaseWaitReason(wait)}.`, opts);
+  if (!record || record.released || record.on !== head.on || record.since !== Math.floor(head.since / 1000) * 1000 || record.unread.join(".") !== head.unread.join(".")) await writeRecord(repo, issue.number, prNumber, "sendback-wait", head, `Pendulum: ${rebaseWaitReason(wait)}.`, opts);
   const comments = await commentsOf(repo, issue, opts).catch(() => null);
   await say(repo, issue.number, overlapOf(comments, issue.number), `rebasewait-${wait.on}-${Math.floor(wait.since / 1000)}`, rebaseWaitNote(wait, prNumber, waitMaxMs), opts, log);
 }
@@ -555,31 +555,31 @@ export async function sayRebaseWait(repo, { issue, prNumber, wait, record }, opt
  * back now), "gaveUp" (sent back at WAIT_MAX_MS) or "over" (the PR conflicts no more, or left review: nothing to rebase).
  */
 export async function clearRebaseWait(repo, { issue, prNumber, record, how = "sent" }, opts, { log = () => {}, waitMaxMs = WAIT_MAX_MS } = {}) {
-  const text = { sent: `this Objective's rebase no longer waits for #${record.on}; it rebases now`, gaveUp: `this Objective's rebase stopped waiting for #${record.on} after ${hours(waitMaxMs)} h, the longest Factory holds one for a sibling; it rebases now`, over: `this Objective's PR no longer waits for #${record.on} to rebase: it conflicts no more, or left review` }[how];
-  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true, over: how === "over" }, `Factory: ${text}.`, opts);
+  const text = { sent: `this Objective's rebase no longer waits for #${record.on}; it rebases now`, gaveUp: `this Objective's rebase stopped waiting for #${record.on} after ${hours(waitMaxMs)} h, the longest Pendulum holds one for a sibling; it rebases now`, over: `this Objective's PR no longer waits for #${record.on} to rebase: it conflicts no more, or left review` }[how];
+  await writeRecord(repo, issue.number, prNumber, "sendback-wait", { on: record.on, since: record.since, unread: record.unread, released: true, over: how === "over" }, `Pendulum: ${text}.`, opts);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
-  if (old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", `Factory: ${text}.`, opts, log);
+  if (old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", `Pendulum: ${text}.`, opts, log);
 }
 
 /**
  * The work stage's hand-off of a head no review has seen (worker.mjs, its PR `pr` delivered and ready, the review label
- * off, `head` the commit Factory pushed). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on
+ * off, `head` the commit Pendulum pushed). With `autoMerge`, a sibling ahead of it (aheadOf) holds it: the record goes on
  * the PR first, keeping the Objective's first wait start when it waited before, then the note on the issue, and the
  * review label stays off; the stage ends delivered and the Objective In review, its slot free. Returns the wait (`{on,
  * files, cause, unread}`) or null: the caller puts the review label on. With `hold` off (sibling_hold) nothing waits.
- * Nothing holds a reviewed head Factory rebased (`rebaseMode` and `reviewed`), nor the rebase of a PR that was ahead
+ * Nothing holds a reviewed head Pendulum rebased (`rebaseMode` and `reviewed`), nor the rebase of a PR that was ahead
  * already (its wait over, or handed to review before and sent back): it goes next. A hold within WAIT_MAX_MS of the
  * Objective's last one keeps that one's start (one episode); a later one starts its own. A read or a trial merge that
  * fails holds nothing (the review goes on, as without siblings), except a sibling head that cannot be fetched (aheadOf);
  * a record that cannot be written holds nothing either.
  */
-export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMerge, hold = true, objectiveLabel = "factory:objective", rebaseMode = false, reviewed = false, waitMaxMs = WAIT_MAX_MS }, opts, { log = () => {}, now = Date.now() } = {}) {
+export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMerge, hold = true, objectiveLabel = "pendulum:objective", rebaseMode = false, reviewed = false, waitMaxMs = WAIT_MAX_MS }, opts, { log = () => {}, now = Date.now() } = {}) {
   if (!autoMerge || !hold || !pr || !head || (rebaseMode && reviewed)) return null;
   const trials = siblingTrials(repo, opts);
   try {
     const has = (i, name) => (i.labels || []).some((l) => (typeof l === "string" ? l : l.name) === name);
     const others = new Map();
-    for (const label of ["factory:in-review", "factory:running"]) for (const i of await listIssuesByLabel(repo, label, opts)) if (i.number !== issue && has(i, objectiveLabel)) others.set(i.number, i);
+    for (const label of ["pendulum:in-review", "pendulum:running"]) for (const i of await listIssuesByLabel(repo, label, opts)) if (i.number !== issue && has(i, objectiveLabel)) others.set(i.number, i);
     if (!others.size) return null;
     const ownComments = await listComments(repo, pr.number, opts);
     const own = reviewWaitOf(ownComments, issue);
@@ -589,9 +589,9 @@ export async function reviewHold(repo, { issue, pr, head = pr?.head?.sha, autoMe
     // One hold episode keeps its first start; held again past the bound, a new episode starts.
     const since = own && now - own.since < waitMaxMs ? own.since : now;
     const prOf = prFinder(repo, opts, { [issue]: pr });
-    const wait = await aheadOf(repo, { issue: self, head, key: keyOf(since, self), others: [...others.values()], state: (s) => (has(s, "factory:in-review") ? "In review" : "Running") }, opts, prOf, new Map(), trials);
+    const wait = await aheadOf(repo, { issue: self, head, key: keyOf(since, self), others: [...others.values()], state: (s) => (has(s, "pendulum:in-review") ? "In review" : "Running") }, opts, prOf, new Map(), trials);
     if (!wait) return null;
-    await writeWait(repo, issue, pr.number, { on: wait.on, since, unread: wait.unread }, `Factory: ${waitReason(wait)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
+    await writeWait(repo, issue, pr.number, { on: wait.on, since, unread: wait.unread }, `Pendulum: ${waitReason(wait)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
     await sayWaiting(repo, self, pr.number, wait, since, opts, { log, waitMaxMs });
     return wait;
   } catch (e) {
@@ -627,7 +627,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
   }
   const release = (how, text) => writeWait(repo, issue.number, pr.number, { on: wait.on, since: wait.since, released: true }, text, opts).then(() => how);
   const labelledAt = await objectiveLabeledAt(repo, pr.number, REVIEW_LABEL, opts);
-  if (labelledAt && wait.at && Date.parse(labelledAt) > wait.at) return dryRun ? "stale" : release("stale", "Factory: the review label went on after this PR's wait began; it waits no more.");
+  if (labelledAt && wait.at && Date.parse(labelledAt) > wait.at) return dryRun ? "stale" : release("stale", "Pendulum: the review label went on after this PR's wait began; it waits no more.");
   const gaveUp = now - wait.since >= waitMaxMs;
   if (autoMerge && hold && !gaveUp) {
     const others = issues.filter((i) => i.number !== issue.number && !landed.includes(i.number) && ["In review", "Running"].includes(stateOf(i, statuses[i.number] ?? null)));
@@ -643,7 +643,7 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
     }
     if (on) {
       // A sibling head that could not be fetched: named in the record, so the next tick goes on without it.
-      if (!dryRun && on.unread.length && on.unread.join(".") !== wait.unread.join(".")) await writeWait(repo, issue.number, pr.number, { on: on.on, since: wait.since, unread: on.unread }, `Factory: ${waitReason(on)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
+      if (!dryRun && on.unread.length && on.unread.join(".") !== wait.unread.join(".")) await writeWait(repo, issue.number, pr.number, { on: on.on, since: wait.since, unread: on.unread }, `Pendulum: ${waitReason(on)}; the dispatcher puts \`${REVIEW_LABEL}\` on this PR once it has.`, opts);
       return { waiting: on };
     }
   }
@@ -655,22 +655,22 @@ export async function reviewWaitResume(repo, { issue, pr, wait, issues, statuses
     await removeLabel(repo, pr.number, REVIEW_LABEL, opts);
     await addLabels(repo, pr.number, [REVIEW_LABEL], opts);
   }
-  await release(how, how === "rebase" ? `Factory: this PR's wait for #${wait.on} is over; it rebases, then goes to review.` : `Factory: this PR's wait for #${wait.on} is over; it goes to review.`);
+  await release(how, how === "rebase" ? `Pendulum: this PR's wait for #${wait.on} is over; it rebases, then goes to review.` : `Pendulum: this PR's wait for #${wait.on} is over; it goes to review.`);
   const old = overlapOf(await commentsOf(repo, issue, opts).catch(() => null), issue.number);
   if (old?.kind === "waits" || old?.kind === "rebasewait") await say(repo, issue.number, old, "cleared", clearedNote(wait.on, gaveUp && autoMerge && hold, waitMaxMs), opts, log);
   return how;
 }
 
 /**
- * A run a person named for this Objective (local.mjs `factory run <issue>`) does not wait: the review label goes on, its
+ * A run a person named for this Objective (local.mjs `pendulum run <issue>`) does not wait: the review label goes on, its
  * PR's waiting record (`wait`, reviewWaitOf) is released, and the issue's note says the wait is over. A failed write throws.
  */
 export async function reviewNow(repo, { issue, prNumber, wait }, opts) {
   await removeLabel(repo, prNumber, REVIEW_LABEL, opts);
   await addLabels(repo, prNumber, [REVIEW_LABEL], opts);
-  await writeWait(repo, issue, prNumber, { on: wait.on, since: wait.since, released: true }, "Factory: a run named by hand for this Objective started its review.", opts);
+  await writeWait(repo, issue, prNumber, { on: wait.on, since: wait.since, released: true }, "Pendulum: a run named by hand for this Objective started its review.", opts);
   const old = overlapOf(await listComments(repo, issue, opts).catch(() => null), issue);
-  if (old?.kind === "waits") await say(repo, issue, old, "cleared", `Factory: this Objective no longer waits for #${wait.on}: a run named for it by hand started its review.`, opts, () => {});
+  if (old?.kind === "waits") await say(repo, issue, old, "cleared", `Pendulum: this Objective no longer waits for #${wait.on}: a run named for it by hand started its review.`, opts, () => {});
 }
 
 /**

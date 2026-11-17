@@ -23,7 +23,7 @@ function fakeHome() {
 
 const within = (p, d) => p === d || p.startsWith(`${d}/`);
 const covered = (list, p) => list.some((q) => p === q || p.startsWith(`${q}/`));
-const codexDenied = (args) => args.find((a) => a.startsWith("permissions.factory="));
+const codexDenied = (args) => args.find((a) => a.startsWith("permissions.pendulum="));
 
 test("#260: every sandbox kind denies a second login's whole folder; the default stage's own login stays readable to its harness process alone", () => {
   const h = fakeHome();
@@ -67,15 +67,15 @@ test("#260: every sandbox kind denies a second login's whole folder; the default
   assert.ok(!outerCodex.includes(join(h, ".codex")), "its own home");
 });
 
-test("#260: the sandboxes a stage builds itself deny what serve hands it (FACTORY_LOCAL_SANDBOX credentials)", () => {
+test("#260: the sandboxes a stage builds itself deny what serve hands it (PENDULUM_LOCAL_SANDBOX credentials)", () => {
   const h = fakeHome();
   const credentials = credentialPaths(h, {}, { own: stageLogin("claude", {}, h) });
-  const local = localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], domains: [], clone: null, readOnly: [], credentials }) });
+  const local = localSandbox({ PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], domains: [], clone: null, readOnly: [], credentials }) });
   assert.deepEqual(local.credentials, credentials);
   const args = harnessCommand({ harness: "claude", prompt: "x", local }).args;
   const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
   for (const p of [join(h, ".claude-two"), join(h, ".codex-two")]) assert.ok(settings.sandbox.filesystem.denyRead.includes(p) && settings.permissions.deny.includes(`Read(/${p})`), `claude child: ${p}`);
-  const codex = codexDenied(harnessCommand({ harness: "codex", prompt: "x", local: localSandbox({ FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], domains: [], clone: null, readOnly: [], credentials: credentialPaths(h, {}, { own: stageLogin("codex", {}, h) }) }) }) }).args);
+  const codex = codexDenied(harnessCommand({ harness: "codex", prompt: "x", local: localSandbox({ PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [], domains: [], clone: null, readOnly: [], credentials: credentialPaths(h, {}, { own: stageLogin("codex", {}, h) }) }) }) }).args);
   for (const p of [join(h, ".claude-two"), join(h, ".codex-two")]) assert.ok(codex.includes(`${JSON.stringify(p)}="deny"`), `codex child: ${p}`);
 });
 
@@ -202,9 +202,9 @@ test("#260: the outer sandbox denies the list serve built, so a login only serve
   const dev = join(h, "my-copilot");
   mkdirSync(dev);
   const credentials = credentialPaths(h, { COPILOT_HOME: dev });
-  const outer = harnessOuterSettings({ harness: "copilot", writable: ["/c"], home: h, env: { COPILOT_HOME: join(h, "factory-copilot") }, credentials }).filesystem.denyRead;
+  const outer = harnessOuterSettings({ harness: "copilot", writable: ["/c"], home: h, env: { COPILOT_HOME: join(h, "pendulum-copilot") }, credentials }).filesystem.denyRead;
   assert.ok(outer.includes(dev), "serve's COPILOT_HOME, not the stage's");
-  assert.ok(!outer.includes(join(h, "factory-copilot")));
+  assert.ok(!outer.includes(join(h, "pendulum-copilot")));
 });
 
 test("#260: a link from the stage's folder to or above another Claude folder never downgrades it from whole", () => {
@@ -236,7 +236,7 @@ test("#260: doctor --local names a login a harness home holds, locally only; a k
   const ok = localLoginChecks({ inputs: { harness: "claude" }, env: {}, local: true, home: h });
   assert.equal(ok[0].status, "PASS");
   assert.ok(ok[0].detail.includes(join(h, ".claude-two")) && ok[0].detail.includes(codexTwo));
-  // ~/.config/factory inside a login folder of another harness's: a stage may run on it.
+  // ~/.config/pendulum inside a login folder of another harness's: a stage may run on it.
   assert.equal(keyDirExposedBy("claude", { COPILOT_HOME: join(h, ".config") }, h), join(h, ".config"));
 });
 

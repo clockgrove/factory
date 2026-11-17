@@ -1,6 +1,6 @@
 // Vercel Sandbox behind the cloud-sandbox contract (sandbox.mjs, docs/ADAPTERS.md), on the @vercel/sandbox SDK pinned
 // in plugin/package.json. A sandbox id is the Vercel sandbox's name (unique in the project). The SDK is loaded on
-// open only, so Factory's other scripts run without an install. Credentials: VERCEL_TOKEN, VERCEL_TEAM_ID and
+// open only, so Pendulum's other scripts run without an install. Credentials: VERCEL_TOKEN, VERCEL_TEAM_ID and
 // VERCEL_PROJECT_ID, passed to every call; nothing is read from a CLI login on the machine.
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -93,7 +93,7 @@ const KEPT = ["PATH", "LANG", "TERM"];
 /** `argv` as `user` in `cwd` (the user's home when absent): the sudo command line, which holds no env value. */
 export function userCommand({ user, home, cwd, env = {}, argv }) {
   const keep = [...new Set([...KEPT, ...Object.keys(env)])].join(" ");
-  return { cmd: "sudo", args: ["-n", "-u", user, "--", "/bin/bash", "-c", AS_USER, "factory-as-user", keep, home, user, cwd ?? home, ...argv] };
+  return { cmd: "sudo", args: ["-n", "-u", user, "--", "/bin/bash", "-c", AS_USER, "pendulum-as-user", keep, home, user, cwd ?? home, ...argv] };
 }
 
 const STOP_SETTLE_MS = 120_000;
@@ -148,7 +148,7 @@ export async function open(env = process.env) {
     async create(spec) {
       const s = checkCreateSpec(spec);
       if (s.vcpus !== 1 && (s.vcpus % 2 !== 0 || s.vcpus > 32)) throw new SandboxError("invalid", "vercel: vcpus must be 1 or an even number up to 32 (the plan may cap it lower)", { vendor: VENDOR });
-      const name = s.name ?? `factory-${randomBytes(6).toString("hex")}`;
+      const name = s.name ?? `pendulum-${randomBytes(6).toString("hex")}`;
       const networkPolicy = s.network === "all" ? "allow-all" : s.network === "none" ? "deny-all" : { allow: s.network.allow };
       const sandbox = await call(() =>
         Sandbox.create({

@@ -16,7 +16,7 @@ writeFileSync(
   join(root, "scripts", "worker.mjs"),
   'import { appendFileSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, "ran\\n");\nif (process.env.FAKE_LIMIT) {\n  const { accountHolds } = await import(process.env.FAKE_HOLDS);\n  accountHolds({ dir: process.env.FAKE_HOLDS_DIR }).limit(JSON.parse(process.env.FAKE_LIMIT));\n  const { existsSync } = await import("node:fs");\n  while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\n}\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), process.env.FAKE_RESULT);\n',
 );
-process.env.FACTORY_PLUGIN_ROOT = root;
+process.env.PENDULUM_PLUGIN_ROOT = root;
 const { HOLD_FORGET_MS, HOLD_MAX_MS, LIMIT_BACKOFF_MS, accountHolds, holdsDir } = await import("../scripts/lib/holds.mjs");
 const { Local } = await import("../scripts/local.mjs");
 const { accountsFile } = await import("../scripts/lib/accounts.mjs");
@@ -29,8 +29,8 @@ const within = (p, d) => p === d || p.startsWith(`${d}/`);
 /** A stand-in home with two Claude Code accounts declared, alpha (the default) and beta, or none. Every file is a dummy. */
 function fakeHome({ declared = true } = {}) {
   const h = realpathSync(mkdtempSync(join(tmpdir(), "holds-")));
-  for (const d of [".claude", ".codex", ".config/factory", "work/claude-a", "work/claude-b"]) mkdirSync(join(h, d), { recursive: true, mode: 0o700 });
-  chmodSync(join(h, ".config", "factory"), 0o700);
+  for (const d of [".claude", ".codex", ".config/pendulum", "work/claude-a", "work/claude-b"]) mkdirSync(join(h, d), { recursive: true, mode: 0o700 });
+  chmodSync(join(h, ".config", "pendulum"), 0o700);
   if (declared) writeFileSync(accountsFile(h), JSON.stringify({ claude: [{ name: "alpha", home: join(h, "work", "claude-a") }, { name: "beta", home: join(h, "work", "claude-b") }] }), { mode: 0o600 });
   return h;
 }
@@ -68,7 +68,7 @@ function serveOn(h, clock) {
   writeFileSync(ran, "");
   loop.harnessFor = async () => ({ ok: true, harness: "claude", account: loop.accountFor("claude") });
   loop.result = {};
-  loop.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], FAKE_RAN: ran, FAKE_RESULT: JSON.stringify(loop.result), ...(loop.during ? { FAKE_LIMIT: JSON.stringify(loop.during), FAKE_HOLDS: HOLDS, FAKE_HOLDS_DIR: holdsDir(h), FAKE_GO: join(dev, "go") } : {}) });
+  loop.stageEnv = (issue, usageDir, c, stageTmp) => ({ PATH: `${bin}:${process.env.PATH}`, PENDULUM_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], FAKE_RAN: ran, FAKE_RESULT: JSON.stringify(loop.result), ...(loop.during ? { FAKE_LIMIT: JSON.stringify(loop.during), FAKE_HOLDS: HOLDS, FAKE_HOLDS_DIR: holdsDir(h), FAKE_GO: join(dev, "go") } : {}) });
   loop.go = () => writeFileSync(join(dev, "go"), "");
   loop.ran = () => readFileSync(ran, "utf8").split("\n").filter(Boolean).length;
   return loop;
@@ -91,8 +91,8 @@ test("#264: a usage limit holds only the account that met it, for every serve on
     assert.equal(a.limitUntil({ key: "beta", shared: true }), null, "beta is not held");
     // Another repository's serve, and a serve started afresh: the machine's holds, read from disk.
     for (const b of [serveOn(h, () => t), serveOn(h, () => t)]) {
-      assert.match(b.limitHold(["factory:objective"]), /^claude account alpha's usage limit is spent until /);
-      assert.equal(b.limitHold(["factory:objective", "factory:harness:codex"]), null, "another harness's account starts");
+      assert.match(b.limitHold(["pendulum:objective"]), /^claude account alpha's usage limit is spent until /);
+      assert.equal(b.limitHold(["pendulum:objective", "pendulum:harness:codex"]), null, "another harness's account starts");
       const held = await b.stage(8, "work", "worker.mjs", []);
       assert.deepEqual([held.exit, held.account, held.usageLimit.held, Date.parse(held.usageLimit.reset)], ["paused", "alpha", true, t + 180 * MIN]);
       assert.equal(b.ran(), 0, "nothing started on alpha: no call spent to find the limit again");
@@ -102,12 +102,12 @@ test("#264: a usage limit holds only the account that met it, for every serve on
     // Past the reset, alpha starts again.
     t += 180 * MIN;
     const c = serveOn(h, () => t);
-    assert.equal(c.limitHold(["factory:objective"]), null);
+    assert.equal(c.limitHold(["pendulum:objective"]), null);
     c.result = { exit: "delivered", tokens: { output: 10 }, servedPasses: 1 };
     assert.equal((await c.stage(8, "work", "worker.mjs", [])).exit, "delivered");
     assert.equal(c.ran(), 1);
   });
-  // The record: no secret, no path; and under Factory's cache folder, never ~/.config/factory.
+  // The record: no secret, no path; and under Pendulum's cache folder, never ~/.config/pendulum.
   // A served stage that reported no quota reading leaves that fact too (#391): its account's quota file, no secret or path.
   const all = readdirSync(holdsDir(h));
   const files = all.filter((f) => f !== "alpha.quota.json");
@@ -115,7 +115,7 @@ test("#264: a usage limit holds only the account that met it, for every serve on
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(holdsDir(h), "alpha.quota.json"), "utf8"))).sort(), ["account", "at", "harness", "silentAt", "windows"]);
   for (const f of files) assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(holdsDir(h), f), "utf8"))).sort(), ["account", "at", "harness", "streak", "until"]);
   assert.equal(lstatSync(holdsDir(h)).mode & 0o077, 0);
-  assert.ok(!within(holdsDir(h), join(h, ".config", "factory")));
+  assert.ok(!within(holdsDir(h), join(h, ".config", "pendulum")));
 });
 
 test("#264: an account held by another account's limit still starts: a hold on beta holds no stage on alpha", async () => {
@@ -124,7 +124,7 @@ test("#264: an account held by another account's limit still starts: a hold on b
   await withHome(h, async () => {
     accountHolds({ dir: holdsDir(h) }).limit({ harness: "claude", account: "beta", reset: t + 60 * MIN, now: t });
     const a = serveOn(h, () => t);
-    assert.equal(a.limitHold(["factory:objective"]), null);
+    assert.equal(a.limitHold(["pendulum:objective"]), null);
     a.result = { exit: "delivered", tokens: { output: 10 } };
     assert.equal((await a.stage(8, "work", "worker.mjs", [])).exit, "delivered");
     assert.equal(a.ran(), 1);
@@ -179,7 +179,7 @@ test("#264: the back-off streak is the account's, shared by every serve; it ends
 });
 
 test("#264: several serves writing holds at the same time lose none", async () => {
-  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), ".cache", "factory", "holds");
+  const dir = join(realpathSync(mkdtempSync(join(tmpdir(), "holds-"))), ".cache", "pendulum", "holds");
   const t = Date.now();
   const go = t + 400;
   // Twelve processes, each its own serve, write at the same instant: eight accounts, some met by two serves at once.
@@ -208,7 +208,7 @@ test("#264: no sandbox may write the holds; a record a sandbox or another user c
   const t = Date.now();
   accountHolds({ dir }).limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
   for (const harness of ["claude", "codex", "copilot"]) {
-    const fs = harnessOuterSettings({ harness, writable: [join(h, "work", "repo"), join(h, ".cache", "factory", "s", "8-abcdef")], home: h, env: {} }).filesystem;
+    const fs = harnessOuterSettings({ harness, writable: [join(h, "work", "repo"), join(h, ".cache", "pendulum", "s", "8-abcdef")], home: h, env: {} }).filesystem;
     assert.ok(fs.denyWrite.includes(dir), `${harness}: the holds are read-only in its outer sandbox`);
     assert.ok(!fs.allowWrite.some((p) => within(dir, p) || within(p, dir)), `${harness}: no writable path is in or around the holds`);
   }
@@ -242,14 +242,14 @@ test("#264: with no accounts declared, a hold is the login's: two serves on two 
     // Another serve on another login: nothing held, its stage runs.
     on("claude-b");
     const b = serveOn(h, () => t);
-    assert.equal(b.limitHold(["factory:objective"]), null);
+    assert.equal(b.limitHold(["pendulum:objective"]), null);
     b.result = { exit: "delivered", tokens: { output: 10 } };
     assert.equal((await b.stage(8, "work", "worker.mjs", [])).exit, "delivered");
     assert.equal(b.ran(), 1);
     // Another serve (or a restarted one) on the first login: held, nothing starts.
     on("claude-a");
     const c = serveOn(h, () => t);
-    assert.match(c.limitHold(["factory:objective"]), /^claude's usage limit is spent until /);
+    assert.match(c.limitHold(["pendulum:objective"]), /^claude's usage limit is spent until /);
     assert.equal((await c.stage(8, "work", "worker.mjs", [])).exit, "paused");
     assert.equal(c.ran(), 0);
   });
@@ -310,10 +310,10 @@ test("#264: a Copilot token from serve's environment names no login: its hold st
     assert.deepEqual(hold, { key: "copilot@env", shared: false });
     await a.limitPaused(8, { exit: "paused", stage: "work", account: "copilot", hold, usageLimit: { harness: "copilot", reset: new Date(t + 60 * MIN).toISOString(), since: new Date(t).toISOString() } });
     assert.equal(a.limitUntil(hold), t + 60 * MIN);
-    assert.match(a.limitHold(["factory:objective", "factory:harness:copilot"]), /^copilot's usage limit is spent until /);
+    assert.match(a.limitHold(["pendulum:objective", "pendulum:harness:copilot"]), /^copilot's usage limit is spent until /);
     assert.equal(serveOn(h, () => t).limitUntil(hold), null, "another serve does not see it");
     assert.deepEqual(readdirSync(holdsDir(h)), []);
-    // A token file in ~/.config/factory is a login: shared, keyed by its path, never its value.
+    // A token file in ~/.config/pendulum is a login: shared, keyed by its path, never its value.
     delete process.env.COPILOT_GITHUB_TOKEN;
     assert.equal(a.holdOf({ name: "copilot", harness: "copilot", declared: false }).shared, true);
   });

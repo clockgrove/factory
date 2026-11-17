@@ -1,4 +1,4 @@
-// Pure logic shared by the Factory scripts: no I/O, no GitHub, no harness.
+// Pure logic shared by the Pendulum scripts: no I/O, no GitHub, no harness.
 // Everything here is covered by test/ with `node --test`.
 
 import { parseToml } from "./toml.mjs";
@@ -64,8 +64,8 @@ export function setupFilesNote(guard, max = 25, width = 80) {
   const lines = [];
   if (files.length) lines.push(`Setup's files, don't change them or anything under them: ${cut(files, room)}.`);
   if (scripts.length) lines.push(`Setup's package.json scripts, don't change them: ${cut(scripts, Math.max(max - room, Math.min(scripts.length, 5)))}.`);
-  if (lines.length) lines.push("Setup runs them as the runner from the default branch, so Factory refuses a push that changes one.");
-  if (guard.unresolved?.length) lines.push("Setup also runs what Factory cannot name, so Factory refuses every push until a person fixes the setup command.");
+  if (lines.length) lines.push("Setup runs them as the runner from the default branch, so Pendulum refuses a push that changes one.");
+  if (guard.unresolved?.length) lines.push("Setup also runs what Pendulum cannot name, so Pendulum refuses every push until a person fixes the setup command.");
   return lines.join(" ");
 }
 
@@ -83,20 +83,20 @@ export function taskCardValues({ issue, maxUsd, timeoutMinutes, validation, budg
     max_parts: String(maxParts),
     validation: (validation || []).length ? validation.map(commandText).join("; ") : "none",
     validation_note: checks.length
-      ? `Factory's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head Factory pushes, run by CI in parallel; before you stop, run the tests your change touches, not the whole suite.`
-      : "Run the validation commands before you stop; Factory runs them again.",
+      ? `Pendulum's validation pass is the repository's required check${checks.length > 1 ? "s" : ""} (${checks.join(", ")}) on the head Pendulum pushes, run by CI in parallel; before you stop, run the tests your change touches, not the whole suite.`
+      : "Run the validation commands before you stop; Pendulum runs them again.",
     budget_command: budgetCommand && budgetCommand.trim() ? budgetCommand.trim() : "none",
     protected_paths: protectedPaths.join(", "),
     setup_files: setupFilesNote(setupGuard) ? ` ${setupFilesNote(setupGuard)}` : "",
-    branch: `factory/${issue}`,
+    branch: `pendulum/${issue}`,
   };
 }
 
 /** Where GitHub reads workflows from: a token without the Workflows permission may not create or update a file here. */
 export const WORKFLOWS_DIR = ".github/workflows/";
 
-/** The protected list: Factory's fixed entries plus the repository's additions, deduped. */
-export const FACTORY_PROTECTED = [
+/** The protected list: Pendulum's fixed entries plus the repository's additions, deduped. */
+export const PENDULUM_PROTECTED = [
   ".github/",
   "CODEOWNERS",
   ".agents/skills/",
@@ -105,7 +105,7 @@ export const FACTORY_PROTECTED = [
 ];
 
 export function protectedPaths(additions = []) {
-  const all = [...FACTORY_PROTECTED, ...additions.map((p) => p.trim()).filter(Boolean)];
+  const all = [...PENDULUM_PROTECTED, ...additions.map((p) => p.trim()).filter(Boolean)];
   return [...new Set(all)];
 }
 
@@ -144,11 +144,11 @@ export function protectedCovers(rule, path) {
 
 /**
  * The Blocked reason for commits on protected paths. When every one is a workflow file, the fix is the hand-over
- * (handover.mjs): the change goes in $FACTORY_OUT/workflow.patch, never in a commit.
+ * (handover.mjs): the change goes in $PENDULUM_OUT/workflow.patch, never in a commit.
  */
 export function protectedReason(hits) {
   const why = `touched protected path ${hits.join(", ")}`;
-  return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Factory never pushes a workflow file: the worker hands the change over in $FACTORY_OUT/workflow.patch (factory-deliver-pr), so re-apply the label to rerun` : why;
+  return hits.every((h) => h.startsWith(WORKFLOWS_DIR)) ? `${why}; Pendulum never pushes a workflow file: the worker hands the change over in $PENDULUM_OUT/workflow.patch (pendulum-deliver-pr), so re-apply the label to rerun` : why;
 }
 
 /**
@@ -157,8 +157,8 @@ export function protectedReason(hits) {
  */
 export const setupGuardReason = (hits, unresolved = []) =>
   unresolved.length
-    ? `the setup command runs ${unresolved.slice(0, 3).join("; ")}${unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : ""}, which Factory cannot resolve to repository files, so it cannot tell whether this push changes what runs as the runner beside the App's key; name each file literally in the command, or move the command into a script file`
-    : `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Factory never pushes one; a person changes it on the default branch`;
+    ? `the setup command runs ${unresolved.slice(0, 3).join("; ")}${unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : ""}, which Pendulum cannot resolve to repository files, so it cannot tell whether this push changes what runs as the runner beside the App's key; name each file literally in the command, or move the command into a script file`
+    : `changed ${hits.slice(0, 5).join(", ")}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}, which the setup command runs as the runner beside the App's key: a worker's change to it would run there once merged, so Pendulum never pushes one; a person changes it on the default branch`;
 
 /** Changed files that fall under a protected path (protectedCovers). */
 export function protectedTouched(files, protectedList) {
@@ -304,7 +304,7 @@ export async function guardLinks(paths, io) {
       const target = await io.link?.(at);
       if (typeof target !== "string") continue;
       if ((hops += 1) > 40) {
-        unresolved.push(`${p} (a chain of links Factory cannot follow)`);
+        unresolved.push(`${p} (a chain of links Pendulum cannot follow)`);
         break;
       }
       const real = posixJoin(dirOf(at), target);
@@ -644,7 +644,7 @@ export const settingsFile = (path) => fileName(String(path)) === SETTINGS_FILE;
  * workspaceDeclarations) is in scope when one of its member manifests is changed before or by this pass. A lockfile
  * changed without its manifest or a member manifest in scope is refused. `extra` (the files the repository's `setup`
  * and `install` commands name, setupPaths) counts as toolchain too, and with `unknown` (what those commands may run that
- * Factory cannot name, commandRefs `unresolved`) every file does: any one may be what they run. A pnpm-workspace.yaml in
+ * Pendulum cannot name, commandRefs `unresolved`) every file does: any one may be what they run. A pnpm-workspace.yaml in
  * `membership` (its change touches only the `packages` list, membershipOnly) is not. `paths`: the repository's
  * `toolchain_paths` setting (toolchainFile). Everything else a fix pass may change as before.
  */
@@ -669,7 +669,7 @@ export function fixScopeRefused(changed, { prior = [], texts = [], extra = [], n
  * script entry, `<path> scripts.<name>`), so that a confident "part of the fix" lets it go. Only a lockfile: never a
  * version pin (any program setup, install or a check runs may read one), a script entry, a protected path, what either
  * command names or runs (`extra`, each with what is under and above it: guardCovers), what the setup guard covers
- * (`guarded`, setupGuard `files`), nor anything while either command may run a file Factory cannot name (`unknown`).
+ * (`guarded`, setupGuard `files`), nor anything while either command may run a file Pendulum cannot name (`unknown`).
  * A lockfile setup's install reads is no exception: its manifest beside it in scope already lets it go
  * (fixScopeRefused). Everything else stays refused as the fence found it.
  */
@@ -682,24 +682,24 @@ export function fenceDecidable(entry, { extra = [], unknown = [], protectedList 
 
 /**
  * The Blocked reason (and the push refusal) for toolchain files a fix pass changed outside its scope. `unknown`: what
- * the setup or install command may run that Factory cannot name (fixScopeRefused), said once, with its fix. `judged`:
+ * the setup or install command may run that Pendulum cannot name (fixScopeRefused), said once, with its fix. `judged`:
  * what the fence check said of the files it was asked about (`<path>: <why>`, outbox.mjs box.fenceVerdict).
  */
 export const fixScopeReason = (files, unknown = [], judged = []) =>
-  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names${judged.length ? `; the fence check: ${judged.slice(0, 3).join("; ")}${judged.length > 3 ? `; and ${judged.length - 3} more` : ""}` : ""}; to allow it, name the file in the issue or a maintainer comment and re-apply factory:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Factory cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
+  `a fix pass changed ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""} (toolchain, lockfile or CI configuration), which neither the plan nor the failing check names${judged.length ? `; the fence check: ${judged.slice(0, 3).join("; ")}${judged.length > 3 ? `; and ${judged.length - 3} more` : ""}` : ""}; to allow it, name the file in the issue or a maintainer comment and re-apply pendulum:objective${unknown.length ? `. The setup or install command runs ${unknown.slice(0, 3).join(", ")}${unknown.length > 3 ? ` and ${unknown.length - 3} more` : ""}, which Pendulum cannot resolve to repository files, so every file counts as one it may run; name each file literally in the command, or move the command into a script file` : ""}`;
 
 /**
  * The Blocked reason for a push GitHub refused because it would create or update a workflow file, which a token
- * without the Workflows permission (the local token, the Factory App) may not do. `paths`: the workflow files the branch
+ * without the Workflows permission (the local token, the Pendulum App) may not do. `paths`: the workflow files the branch
  * has unlike the default branch; `own`: those the branch itself changed. Fixed text: GitHub's own message goes to the
  * job log only.
  */
 export const workflowScopeReason = ({ branch, defaultBranch, paths = [], own = [] }) => {
   const list = (p) => `${p.slice(0, 3).join(", ")}${p.length > 3 ? ` and ${p.length - 3} more` : ""}`;
-  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Factory's token may not create or update workflow files; the worker hands a workflow change over in $FACTORY_OUT/workflow.patch instead (factory-deliver-pr), so re-apply the label to rerun`;
-  if (paths.length) return `push rejected (workflow scope): GitHub refused ${branch} because its ${list(paths)} is not the version ${defaultBranch} has, and Factory's token may not create or update workflow files; bring the branch up to date with ${defaultBranch} (re-apply the label to rerun)`;
-  // The branch's workflow files match the default branch as Factory last read it: it moved again before the push.
-  return `push rejected (workflow scope): GitHub refused ${branch} for a workflow file Factory's token may not create or update, though its workflow files matched ${defaultBranch} when Factory read it; ${defaultBranch} likely changed one again during the push (re-apply the label to rerun)`;
+  if (own.length) return `push rejected (workflow scope): GitHub refused ${branch} because it changes ${list(own)}, and Pendulum's token may not create or update workflow files; the worker hands a workflow change over in $PENDULUM_OUT/workflow.patch instead (pendulum-deliver-pr), so re-apply the label to rerun`;
+  if (paths.length) return `push rejected (workflow scope): GitHub refused ${branch} because its ${list(paths)} is not the version ${defaultBranch} has, and Pendulum's token may not create or update workflow files; bring the branch up to date with ${defaultBranch} (re-apply the label to rerun)`;
+  // The branch's workflow files match the default branch as Pendulum last read it: it moved again before the push.
+  return `push rejected (workflow scope): GitHub refused ${branch} for a workflow file Pendulum's token may not create or update, though its workflow files matched ${defaultBranch} when Pendulum read it; ${defaultBranch} likely changed one again during the push (re-apply the label to rerun)`;
 };
 
 /**
@@ -724,12 +724,12 @@ export const pushRefusal = ({ branch, out = [], code = 1 }) => {
   const line = out.find((l) => l.startsWith("!\t")) || "";
   const status = /\[(remote rejected|remote failure|rejected)\]/.exec(line)?.[1] || "";
   const why = status === "rejected" ? GIT_REASONS.find((r) => line.includes(`(${r})`)) || "" : "";
-  const kind = [status, why === "stale info" ? "GitHub's head moved since Factory read it" : why].filter(Boolean).join(", ");
+  const kind = [status, why === "stale info" ? "GitHub's head moved since Pendulum read it" : why].filter(Boolean).join(", ");
   return `push rejected: GitHub refused refs/heads/${branch} (${kind ? `${kind}, ` : ""}exit ${code}); its message is in the job log`;
 };
 
 /** The PR label the App applies after validation is green; `pull_request(labeled)` on it fires the review job. */
-export const REVIEW_LABEL = "factory:review";
+export const REVIEW_LABEL = "pendulum:review";
 
 // ----------------------------------------------------------------- dispatch
 
@@ -760,20 +760,20 @@ export function parseBlockedBy(body) {
 /** The statuses that keep an issue out of the ready list, as the card shows them or the label says. */
 export const NOT_READY_STATUSES = new Set(["Running", "Blocked", "Question", "In review", "Done"]);
 export const STATE_LABELS = {
-  "factory:running": "Running",
-  "factory:blocked": "Blocked",
-  "factory:question": "Question",
-  "factory:in-review": "In review",
+  "pendulum:running": "Running",
+  "pendulum:blocked": "Blocked",
+  "pendulum:question": "Question",
+  "pendulum:in-review": "In review",
 };
 
 /**
  * The issue's state from its Project card, else from its fallback label, else Queued. The board has no Question
- * column: a Question's card sits in In review (applyExit), and its `factory:question` label says which it is, so a
+ * column: a Question's card sits in In review (applyExit), and its `pendulum:question` label says which it is, so a
  * card In review with that label is a Question, as the label alone says without a board.
  */
 export function stateOf(issue, cardStatus) {
   const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
-  if (cardStatus === "In review" && names.includes("factory:question")) return "Question";
+  if (cardStatus === "In review" && names.includes("pendulum:question")) return "Question";
   if (cardStatus && cardStatus !== "Queued") return cardStatus;
   for (const n of names) if (STATE_LABELS[n]) return STATE_LABELS[n];
   return cardStatus || "Queued";
@@ -798,9 +798,9 @@ export function doneTidies(closed, { cards = {}, project = false, tends = () => 
 
 /**
  * The record a Done pass acting under a person's login posts (marker `done`) before it removes `labels`: the scorer
- * (bench/lib/objective.mjs) reads its `removed:` line, so those removals count as Factory's, not that person's.
+ * (bench/lib/objective.mjs) reads its `removed:` line, so those removals count as Pendulum's, not that person's.
  */
-export const doneRecord = (labels) => `Factory: this Objective is closed, so its state label is cleared and its card moves to Done.\nremoved: ${labels.join(" ")}`;
+export const doneRecord = (labels) => `Pendulum: this Objective is closed, so its state label is cleared and its card moves to Done.\nremoved: ${labels.join(" ")}`;
 
 /**
  * Choose the issues to start. Pure: the caller supplies what GitHub said.
@@ -894,27 +894,27 @@ export function clip(text, max = REASON_MAX) {
 
 /**
  * Why a stage Blocked, as a code: a closed list, written on each Blocked notice (blockMarker) so the bench scorer decides
- * the External bucket on structure, never on the reason's words. `external`: outside Factory and outside the work, so
- * the 1.0 streak skips an Objective whose only stops were these (docs/PLAN.md, Job one). Anything Factory cannot place
- * is `factory`, never external.
+ * the External bucket on structure, never on the reason's words. `external`: outside Pendulum and outside the work, so
+ * the 1.0 streak skips an Objective whose only stops were these (docs/PLAN.md, Job one). Anything Pendulum cannot place
+ * is `pendulum`, never external.
  */
 export const BLOCK_CAUSES = Object.freeze({
-  "max-usd": Object.freeze({ external: true, what: "Factory's max_usd cap reached" }),
+  "max-usd": Object.freeze({ external: true, what: "Pendulum's max_usd cap reached" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
   "provider-quota": Object.freeze({ external: true, what: "a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit included), GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan" }),
-  outage: Object.freeze({ external: true, what: "a provider or GitHub outage Factory waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
+  outage: Object.freeze({ external: true, what: "a provider or GitHub outage Pendulum waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
   setup: Object.freeze({ external: false, what: "a setup gap: a credential or payment method, a secret, a host, an install, any other Git LFS refusal, the repository's settings or rules, the author's access" }),
   work: Object.freeze({ external: false, what: "the work: the worker's own Block, validation red, review findings, a protected path, the Objective's size, an edit to the Objective after its plan" }),
-  factory: Object.freeze({ external: false, what: "Factory itself: a crash, a lost or stuck stage, an exit it could not apply, or a cause it did not place" }),
+  pendulum: Object.freeze({ external: false, what: "Pendulum itself: a crash, a lost or stuck stage, an exit it could not apply, or a cause it did not place" }),
 });
 
-/** The Blocked notice's cause line; a code outside BLOCK_CAUSES is written as `factory`. */
-export const blockMarker = (cause) => `<!-- factory:block ${JSON.stringify({ cause: Object.hasOwn(BLOCK_CAUSES, cause) ? cause : "factory" })} -->`;
+/** The Blocked notice's cause line; a code outside BLOCK_CAUSES is written as `pendulum`. */
+export const blockMarker = (cause) => `<!-- pendulum:block ${JSON.stringify({ cause: Object.hasOwn(BLOCK_CAUSES, cause) ? cause : "pendulum" })} -->`;
 
-const BLOCK_LINE = /^<!-- factory:block (\{[^\n]*\}) -->$/gm;
+const BLOCK_LINE = /^<!-- pendulum:block (\{[^\n]*\}) -->$/gm;
 /**
  * The cause a Blocked notice records (blockMarker), or null: none written (an older notice) or not on the list. The
- * notice's last cause line is Factory's (applyExit writes it after the sanitised reason and output).
+ * notice's last cause line is Pendulum's (applyExit writes it after the sanitised reason and output).
  */
 export function blockCauseOf(body) {
   const m = [...String(body || "").matchAll(BLOCK_LINE)].at(-1);
@@ -928,20 +928,20 @@ export function blockCauseOf(body) {
 }
 
 /**
- * The model each Factory agent file is pinned to (checkout.mjs agentModel): the stage's `subagent` or `reviewer` model,
+ * The model each Pendulum agent file is pinned to (checkout.mjs agentModel): the stage's `subagent` or `reviewer` model,
  * with the label and the variable that choose it (choice.mjs CHOICE_PREFIXES, docs/USAGE.md).
  */
 export const AGENT_MODELS = Object.freeze({
-  implementer: Object.freeze({ model: "subagent", what: "sub-agent", label: "factory:subagent-model:", variable: "FACTORY_SUBAGENT_MODEL" }),
-  reviewer: Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
-  "foundation-reviewer": Object.freeze({ model: "reviewer", what: "reviewer", label: "factory:reviewer-model:", variable: "FACTORY_REVIEWER_MODEL" }),
+  implementer: Object.freeze({ model: "subagent", what: "sub-agent", label: "pendulum:subagent-model:", variable: "PENDULUM_SUBAGENT_MODEL" }),
+  reviewer: Object.freeze({ model: "reviewer", what: "reviewer", label: "pendulum:reviewer-model:", variable: "PENDULUM_REVIEWER_MODEL" }),
+  "foundation-reviewer": Object.freeze({ model: "reviewer", what: "reviewer", label: "pendulum:reviewer-model:", variable: "PENDULUM_REVIEWER_MODEL" }),
 });
 
 /** refusalReason for a sub-agent's model refused (usage.mjs subAgentRefusal): the agent, and what chose its model. */
 function subAgentRefusalReason(r, fields) {
   const pin = Object.hasOwn(AGENT_MODELS, r.subAgent) ? AGENT_MODELS[r.subAgent] : null;
   const who = r.subAgent ? `its \`${r.subAgent}\` sub-agent` : "a sub-agent";
-  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then re-apply \`factory:objective\`` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
+  const fix = pin ? `the ${pin.what} model, which a \`${pin.label}<id>\` label on the issue (else ${pin.variable}) chooses: name a model this login serves, then re-apply \`pendulum:objective\`` : "the agent's own model: name one this login serves in the agent's file, or fix the credential's account";
   return `${r.harness} was refused by its provider for ${who}${fields ? ` (${fields})` : ""}${r.message ? `: ${clip(r.message)}` : ""}; the run was stopped, since the main session would go on without that work. The fix is ${fix}`;
 }
 
@@ -996,8 +996,8 @@ const allowedBy = (host, domains) => domains.some((d) => d === host || (typeof d
 
 /**
  * The fix line of a Block whose worker named the hosts its sandbox denied. For this Objective alone: a person who can
- * push applies a `factory:host:<host>` label for each (choice.mjs HOST_PREFIX; a host too long for GitHub's 50-character
- * label limit is left to the setting), then re-applies the label. For every Objective: FACTORY_LOCAL_DOMAINS (local
+ * push applies a `pendulum:host:<host>` label for each (choice.mjs HOST_PREFIX; a host too long for GitHub's 50-character
+ * label limit is left to the setting), then re-applies the label. For every Objective: PENDULUM_LOCAL_DOMAINS (local
  * mode) or the `allowed_domains` input (`route` "runner": Actions or a cloud sandbox). Hosts the sandboxes already allow
  * (`domains`) are left out, since allowing them again fixes nothing; null when none is left, so the Block keeps the
  * generic fix.
@@ -1007,13 +1007,13 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
   if (!left.length) return null;
   const them = left.length === 1 ? "it" : "them";
   const tick = (h) => `\`${h}\``;
-  const labels = left.map((h) => `factory:host:${h}`).filter((l) => l.length <= 50);
+  const labels = left.map((h) => `pendulum:host:${h}`).filter((l) => l.length <= 50);
   const short = labels.length < left.length ? " (the rest are too long for a label)" : "";
-  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then re-applies \`factory:objective\`. To open ${them} to every Objective, ` : "";
+  const alone = labels.length ? `a person who can push applies ${labels.map(tick).join(", ")} to this issue${short}, which opens ${labels.length === 1 ? "it" : "them"} to this Objective alone, then re-applies \`pendulum:objective\`. To open ${them} to every Objective, ` : "";
   // On Actions and in a cloud sandbox, each harness's sandbox: the workflow's `allowed_domains` input (harness.mjs
   // claudeRunner, codexRunner, copilotRunner).
-  const setting = route === "runner" ? "the Factory workflow's `allowed_domains` input (or `FACTORY_ALLOWED_DOMAINS` in its env block)" : "`FACTORY_LOCAL_DOMAINS` (a running `serve` reads it when it restarts)";
-  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then re-apply \`factory:objective\`.`;
+  const setting = route === "runner" ? "the Pendulum workflow's `allowed_domains` input (or `PENDULUM_ALLOWED_DOMAINS` in its env block)" : "`PENDULUM_LOCAL_DOMAINS` (a running `serve` reads it when it restarts)";
+  return `${route === "runner" ? "The harness's sandbox" : "The local sandbox"} denied ${left.map(tick).join(", ")}. If the Objective needs ${them}, ${alone}add ${them} to ${setting}, then re-apply \`pendulum:objective\`.`;
 }
 
 /**
@@ -1027,16 +1027,16 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              committed nothing on a red head: session.mjs unchangedBlock), freshPass?: string (the head a fresh worker
  *              pass was given after a fix pass changed nothing on it, when the red after it is the last), stalled?: string
  *              (why the fix pass before the last red made no progress, or could not be judged, naming that red: session.mjs
- *              validationLoop), stalledCause?: its Block's cause (`work`; `factory` or `outage` when the judgement was not made)}
+ *              validationLoop), stalledCause?: its Block's cause (`work`; `pendulum` or `outage` when the judgement was not made)}
  *  protectedHits: string[]
  *  record:     the harness's exit record {exit, reason, questions, deniedHosts?, missingSecrets?} (parseExitRecord), or null
- *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Factory filled it in because
+ *  recordBasis: where the record came from (session.mjs exitRecord `basis`); "none" when Pendulum filled it in because
  *              the harness left none and the ask could not run or got none, so it is not the worker's own reason
  *  question:   boolean, when the caller has already decided whether a question is open
  *              (the review job: the PR's draft state after the answer pass, so a human's
  *              "mark ready" answers it)
  *  reviewUnaddressed: number (review pass: findings still open, session.mjs unaddressedReviewComments)
- *  pushRejected: why Factory's push was refused or rejected (outbox.mjs); any such push Blocks
+ *  pushRejected: why Pendulum's push was refused or rejected (outbox.mjs); any such push Blocks
  *  pushCause:  that Block's cause when not the work's (outbox.mjs errorCause: the fence check could not judge a file)
  *  unresolved: string, why what a send-back's conflict pass left is not the branch rebased onto its base (worker.mjs,
  *              outbox.mjs rebaseLeft): Blocked with it after the hard stops, as the work's
@@ -1047,7 +1047,7 @@ export function deniedHostsFix(hosts, domains = [], route = "local") {
  *              Question, asked whether or not the run committed, before any other check but the hard stops
  *  sessionCap: string, sessionCapNote: the sandbox vendor's session cut this stage's wall clock; a time cap names it
  *  handoverRefused: string, why the worker's workflow hand-over could not go out (handover.mjs handoverRefusedReason)
- *  handoverOnly: boolean, the run left a workflow hand-over Factory accepted and nothing to push; it Blocks as the
+ *  handoverOnly: boolean, the run left a workflow hand-over Pendulum accepted and nothing to push; it Blocks as the
  *              hand-over (`handoverOnly: true` on the result) only when the harness ended ok and the record is delivered
  * Nothing here reads prose: the record is JSON the harness wrote (or answered with), the
  * rest are GitHub fields, exit codes and counts.
@@ -1061,14 +1061,14 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   // GitHub's Git LFS quota or storage (the outbox's `lfs-quota` refusal) is a plan limit a person raises; any other LFS refusal is setup.
   if (lfsRefused) return { exit: "blocked", reason: pushRejected || "Git LFS refused the upload (quota or storage)", cause: lfsQuota ? "provider-quota" : "setup" };
   if (lfsPlain.length) return { exit: "blocked", reason: `committed as plain git blobs though .gitattributes routes them to Git LFS: ${lfsPlain.slice(0, 5).join(", ")}`, cause: "work" };
-  // Factory refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
+  // Pendulum refused or GitHub rejected a push (outbox.mjs): what GitHub holds is not what was checked. Always Blocked.
   if (pushRejected) return { exit: "blocked", reason: /^push rejected/.test(pushRejected) ? pushRejected : `push refused: ${pushRejected}`, cause: Object.hasOwn(BLOCK_CAUSES, pushCause ?? "") ? pushCause : "work" };
   // A provider's refusal (usage.mjs providerRefusal) is never retried: it Blocks at once, naming the refusal.
   if (harness?.refusal) return { exit: "blocked", reason: refusalReason(harness.refusal), cause: refusalCause(harness.refusal) };
-  if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "factory" };
+  if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "pendulum" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
-  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "factory" : "max-usd" };
+  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "pendulum" : "max-usd" };
   if (unresolved) return { exit: "blocked", reason: unresolved, cause: "work" };
   if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
   // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
@@ -1080,19 +1080,19 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // the names, not the missing commits.
     if (record?.exit === "blocked" && (record.deniedHosts?.length || record.missingSecrets?.length)) return workerBlocked(record);
     // Nothing to push but a workflow hand-over, from a harness that ended well and a worker that says it delivered: no
-    // PR can hold it, so it waits on the issue for a person (the owner's trust stance: Factory's token has no Workflows
+    // PR can hold it, so it waits on the issue for a person (the owner's trust stance: Pendulum's token has no Workflows
     // permission), a setting and not the work. A worker's own Block or Question, and a failed harness, keep their exits.
-    if (commits === 0 && handoverOnly && harness?.ok && record?.exit === "delivered") return { exit: "blocked", reason: "the whole change is a workflow hand-over, which Factory never pushes: a person applies it with `factory handover`, as Factory's hand-over comment on this issue says", cause: "setup", handoverOnly: true };
+    if (commits === 0 && handoverOnly && harness?.ok && record?.exit === "delivered") return { exit: "blocked", reason: "the whole change is a workflow hand-over, which Pendulum never pushes: a person applies it with `pendulum handover`, as Pendulum's hand-over comment on this issue says", cause: "setup", handoverOnly: true };
     if (commits === 0) {
       // A worker that stopped on purpose before any commit: its own Block or Question, with the reason it gave. A record
-      // Factory filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.
+      // Pendulum filled in because the ask could not run or got no record (recordBasis "none") is not the worker's.
       const own = record && recordBasis !== "none";
       if (own && record.exit === "blocked" && record.reason) return workerBlocked(record);
       if (own && record.exit === "question") return openQuestion(record);
       const why = harness?.error ? `worker ended without commits: ${harness.error}` : "worker ended without commits or a PR";
-      return { exit: "blocked", reason: record?.exit === "blocked" && !own && record.reason ? `${why}; ${clip(record.reason)}` : why, cause: "factory" };
+      return { exit: "blocked", reason: record?.exit === "blocked" && !own && record.reason ? `${why}; ${clip(record.reason)}` : why, cause: "pendulum" };
     }
-    return { exit: "blocked", reason: "no PR could be opened for the branch", cause: "factory" };
+    return { exit: "blocked", reason: "no PR could be opened for the branch", cause: "pendulum" };
   }
   if (validation && !validation.green) {
     // Every failing job fails the same way on the default branch (reds.mjs): handed back as the base's, not this change's.
@@ -1100,20 +1100,20 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
     // A required job GitHub never started (triage.mjs notStartedJobs): infrastructure, Blocked quoting GitHub's annotation.
     if (validation.notStarted) return { exit: "blocked", reason: validation.notStarted, cause: "outage" };
     // A wait that ended with no required check failed (triage.mjs checksNotStarted): no red at all, so never "validation red".
-    // Its cause is the wait's own when it has one (a run that ended startup_failure: outage), else Factory's.
-    if (validation.stuck) return { exit: "blocked", reason: validation.stuck, cause: Object.hasOwn(BLOCK_CAUSES, validation.stuckCause ?? "") ? validation.stuckCause : "factory" };
+    // Its cause is the wait's own when it has one (a run that ended startup_failure: outage), else Pendulum's.
+    if (validation.stuck) return { exit: "blocked", reason: validation.stuck, cause: Object.hasOwn(BLOCK_CAUSES, validation.stuckCause ?? "") ? validation.stuckCause : "pendulum" };
     // A fix pass that committed nothing left the same red (session.mjs unchangedBlock): said as such, never a second red.
     if (validation.unchanged) return { exit: "blocked", reason: validation.unchanged.reason, cause: validation.unchanged.cause };
     // A fix pass kept toolchain changes its scope does not reach (fixScopeRefused): nothing of it was pushed.
-    // Its cause is `factory` or `outage` when the fence check gave no answer on every file still refused (scopeCause).
+    // Its cause is `pendulum` or `outage` when the fence check gave no answer on every file still refused (scopeCause).
     if (validation.scope) return { exit: "blocked", reason: validation.scope, cause: Object.hasOwn(BLOCK_CAUSES, validation.scopeCause ?? "") ? validation.scopeCause : "work" };
     // A fresh worker pass ran after a fix pass that changed nothing, and its commit is red too: both attempts named.
     const fresh = validation.freshPass ? `; a fresh worker pass followed the fix pass that changed nothing on ${String(validation.freshPass).slice(0, 7)}` : "";
     const red = validation.stalled
-      ? `validation red on Factory's pass ${validation.passes}${validation.command ? ` (${validation.command})` : ""}: ${validation.stalled}${fresh}`
-      : `validation red after Factory's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
+      ? `validation red on Pendulum's pass ${validation.passes}${validation.command ? ` (${validation.command})` : ""}: ${validation.stalled}${fresh}`
+      : `validation red after Pendulum's ${["first", "second", "third"][Math.min(Math.max(validation.passes, 1), 3) - 1]} pass${validation.command ? ` (${validation.command})` : ""}${fresh}`;
     // The last red's triage read it as a flake and GitHub refused the rerun (triage.mjs refusedRerunText): said, with the remedy.
-    // A progress judgement the decider could not make is Factory's (or its vendor's outage), never the work's.
+    // A progress judgement the decider could not make is Pendulum's (or its vendor's outage), never the work's.
     const cause = validation.stalled && Object.hasOwn(BLOCK_CAUSES, validation.stalledCause ?? "") ? validation.stalledCause : "work";
     return { exit: "blocked", reason: validation.triageRefused ? `${red}; ${validation.triageRefused}` : red, cause };
   }
@@ -1123,7 +1123,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (reviewUnaddressed > 0 && !open) return { exit: "blocked", reason: `${reviewUnaddressed} reviewer finding(s) still open after the answer pass`, cause: "work", findingsOpen: true };
   if (record?.exit === "blocked") return workerBlocked(record);
   if (open) return openQuestion(record);
-  if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error", cause: "factory" };
+  if (harness && !harness.ok) return { exit: "blocked", reason: harness.error || "harness reported an error", cause: "pendulum" };
   return { exit: "delivered", reason: "" };
 }
 
@@ -1133,7 +1133,7 @@ export const EXITS = ["delivered", "question", "blocked"];
 export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records) >= maxUsd;
 
 /**
- * Whether Factory's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
+ * Whether Pendulum's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
  * shut, gateway-relay.mjs): the spend at the cap, the relay's refusal at it (`relayTotals.capped`), or a harness's own cap
  * (Claude Code's error_max_budget_usd, Copilot's start refused under its credit floor).
  */
@@ -1336,8 +1336,8 @@ export function parseExitRecord(text) {
             const text = (q) => (typeof q === "string" ? q : q?.question ?? q?.item ?? JSON.stringify(q));
             const items = (Array.isArray(v.questions) ? v.questions : []).filter((q) => text(q));
             const questions = items.map(text);
-            // A split Objective's part: the items left for the next PR (factory-implement-split). `part.remaining: []` says this
-            // is the last part; no `part` at all says nothing, and the part Factory recorded stands.
+            // A split Objective's part: the items left for the next PR (pendulum-implement-split). `part.remaining: []` says this
+            // is the last part; no `part` at all says nothing, and the part Pendulum recorded stands.
             const part = Array.isArray(v.part?.remaining) ? { remaining: v.part.remaining.map(text).filter(Boolean) } : null;
             // A question exit's questions that name no test of the Question rule (questionFounded); none at all is one.
             const unfounded = v.exit === "question" ? (items.length ? items.filter((q) => !questionFounded(q)).map(text) : [typeof v.reason === "string" && v.reason ? v.reason : "a question exit with no question"]) : [];
@@ -1356,7 +1356,7 @@ export function parseExitRecord(text) {
 }
 
 /**
- * The three tests of factory-objective-plan's Question rule: the choice changes or removes an existing public contract (a use
+ * The three tests of pendulum-objective-plan's Question rule: the choice changes or removes an existing public contract (a use
  * that works on the base commit breaks or behaves differently), contradicts a decision recorded in the issue, or grants
  * new access (a permission, a credential, a newly exposed service). Any other addition that leaves every existing use
  * working, and a reversible choice the issue leaves open, meet none.
@@ -1369,24 +1369,24 @@ export const questionFounded = (q) =>
 
 const QUESTION_SHAPE = '{"question": "the question a human must answer, verbatim", "test": "contract" | "decision" | "access", "existing": "the existing contract it changes or removes, the recorded decision it contradicts, or the access it grants"}';
 
-/** What Factory asks a harness that left no exit record (resumed in its own session where it can). */
+/** What Pendulum asks a harness that left no exit record (resumed in its own session where it can). */
 export const EXIT_PROMPT = `Reply with only one JSON object and nothing else: {"exit": "delivered" | "question" | "blocked", "questions": [${QUESTION_SHAPE}], "reason": "why you are blocked, else empty", "deniedHosts": ["each host the sandbox denied that blocked you"], "missingSecrets": ["each environment variable your shell lacked that blocked you"], "part": {"remaining": ["each checklist item left for the next PR"]}}. "question" means an assumption in your plan still needs a human decision; "blocked" means you stopped short of the acceptance; otherwise "delivered". Leave out "deniedHosts" unless the sandbox denying a host is why you are blocked, "missingSecrets" unless a secret or API key missing from your shell is, and "part" unless you split the Objective and items remain for a later PR.`;
 
 /** The questions of a question exit that already name a test of the Question rule: they stand whatever the check says. */
 export const standingQuestions = (record) => (record?.questions || []).filter((q) => !(record.unfounded || []).includes(q));
 
 /**
- * What Factory asks a harness whose question exit names no test for some questions (parseExitRecord `unfounded`),
+ * What Pendulum asks a harness whose question exit names no test for some questions (parseExitRecord `unfounded`),
  * once, resumed in its own session where it can: keep each that meets a test, record the rest as assumptions. The
  * record's questions that already name a test (standingQuestions) are listed as staying. With `file`, the session
- * that runs `factory deliver` itself writes the new record to exit.json and runs deliver again.
+ * that runs `pendulum deliver` itself writes the new record to exit.json and runs deliver again.
  */
 export function questionCheckPrompt(record, { file = false } = {}) {
   const line = (q, i) => `${i + 1}. ${String(q).replace(/\s+/g, " ").slice(0, 500)}`;
   const list = (record.unfounded || []).map(line).join("\n");
   const standing = standingQuestions(record);
   const stays = standing.length ? `\n\nThese questions already name a test and stay in the record as raised; keep their QUESTION: markers and include each unchanged in "questions":\n${standing.map(line).join("\n")}` : "";
-  return `Your exit record raises a Question without naming which test of the Question rule it meets:\n${list}${stays}\n\nA Question stands only when the choice changes or removes an existing public contract, so that a use that works on the base commit breaks or behaves differently ("contract"), contradicts a decision recorded in the issue ("decision"), or grants new access: a permission, a credential, a service reachable from outside that was not ("access"). Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, and so is a reversible choice the issue leaves open. For each question in the first list: if it meets a test, keep it and name the existing contract, the decision or the access; otherwise drop its QUESTION: marker in $FACTORY_OUT/pr.md and $FACTORY_OUT/plan.md, so it reads as a recorded assumption. Change no code${file ? "" : " and run nothing else"}. Then ${file ? "write $FACTORY_OUT/exit.json as" : "reply with"} only one JSON object and nothing else: {"exit": "delivered" | "question", "questions": [${QUESTION_SHAPE}], "reason": ""}, "delivered" only when no question is left${standing.length ? ' (the questions that stay make it "question")' : ""}.`;
+  return `Your exit record raises a Question without naming which test of the Question rule it meets:\n${list}${stays}\n\nA Question stands only when the choice changes or removes an existing public contract, so that a use that works on the base commit breaks or behaves differently ("contract"), contradicts a decision recorded in the issue ("decision"), or grants new access: a permission, a credential, a service reachable from outside that was not ("access"). Any other addition that leaves every existing use working (a new command, endpoint, export, file or optional field) is an assumption, and so is a reversible choice the issue leaves open. For each question in the first list: if it meets a test, keep it and name the existing contract, the decision or the access; otherwise drop its QUESTION: marker in $PENDULUM_OUT/pr.md and $PENDULUM_OUT/plan.md, so it reads as a recorded assumption. Change no code${file ? "" : " and run nothing else"}. Then ${file ? "write $PENDULUM_OUT/exit.json as" : "reply with"} only one JSON object and nothing else: {"exit": "delivered" | "question", "questions": [${QUESTION_SHAPE}], "reason": ""}, "delivered" only when no question is left${standing.length ? ' (the questions that stay make it "question")' : ""}.`;
 }
 
 /**
@@ -1405,8 +1405,8 @@ export function mergeChecked(record, again) {
   return { exit, reason: again.reason || "", questions, ...(part ? { part } : {}), ...(unfounded.length ? { unfounded } : {}) };
 }
 
-/** Factory's own line comment when a review pass has nothing line-tied to say; the worker never answers it. */
-export const PLACEHOLDER_MARKER = "<!-- factory:placeholder -->";
+/** Pendulum's own line comment when a review pass has nothing line-tied to say; the worker never answers it. */
+export const PLACEHOLDER_MARKER = "<!-- pendulum:placeholder -->";
 export const isPlaceholder = (body) => String(body || "").includes(PLACEHOLDER_MARKER);
 
 // -------------------------------------------------------------- review diff
@@ -1491,7 +1491,7 @@ const findingAt = (path, line) => (path ? `\`${shownPath(path)}\`${Number.isInte
  * one on a file that takes none moves to the first file (the same line when that file shows it, else its first). A
  * moved comment starts with a note naming the file and line the finding is about and `why` it moved, and carries them
  * and its own text as `at`, so a second fitting keeps that note and a review body sets the finding out without it.
- * Factory's placeholder moves without a note. Returns {inline, aside: those with nowhere to go}.
+ * Pendulum's placeholder moves without a note. Returns {inline, aside: those with nowhere to go}.
  */
 function fitComments(comments, shown, why) {
   const paths = [...shown.keys()];
@@ -1567,14 +1567,14 @@ export function fitToFiles(comments, files) {
   return { inline, moved: inline.filter((c) => !kept.has(c)).length, aside };
 }
 
-/** A comment as GitHub's review API takes it (Factory's own fields, such as `at`, left off). */
+/** A comment as GitHub's review API takes it (Pendulum's own fields, such as `at`, left off). */
 export const reviewComment = (c) => ({ path: c.path, line: c.line, side: c.side || "RIGHT", body: c.body });
 
-/** The most of a review body Factory writes in full (GitHub refuses one over 65,536 characters). */
+/** The most of a review body Pendulum writes in full (GitHub refuses one over 65,536 characters). */
 export const REVIEW_BODY_MAX = 60_000;
 
-/** The marker before each finding Factory sets out in a review body: its number, file and line, as JSON. */
-const FINDING = /^<!-- factory:finding (\{[^\n]*\}) -->$/;
+/** The marker before each finding Pendulum sets out in a review body: its number, file and line, as JSON. */
+const FINDING = /^<!-- pendulum:finding (\{[^\n]*\}) -->$/;
 const markerJson = (v) => JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 
 /**
@@ -1582,10 +1582,10 @@ const markerJson = (v) => JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/
  * after a marker (bodyFindings reads them back, so the answer pass gets them and they count until answered). A `<!--`
  * in a comment is escaped so no text in the body reads as a marker. Past `max`, a finding keeps its marker and place
  * but not its text; past `hard`, the rest are one marker that says how many were cut, itself a finding to answer.
- * Factory's placeholder goes in as plain text: it is no finding.
+ * Pendulum's placeholder goes in as plain text: it is no finding.
  */
 export function reviewBody(body, comments, max = REVIEW_BODY_MAX, hard = max + 5_000) {
-  // Factory's placeholder is no finding: its text goes in as it is, with nothing to answer.
+  // Pendulum's placeholder is no finding: its text goes in as it is, with nothing to answer.
   const aside = (comments || []).filter((c) => !isPlaceholder(c?.body));
   const head = `${String(body ?? "")}${(comments || []).filter((c) => isPlaceholder(c?.body)).map((c) => `\n\n${String(c.body).replace(PLACEHOLDER_MARKER, "").trim()}`).join("")}`;
   if (!aside.length) return head;
@@ -1593,13 +1593,13 @@ export function reviewBody(body, comments, max = REVIEW_BODY_MAX, hard = max + 5
   for (let i = 0; i < aside.length; i += 1) {
     const c = aside[i];
     const at = c?.at || { path: c?.path, line: Number.isInteger(c?.line) ? c.line : null };
-    const top = `\n\n<!-- factory:finding ${markerJson({ n: i + 1, path: String(at.path ?? ""), line: at.line })} -->\n**${findingAt(at.path, at.line)}**\n\n`;
+    const top = `\n\n<!-- pendulum:finding ${markerJson({ n: i + 1, path: String(at.path ?? ""), line: at.line })} -->\n**${findingAt(at.path, at.line)}**\n\n`;
     const full = `${top}${String(c?.at?.body ?? c?.body ?? "").replace(/<!--/g, "&lt;!--")}`;
     const short = `${top}(This finding's text is cut: past GitHub's size limit for a review body.)`;
     if (out.length + full.length <= max) out += full;
     else if (out.length + short.length <= hard) out += short;
     else {
-      out += `\n\n<!-- factory:finding ${markerJson({ n: i + 1, cut: aside.length - i })} -->\n(${aside.length - i} more finding(s) are cut: past GitHub's size limit for a review body)`;
+      out += `\n\n<!-- pendulum:finding ${markerJson({ n: i + 1, cut: aside.length - i })} -->\n(${aside.length - i} more finding(s) are cut: past GitHub's size limit for a review body)`;
       break;
     }
   }
@@ -1611,8 +1611,8 @@ export const bodyFindingId = (reviewId, n) => `r${reviewId}-${n}`;
 export const isBodyFindingId = (id) => typeof id === "string" && /^r\d+-\d+$/.test(id);
 
 /**
- * The findings Factory set out in a review body (reviewBody), in order: {n, path, line, body}; a cut tail is one finding
- * whose `cut` says how many it stands for. Read only from a review Factory trusts as its own.
+ * The findings Pendulum set out in a review body (reviewBody), in order: {n, path, line, body}; a cut tail is one finding
+ * whose `cut` says how many it stands for. Read only from a review Pendulum trusts as its own.
  */
 export function bodyFindings(body) {
   const out = [];
@@ -1624,7 +1624,7 @@ export function bodyFindings(body) {
       try {
         v = JSON.parse(m[1]);
       } catch {
-        // not Factory's marker shape: read as text of the finding before it
+        // not Pendulum's marker shape: read as text of the finding before it
       }
       if (v && Number.isInteger(v.n) && v.n > 0) {
         cur = { n: v.n, path: typeof v.path === "string" ? v.path : null, line: Number.isInteger(v.line) ? v.line : null, ...(Number.isInteger(v.cut) ? { cut: v.cut } : {}), lines: [] };
@@ -1793,7 +1793,7 @@ export const entryKey = (id) =>
 
 /**
  * The acceptance entries an issue states, so the reviewer judges each one: the top-level list items in the section the
- * factory-file skill writes, a Markdown heading whose text is exactly `Acceptance` (any level, any case), down to the
+ * pendulum-file skill writes, a Markdown heading whose text is exactly `Acceptance` (any level, any case), down to the
  * next heading of its level or above; items under its sub-headings are entries too. Each is {id, text}: the id is the
  * item's own label ("- **B:** ..." is B) or else its 1-based position; nested items and continuation lines join their
  * entry's text. [] when the issue has no such section: the reviewer then names the entries from the issue text itself.
@@ -1886,12 +1886,12 @@ export function ontoRecord(issue, { from, base, files = [], defaultBranch = "mai
   const list = [...new Set((files || []).map(String).filter(Boolean))].slice(0, ONTO_FILES);
   // JSON inside an HTML comment: `>` escaped, so no file name can close it.
   const data = markerJson({ files: list });
-  return `${marker(issue, "onto", `${from}:${base}`).replace(/ -->$/, "")} ${data} -->\nFactory: rebasing onto \`${defaultBranch}\` at ${String(base).slice(0, 7)} conflicts in ${conflictFiles(list)}; the worker resolves it.`;
+  return `${marker(issue, "onto", `${from}:${base}`).replace(/ -->$/, "")} ${data} -->\nPendulum: rebasing onto \`${defaultBranch}\` at ${String(base).slice(0, 7)} conflicts in ${conflictFiles(list)}; the worker resolves it.`;
 }
 
 /** The record ontoRecord wrote, read from a comment's body, or null: `{from, base, files}`. */
 export function parseOnto(issue, body) {
-  const m = new RegExp(`^<!-- factory:${Number(issue)}:onto:([0-9a-f]{40,64}):([0-9a-f]{40,64}) (\\{[^\\n]*\\}) -->`).exec(String(body || ""));
+  const m = new RegExp(`^<!-- pendulum:${Number(issue)}:onto:([0-9a-f]{40,64}):([0-9a-f]{40,64}) (\\{[^\\n]*\\}) -->`).exec(String(body || ""));
   if (!m) return null;
   try {
     const files = JSON.parse(m[3])?.files;
@@ -1932,13 +1932,13 @@ export function conflictsAt(pr, sha) {
 /** Times one reviewed PR is put in the merge queue: the first enqueue and one more after the queue drops it. */
 export const QUEUE_TRIES = 2;
 /**
- * How long a merge queue commit may wait with no CI begun on it (gateStarted) before Factory reads it as stalled (#295):
+ * How long a merge queue commit may wait with no CI begun on it (gateStarted) before Pendulum reads it as stalled (#295):
  * the default of the repository's queue_stall_minutes (STALL_DEFAULTS `queueMs`).
  */
 export const QUEUE_STALL_MS = 10 * 60_000;
-/** The code Factory gives a stalled queue entry it took out itself: GitHub started no check on the queue's commit. */
+/** The code Pendulum gives a stalled queue entry it took out itself: GitHub started no check on the queue's commit. */
 export const STALL_CODE = "checks_never_started";
-/** The code Factory gives a queue entry it took out because a required check started and did not finish in time (#2683). */
+/** The code Pendulum gives a queue entry it took out because a required check started and did not finish in time (#2683). */
 export const HUNG_CODE = "checks_hung";
 /** The merge queue's check timeout setup writes (github.mjs ensureRuleset), assumed when the ruleset is unread. */
 export const SETUP_QUEUE_TIMEOUT_MIN = 60;
@@ -2175,15 +2175,15 @@ export const CONFLICT_CODE = "merge_conflict";
 /**
  * What the merge pass does with a reviewed, green PR that is not in the merge queue, from GitHub's own record of its
  * removals from the queue (timeline `removed_from_merge_queue` events: `{at, reason, actor, person}`, or `{self: true}`
- * for a removal Factory made this pass that the timeline does not show yet). Only removals after `since` (queueSince:
+ * for a removal Pendulum made this pass that the timeline does not show yet). Only removals after `since` (queueSince:
  * the review the merge rests on, the head's push, the last re-entry or Block) count, and a removal because it merged is
  * none. Who removed it decides what it is:
- * - Factory (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
- *   this pass's own, or the one Factory's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE. A
+ * - Pendulum (`self`, or its App's login): a drop it made of a stalled entry, with its `code` (STALL_CODE or HUNG_CODE:
+ *   this pass's own, or the one Pendulum's requeue record holds for it, session.mjs requeueRecords), else STALL_CODE. A
  *   HUNG_CODE removal marked `cleared` (its hung step's job then concluded green in time: hungOutcome "green") is no
  *   drop: it counts as `cleared`, never toward QUEUE_TRIES or as a hold. Only the first QUEUE_CLEARED_MAX of those
  *   since `since` are cleared; any later one counts as a drop, so a step that is slow on every try still Blocks;
- * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Factory leaves
+ * - a person's account (`person`: only writers can dequeue): a hold. When the newest removal is a hold, Pendulum leaves
  *   the PR out (`{hold}`) until a person enqueues it again or a new review, head, re-entry or Block moves `since`;
  * - the queue itself (`github-merge-queue`) or any other bot: a drop, with GitHub's reason code, except a removal for a
  *   conflict (CONFLICT_CODE): the PR conflicts with the default branch or with a PR ahead of it in the queue, which a
@@ -2192,7 +2192,7 @@ export const CONFLICT_CODE = "merge_conflict";
  *   with has moved (session.mjs mergeReadyOne).
  * Under QUEUE_TRIES drops it is enqueued (`{enqueue: true, drops, last}`, `last` the newest drop or cleared removal
  * `{at, code}`); at QUEUE_TRIES it Blocks with why (`{block: reason, drops, last, codes}`, `codes` the distinct drop
- * codes); `last` has `factory: true` when Factory made that removal, `cleared: true` when it is cleared, and either
+ * codes); `last` has `pendulum: true` when Pendulum made that removal, `cleared: true` when it is cleared, and either
  * answer has `cleared`, their count, when there are any. Codes are
  * GitHub's (`checks_timed_out`, `failed_checks`, ...); anything else reads `unknown`.
  */
@@ -2205,11 +2205,11 @@ export function queueRetry(removals, { since, self = null }) {
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
     .map((r) => {
       const who = botless(r.actor);
-      // Factory's own removal names why: this pass's (`self`), or one read back from Factory's requeue record (`code`).
+      // Pendulum's own removal names why: this pass's (`self`), or one read back from Pendulum's requeue record (`code`).
       if (r.self === true || (me && who === me)) {
         const code = r.code ? queueCode(r.code) : STALL_CODE;
         const cleared = r.cleared === true && code === HUNG_CODE && clears++ < QUEUE_CLEARED_MAX;
-        return { at: r.at, code, drop: !cleared, factory: true, ...(cleared ? { cleared } : {}) };
+        return { at: r.at, code, drop: !cleared, pendulum: true, ...(cleared ? { cleared } : {}) };
       }
       const drop = r.person !== true || who === QUEUE_BOT;
       const code = queueCode(r.reason);
@@ -2221,11 +2221,11 @@ export function queueRetry(removals, { since, self = null }) {
   const drops = after.filter((r) => r.drop);
   const tried = after.filter((r) => r.drop || r.cleared);
   const n = tried.at(-1);
-  const last = n ? { at: n.at, code: n.code, ...(n.factory ? { factory: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
+  const last = n ? { at: n.at, code: n.code, ...(n.pendulum ? { pendulum: true } : {}), ...(n.cleared ? { cleared: true } : {}) } : null;
   const cleared = tried.length - drops.length ? { cleared: tried.length - drops.length } : {};
   if (drops.length < QUEUE_TRIES) return { enqueue: true, drops: drops.length, last, ...cleared };
   const codes = [...new Set(drops.map((d) => d.code))];
-  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Factory re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
+  return { block: `the merge queue dropped the reviewed PR ${drops.length} times without merging it (${codes.join(", ")}); Pendulum re-enqueued it once. Check that the required checks run on the queue's merge_group commits`, drops: drops.length, last, codes, ...cleared };
 }
 
 /** GitHub Actions' app id: a required check's integration when the ruleset names none. */
@@ -2296,7 +2296,7 @@ export function queueStall(entry, { started, now = Date.now(), hung = null, stal
 }
 
 /**
- * Whether a PR head beyond the one Factory recorded as mergeable is GitHub's own "Update branch" merge: a merge commit
+ * Whether a PR head beyond the one Pendulum recorded as mergeable is GitHub's own "Update branch" merge: a merge commit
  * whose first parent is the recorded head and whose second is on the default branch (`secondOnDefault`), committed and
  * signed by GitHub's web-flow key. Any other new head (a push by anyone) goes back to review.
  */
@@ -2307,7 +2307,7 @@ export function updateBranchHead(commit, recorded, secondOnDefault) {
 
 // ---------------------------------------------------------------- markers
 
-export const marker = (issue, kind, id = "") => `<!-- factory:${issue}:${kind}${id ? `:${id}` : ""} -->`;
+export const marker = (issue, kind, id = "") => `<!-- pendulum:${issue}:${kind}${id ? `:${id}` : ""} -->`;
 
 /** People who can push; on a public repository anyone else may still comment and review. */
 export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -2330,7 +2330,7 @@ export function parseMaintainer(entry) {
   return m ? { login: m[1], id: m[2] ? Number(m[2]) : null } : null;
 }
 /**
- * The workflow's own maintainers (FACTORY_NOTIFY and FACTORY_MAINTAINERS): trusted because only a writer can change
+ * The workflow's own maintainers (PENDULUM_NOTIFY and PENDULUM_MAINTAINERS): trusted because only a writer can change
  * the workflow file. This does not depend on what the reading token can see: an App sees an org owner whose membership
  * is private as CONTRIBUTOR, and lists no collaborators at all for org-derived access. Each is trusted by its numeric
  * user id (`login#id`), never by the login string: a login renamed away and registered by someone else is a stranger.
@@ -2355,7 +2355,7 @@ export const pinnedMaintainer = (user) => Number.isInteger(user?.id) && !!WRITER
 export const pushAuthor = (item) => PUSH_ASSOCIATIONS.has(item?.author_association) || knownWriter(item?.user?.login) === true || pinnedMaintainer(item?.user);
 
 /**
- * The login Factory itself writes as in this process: the App's `<slug>[bot]` on Actions, the token's owner in local
+ * The login Pendulum itself writes as in this process: the App's `<slug>[bot]` on Actions, the token's owner in local
  * mode (github.mjs primeSelf sets it). Null until known.
  */
 let SELF = null;
@@ -2363,10 +2363,10 @@ export const setSelf = (login) => {
   SELF = login ? loginKey(login) : null;
 };
 export const selfLogin = () => SELF;
-/** Whether this comment or review is Factory's own, by its exact login. */
+/** Whether this comment or review is Pendulum's own, by its exact login. */
 export const isSelf = (item) => !!SELF && loginKey(item?.user?.login) === SELF;
 /**
- * Whether Factory may act on a marker in this comment or review: written by Factory's own login or by someone who can
+ * Whether Pendulum may act on a marker in this comment or review: written by Pendulum's own login or by someone who can
  * push. Any other App, the job's own token (github-actions[bot]) included, is a stranger. Anyone can paste a marker.
  */
 export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
@@ -2376,26 +2376,26 @@ export const trustedAuthor = (item) => isSelf(item) || pushAuthor(item);
  * login is an App's, which no person can hold.
  */
 export const CODE_SCANNING = "github-advanced-security[bot]";
-// Factory's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
-const REPLY_AT_START = /^<!-- factory:\d+:reply:\S+ -->/;
+// Pendulum's answer to a line comment: its reply marker at the start (handoff.mjs postReplies).
+const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
 
 /**
- * Whether `reply` is Factory's own answer to a line comment: its reply marker at the start (handoff.mjs postReplies), by
- * Factory or someone who can push. Such an answer alone answers nothing: the finding check judges it (finding-check.mjs),
+ * Whether `reply` is Pendulum's own answer to a line comment: its reply marker at the start (handoff.mjs postReplies), by
+ * Pendulum or someone who can push. Such an answer alone answers nothing: the finding check judges it (finding-check.mjs),
  * and only its yes resolves the thread, which is what then marks the finding answered.
  */
-export const factoryReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
+export const pendulumReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
 
 /**
  * Whether a person's `reply` answers the line comment that a named reviewer or code scanning (`rootLogin`) opened, the
- * same on every side (the answer pass's list, the threads Factory resolves, the merge pass): a reply by someone who can
- * push (trustedAuthor) that is not Factory's own answer (factoryReply). Never on code scanning's comment: a person's
- * "looking into it" leaves a security finding to the answer pass, and never lets Factory resolve it.
+ * same on every side (the answer pass's list, the threads Pendulum resolves, the merge pass): a reply by someone who can
+ * push (trustedAuthor) that is not Pendulum's own answer (pendulumReply). Never on code scanning's comment: a person's
+ * "looking into it" leaves a security finding to the answer pass, and never lets Pendulum resolve it.
  */
-export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !factoryReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
+export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !pendulumReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
 
 /**
- * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Factory marker
+ * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Pendulum marker
  * comment), oldest first, each with its `kind` (`comment`, `review` or `line`, an inline comment on the diff) and `state`
  * (a review's GitHub state, an inline comment's the state of the review it was posted in, else null). Who may decide is
  * not read from author_association: an App's token sees an organization
@@ -2403,10 +2403,10 @@ export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !fac
  */
 /**
  * The newest restart's time (ISO) among an issue's comments (stop.mjs restartObjective's record, marker
- * `<!-- factory:<n>:restart:<at> -->` then `<!-- factory:restart {"at"} -->`, `at` when the restart label was applied),
- * from a record Factory or a writer posted; null for none.
+ * `<!-- pendulum:<n>:restart:<at> -->` then `<!-- pendulum:restart {"at"} -->`, `at` when the restart label was applied),
+ * from a record Pendulum or a writer posted; null for none.
  */
-const RESTART_RECORD = /^<!-- factory:\d+:restart:[0-9TZ]+ -->\n<!-- factory:restart (\{[^\n]*\}) -->/;
+const RESTART_RECORD = /^<!-- pendulum:\d+:restart:[0-9TZ]+ -->\n<!-- pendulum:restart (\{[^\n]*\}) -->/;
 export function restartedAt(comments) {
   let last = null;
   for (const c of comments || []) {
@@ -2427,27 +2427,27 @@ export function maintainerDecisions(comments) {
   const all = comments || [];
   // A restart (stop.mjs restartObjective) starts from the issue's current text: what was said before it is no decision.
   const since = Date.parse(restartedAt(all));
-  // Factory's own review threads: inline comments of a review whose body carries the review marker, and replies in
+  // Pendulum's own review threads: inline comments of a review whose body carries the review marker, and replies in
   // those threads by the review's own author. In local mode the reviewer and the worker post as the developer's login,
   // with no bot type to tell them apart; a reply by anyone else in the thread is still a decision.
-  const factoryReviews = new Map(all.filter((c) => c?.kind === "review" && REVIEW_BODY.test(c.body || "") && trustedAuthor(c)).map((r) => [r.id, loginKey(r.user?.login)]));
+  const pendulumReviews = new Map(all.filter((c) => c?.kind === "review" && REVIEW_BODY.test(c.body || "") && trustedAuthor(c)).map((r) => [r.id, loginKey(r.user?.login)]));
   const lines = new Map(all.filter((c) => c?.kind === "line").map((c) => [c.id, c]));
-  const factoryThread = (c) => {
+  const pendulumThread = (c) => {
     if (c?.kind !== "line") return false;
-    if (factoryReviews.has(c.pull_request_review_id)) return true;
+    if (pendulumReviews.has(c.pull_request_review_id)) return true;
     const root = lines.get(c.in_reply_to_id);
-    return !!root && factoryReviews.has(root.pull_request_review_id) && factoryReviews.get(root.pull_request_review_id) === loginKey(c.user?.login);
+    return !!root && pendulumReviews.has(root.pull_request_review_id) && pendulumReviews.get(root.pull_request_review_id) === loginKey(c.user?.login);
   };
   // Each review's state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED), its body empty or not: an inline comment
   // carries the state of the review it was posted in.
   const reviewStates = new Map(all.filter((c) => c?.kind === "review").map((r) => [r.id, r.state ?? null]));
   const stateOf = (c) => (c.kind === "review" ? (c.state ?? null) : c.kind === "line" ? (reviewStates.get(c.pull_request_review_id) ?? null) : null);
   return all
-    .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- factory:") && (c.body || "").trim() && !factoryThread(c) && !(Date.parse(c.created_at) <= since))
+    .filter((c) => c?.user?.type !== "Bot" && !(c.body || "").includes("<!-- pendulum:") && (c.body || "").trim() && !pendulumThread(c) && !(Date.parse(c.created_at) <= since))
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
     .map((c) => ({ author: c.user?.login ?? "?", authorId: c.user?.id ?? null, at: c.created_at, body: c.body.trim(), key: `${c.kind || "comment"}:${c.id}`, kind: c.kind || "comment", state: stateOf(c), seen: latest(c.created_at, c.updated_at), ...(c.on ? { on: c.on } : {}) }));
 }
-const REVIEW_BODY = /<!-- factory:\d+:review -->/;
+const REVIEW_BODY = /<!-- pendulum:\d+:review -->/;
 const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t))).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? null;
 
 /**
@@ -2455,8 +2455,8 @@ const latest = (...times) => times.filter((t) => Number.isFinite(Date.parse(t)))
  * (created, or last edited). Recorded as a hidden line in the run's progress comment on the issue.
  */
 export const decisionsRead = (decisions) => Object.fromEntries((decisions || []).filter((d) => d.key).map((d) => [d.key, d.seen ?? d.at]));
-export const decisionsReadMarker = (read) => `<!-- factory:decisions-read ${JSON.stringify(read || {})} -->`;
-const DECISIONS_READ = /^<!-- factory:decisions-read (\{[^\n]*\}) -->$/m;
+export const decisionsReadMarker = (read) => `<!-- pendulum:decisions-read ${JSON.stringify(read || {})} -->`;
+const DECISIONS_READ = /^<!-- pendulum:decisions-read (\{[^\n]*\}) -->$/m;
 /** Merge read records (maps of key to time): the latest time read per key. */
 export function mergeRead(...reads) {
   const out = {};
@@ -2464,13 +2464,13 @@ export function mergeRead(...reads) {
   return out;
 }
 /**
- * Every read record on the issue, merged: only from Factory's own progress comments, written by `self` (the login
- * Factory posts as: the App's bot on Actions, the developer's login in local mode). Anyone else's record, a record
+ * Every read record on the issue, merged: only from Pendulum's own progress comments, written by `self` (the login
+ * Pendulum posts as: the App's bot on Actions, the developer's login in local mode). Anyone else's record, a record
  * outside a progress comment, or one that does not parse counts for nothing: its decisions stay unread.
  */
 export function decisionsReadOf(comments, { issue, self }) {
-  if (!self) throw new Error("Factory's own login is unknown, so its read records cannot be told from anyone else's");
-  const progress = `<!-- factory:${issue}:progress:`;
+  if (!self) throw new Error("Pendulum's own login is unknown, so its read records cannot be told from anyone else's");
+  const progress = `<!-- pendulum:${issue}:progress:`;
   const reads = [];
   for (const c of comments || []) {
     if (loginKey(c?.user?.login) !== loginKey(self) || !(c.body || "").startsWith(progress)) continue;
@@ -2489,15 +2489,15 @@ export function decisionsReadOf(comments, { issue, self }) {
  * The plan-time Questions a run asked (one-repo.mjs planNeeds): each repository asked about (lower-cased) and
  * when. Recorded as a hidden line in the run's progress comment on the issue, read back by planAskedOf.
  */
-export const planAskedMarker = (asked) => `<!-- factory:plan-asked ${JSON.stringify(asked || {}).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
-const PLAN_ASKED = /^<!-- factory:plan-asked (\{[^\n]*\}) -->$/m;
+export const planAskedMarker = (asked) => `<!-- pendulum:plan-asked ${JSON.stringify(asked || {}).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+const PLAN_ASKED = /^<!-- pendulum:plan-asked (\{[^\n]*\}) -->$/m;
 /**
- * Every plan-time Question record on the issue, merged (the latest time per repository): only from Factory's own
+ * Every plan-time Question record on the issue, merged (the latest time per repository): only from Pendulum's own
  * progress comments, written by `self`, as decisionsReadOf. Anyone else's record counts for nothing. Without `self`, none.
  */
 export function planAskedOf(comments, { issue, self }) {
   if (!self) return {};
-  const progress = `<!-- factory:${issue}:progress:`;
+  const progress = `<!-- pendulum:${issue}:progress:`;
   const asked = [];
   for (const c of comments || []) {
     if (loginKey(c?.user?.login) !== loginKey(self) || !(c.body || "").startsWith(progress)) continue;
@@ -2514,7 +2514,7 @@ export function planAskedOf(comments, { issue, self }) {
 }
 /**
  * The decisions no pass has read yet: never read, or edited after the version a pass read. These have not reached
- * the code, so Factory applies them before it merges.
+ * the code, so Pendulum applies them before it merges.
  */
 export function unreadDecisions(decisions, read) {
   return (decisions || []).filter((d) => {
@@ -2527,7 +2527,7 @@ export function unreadDecisions(decisions, read) {
  * A Question answered while the review job that raised it ran, which its Question exit must not revert: both a
  * decision by a writer (`writers`, logins confirmed to have write access) that no pass has read, posted or edited
  * after the job read the decisions (`readAt`, ms), and the PR marked ready by a person after the job started
- * (`startedAt`, ms; `events`, the PR's timeline). Factory's own ready marks are not a person's: a bot's, or the token's
+ * (`startedAt`, ms; `events`, the PR's timeline). Pendulum's own ready marks are not a person's: a bot's, or the token's
  * own login (`self`; in local mode that is the developer's). Either one alone keeps the Question. In local mode
  * (`local`) the Question always stands: no event runs the review there, serve does, and only for a PR out of draft
  * whose issue is still a Question (local.mjs pendingReviews), so the person marks the PR ready again. Returns what
@@ -2560,7 +2560,7 @@ export function decisionsSection(decisions, cap = 12_000) {
   if (!decisions?.length) return "";
   const shown = decisionsShown(decisions, cap);
   const cut = decisions.length - shown.length;
-  const note = cut ? `${cut} earlier decision(s) are not shown here for length; read them all in \`$FACTORY_IN/decisions.md\` before you change anything.\n\n` : "";
+  const note = cut ? `${cut} earlier decision(s) are not shown here for length; read them all in \`$PENDULUM_IN/decisions.md\` before you change anything.\n\n` : "";
   return `## Decisions recorded by maintainers (comments on the issue and PR, oldest first)\n\nWhere one answers a question or differs from the issue body, it wins: it is the owner's later word.\n\n${note}${shown.map(decisionText).join("\n\n")}`;
 }
 
@@ -2568,7 +2568,7 @@ export function decisionsSection(decisions, cap = 12_000) {
  * The spend line a run without a usage artifact (local mode) writes into its progress comment: structured, so a
  * dispatcher reads the number, never the prose exit line. Parsed by spendOf().
  */
-export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
+export const spendMarker = (usd, parts = null) => `<!-- pendulum:spend ${JSON.stringify({ usd, ...(parts || {}) })} -->`;
 
 /**
  * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
@@ -2577,7 +2577,7 @@ export const spendMarker = (usd, parts = null) => `<!-- factory:spend ${JSON.str
  * on the issue for its progress line (rebaseTally) and the scorecard reads the same lines.
  */
 export const rebaseCostMarker = ({ usd, conflict, usdLowerBound = false, usdUpperBound = false }) =>
-  `<!-- factory:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...(usdLowerBound && Number.isFinite(usd) ? { usdLowerBound: true } : {}), ...(usdUpperBound && Number.isFinite(usd) ? { usdUpperBound: true } : {}) })} -->`;
+  `<!-- pendulum:rebase-cost ${JSON.stringify({ usd: Number.isFinite(usd) ? usd : null, conflict: !!conflict, ...(usdLowerBound && Number.isFinite(usd) ? { usdLowerBound: true } : {}), ...(usdUpperBound && Number.isFinite(usd) ? { usdUpperBound: true } : {}) })} -->`;
 
 /**
  * A rebase stage's cost for its rebase line, from what its spend line is made of (stageSpendLine: the usage record
@@ -2618,7 +2618,7 @@ export function rebaseLine({ usd, conflict, passes = 0, usdLowerBound = false, u
 
 /** The rebase line in one comment body: {usd, conflict, usdLowerBound?, usdUpperBound?}, or null when it has none (or a broken one). */
 export function rebaseCostOf(body) {
-  const m = /^<!-- factory:rebase-cost (\{[^\n]*\}) -->$/m.exec(body || "");
+  const m = /^<!-- pendulum:rebase-cost (\{[^\n]*\}) -->$/m.exec(body || "");
   if (!m) return null;
   try {
     const v = JSON.parse(m[1]);
@@ -2631,21 +2631,21 @@ export function rebaseCostOf(body) {
 
 /**
  * Issue `issue`'s send-back rebases so far, from the rebase lines in the work stages' progress comments `comments`
- * written by `mine` (Factory's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`
+ * written by `mine` (Pendulum's own login, or in local mode the login it posts as): `{count, usd, unmetered, conflicts}`
  * and, when any summed figure carries one, its bound mark (`usdLowerBound`, `usdUpperBound`). `usd` is the metered
  * stages' sum with each one's sandbox dollars, read from the vendor comment keyed as its progress comment (vendorBody)
  * when `comments` holds it: a sandbox at the session's ceiling makes the sum an upper bound, one unpriced a lower bound.
  */
 export function rebaseTally(comments, issue, mine = trustedAuthor) {
   const out = { count: 0, usd: 0, unmetered: 0, conflicts: 0 };
-  const keyOf = (body, kind) => new RegExp(`^<!-- factory:${issue}:${kind}:(work[A-Za-z0-9:-]{0,96}) -->`).exec(body || "")?.[1] ?? null;
+  const keyOf = (body, kind) => new RegExp(`^<!-- pendulum:${issue}:${kind}:(work[A-Za-z0-9:-]{0,96}) -->`).exec(body || "")?.[1] ?? null;
   const vendor = new Map();
   for (const c of comments || []) {
     const key = mine(c) ? keyOf(c.body, "vendor") : null;
     const parts = key ? spendParts(c.body) : null;
     if (parts) vendor.set(key, parts);
   }
-  const head = `<!-- factory:${issue}:progress:work`;
+  const head = `<!-- pendulum:${issue}:progress:work`;
   for (const c of comments || []) {
     if (!mine(c) || !(c.body || "").startsWith(head)) continue;
     const r = rebaseCostOf(c.body);
@@ -2697,8 +2697,8 @@ export function stageSpendLine(usage, { records = [], known = null } = {}) {
  * hosts (`hosts`), and in local mode the account's name (`account`).
  */
 export const harnessMarker = (harness, model = "", ran = null) =>
-  `<!-- factory:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}), ...(ran?.account ? { account: ran.account } : {}) })} -->`;
-const SPEND = /^<!-- factory:spend (\{[^\n]*\}) -->$/m;
+  `<!-- pendulum:harness ${JSON.stringify({ harness, ...(model ? { model } : {}), ...(ran ? { models: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null }, labels: ran.labels ?? [], ...(ran.hosts?.length ? { hosts: ran.hosts } : {}) } : {}), ...(ran?.account ? { account: ran.account } : {}) })} -->`;
+const SPEND = /^<!-- pendulum:spend (\{[^\n]*\}) -->$/m;
 /** The dollars a progress comment's spend line records, or 0: the total, model and sandbox vendor together. */
 export function spendOf(body) {
   const usd = spendParts(body)?.usd;
@@ -2740,12 +2740,12 @@ export function vendorLine({ id, state, cost, rates, at = new Date().toISOString
       ? `usage not read${error ? ` (${word(error)})` : ""}`
       : `${secs(cost.activeCpuMs)} active CPU in ${secs(cost.wallMs)}`;
   const stored = cost.storedMs > 0 ? `; stopped ${(cost.storedMs / 3_600_000).toFixed(1)} h before it with ${Number.isFinite(cost.storedBytes) ? `${(cost.storedBytes / 1e9).toFixed(2)} GB` : "? GB"} saved: ${money(cost.storedUsd)}` : "";
-  const id_ = typeof id === "string" && /^factory-[A-Za-z0-9_-]{1,60}$/.test(id) ? id : "?";
+  const id_ = typeof id === "string" && /^pendulum-[A-Za-z0-9_-]{1,60}$/.test(id) ? id : "?";
   return `- ${clock} sandbox \`${id_}\` ${word(state)}: ${use}, ${size}; ${rate}; vendor ${cost.upperBound ? "at most " : ""}${money(cost.usd)} this stage${stored}`;
 }
 
 /**
- * The vendor comment's body (`<!-- factory:<n>:vendor:<stage>:<key> -->`, one per stage, written by its one booker):
+ * The vendor comment's body (`<!-- pendulum:<n>:vendor:<stage>:<key> -->`, one per stage, written by its one booker):
  * `line` (vendorLine) and a spend line of the vendor's dollars, which `daily_usd` adds to the stage's progress comment's
  * model dollars. `modelUsd`: the harness's dollars from the usage record, for a stage that left no progress comment.
  * `upperBound` (stageVendorCost's: the session's ceiling, its usage not read or not settled) is kept as
@@ -2755,14 +2755,14 @@ export function vendorBody({ line, vendorUsd, modelUsd = null, upperBound = fals
   const round = (n) => Math.round(n * 1e6) / 1e6;
   const vendor = Number.isFinite(vendorUsd) ? round(vendorUsd) : null;
   const model = Number.isFinite(modelUsd) ? round(modelUsd) : null;
-  return `Factory's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(vendor !== null && upperBound ? { vendorUpperBound: true } : {}) })}`;
+  return `Pendulum's sandbox cost for this stage:\n${line}\n${spendMarker(round((vendor ?? 0) + (model ?? 0)), { ...(model === null ? {} : { modelUsd: model }), vendorUsd: vendor, ...(vendor !== null && upperBound ? { vendorUpperBound: true } : {}) })}`;
 }
 
 // ----------------------------------------------------------------- launch
 
-/** The Objective an event's branch names (`factory/<n>`), or null. */
+/** The Objective an event's branch names (`pendulum/<n>`), or null. */
 const branchIssue = (ref) => {
-  const m = /^factory\/(\d+)$/.exec(String(ref || ""));
+  const m = /^pendulum\/(\d+)$/.exec(String(ref || ""));
   return m ? Number(m[1]) : null;
 };
 /** An ISO time from a payload or a record, normalised; null when it is not a time. */
@@ -2772,9 +2772,9 @@ const isoOrNull = (t) => (t && Number.isFinite(Date.parse(t)) ? new Date(Date.pa
  * What a launcher was started for, from the event GitHub delivered (pure; the caller reads GITHUB_EVENT_NAME and the
  * payload). `issue` is set when the dispatcher named the Objective (the launch job's matrix: a pick or a sweep's
  * re-launch): kind `swept`, whatever event ticked the dispatcher. Otherwise one of:
- *   comment  a new comment on an Objective issue (not a PR), not one of Factory's own marker comments
- *   checks   a finished check suite (an App's CI) or workflow run (CI on Actions) on a factory/<n> branch
- *   review   the review label on a factory/<n> PR, or the PR marked ready
+ *   comment  a new comment on an Objective issue (not a PR), not one of Pendulum's own marker comments
+ *   checks   a finished check suite (an App's CI) or workflow run (CI on Actions) on a pendulum/<n> branch
+ *   review   the review label on a pendulum/<n> PR, or the PR marked ready
  * Returns {kind, issue, at, sha?, pr?, author?, human?} with `at` the event's own time where the payload has one
  * (null where it has none: the caller uses the workflow run's creation time), or {skip: reason}.
  */
@@ -2785,16 +2785,16 @@ export function launchEvent(name, payload = {}, { issue = null, repoFull = "" } 
     if (payload.action !== "created") return { skip: `issue_comment ${payload.action}` };
     if (payload.issue?.pull_request) return { skip: "a comment on a pull request" };
     const c = payload.comment || {};
-    // A local loop posts its progress and markers with a person's token: they are Factory's records, not an answer.
-    if (String(c.body || "").startsWith("<!-- factory:")) return { skip: "one of Factory's own marker comments" };
+    // A local loop posts its progress and markers with a person's token: they are Pendulum's records, not an answer.
+    if (String(c.body || "").startsWith("<!-- pendulum:")) return { skip: "one of Pendulum's own marker comments" };
     return { kind: "comment", issue: payload.issue?.number ?? null, at: isoOrNull(c.created_at), author: { user: c.user ?? null, author_association: c.author_association ?? null }, human: c.user?.type !== "Bot" };
   }
   if (name === "check_suite" || name === "workflow_run") {
     const s = name === "check_suite" ? payload.check_suite : payload.workflow_run;
     if (payload.action !== "completed" || !s) return { skip: `${name} ${payload.action}` };
     const n = branchIssue(s.head_branch);
-    if (!n) return { skip: `${name} on a branch that is not factory/<issue>` };
-    // A fork's run can carry a factory/<n> branch name too; only this repository's own branch is an Objective's. A
+    if (!n) return { skip: `${name} on a branch that is not pendulum/<issue>` };
+    // A fork's run can carry a pendulum/<n> branch name too; only this repository's own branch is an Objective's. A
     // check suite names no repository: the caller compares its head with the branch's (launchDecision headSha).
     if (name === "workflow_run" && !sameRepo(s.head_repository?.full_name)) return { skip: "a workflow run from another repository" };
     return { kind: "checks", issue: n, at: isoOrNull(s.updated_at), sha: s.head_sha ?? null };
@@ -2802,16 +2802,16 @@ export function launchEvent(name, payload = {}, { issue = null, repoFull = "" } 
   if (name === "pull_request") {
     const pr = payload.pull_request || {};
     const n = branchIssue(pr.head?.ref);
-    if (!n) return { skip: "not a factory/<issue> branch" };
+    if (!n) return { skip: "not a pendulum/<issue> branch" };
     if (!sameRepo(pr.head?.repo?.full_name)) return { skip: "a PR from another repository" };
     const labelled = payload.action === "labeled" && payload.label?.name === REVIEW_LABEL;
     if (!labelled && payload.action !== "ready_for_review") return { skip: `pull_request ${payload.action}` };
     return { kind: "review", issue: n, pr: pr.number ?? null, at: isoOrNull(pr.updated_at), sha: pr.head?.sha ?? null, ready: payload.action === "ready_for_review", human: payload.sender?.type !== "Bot", draft: !!pr.draft };
   }
   if (name === "repository_dispatch") {
-    // A stage in a sandbox asks the launcher for fresh tokens or for its next step (stage.mjs): only Factory sends these.
+    // A stage in a sandbox asks the launcher for fresh tokens or for its next step (stage.mjs): only Pendulum sends these.
     const p = payload.client_payload || {};
-    if (payload.action !== "factory-stage") return { skip: `repository_dispatch ${payload.action}` };
+    if (payload.action !== "pendulum-stage") return { skip: `repository_dispatch ${payload.action}` };
     if (!Number.isSafeInteger(p.issue) || p.issue < 1 || typeof p.claim !== "string" || !["token", "ended"].includes(p.want)) return { skip: "a stage event without its issue, claim or want" };
     // `ask`: when a token request was made (seconds), naming that one request; absent on an end.
     const ask = p.want === "token" && Number.isSafeInteger(p.ask) && p.ask > 0 ? p.ask : null;
@@ -2824,8 +2824,8 @@ export function launchEvent(name, payload = {}, { issue = null, repoFull = "" } 
  * The sandbox marker comment's JSON line; its first line is marker(issue, "sandbox"). `<` and `>` are escaped inside
  * the JSON (\u003c, \u003e), so no value can close the HTML comment or open markup.
  */
-export const sandboxMarkerLine = (rec) => `<!-- factory:sandbox ${JSON.stringify(rec).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
-const SANDBOX = /^<!-- factory:sandbox (\{[^\n]*\}) -->$/m;
+export const sandboxMarkerLine = (rec) => `<!-- pendulum:sandbox ${JSON.stringify(rec).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+const SANDBOX = /^<!-- pendulum:sandbox (\{[^\n]*\}) -->$/m;
 /** The record in a sandbox marker comment body, or null. */
 export function sandboxRecordOf(body) {
   const m = SANDBOX.exec(body || "");
@@ -2852,10 +2852,10 @@ export function stagePartComment(comments, issue, claim, { self = isSelf } = {})
 
 /**
  * The Objective's sandbox record, merged from its single-writer parts (docs/ADAPTERS.md, Records): the claim comment
- * `<!-- factory:<n>:sandbox -->` (launchers and the sweep, under the Objective's record lock) and, while it says
- * `running`, the comment of the stage holding its claim (`<!-- factory:<n>:stage:<claim> -->`, that stage alone): its
+ * `<!-- pendulum:<n>:sandbox -->` (launchers and the sweep, under the Objective's record lock) and, while it says
+ * `running`, the comment of the stage holding its claim (`<!-- pendulum:<n>:stage:<claim> -->`, that stage alone): its
  * fields over the claim comment's, its launch entry added where the launcher's is missing, a quota streak over (a
- * stage that writes has started). Factory's own comments only (anyone can paste a marker into theirs), the oldest when
+ * stage that writes has started). Pendulum's own comments only (anyone can paste a marker into theirs), the oldest when
  * there are two. Carries the claim comment's id and updated_at.
  */
 export function sandboxRecord(comments, issue, { self = isSelf } = {}) {
@@ -2885,17 +2885,17 @@ export function withLaunch(launches, entry, { replace = false } = {}) {
 }
 
 /** The tags an Objective's sandbox carries: the vendor-side half of finding it (docs/ADAPTERS.md). */
-export const sandboxTags = (repoId, issue) => ({ factory: "objective", "factory-repo": String(repoId), "factory-issue": String(issue) });
-/** A sandbox id Factory made and may adopt: its own prefix and plain characters (the vendor's names, sandbox-vercel.mjs). */
-export const factorySandboxId = (id) => typeof id === "string" && /^factory-[A-Za-z0-9_-]{1,60}$/.test(id);
+export const sandboxTags = (repoId, issue) => ({ pendulum: "objective", "pendulum-repo": String(repoId), "pendulum-issue": String(issue) });
+/** A sandbox id Pendulum made and may adopt: its own prefix and plain characters (the vendor's names, sandbox-vercel.mjs). */
+export const pendulumSandboxId = (id) => typeof id === "string" && /^pendulum-[A-Za-z0-9_-]{1,60}$/.test(id);
 
 /**
  * The sandbox to use: the one the record names, when the vendor still lists it with this Objective's tags in a usable
  * state (stopped or running). Anything else, an unrecorded sandbox with matching tags included, is not adopted: the
- * launcher creates a new one. Reason: only Factory's own record says which sandbox holds the Objective's work.
+ * launcher creates a new one. Reason: only Pendulum's own record says which sandbox holds the Objective's work.
  */
 export function pickSandbox(listed, { repoId, issue, recordedId = null }) {
-  if (!factorySandboxId(recordedId)) return null;
+  if (!pendulumSandboxId(recordedId)) return null;
   const want = sandboxTags(repoId, issue);
   const s = (listed || []).find((x) => x.id === recordedId);
   if (!s || !["stopped", "running"].includes(s.state)) return null;
@@ -2938,11 +2938,11 @@ export const SESSION_RESERVE_MS = STAGE_GRACE_MS + 3 * 60_000;
 
 /**
  * The launcher's note for a stage whose wall clock one vendor session cut below timeout_minutes (launch.mjs
- * startInSandbox): the stage's environment carries it as FACTORY_STAGE_SESSION_CAP, so a time cap there Blocks naming
+ * startInSandbox): the stage's environment carries it as PENDULUM_STAGE_SESSION_CAP, so a time cap there Blocks naming
  * the vendor's cap (sessionCapNote), not a bare "time cap reached". Empty when nothing was cut.
  */
-export const sessionCapEnv = ({ vendor, setting, minutes }) => (Number(setting) > Number(minutes) && Number(minutes) > 0 && vendor ? { FACTORY_STAGE_SESSION_CAP: JSON.stringify({ vendor: String(vendor), setting: Number(setting), minutes: Number(minutes) }) } : {});
-/** What a time-cap Block adds when the vendor's session cut the stage (FACTORY_STAGE_SESSION_CAP); "" otherwise. */
+export const sessionCapEnv = ({ vendor, setting, minutes }) => (Number(setting) > Number(minutes) && Number(minutes) > 0 && vendor ? { PENDULUM_STAGE_SESSION_CAP: JSON.stringify({ vendor: String(vendor), setting: Number(setting), minutes: Number(minutes) }) } : {});
+/** What a time-cap Block adds when the vendor's session cut the stage (PENDULUM_STAGE_SESSION_CAP); "" otherwise. */
 export function sessionCapNote(cap) {
   let c = null;
   try {
@@ -3160,11 +3160,11 @@ export function dueStage({ state, record, runningSince = null, review = null }) 
  *   ev           launchEvent()'s result
  *   state        the Objective's state (stateOf: card first, then the label)
  *   record       its sandbox record (sandboxRecord), or null
- *   trusted      whether a comment's author is a maintainer (pushAuthor), and not Factory itself
+ *   trusted      whether a comment's author is a maintainer (pushAuthor), and not Pendulum itself
  *   runningSince when the Objective last became Running (its label event)
  *   review       {pr, labelled, labelledAt, readyAt, since, draft} for its PR (reviewRequestOf): a sweep's or a stage
- *                end's only when the PR carries factory:review, a review event's always; null when unread
- *   headSha      the factory/<n> branch's head now (for a finished check)
+ *                end's only when the PR carries pendulum:review, a review event's always; null when unread
+ *   headSha      the pendulum/<n> branch's head now (for a finished check)
  *   staleMs      how long a stage the record says is running holds the sandbox before it counts as gone
  * Returns {stage}, {requeue: reason} or {skip: reason}. Nothing here takes a slot: an answered Question goes back to
  * Queued and the dispatcher, the one place max_concurrent and daily_usd are decided, starts it.
@@ -3172,8 +3172,8 @@ export function dueStage({ state, record, runningSince = null, review = null }) 
 export function launchDecision({ ev, state, record = null, trusted = false, fromSelf = false, closed = false, runningSince = null, review = null, headSha = null, checksDone = false, now = Date.now(), staleMs = 4 * 3600_000 }) {
   if (ev.skip) return { skip: ev.skip };
   if (ev.kind === "stage") {
-    // The running stage's own requests: only Factory's, and only for the claim the record still carries.
-    if (!fromSelf) return { skip: "a stage event Factory did not send" };
+    // The running stage's own requests: only Pendulum's, and only for the claim the record still carries.
+    if (!fromSelf) return { skip: "a stage event Pendulum did not send" };
     if (!record || record.claim !== ev.claim) return { skip: "not the claim the sandbox record carries" };
     if (ev.want === "token") return record.state === "running" ? { token: true } : { skip: `no stage runs (${record.state})` };
     if (record.state !== "ended") return { skip: `the stage has not ended (${record.state})` };
@@ -3206,7 +3206,7 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
   }
   if (ev.kind === "checks") {
     // Only a stage that stopped to wait for CI on this very head resumes, and only while it is still the branch's head.
-    if (!ev.sha || ev.sha !== headSha) return { skip: "not the factory branch's head" };
+    if (!ev.sha || ev.sha !== headSha) return { skip: "not the pendulum branch's head" };
     if (record?.waiting === "checks" && record.head === ev.sha) return { stage: record.stage };
     // CI finished on an In-review PR's head with no stage waiting: the PR may be reviewed and green now, so the
     // dispatcher's merge pass runs on this event rather than on GitHub's cron.
@@ -3237,7 +3237,7 @@ export function checksResume(record, { headSha, checksDone, now = Date.now(), gr
 }
 
 /**
- * Whether a PR body still asks a Question: an item of its Assumptions starting with `QUESTION:` (factory-deliver-pr).
+ * Whether a PR body still asks a Question: an item of its Assumptions starting with `QUESTION:` (pendulum-deliver-pr).
  * A Question asked on the issue (the plan-time Question) is not in the body.
  */
 export const asksQuestion = (body) => /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUESTION:/.test(body || "");
@@ -3252,12 +3252,12 @@ export const asksQuestion = (body) => /(^|\n)\s*(?:[-*]|\d+\.)?\s*(?:\*\*)?QUEST
 export const questionForm = ({ pr = null, askOnIssue = false } = {}) => (askOnIssue || !pr ? "issue" : "pr");
 /** The Question notice's marker: one comment per run (`runId`), the form (questionForm) its last field. */
 export const questionMarker = (issue, { stage, runId, form }) => marker(issue, "question", `${stage}:${runId}:${form}`);
-const QUESTION_NOTICE = /^<!-- factory:(\d+):question:\S*:(issue|pr) -->/;
+const QUESTION_NOTICE = /^<!-- pendulum:(\d+):question:\S*:(issue|pr) -->/;
 /**
- * The form (questionForm) of the Question asked at `since` (the issue's last factory:question label), read from
- * Factory's notice on the issue posted or edited since; null when there is none (a Question its PR asks often has no
- * notice on the issue: its review request is the notice). Factory's: by its own login, by someone who can push, or by an
- * App (local mode posts its notices as the Factory App: app-token.mjs noticeMinter). The latest one counts.
+ * The form (questionForm) of the Question asked at `since` (the issue's last pendulum:question label), read from
+ * Pendulum's notice on the issue posted or edited since; null when there is none (a Question its PR asks often has no
+ * notice on the issue: its review request is the notice). Pendulum's: by its own login, by someone who can push, or by an
+ * App (local mode posts its notices as the Pendulum App: app-token.mjs noticeMinter). The latest one counts.
  */
 export function questionFormOf(comments, { issue, since }) {
   const at = Date.parse(since);
@@ -3274,7 +3274,7 @@ export function questionFormOf(comments, { issue, since }) {
 
 /**
  * A comment that may answer a Question: a maintainer decision (objectiveDecisions: people with write access, never
- * Factory's own marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the
+ * Pendulum's own marked comments) made after the Question was asked, older than `graceMs` (on the sandbox route, the
  * comment's own launch gets that long; on any other route nothing launches on a comment, so the grace is 0). Whether it
  * gives a decision is the answer check's (lib/answer-check.mjs); with no decider, it resumes the Question.
  */
@@ -3288,7 +3288,7 @@ export function missedAnswer(decisions, { questionSince, now = Date.now(), grace
 /** How long the sweep leaves a sandbox whose stage ended moments ago to its launcher's end, which answers it first. */
 export const END_GRACE_MS = 10 * 60_000;
 /**
- * What the sweep does with one of Factory's Objective sandboxes (tags `factory=objective`, this repository's id;
+ * What the sweep does with one of Pendulum's Objective sandboxes (tags `pendulum=objective`, this repository's id;
  * the caller lists only those). `issue` is the Objective (null when GitHub has none by that number), `state` its
  * state, `record` its sandbox record, `holds` whether a stage holds the sandbox now. Returns
  * `{destroy: reason, collect}` (collect: the record's stage left a usage tarball not yet collected), `{stop: reason,

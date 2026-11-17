@@ -1,6 +1,6 @@
-// One machine's room for Factory's local stages, shared by every local loop on it (serve and run, any repository, any
+// One machine's room for Pendulum's local stages, shared by every local loop on it (serve and run, any repository, any
 // harness login): the machine's stage budget, the slots its loops hold against it, and how loaded the machine is now.
-// Both live under the user's ~/.cache/factory, which no sandbox may write:
+// Both live under the user's ~/.cache/pendulum, which no sandbox may write:
 //   machine.json   {"stages": N}: the budget, set once per machine; without it, from the machine's size (defaultStages);
 //                  beside it the machine's limits (machineLimits): when it counts as saturated, and how long a usage
 //                  limit with no reset passes an account over
@@ -23,8 +23,8 @@ import { processRecord, sameProcess, startTime } from "./proc.mjs";
 const GB = 2 ** 30;
 
 /** Where the machine's budget setting and its slots live. */
-export const machineFile = (home = homedir()) => join(home, ".cache", "factory", "machine.json");
-export const slotsDir = (home = homedir()) => join(home, ".cache", "factory", "slots");
+export const machineFile = (home = homedir()) => join(home, ".cache", "pendulum", "machine.json");
+export const slotsDir = (home = homedir()) => join(home, ".cache", "pendulum", "slots");
 
 /** The budget a machine gets without a setting: a quarter of its CPU threads, at most one per 8 GB of memory, at least 1. */
 export const defaultStages = ({ cpus = availableParallelism(), memBytes = totalmem() } = {}) => Math.max(1, Math.min(Math.floor(cpus / 4), Math.floor(memBytes / 8 / GB)));
@@ -68,7 +68,7 @@ const PRESSURE_KEYS = { cpu_psi: "cpuPsi", load: "load", memory_psi: "memPsi", a
  * names, each optional) is when the machine counts as saturated (saturation); `guess_hours` (a list of hours, each
  * above 0 and at most inputs.mjs GUESS_MAX_HOURS) is how long automatic account choice passes over an account whose usage limit reported no reset, by how
  * many in a row (holds.mjs SPENT_GUESS_MS). Returns `{pressure, guessMs, from: {pressure, guess}, file, problems}`:
- * a value that is not given, or cannot be used (named in `problems`), is Factory's default.
+ * a value that is not given, or cannot be used (named in `problems`), is Pendulum's default.
  */
 export function machineLimits({ home = homedir() } = {}) {
   const file = machineFile(home);
@@ -108,7 +108,7 @@ export function limitsLine({ pressure, guessMs }) {
 }
 
 /**
- * The per-loop cap: FACTORY_LOCAL_MAX_CONCURRENT when it is a positive whole number, else the machine's budget. The
+ * The per-loop cap: PENDULUM_LOCAL_MAX_CONCURRENT when it is a positive whole number, else the machine's budget. The
  * budget binds every loop whatever its cap.
  */
 export function loopCap(setting, budget) {
@@ -434,7 +434,7 @@ export function saturation(p, limits = PRESSURE) {
  * How many new stages a loop may start now (resumes count as starts): `{room, force, why, budget, held, pressure}`.
  * `running`: the stages this loop holds; `cap`: its own cap (loopCap). Room is what the machine's budget and the loop's
  * cap leave, and none while the machine is saturated; but a loop that holds no stage may always start one (`force`),
- * so no loop waits forever behind the others or behind work outside Factory. `why` says what holds starts, or null.
+ * so no loop waits forever behind the others or behind work outside Pendulum. `why` says what holds starts, or null.
  * `limits`: when the machine counts as saturated (machineLimits's `pressure`).
  */
 export function machineRoom({ running, cap, budget, held, pressure, limits = PRESSURE }) {

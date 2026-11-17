@@ -16,16 +16,16 @@ import { parseYaml } from "./yaml.mjs";
 import { log } from "./inputs.mjs";
 import { NetworkDown, OUTAGE, downFor, githubOrigin, machineDown, machineKey, networkBack, pastKeys, stepCutOff, stoppedWaiting, waitingOutages } from "./network.mjs";
 import { isSandboxHost } from "./local.mjs";
-import { prepareClaudeHome, prepareFactoryHome, runnerLayout } from "./claude-runner.mjs";
+import { prepareClaudeHome, preparePendulumHome, runnerLayout } from "./claude-runner.mjs";
 import { CODEX_RUNNER_HOME } from "./codex-runner.mjs";
 import { copilotRunnerLayout, prepareCopilotHome } from "./copilot-runner.mjs";
 
-/** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; FACTORY_PLUGIN_ROOT overrides. */
-export const PLUGIN_ROOT = process.env.FACTORY_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** The plugin root: these scripts live in it (plugin/scripts/lib), beside skills/, agents/ and templates/; PENDULUM_PLUGIN_ROOT overrides. */
+export const PLUGIN_ROOT = process.env.PENDULUM_PLUGIN_ROOT || resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * A digest of the plugin's files under `root` (paths and contents, not times; node_modules and test left out): which
- * Factory this is. The stage upload's (launch.mjs pluginPackage) and the image's (lib/image.mjs imageMade).
+ * Pendulum this is. The stage upload's (launch.mjs pluginPackage) and the image's (lib/image.mjs imageMade).
  */
 export function pluginDigest(root = PLUGIN_ROOT) {
   const hash = createHash("sha256");
@@ -64,7 +64,7 @@ export const agentModel = (role, models = {}) => (Object.hasOwn(AGENT_MODELS, ro
  * adopter's override wins). `models` rewrites the pinned model lines from the
  * job's subagent_model / reviewer_model inputs when given. Everything written is
  * added to .git/info/exclude so the worker cannot commit it. All of it is done in the
- * agent's sandbox (backend.mjs sandbox.git, handoff.mjs putFiles), never by Factory on
+ * agent's sandbox (backend.mjs sandbox.git, handoff.mjs putFiles), never by Pendulum on
  * the host. Returns the paths written.
  */
 export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harness = null, models = {}, env = process.env } = {}) {
@@ -101,26 +101,26 @@ export async function installPlugin(checkout, pluginRoot = PLUGIN_ROOT, { harnes
   await excludeFromGit(checkout, written, env);
   const local = backend(env).sandbox.harness(env);
   if (harness === "claude" && local?.claudeDir) await claudePlugin(checkout, local.claudeDir, env);
-  // On a runner and in a cloud sandbox VM the same copy, in Factory's own HOME for Claude Code, made afresh first
+  // On a runner and in a cloud sandbox VM the same copy, in Pendulum's own HOME for Claude Code, made afresh first
   // (lib/claude-runner.mjs): the agent reads it and never writes it.
   else if (harness === "claude" && agentUser() && backend(env).name !== "local") {
     const layout = runnerLayout(agentUser());
     await prepareClaudeHome(layout);
     await claudePlugin(checkout, layout.pluginDir, env, { shared: true });
   }
-  // Codex's HOME on a runner: Factory's own, empty, made afresh (lib/codex-runner.mjs).
-  else if (harness === "codex" && agentUser() && backend(env).name !== "local") await prepareFactoryHome(CODEX_RUNNER_HOME, "Codex");
-  // Copilot's: Factory's own, with its bwrap and the release its binary runs, unpacked by Factory (lib/copilot-runner.mjs).
+  // Codex's HOME on a runner: Pendulum's own, empty, made afresh (lib/codex-runner.mjs).
+  else if (harness === "codex" && agentUser() && backend(env).name !== "local") await preparePendulumHome(CODEX_RUNNER_HOME, "Codex");
+  // Copilot's: Pendulum's own, with its bwrap and the release its binary runs, unpacked by Pendulum (lib/copilot-runner.mjs).
   else if (harness === "copilot" && agentUser() && backend(env).name !== "local") await prepareCopilotHome(copilotRunnerLayout(agentUser()), { env });
   return written;
 }
 
 /**
- * A sandboxed Claude Code run's skills and agent definitions (local mode, and a runner's in Factory's HOME for it): the clone's .claude/skills and .claude/agents as installPlugin
- * left them (Factory's, the repository's own and its mirrored .agents/skills), copied out in the git sandbox into `dir`,
+ * A sandboxed Claude Code run's skills and agent definitions (local mode, and a runner's in Pendulum's HOME for it): the clone's .claude/skills and .claude/agents as installPlugin
+ * left them (Pendulum's, the repository's own and its mirrored .agents/skills), copied out in the git sandbox into `dir`,
  * a directory of the stage's usage directory that no sandbox may write. Claude Code loads them from there (harness.mjs)
- * and never reads the clone's .claude, which sandboxed code can write. The skills become a plugin named factory (a skill
- * is then factory:<name>); the agents keep their names in an --agents file holding only their description, prompt, tools
+ * and never reads the clone's .claude, which sandboxed code can write. The skills become a plugin named pendulum (a skill
+ * is then pendulum:<name>); the agents keep their names in an --agents file holding only their description, prompt, tools
  * and model, so no hook, MCP server or permission mode an agent file declares applies.
  */
 export async function claudePlugin(checkout, dir, env = process.env, { shared = false } = {}) {
@@ -142,7 +142,7 @@ export async function claudePlugin(checkout, dir, env = process.env, { shared = 
 
 /** claudePlugin's files, by path under its directory: the plugin's manifest and skills, and agents.json. */
 export function claudePluginFiles(tree) {
-  const files = { "plugin/.claude-plugin/plugin.json": `${JSON.stringify({ name: "factory" })}\n` };
+  const files = { "plugin/.claude-plugin/plugin.json": `${JSON.stringify({ name: "pendulum" })}\n` };
   const agents = {};
   for (const [rel, text] of Object.entries(tree)) {
     if (typeof text !== "string" || rel.split("/").some((p) => p === "" || p === "." || p === "..")) continue;
@@ -214,7 +214,7 @@ export async function excludeFromGit(checkout, paths, env = process.env) {
  * The paths a stage changed: those that differ between `start` and HEAD, less those the branch took from the default
  * branch by a rebase or merge. A path is taken from the default branch when HEAD has it as the default branch has it
  * (at HEAD's merge-base with origin's tip, read from the server: lfs.mjs serverBase) and the branch had not changed it
- * by `start`. `start` is the commit Factory read before any harness ran, so what a maintainer or an earlier stage pushed
+ * by `start`. `start` is the commit Pendulum read before any harness ran, so what a maintainer or an earlier stage pushed
  * is not the stage's, and commit authors play no part; a stage that reverts such a change made that change. Replace refs
  * and grafts are ignored; when the default branch cannot be read, every changed path counts.
  */
@@ -238,7 +238,7 @@ export async function stageChanges(checkout, start, env = process.env) {
 /**
  * Run one shell command in the checkout with the model secrets scrubbed from its env, in the backend's sandbox (on
  * Actions, as the agent uid). `asRunner`: the repository's `setup`, which may need sudo, runs as the runner uid on a
- * clean default-branch tree Factory made, never on branch code.
+ * clean default-branch tree Pendulum made, never on branch code.
  */
 export async function sh(checkout, command, { timeoutMs, env = process.env, extraEnv = {}, echo = true, asRunner = false, reap = true } = {}) {
   // A stopped stage starts no command (stop.mjs holdIfStopped): one left running would outlive the stage on a local box.
@@ -254,7 +254,7 @@ export async function sh(checkout, command, { timeoutMs, env = process.env, extr
  * The commit identity a child of the job sees. The job runs on the dispatching event (an issue
  * on main, a pull_request merge ref), so its GITHUB_SHA and GITHUB_REF name a commit the checkout
  * is not on; a repository's own CI scripts that assert HEAD equals GITHUB_SHA would fail for
- * every branch with commits. Children get the Factory branch as the ref and no GITHUB_SHA;
+ * every branch with commits. Children get the Pendulum branch as the ref and no GITHUB_SHA;
  * each validation pass sets GITHUB_SHA to the HEAD it tests (runValidation).
  */
 export function branchIdentity(branch) {
@@ -294,17 +294,17 @@ export function runnerFileEnv(env = process.env) {
  * Run the validation commands in order, each group of `parallel:` ones at once (validationGroups); stop after the
  * first group with a failure. Every failure of that group is reported (`failures`, `failed` the first), each with the
  * tail of its output for the prompt (`output`) and up to 256 KB of it (`full`), which the fix run reads in
- * $FACTORY_IN/checks/; Factory writes no log file of its own. GITHUB_SHA is the HEAD under test.
+ * $PENDULUM_IN/checks/; Pendulum writes no log file of its own. GITHUB_SHA is the HEAD under test.
  */
 export async function runValidation(checkout, commands, opts = {}) {
   const results = [];
-  // The HEAD under test, read in the agent's sandbox: Factory runs no git on the host in the agent's checkout.
+  // The HEAD under test, read in the agent's sandbox: Pendulum runs no git on the host in the agent's checkout.
   const env = opts.env || process.env;
-  // Factory's git there gets no secret: neither the harness's credential nor the worker secrets' carrier (scrubbedEnv).
+  // Pendulum's git there gets no secret: neither the harness's credential nor the worker secrets' carrier (scrubbedEnv).
   const gitEnv = scrubbedEnv(env);
   const head = (await exec(...backend(gitEnv).sandbox.git(["git", "-C", checkout, "rev-parse", "HEAD"], gitEnv), { env: gitEnv }).catch(() => ({ stdout: "" }))).stdout.trim();
-  // FACTORY_DB_WRAP: only validation commands get a throwaway database (sh), not setup or install.
-  const extraEnv = { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}), FACTORY_DB_WRAP: "1" };
+  // PENDULUM_DB_WRAP: only validation commands get a throwaway database (sh), not setup or install.
+  const extraEnv = { ...(opts.extraEnv || {}), ...(head ? { GITHUB_SHA: head } : {}), PENDULUM_DB_WRAP: "1" };
   const shOpts = opts;
   for (const group of validationGroups(commands)) {
     // Interleaved live output from several commands helps no one; a group's commands report as each ends.
@@ -312,7 +312,7 @@ export async function runValidation(checkout, commands, opts = {}) {
     const runs = await Promise.all(group.map((command) => sh(checkout, command, { ...shOpts, extraEnv, echo: group.length === 1, reap: false })));
     await backend(shOpts.env || process.env).sandbox.reap();
     const done = runs.map((r, i) => ({ command: group[i], ...r, output: r.output.slice(-20_000), full: r.ok ? "" : r.output.slice(-256 * 1024) }));
-    if (group.length > 1) for (const r of done) process.stdout.write(`[factory] ${r.ok ? "passed" : r.timedOut ? "timed out" : `failed (exit ${r.code})`}: ${r.command}\n`);
+    if (group.length > 1) for (const r of done) process.stdout.write(`[pendulum] ${r.ok ? "passed" : r.timedOut ? "timed out" : `failed (exit ${r.code})`}: ${r.command}\n`);
     results.push(...done);
     const failures = done.filter((r) => !r.ok);
     if (failures.length) return { green: false, results, failed: failures[0], failures, head };
@@ -320,13 +320,13 @@ export async function runValidation(checkout, commands, opts = {}) {
   return { green: true, results, failed: null, failures: [], head };
 }
 
-// Run by `node` in the checkout's sandbox (installDeps), as Factory's other commands on the agent's tree are.
+// Run by `node` in the checkout's sandbox (installDeps), as Pendulum's other commands on the agent's tree are.
 // `check`: every direct dependency of each package.json (not below node_modules) that the install linked is whole: the
 // link resolves, its package.json is there and each bin it declares exists. A dependency not linked at all is skipped
 // (hoisted or filtered), and so are local packages (resolved outside node_modules: a workspace's bins may be build
-// output) and packages with install scripts (their files may come from the scripts Factory skips). Exit 3 with the
+// output) and packages with install scripts (their files may come from the scripts Pendulum skips). Exit 3 with the
 // missing paths as JSON on the last line, 0 when nothing is missing. `clear`: each node_modules directory emptied,
-// the package caches Factory keeps in the clone (pnpm's store, Bun's cache) kept, nothing followed through a link.
+// the package caches Pendulum keeps in the clone (pnpm's store, Bun's cache) kept, nothing followed through a link.
 const INSTALL_CHECK = String.raw`
 const fs = require("fs"), path = require("path");
 const mode = process.argv[1], root = process.cwd();
@@ -380,7 +380,7 @@ process.exit(missing.length ? 3 : 0);
 /** installDeps's install check: exit 3 means the install left paths missing, any other failure means no check ran. */
 async function installGaps(checkout, opts) {
   if (!existsSync(join(checkout, "node_modules"))) return [];
-  const r = await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" check', { ...opts, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, echo: false });
+  const r = await sh(checkout, 'node -e "$PENDULUM_INSTALL_CHECK" check', { ...opts, extraEnv: { PENDULUM_INSTALL_CHECK: INSTALL_CHECK }, echo: false });
   if (r.code !== 3) return [];
   try {
     return JSON.parse(r.output.trim().split("\n").filter((l) => l.startsWith("{")).at(-1)).missing.map(String);
@@ -458,7 +458,7 @@ const remainingUntil = (deadlineAt) => (Number.isFinite(deadlineAt) ? Math.max(1
 /**
  * The repository's install in the checkout, checked: its exit code, then (for a Node install) whether it left a
  * linked dependency or a declared binary missing. A failed or incomplete install gets one repair: the node_modules
- * directories emptied (Factory's package caches kept) and the install run again. Returns {ok} or {ok: false, reason},
+ * directories emptied (Pendulum's package caches kept) and the install run again. Returns {ok} or {ok: false, reason},
  * the reason naming the install as infrastructure, never as a validation result: what follows an install that did not
  * finish is no verdict on the branch. A timed-out install is not retried (the stage's deadline is spent). An install
  * that fails while this machine's network is down is no try: it runs again once the network is back (throughOutages),
@@ -484,7 +484,7 @@ export async function installDeps(checkout, command, { timeoutMs, env = process.
   const absent = [];
   for (const t of tools) if (!(await sh(checkout, `command -v ${t.tool} >/dev/null 2>&1`, { env, timeoutMs: left(), echo: false })).ok) absent.push(t);
   if (absent.length) return { ok: false, reason: infra(`${what(first)}: ${absentTools(absent)}${stepText(first)}`), missing: [], absent: absent.map((t) => t.tool) };
-  const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$FACTORY_INSTALL_CHECK" clear', { env, extraEnv: { FACTORY_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
+  const cleared = existsSync(join(checkout, "node_modules")) ? await sh(checkout, 'node -e "$PENDULUM_INSTALL_CHECK" clear', { env, extraEnv: { PENDULUM_INSTALL_CHECK: INSTALL_CHECK }, timeoutMs: left(), echo: false }) : { ok: true };
   const second = await attempt();
   if (second.ok) return { ok: true, repaired: true, first: what(first) };
   return { ok: false, reason: infra(`${what(first)}, and again after a clean reinstall${cleared.ok ? "" : " (node_modules could not be cleared)"}: ${what(second)}${stepText({ ...second, met: second.met ?? first.met })}`), missing: second.missing };

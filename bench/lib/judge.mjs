@@ -14,7 +14,7 @@
  * Blind: which run is A comes from a hash of the two run ids, never from
  * which is the candidate. The trees are fresh checkouts without their Git
  * history, and the Objective and the definition are copies in the pair's
- * directory, so nothing the judge is given names a run, a Factory version,
+ * directory, so nothing the judge is given names a run, a Pendulum version,
  * a group or a date. The harness unblinds the answers to run ids, keeps
  * each pair's judgment in the results, and never judges a pair again unless
  * the judge (its command and the bench home's graders/, where it lives) or
@@ -164,7 +164,7 @@ export async function runJudge(definition, a, b) {
       } catch (error) {
         return { error: error.message };
       }
-      // Its history names the run's repository, dates and Factory's commits.
+      // Its history names the run's repository, dates and Pendulum's commits.
       rmSync(join(trees[side], ".git"), { recursive: true, force: true });
     }
     if (readFileSync(a.objective, "utf8") !== readFileSync(b.objective, "utf8"))

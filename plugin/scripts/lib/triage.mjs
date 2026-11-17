@@ -1,4 +1,4 @@
-// Triage of a red required check before Factory spends a fix pass on it. Each failing CI job is asked, one question per
+// Triage of a red required check before Pendulum spends a fix pass on it. Each failing CI job is asked, one question per
 // failure (jobs that fail the same way share one), whether the change broke it or it is infrastructure or a flake; only
 // when every failing job reads flaky at the confidence floor or more (confidenceFloor: `triage_min_confidence`, else
 // MIN_CONFIDENCE), and no failure points at a file the PR changes, are the failed jobs rerun, once per head. The jobs
@@ -12,7 +12,7 @@
 // A required job GitHub never started (neverStarted: no step, no runner) is no question at all: the validation loop
 // Blocks on it before triage (session.mjs validationLoop), quoting GitHub's annotation.
 // The question goes through the one decision interface (decider.mjs, docs/ADAPTERS.md): the AI Gateway's decision
-// model with a key, else the stage's own harness on its login. This runs in Factory's own process, never in a harness.
+// model with a key, else the stage's own harness on its login. This runs in Pendulum's own process, never in a harness.
 import { createHash, randomBytes } from "node:crypto";
 import { Evaluator, Lexer, Parser, data as exprData } from "../../vendor/@actions/expressions/dist/index.js";
 import { Binary, ContextAccess, Grouping, IndexAccess, Literal, Logical, Unary } from "../../vendor/@actions/expressions/dist/ast.js";
@@ -27,7 +27,7 @@ import { parseYaml } from "./yaml.mjs";
 
 export { failedStep, failingStep };
 
-/** The default decision model: 23/23 single-job reds and every flaky one caught in Factory's offline replay (#2504). */
+/** The default decision model: 23/23 single-job reds and every flaky one caught in Pendulum's offline replay (#2504). */
 export const TRIAGE_MODEL = TRIAGE_MODEL_DEFAULT;
 /**
  * The default confidence floor, measured on TRIAGE_MODEL: on the replay set its hard change-caused reds scored 0.51 to
@@ -314,7 +314,7 @@ export function sameInput({ first, second }, tag = randomBytes(8).toString("hex"
   return redactSecrets([...data("first", first, second), ...data("second", second, first)].join("\n"));
 }
 
-/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): an unmade judgement's cause is `outage`, any other `factory`. */
+/** The decider's codes that are its vendor's outage (adapters/decider.mjs DECIDER_ERRORS): an unmade judgement's cause is `outage`, any other `pendulum`. */
 const OUTAGE_ERRORS = new Set(["unavailable", "rate_limited"]);
 
 // ------------------------------------------------------------------ what the PR changed
@@ -395,9 +395,9 @@ export function changeMentions(sig, names) {
 export const triageMarker = (rec) => {
   const ran = [...(rec?.ran?.values?.() ?? [])];
   const json = JSON.stringify({ reruns: [...(rec?.reruns || [])], sigs: [...(rec?.sigs || [])], ...(ran.length ? { ran } : {}), ...(rec?.refused ? { refused: true } : {}) });
-  return `<!-- factory:triage ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+  return `<!-- pendulum:triage ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
 };
-const TRIAGE = /^<!-- factory:triage (\{[^\n]*\}) -->$/m;
+const TRIAGE = /^<!-- pendulum:triage (\{[^\n]*\}) -->$/m;
 
 /** One job of a record's `ran` as kept, or null when it is not one: a job id, a name, a failed step ("" unknown), a signature or null. */
 const ranJob = (j) => {
@@ -425,9 +425,9 @@ export function mergeTriage(...recs) {
   return { reruns, sigs, ran, refused };
 }
 
-/** Every triage record on the issue: only from Factory's own progress comments (its own login), as decisionsReadOf reads. */
+/** Every triage record on the issue: only from Pendulum's own progress comments (its own login), as decisionsReadOf reads. */
 export function triageOf(comments, { issue }) {
-  const progress = `<!-- factory:${issue}:progress:`;
+  const progress = `<!-- pendulum:${issue}:progress:`;
   const recs = [];
   for (const c of comments || []) {
     if (!isSelf(c) || !(c.body || "").startsWith(progress)) continue;
@@ -885,7 +885,7 @@ export async function checkSources({ repo, sha, names, checkRuns = [], token, ac
     const all = new Map([...listed, ...workflowRuns.map((w) => ({ id: w.workflow_id, path: w.path }))].filter((w) => w.id && w.path).map((w) => [w.id, String(w.path).replace(/@.*$/, "")]));
     let changed;
     for (const [id, path] of all) {
-      if (/(^|\/)factory\.ya?ml$/.test(path)) continue;
+      if (/(^|\/)pendulum\.ya?ml$/.test(path)) continue;
       const text = await read(path);
       const { checks, filters, chained: after } = await workflowChecks(text, read);
       // A file that could not be read may run `on: workflow_run`: that is never read as no such workflow.
@@ -1033,7 +1033,7 @@ export function refusedRerunText(refusal) {
 /**
  * The progress line for one triage: the model and the confidence floor (`floor`, confidenceFloor), each job's verdict,
  * confidence and signature, and, for a failure already rerun once, how that was decided (`repeat`: the signature, or
- * the same-failure check's verdict, confidence and floor), then what Factory does.
+ * the same-failure check's verdict, confidence and floor), then what Pendulum does.
  */
 export function triageLine({ sha, model, jobs, outcome, floor = confidenceFloor() }) {
   const each = jobs.map((j) => {
@@ -1067,7 +1067,7 @@ export function triageLine({ sha, model, jobs, outcome, floor = confidenceFloor(
  * or a question over SAME_INPUT_CAP, is neither the same nor surely another failure, with no call.
  * Resolves {same, different, exact, said}, never throws: `same` and `different` true only when exact or answered so at the floor
  * (with no decider, the exact part alone: what it cannot tell is `different`, as no signature never matched); no answer
- * is `undecided` with its Block's `cause` (`outage` for the vendor's outage, else `factory`) and `limited` (the stage
+ * is `undecided` with its Block's `cause` (`outage` for the vendor's outage, else `pendulum`) and `limited` (the stage
  * harness's usage limit that stopped it). `said` names how it was decided, with the verdict, confidence and floor.
  * `floor()`: the confidence floor (confidenceFloor) a verdict here is read at now. `modelBase({sha, failedRuns})`: whether
  * the decision model may judge a red on `sha` the default branch's ({ok, why}): only when its triage (red(), classify())
@@ -1092,7 +1092,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   };
   const known = async () => {
     if (!earlier) {
-      // Factory's own login first: only its own progress comments' records count (triageOf).
+      // Pendulum's own login first: only its own progress comments' records count (triageOf).
       await progress?.self?.().catch(() => null);
       earlier = triageOf(await listComments(repo, issue, opts).catch(() => []), { issue });
     }
@@ -1202,7 +1202,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       return { same: sure && verdict === "same_failure", different: sure && verdict === "different_failure", exact: false, said };
     }
     const limited = ask.limited?.() ?? null;
-    return { same: false, different: false, exact: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "factory", said, ...(limited ? { limited } : {}) };
+    return { same: false, different: false, exact: false, undecided: true, cause: OUTAGE_ERRORS.has(error) && !limited ? "outage" : "pendulum", said, ...(limited ? { limited } : {}) };
   };
   // Whether a failure was already rerun once on this Objective: its signature is recorded (seen.sigs), or an earlier
   // rerun of the same job is not surely another failure (`same`: only `different`, exact or at the floor, lets it be

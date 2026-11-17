@@ -83,7 +83,7 @@ test("redProgress with durations in the failure lines: A again with only its dur
   }
 });
 
-test("the progress question: closer at the confidence floor or more is progress; under it or not_closer is none; no answer leaves it unjudged, Factory's or the outage's", async () => {
+test("the progress question: closer at the confidence floor or more is progress; under it or not_closer is none; no answer leaves it unjudged, Pendulum's or the outage's", async () => {
   const before = red("a", ["test", sig("t1", "not ok 1 - parses the header")]);
   const after = red("b", ["test", sig("t2", "not ok 4 - writes the footer")]);
   const asked = [];
@@ -95,7 +95,7 @@ test("the progress question: closer at the confidence floor or more is progress;
   assert.match(asked[0].input, /own commits \(git log --stat, merges left out\):\n<<<BEGIN \w+>>>\n src\/a\.mjs \| 2 \+-/);
   assert.equal((await check({ verdict: "closer", confidence: 0.5 }).judge({ before, after })).progress, false);
   assert.deepEqual(await check({ verdict: "not_closer", confidence: 0.9 }).judge({ before, after }), { progress: false, why: "the decision model (perplexity/pplx-decider-v1.2) judged it no closer to green at 0.90" });
-  assert.deepEqual(await check({ verdict: null, confidence: null, error: "vendor" }).judge({ before, after }), { progress: false, undecided: true, cause: "factory", why: "the decision model (perplexity/pplx-decider-v1.2) gave no answer (vendor)" });
+  assert.deepEqual(await check({ verdict: null, confidence: null, error: "vendor" }).judge({ before, after }), { progress: false, undecided: true, cause: "pendulum", why: "the decision model (perplexity/pplx-decider-v1.2) gave no answer (vendor)" });
   assert.equal((await check({ verdict: null, confidence: null, error: "unavailable" }).judge({ before, after })).cause, "outage");
   const off = openProgressCheck({ inputs: { decisionRoute: "off" } });
   assert.equal(off.off, "route-off");
@@ -109,7 +109,7 @@ test("the progress question: closer at the confidence floor or more is progress;
 
 /**
  * The real validationLoop on the commands route in a git checkout, with a fake Codex whose call n does `steps[n - 1]`:
- * merges a side branch adding its `merge` file (as Factory's catch-up merge brings in the default branch's commits),
+ * merges a side branch adding its `merge` file (as Pendulum's catch-up merge brings in the default branch's commits),
  * writes its `write` files, deletes its `remove` files and, with `commit`, commits everything (git add -A). `base`: files
  * the first commit holds. `before(git, work)`: a loop of the same stage, with the same `progressCheck` (and so the same
  * seen reds)
@@ -202,7 +202,7 @@ test("validation loop: a fix pass that committed, with the same command failing 
   assert.equal(r.calls, 1, "no second fix pass");
   const cmd = "test -f fixed || { echo \"not ok 1 - fixed is missing its fix: $(cat fixed 2>/dev/null || echo none)\"; exit 1; }";
   assert.equal(r.result.stalled, `the fix pass before it made no progress: the same jobs fail with the same failure lines; failing: ${cmd} (${cmd}: not ok 1 - fixed is missing its fix: none)`);
-  assert.deepEqual(exitOf(r.result), { exit: "blocked", reason: `validation red on Factory's pass 2 (${cmd}): ${r.result.stalled}`, cause: "work" });
+  assert.deepEqual(exitOf(r.result), { exit: "blocked", reason: `validation red on Pendulum's pass 2 (${cmd}): ${r.result.stalled}`, cause: "work" });
 });
 
 test("validation loop: a fix pass that committed nothing is no progress, and Blocks (#399)", async () => {
@@ -309,9 +309,9 @@ test("validation loops of one stage share their reds: A held by the first, B aft
   assert.equal(apart.calls, 2);
 });
 
-test("validation loop: a decision model that gives no answer leaves the judgement unmade: the Block is Factory's, or the outage's, never the work's (#399 review)", async () => {
+test("validation loop: a decision model that gives no answer leaves the judgement unmade: the Block is Pendulum's, or the outage's, never the work's (#399 review)", async () => {
   const steps = ["one", "done"].map((x) => ({ write: { state: `${x}\n` }, commit: true }));
-  for (const [error, cause] of [["vendor", "factory"], ["unavailable", "outage"]]) {
+  for (const [error, cause] of [["vendor", "pendulum"], ["unavailable", "outage"]]) {
     const progressCheck = openProgressCheck({ inputs: {}, decider: { name: "fake", decide: async () => ({ verdict: null, confidence: null, error }) } });
     const r = await commandsLoop({ commands: [needs("state", "done")], steps, progressCheck });
     assert.equal(r.calls, 1);

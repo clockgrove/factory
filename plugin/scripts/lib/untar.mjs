@@ -1,4 +1,4 @@
-// Unpacking an archive Factory made as the agent, without GNU tar (#102).
+// Unpacking an archive Pendulum made as the agent, without GNU tar (#102).
 //
 // Why: on Ubuntu 26.04 GNU tar (1.35+dfsg-4ubuntu0.4) opens each directory it extracts into with openat2
 // (RESOLVE_BENEATH) and has no fallback when that call fails. The agent's systemd unit sets RestrictSUIDSGID, whose
@@ -7,7 +7,7 @@
 // handed over. 24.04's tar falls back to openat. Lifting RestrictSUIDSGID would let the agent make setuid and setgid
 // files; this unpacks with plain mkdir/open instead, as the agent, in the same confinement.
 //
-// What it unpacks: the archives Factory's own `tar -c` makes (a harness session: claude-runner.mjs archiveSession,
+// What it unpacks: the archives Pendulum's own `tar -c` makes (a harness session: claude-runner.mjs archiveSession,
 // session.mjs restoreTranscript; Git LFS objects: outbox.mjs lfsHandOver): directories and regular files, with GNU
 // long names or pax paths. Every other entry (a link of either kind, a device, a FIFO, a sparse file) is skipped, so
 // nothing it writes can lead outside `dest`. A name that is absolute or has a `..` or empty segment, a size that is not
@@ -100,8 +100,8 @@ process.stdin.on("end", () => { if (!ended || cur) fail("the archive is cut shor
 `;
 
 /**
- * Unpack `tar` (a Buffer of an archive Factory made) into `dest` as the agent: the command runs in the agent's
- * confinement through `wrap` (backend.mjs sandbox.git, as Factory's other git-side work does), else through proc.mjs
+ * Unpack `tar` (a Buffer of an archive Pendulum made) into `dest` as the agent: the command runs in the agent's
+ * confinement through `wrap` (backend.mjs sandbox.git, as Pendulum's other git-side work does), else through proc.mjs
  * exec's own rule (a `cwd` in the agent's home). `keep`: leave a file already there. Returns exec's result: code 0 when
  * done; a run past `timeoutMs` is stopped.
  */
@@ -159,7 +159,7 @@ const entry = (name, type, size, mode, mtime) => {
 };
 const skip = (rel, why) => process.stderr.write("tarpack: skipped " + JSON.stringify(String(rel).slice(0, 200)) + " (" + why + ")\n");
 const buf = Buffer.alloc(1024 * 1024);
-// A name Factory passed in must be there; below it, what cannot be read is skipped and named (a planted name that is
+// A name Pendulum passed in must be there; below it, what cannot be read is skipped and named (a planted name that is
 // not UTF-8, a file or directory that cannot be opened, a tree past the path limit), never the whole capture.
 const add = (rel, top) => {
   const abs = path.join(root, rel);

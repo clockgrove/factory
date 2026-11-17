@@ -1,7 +1,7 @@
 // Codex sub-agent threads (#88). A Codex run whose model calls `spawn_agent` (the implementer sub-agent) starts each
 // child as a thread of its own: its usage is in neither the parent's `turn.completed` nor the parent's rollout, and its
 // rollout is a file of its own beside the parent's under CODEX_HOME/sessions (`YYYY/MM/DD/rollout-<time>-<thread>.jsonl`,
-// codex-cli 0.160 to 0.167). So after every Codex run Factory reads the threads the run's rollout names, priced at each
+// codex-cli 0.160 to 0.167). So after every Codex run Pendulum reads the threads the run's rollout names, priced at each
 // thread's own model and added to the run's record: the stage's dollars, max_usd between passes, daily_usd, and the
 // saved transcript all cover them. Children of children count too.
 //
@@ -55,7 +55,7 @@ const NAMES_ONLY = ['"agent_thread_id"'];
 
 /**
  * One rollout's own thread: `{id, parent, model, tokens, names}`, or null when its first line is no `session_meta`.
- * `parent` is the thread that spawned it (null for a thread Factory started); `tokens` its own usage in Factory's shape
+ * `parent` is the thread that spawned it (null for a thread Pendulum started); `tokens` its own usage in Pendulum's shape
  * (input includes the cached and written parts, output the reasoning part, as `turn.completed` reports them), null when
  * it recorded none; `names` the other threads it names. `namesOnly` reads only the names (a run's own rollout, whose
  * usage its stream already reported).
@@ -156,7 +156,7 @@ const less = (a, b) => Math.max(0, (a ?? 0) - (b ?? 0));
 
 /**
  * A Codex run's record with its sub-agent threads counted: each thread's own share (its total less `prior(id)`, the
- * total Factory already counted for it in an earlier pass or stage, so a resume never counts a child twice), priced at
+ * total Pendulum already counted for it in an earlier pass or stage, so a resume never counts a child twice), priced at
  * the thread's own model (the run's when the rollout names none), added to the record's tokens and dollars and listed
  * in `subAgents`. Returns `{rec, totals}`: `totals` maps each thread to its running total, for the next pass's `prior`.
  * A thread whose model has no price leaves the dollars a lower bound (`usdLowerBound`); a run whose own dollars are

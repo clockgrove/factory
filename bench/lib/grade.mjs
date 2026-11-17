@@ -1,9 +1,9 @@
 /**
  * The benchmark's own judgment of a run (#2223): its frozen grader run
  * against a fresh checkout of the run repository's default branch at the
- * Objective's end, never Factory's reviewers. And what the run repository's
+ * Objective's end, never Pendulum's reviewers. And what the run repository's
  * history says of the operator: commits on the default branch during the
- * run that no Factory merge made (hand fixes).
+ * run that no Pendulum merge made (hand fixes).
  *
  * Grader contract (bench/README.md#Grader): `definition.grader = { command,
  * timeoutMinutes }`. The command runs in a shell, its working directory the
@@ -90,10 +90,10 @@ export function endCommit(checkout, endedAt) {
 
 /**
  * Commits on the default branch (first parent, up to `end`) made from
- * `startedAt` to `endedAt` that no Factory merge made, oldest first: each
- * `{ sha, at }`. Factory's merges are the merge commits its merge steps
+ * `startedAt` to `endedAt` that no Pendulum merge made, oldest first: each
+ * `{ sha, at }`. Pendulum's merges are the merge commits its merge steps
  * recorded (`merges`) and any merge commit whose other parent is a head
- * Factory published (`heads`). The definition's base patches, which
+ * Pendulum published (`heads`). The definition's base patches, which
  * provisioning put on the branch before admission (`patches`, the commits
  * they made), are never hand fixes, whatever their time. `base`, when the
  * checkout has it, bounds the history read.

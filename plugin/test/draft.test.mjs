@@ -1,4 +1,4 @@
-// Draft Objectives (#204): an issue with `factory:draft` is never run, on any route, even with `factory:objective` on
+// Draft Objectives (#204): an issue with `pendulum:draft` is never run, on any route, even with `pendulum:objective` on
 // it too: no dispatch, no claim, no spend. Starting one takes the draft label off and applies the Objective label; the
 // scorecard's clock starts there.
 import "./temp.mjs";
@@ -19,7 +19,7 @@ RETRY.sleep = async () => {};
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
 // The repository's writer (its collaborators list names it).
 const MAINTAINER = { login: "maintainer", type: "User" };
-const OBJ = "factory:objective";
+const OBJ = "pendulum:objective";
 const issue = (labels, state = "open", number = 7, extra = {}) => ({ number, state, labels: labels.map((name) => ({ name })), body: "", updated_at: new Date().toISOString(), user: { login: "maintainer" }, ...extra });
 
 test("stopCause: a draft never runs, its Objective label on or not, and a draft label wins over a restart; closed is still closed", () => {
@@ -30,7 +30,7 @@ test("stopCause: a draft never runs, its Objective label on or not, and a draft 
   assert.equal(stopCause({ state: "open", labels: [OBJ, DRAFT_LABEL] }, OBJ), "draft", "labels as names");
   assert.equal(stopCause(issue([OBJ]), OBJ), null, "started: runs");
   assert.ok(isDraft(issue([DRAFT_LABEL])) && !isDraft(issue([OBJ])));
-  assert.equal(stopText("draft"), "`factory:draft` was applied", "no brackets inside the exit line's own: exit: stopped (`factory:draft` was applied)");
+  assert.equal(stopText("draft"), "`pendulum:draft` was applied", "no brackets inside the exit line's own: exit: stopped (`pendulum:draft` was applied)");
 });
 
 test("a running stage stops when its Objective is made a draft", { timeout: 5000 }, async () => {
@@ -43,7 +43,7 @@ test("a running stage stops when its Objective is made a draft", { timeout: 5000
   assert.deepEqual(seen, ["draft"]);
 });
 
-/** A fetch fake over one repository: `issues(label)` lists open issues, `pr(n)` the factory/<n> branch's open PR. */
+/** A fetch fake over one repository: `issues(label)` lists open issues, `pr(n)` the pendulum/<n> branch's open PR. */
 function fakeApi({ issues = () => [], pr = () => null, timeline = () => [], issue: one = () => null }) {
   const writes = [];
   const realFetch = globalThis.fetch;
@@ -62,12 +62,12 @@ function fakeApi({ issues = () => [], pr = () => null, timeline = () => [], issu
     const single = /^\/repos\/acme\/app\/issues\/(\d+)$/.exec(u.pathname);
     if (method === "GET" && single && one(Number(single[1]))) return json(one(Number(single[1])));
     if (method === "GET" && u.pathname === "/repos/acme/app/pulls") {
-      const n = Number(/factory\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
+      const n = Number(/pendulum\/(\d+)$/.exec(u.searchParams.get("head") || "")?.[1]);
       const p = pr(n);
       return json(p ? [p] : []);
     }
     const onePr = /^\/repos\/acme\/app\/pulls\/(\d+)$/.exec(u.pathname);
-    if (method === "GET" && onePr) return json({ number: Number(onePr[1]), state: "open", draft: false, node_id: `PR_${onePr[1]}`, mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "factory/7" }, base: { ref: "main" }, labels: [] });
+    if (method === "GET" && onePr) return json({ number: Number(onePr[1]), state: "open", draft: false, node_id: `PR_${onePr[1]}`, mergeable_state: "clean", head: { sha: "a".repeat(40), ref: "pendulum/7" }, base: { ref: "main" }, labels: [] });
     if (method === "GET" && /\/issues\/\d+\/timeline$/.test(u.pathname)) return json(timeline(Number(/issues\/(\d+)\//.exec(u.pathname)[1])));
     if (method === "GET" && u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
     if (method === "GET" && /\/actions\/workflows\/[^/]+\/runs$/.test(u.pathname)) return json({ workflow_runs: [] });
@@ -80,9 +80,9 @@ function fakeApi({ issues = () => [], pr = () => null, timeline = () => [], issu
 }
 
 const withApi = async (env, fn) => {
-  const saved = Object.fromEntries(["FACTORY_LOCAL", "FACTORY_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries(["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL", "GITHUB_API_URL"].map((k) => [k, process.env[k]]));
   Object.assign(process.env, { GITHUB_API_URL: "https://github.test", ...env });
-  for (const k of ["FACTORY_LOCAL", "FACTORY_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
+  for (const k of ["PENDULUM_LOCAL", "PENDULUM_LOCAL_ALL"]) if (!(k in env)) delete process.env[k];
   try {
     return await fn();
   } finally {
@@ -93,14 +93,14 @@ const withApi = async (env, fn) => {
 
 const INPUTS = { repo: "acme/app", objectiveLabel: OBJ, maxConcurrent: 5, dailyUsd: 100, ciChecks: [], timeoutMinutes: 60 };
 
-test("dispatcher: a draft is never picked or restarted, even beside factory:objective, and says why; what it blocks stays blocked", async () => {
+test("dispatcher: a draft is never picked or restarted, even beside pendulum:objective, and says why; what it blocks stays blocked", async () => {
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const ago = (ms) => new Date(Date.now() - ms).toISOString();
   // #7 a draft that also carries the Objective label (and a restart); #8 a plain Objective; #9 an Objective blocked by #7.
   const listed = [issue([OBJ, DRAFT_LABEL, RESTART_LABEL], "open", 7), issue([OBJ], "open", 8), issue([OBJ], "open", 9, { body: "Blocked by #7" })];
   const tick = (inputs) =>
     withApi({}, async () => {
-      setSelf("factory-app[bot]");
+      setSelf("pendulum-app[bot]");
       const api = fakeApi({ issues: (label) => (label === OBJ ? listed : []), timeline: () => [{ event: "labeled", label: { name: RESTART_LABEL }, actor: { login: "maintainer", type: "User" }, created_at: ago(60_000) }] });
       try {
         return { r: await dispatch(inputs, { token: "t" }), writes: api.writes };
@@ -126,7 +126,7 @@ test("dispatcher: an Objective made a draft while In review is left a draft PR a
   const { dispatch } = await import("../scripts/dispatch.mjs");
   const ago = (ms) => new Date(Date.now() - ms).toISOString();
   // #7 In review, made a draft just now; #8 Running, made a draft just now; #9 Running, made a draft long ago.
-  const open = { [OBJ]: [issue([OBJ, DRAFT_LABEL, "factory:in-review"], "open", 7)], "factory:in-review": [issue([OBJ, DRAFT_LABEL, "factory:in-review"], "open", 7)], "factory:running": [issue([OBJ, DRAFT_LABEL, "factory:running"], "open", 8), issue([DRAFT_LABEL, "factory:running"], "open", 9)] };
+  const open = { [OBJ]: [issue([OBJ, DRAFT_LABEL, "pendulum:in-review"], "open", 7)], "pendulum:in-review": [issue([OBJ, DRAFT_LABEL, "pendulum:in-review"], "open", 7)], "pendulum:running": [issue([OBJ, DRAFT_LABEL, "pendulum:running"], "open", 8), issue([DRAFT_LABEL, "pendulum:running"], "open", 9)] };
   await withApi({}, async () => {
     const api = fakeApi({
       issues: (label) => open[label] || [],
@@ -136,8 +136,8 @@ test("dispatcher: an Objective made a draft while In review is left a draft PR a
     try {
       const r = await dispatch(INPUTS, { token: "t" });
       assert.deepEqual(r.stopped, [7, 9]);
-      assert.ok(api.writes.includes("draft PR_70") && api.writes.includes("DELETE /issues/70/labels/factory:review") && api.writes.includes("DELETE /issues/7/labels/factory:in-review"));
-      assert.ok(api.writes.includes("draft PR_90") && api.writes.includes("DELETE /issues/9/labels/factory:running"));
+      assert.ok(api.writes.includes("draft PR_70") && api.writes.includes("DELETE /issues/70/labels/pendulum:review") && api.writes.includes("DELETE /issues/7/labels/pendulum:in-review"));
+      assert.ok(api.writes.includes("draft PR_90") && api.writes.includes("DELETE /issues/9/labels/pendulum:running"));
       assert.ok(!api.writes.some((w) => /\/issues\/8\//.test(w)), "a stage may still be stopping itself");
       assert.deepEqual(r.ready, []);
     } finally {
@@ -149,7 +149,7 @@ test("dispatcher: an Objective made a draft while In review is left a draft PR a
 test("the merge pass never merges a draft's PR, whoever runs it", async () => {
   const { mergeReadyOne } = await import("../scripts/lib/session.mjs");
   await withApi({}, async () => {
-    const api = fakeApi({ issue: (n) => (n === 7 ? issue([OBJ, DRAFT_LABEL, "factory:in-review"]) : null) });
+    const api = fakeApi({ issue: (n) => (n === 7 ? issue([OBJ, DRAFT_LABEL, "pendulum:in-review"]) : null) });
     try {
       assert.equal(await mergeReadyOne(REPO, { issue: 7, prNumber: 70, queue: false, objectiveLabel: OBJ }, { token: "t" }), "stopped");
       assert.ok(!api.writes.some((w) => /merge/.test(w)));
@@ -162,11 +162,11 @@ test("the merge pass never merges a draft's PR, whoever runs it", async () => {
 test("the sandbox launcher starts nothing for a draft, whatever the event", async () => {
   const { readContext } = await import("../scripts/launch.mjs");
   await withApi({}, async () => {
-    const api = fakeApi({ issue: (n) => (n === 7 ? issue([OBJ, DRAFT_LABEL, "factory:question"]) : null) });
+    const api = fakeApi({ issue: (n) => (n === 7 ? issue([OBJ, DRAFT_LABEL, "pendulum:question"]) : null) });
     try {
       for (const kind of ["comment", "swept", "checks", "review"]) {
         const c = await readContext({ repo: REPO, n: 7, ev: { kind, human: true }, inputs: { objectiveLabel: OBJ, maintainers: [], ciChecks: [] }, opts: { token: "t" }, readEventTime: false });
-        assert.match(c.skip ?? "", /#7 is a draft \(factory:draft\)/, kind);
+        assert.match(c.skip ?? "", /#7 is a draft \(pendulum:draft\)/, kind);
       }
       assert.deepEqual(api.writes, []);
     } finally {
@@ -175,28 +175,28 @@ test("the sandbox launcher starts nothing for a draft, whatever the event", asyn
   });
 });
 
-test("local mode: `factory run` refuses a draft before any claim; a draft is neither resumed nor reviewed", async () => {
+test("local mode: `pendulum run` refuses a draft before any claim; a draft is neither resumed nor reviewed", async () => {
   const { Local, holderId } = await import("../scripts/local.mjs");
   const { claimBody } = await import("../scripts/lib/local.mjs");
   const ws = mkdtempSync(join(tmpdir(), "draft-ws-"));
   const claimed = [];
-  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ FACTORY_LOCAL_ALL: "1" }), reapHere: () => {}, ws: () => ws, withClaim: async (n) => (claimed.push(n), { exit: "delivered" }) });
+  const loop = Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "acme/app", opts: { token: "t" }, wf: {}, holder: "this-loop", baseEnv: () => ({ PENDULUM_LOCAL_ALL: "1" }), reapHere: () => {}, ws: () => ws, withClaim: async (n) => (claimed.push(n), { exit: "delivered" }) });
   const gh = { getIssue: async () => issue([OBJ, DRAFT_LABEL]), findPr: async () => null };
-  await assert.rejects(loop.runIssue(7, { gh, waitMs: 1 }), /#7 is a draft \(factory:draft\), which Factory never runs; start it first/);
+  await assert.rejects(loop.runIssue(7, { gh, waitMs: 1 }), /#7 is a draft \(pendulum:draft\), which Pendulum never runs; start it first/);
   assert.deepEqual(claimed, [], "no claim is taken");
   // Held by a loop of this machine that went away: resumed and reviewed unless a draft.
   const away = holderId(undefined, 2 ** 22 + 7);
-  const claim = (n) => ({ id: n, user: { login: "maintainer", type: "User" }, updated_at: new Date(Date.now() - 3600_000).toISOString(), body: `<!-- factory:${n}:local -->\n${claimBody(away, new Date(Date.now() - 3600_000))}` });
-  const pull = (n) => ({ number: n * 10, draft: false, head: { ref: `factory/${n}` }, labels: [{ name: "factory:review" }] });
-  await withApi({ FACTORY_LOCAL: "1", FACTORY_LOCAL_ALL: "1" }, async () => {
+  const claim = (n) => ({ id: n, user: { login: "maintainer", type: "User" }, updated_at: new Date(Date.now() - 3600_000).toISOString(), body: `<!-- pendulum:${n}:local -->\n${claimBody(away, new Date(Date.now() - 3600_000))}` });
+  const pull = (n) => ({ number: n * 10, draft: false, head: { ref: `pendulum/${n}` }, labels: [{ name: "pendulum:review" }] });
+  await withApi({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_ALL: "1" }, async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
       const u = new URL(url);
       const json = (b) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
       if (u.pathname === "/repos/acme/app/pulls") return json([pull(7), pull(8)]);
       const one = /^\/repos\/acme\/app\/issues\/(\d+)$/.exec(u.pathname);
-      if (one) return json(issue(Number(one[1]) === 8 ? [OBJ, DRAFT_LABEL, "factory:in-review"] : [OBJ, "factory:in-review"], "open", Number(one[1])));
-      if (u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("labels") === "factory:running" ? [issue([OBJ, DRAFT_LABEL, "factory:running"], "open", 8), issue([OBJ, "factory:running"], "open", 7)] : []);
+      if (one) return json(issue(Number(one[1]) === 8 ? [OBJ, DRAFT_LABEL, "pendulum:in-review"] : [OBJ, "pendulum:in-review"], "open", Number(one[1])));
+      if (u.pathname === "/repos/acme/app/issues") return json(u.searchParams.get("labels") === "pendulum:running" ? [issue([OBJ, DRAFT_LABEL, "pendulum:running"], "open", 8), issue([OBJ, "pendulum:running"], "open", 7)] : []);
       if (u.pathname.endsWith("/collaborators")) return json([{ login: "maintainer" }]);
       if (u.pathname === "/user") return json({ login: "maintainer", type: "User" });
       const comments = /^\/repos\/acme\/app\/issues\/(\d+)\/comments$/.exec(u.pathname);
@@ -212,17 +212,17 @@ test("local mode: `factory run` refuses a draft before any claim; a draft is nei
   });
 });
 
-test("setup creates factory:draft, and applying or removing it ticks the dispatcher on every route", async () => {
+test("setup creates pendulum:draft, and applying or removing it ticks the dispatcher on every route", async () => {
   const { readFileSync } = await import("node:fs");
   const { LABELS, renderWorkflow } = await import("../scripts/setup.mjs");
   const { parseYaml } = await import("../scripts/lib/yaml.mjs");
   assert.ok(LABELS.some(([name]) => name === DRAFT_LABEL));
   const template = readFileSync(join(import.meta.dirname, "..", "workflow-template.yml"), "utf8");
-  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/factory@v1.2.3", ci_workflow: "Quality" };
+  const values = { harness: "claude", runs_on: "ubuntu-latest", action: "clockgrove/pendulum@v1.2.3", ci_workflow: "Quality" };
   for (const v of [values, { ...values, sandbox: "vercel", default_branch: "main" }]) {
     const wf = parseYaml(renderWorkflow(template, v));
     assert.ok(wf.on.issues.types.includes("labeled") && wf.on.issues.types.includes("unlabeled"));
-    assert.match(wf.jobs.dispatch.if, /github\.event\.label\.name == 'factory:draft'/);
+    assert.match(wf.jobs.dispatch.if, /github\.event\.label\.name == 'pendulum:draft'/);
   }
 });
 
@@ -258,16 +258,16 @@ test("scorecard: a draft's clock starts when it is started, whatever the order o
 test("a draft edited after its plan and started by taking its draft label off is planned again, not Blocked as edited", async () => {
   const { planGate } = await import("../scripts/lib/objective-trust.mjs");
   // The Objective label at T0 and a plan from that text; made a draft at T1, edited at T2, started at T3 by taking the
-  // draft label off (factory:objective stayed on).
+  // draft label off (pendulum:objective stayed on).
   const T0 = "2031-03-02T01:00:00Z";
   const timeline = [
     { event: "labeled", label: { name: OBJ }, actor: MAINTAINER, created_at: T0 },
-    { event: "labeled", label: { name: "factory:running" }, created_at: "2031-03-02T01:01:00Z" },
+    { event: "labeled", label: { name: "pendulum:running" }, created_at: "2031-03-02T01:01:00Z" },
     { event: "labeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:10:00Z" },
     { event: "unlabeled", label: { name: DRAFT_LABEL }, actor: MAINTAINER, created_at: "2031-03-02T01:30:00Z" },
   ];
   await withApi({}, async () => {
-    setSelf("factory-app[bot]");
+    setSelf("pendulum-app[bot]");
     const api = fakeApi({ timeline: () => timeline });
     const blocks = [];
     try {
@@ -304,11 +304,11 @@ test("a Blocked or Question Objective made a draft and started by taking the dra
   const at = (m) => `2031-03-02T0${m}:00:00Z`;
   const ev = (event, name, t) => ({ event, label: { name }, actor: { login: "maintainer", type: "User" }, created_at: t });
   const run = async (events) => (await requeuedIn(events, OBJ, async () => true)).requeued;
-  for (const state of ["factory:blocked", "factory:question"]) {
-    const base = [ev("labeled", OBJ, at(1)), ev("labeled", "factory:running", at(2)), ev("labeled", state, at(3)), ev("labeled", DRAFT_LABEL, at(4))];
+  for (const state of ["pendulum:blocked", "pendulum:question"]) {
+    const base = [ev("labeled", OBJ, at(1)), ev("labeled", "pendulum:running", at(2)), ev("labeled", state, at(3)), ev("labeled", DRAFT_LABEL, at(4))];
     assert.equal(await run([...base, ev("unlabeled", DRAFT_LABEL, at(5))]), true, `${state}: started`);
     assert.equal(await run(base), false, `${state}: still a draft`);
   }
   // A draft removal from before the Block is no restart of the Blocked run.
-  assert.equal(await run([ev("labeled", DRAFT_LABEL, at(1)), ev("labeled", OBJ, at(1)), ev("unlabeled", DRAFT_LABEL, at(2)), ev("labeled", "factory:blocked", at(3))]), false);
+  assert.equal(await run([ev("labeled", DRAFT_LABEL, at(1)), ev("labeled", OBJ, at(1)), ev("unlabeled", DRAFT_LABEL, at(2)), ev("labeled", "pendulum:blocked", at(3))]), false);
 });

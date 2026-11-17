@@ -12,10 +12,10 @@ import { asAgent, setAgent } from "../scripts/lib/proc.mjs";
 import { BACKENDS } from "../scripts/lib/backend.mjs";
 import { claudeSandboxChecks } from "../scripts/doctor.mjs";
 
-const AGENT = { user: "factory-agent", uid: 1002, home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
+const AGENT = { user: "pendulum-agent", uid: 1002, home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
 const denied = (settings) => settings.sandbox.credentials.envVars.filter((v) => v.mode === "deny").map((v) => v.name);
 
-/** A throwaway agent home, temp directory and Factory-owned Claude home, for the runner's start-up path. */
+/** A throwaway agent home, temp directory and Pendulum-owned Claude home, for the runner's start-up path. */
 function fakeRunner() {
   const root = mkdtempSync(join(tmpdir(), "cr-"));
   const agent = { home: join(root, "agent"), tmp: join(root, "agent", "tmp"), uid: process.getuid() };
@@ -30,20 +30,20 @@ test("Claude's sandbox unsets the model credentials in every command's environme
 
 test("a runner's Claude settings: writes only in the checkout, the temp directories and the caches, never elsewhere in the agent's home", () => {
   const layout = runnerLayout(AGENT);
-  const writable = ["/home/factory-agent/repo", layout.agentTmp, layout.cmdTmp, ...layout.caches];
-  const s = claudeRunnerSettings({ clone: "/home/factory-agent/repo", writable, domains: ["github.com"] });
+  const writable = ["/home/pendulum-agent/repo", layout.agentTmp, layout.cmdTmp, ...layout.caches];
+  const s = claudeRunnerSettings({ clone: "/home/pendulum-agent/repo", writable, domains: ["github.com"] });
   const fs = s.sandbox.filesystem;
   assert.equal(s.sandbox.failIfUnavailable, true);
   assert.equal(s.sandbox.allowUnsandboxedCommands, false);
   assert.equal(s.disableAllHooks, true);
   assert.deepEqual(s.sandbox.network.allowedDomains, ["github.com"]);
   assert.deepEqual(fs.allowWrite, writable);
-  assert.ok(!fs.allowWrite.includes("/home/factory-agent"), "not the agent's home: its shell start-up files and git config stay unwritable");
+  assert.ok(!fs.allowWrite.includes("/home/pendulum-agent"), "not the agent's home: its shell start-up files and git config stay unwritable");
   assert.ok(!fs.allowWrite.some((p) => p.startsWith(layout.config)), "nor Claude Code's own state");
   assert.deepEqual(fs.denyRead, ["/proc"], "the agent's read-only GitHub token is for its commands");
   for (const p of ["repo/.git/hooks", "repo/.git/config", "repo/.claude", "repo/.mcp.json"]) {
-    assert.ok(fs.denyWrite.includes(`/home/factory-agent/${p}`), `${p}: no command writes it`);
-    assert.ok(s.permissions.deny.includes(`Edit(//home/factory-agent/${p})`), `${p}: no edit either`);
+    assert.ok(fs.denyWrite.includes(`/home/pendulum-agent/${p}`), `${p}: no command writes it`);
+    assert.ok(s.permissions.deny.includes(`Edit(//home/pendulum-agent/${p})`), `${p}: no edit either`);
   }
   assert.deepEqual(denied(s), CLAUDE_SECRET_ENV);
   assert.equal(s.permissions.blockWritesOutsideWorkingDirectories, true);
@@ -54,13 +54,13 @@ test("allowed_domains: added to LOCAL_DOMAINS, host names and *. entries only; d
   const value = "pypi.org, *.pythonhosted.org\nFiles.Example.com bad_host 1.2.3.4 http://x.org github.com";
   assert.deepEqual(runnerDomains(value).slice(LOCAL_DOMAINS.length), ["pypi.org", "*.pythonhosted.org", "files.example.com"]);
   assert.deepEqual(droppedDomains(value), ["bad_host", "1.2.3.4", "http://x.org"]);
-  const rows = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: { FACTORY_INPUT_ALLOWED_DOMAINS: value }, local: false });
+  const rows = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: { PENDULUM_INPUT_ALLOWED_DOMAINS: value }, local: false });
   assert.deepEqual(rows.map((r) => `${r.name}:${r.status}`), ["allowed_domains:WARN"]);
   assert.match(rows[0].detail, /"bad_host", "1\.2\.3\.4", "http:\/\/x\.org"/);
 });
 
-test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it", () => {
-  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: { FACTORY_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
+test("Claude on a runner: its own sandbox, acceptEdits, Pendulum's HOME for it", () => {
+  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/pendulum-agent/repo", env: { PENDULUM_INPUT_ALLOWED_DOMAINS: "pypi.org" } });
   assert.deepEqual(runner.domains, [...LOCAL_DOMAINS, "pypi.org"]);
   assert.equal(runner.home, CLAUDE_HOME);
   const { args, env } = harnessCommand({ harness: "claude", model: "m", prompt: "p", runner });
@@ -69,26 +69,26 @@ test("Claude on a runner: its own sandbox, acceptEdits, Factory's HOME for it", 
   assert.equal(flag("--permission-mode"), "acceptEdits");
   assert.equal(flag("--setting-sources"), "");
   assert.ok(args.includes("--strict-mcp-config"));
-  assert.equal(flag("--plugin-dir"), `${CLAUDE_HOME}/claude/plugin`, "Factory's skills from its own directory");
-  assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), ["/home/factory-agent/repo", "/home/factory-agent/tmp"]);
+  assert.equal(flag("--plugin-dir"), `${CLAUDE_HOME}/claude/plugin`, "Pendulum's skills from its own directory");
+  assert.deepEqual(args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : [])), ["/home/pendulum-agent/repo", "/home/pendulum-agent/tmp"]);
   const settings = JSON.parse(flag("--settings"));
   assert.deepEqual(denied(settings), SHELL_SECRET_KEYS, "every credential the harness could hold");
-  const editDiffs = "/home/factory-agent/.factory-claude/cmd/claude-1002/bash-edit-diff";
-  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/home/factory-agent/.factory-claude/cmd"), "its command temp directory is writable");
+  const editDiffs = "/home/pendulum-agent/.pendulum-claude/cmd/claude-1002/bash-edit-diff";
+  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/home/pendulum-agent/.pendulum-claude/cmd"), "its command temp directory is writable");
   assert.ok(settings.sandbox.filesystem.denyWrite.includes(editDiffs), "but not its Bash edits' diffs, which its own git reads outside the sandbox");
   assert.ok(settings.permissions.deny.includes(`Edit(/${editDiffs})`));
   assert.throws(() => claudeRunner({ harness: "claude", agent: { ...AGENT, uid: undefined, user: "no-such-user-f30" }, clone: "/c" }), /no uid/, "no uid, no start");
   assert.equal(settings.sandbox.network.allowedDomains.at(-1), "pypi.org");
-  assert.equal(env.CLAUDE_CONFIG_DIR, "/home/factory-agent/.factory-claude/config");
-  assert.equal(env.CLAUDE_CODE_TMPDIR, "/home/factory-agent/.factory-claude/cmd");
+  assert.equal(env.CLAUDE_CONFIG_DIR, "/home/pendulum-agent/.pendulum-claude/config");
+  assert.equal(env.CLAUDE_CODE_TMPDIR, "/home/pendulum-agent/.pendulum-claude/cmd");
   assert.equal(env.CLAUDE_ENV_FILE, `${CLAUDE_HOME}/env.sh`);
   assert.equal(env.GIT_CONFIG_KEY_0, "core.fsmonitor", "Claude Code's own git runs no fsmonitor from the checkout");
-  const [cmd, launch] = runnerLaunch(runner, "claude", ["-p"], "/opt/tool/bin:/home/factory-agent/.local/bin:/usr/bin");
+  const [cmd, launch] = runnerLaunch(runner, "claude", ["-p"], "/opt/tool/bin:/home/pendulum-agent/.local/bin:/usr/bin");
   assert.equal(cmd, "/usr/bin/env");
   assert.deepEqual(launch, [`HOME=${CLAUDE_HOME}`, "TMPDIR=/tmp", "PATH=/opt/tool/bin:/usr/bin", "claude", "-p"], "nothing of the agent's home on its PATH");
   assert.equal(claudeRunner({ harness: "codex", agent: AGENT, clone: "/c" }), null);
   assert.equal(claudeRunner({ harness: "claude", agent: null, clone: "/c" }), null, "no agent uid, no runner sandbox");
-  assert.equal(claudeRunner({ harness: "claude", agent: AGENT, clone: "/c", env: { FACTORY_LOCAL: "1" } }), null, "local mode has its own");
+  assert.equal(claudeRunner({ harness: "claude", agent: AGENT, clone: "/c", env: { PENDULUM_LOCAL: "1" } }), null, "local mode has its own");
 });
 
 test("a ~/.bashrc a validation command planted in the agent's home never runs at the next Claude start", async () => {
@@ -100,7 +100,7 @@ test("a ~/.bashrc a validation command planted in the agent's home never runs at
   assert.ok(existsSync(marker), "the planted files run when HOME is the agent's");
   writeFileSync(marker, "");
   await prepareClaudeHome(layout, { sudo: false });
-  // Claude Code's start on a runner: the unit gives the agent's HOME; Factory's launch replaces it before Claude starts.
+  // Claude Code's start on a runner: the unit gives the agent's HOME; Pendulum's launch replaces it before Claude starts.
   const [cmd, args] = runnerLaunch(layout, "bash", ["-lc", 'printf "%s" "$HOME"']);
   assert.equal(cmd, "/usr/bin/env");
   assert.equal(execFileSync("/usr/bin/env", args, { encoding: "utf8", env: { PATH: process.env.PATH, HOME: agent.home } }), layout.home);
@@ -110,7 +110,7 @@ test("a ~/.bashrc a validation command planted in the agent's home never runs at
   assert.equal(execFileSync("bash", ["-c", '. "$1"; printf "%s %s" "$HOME" "$TMPDIR"', "sh", layout.envFile], { encoding: "utf8" }), `${agent.home} ${agent.tmp}`);
 });
 
-test("Claude's state is made afresh before every start: what was planted is gone, the sessions Factory holds are back", async () => {
+test("Claude's state is made afresh before every start: what was planted is gone, the sessions Pendulum holds are back", async () => {
   dropSessions();
   const { layout } = fakeRunner();
   await resetClaudeState(layout);
@@ -124,7 +124,7 @@ test("Claude's state is made afresh before every start: what was planted is gone
   writeFileSync(join(projects, "-repo", "s1.jsonl"), '{"planted":true}\n');
   await resetClaudeState(layout);
   assert.ok(!existsSync(join(layout.config, "settings.json")) && !existsSync(join(layout.config, ".claude.json")));
-  assert.equal(readFileSync(join(projects, "-repo", "s1.jsonl"), "utf8"), '{"turn":1}\n', "Factory's captured copy, not the planted one");
+  assert.equal(readFileSync(join(projects, "-repo", "s1.jsonl"), "utf8"), '{"turn":1}\n', "Pendulum's captured copy, not the planted one");
   await realRoots({ fix: [layout.agentTmp, ...layout.caches] }, layout.agentHome);
   for (const c of layout.caches) assert.ok(existsSync(c), `${c} made for the sandbox to write`);
   assert.ok(existsSync(layout.editDiffs), "the edit-diff directory is a real one, for the write denial to hold");
@@ -170,10 +170,10 @@ test("doctor: in a job, bwrap, socat and rg; on a self-hosted runner, AppArmor w
   const restricted = () => "1\n";
   const rows = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: job, local: false, has, read: restricted, profiles: async () => "unprivileged_userns (enforce)\n" });
   assert.deepEqual(names(rows), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:FAIL", "claude sandbox: apparmor:FAIL"]);
-  assert.match(rows.at(-1).fix, /factory-bwrap.*apparmor_parser -r/);
-  const fixed = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: job, local: false, has: async () => true, read: restricted, profiles: async () => "factory-bwrap (unconfined)\n" });
+  assert.match(rows.at(-1).fix, /pendulum-bwrap.*apparmor_parser -r/);
+  const fixed = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: job, local: false, has: async () => true, read: restricted, profiles: async () => "pendulum-bwrap (unconfined)\n" });
   assert.equal(fixed.at(-1).status, "PASS");
-  const ubuntu26 = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: job, local: false, has: async () => true, read: restricted, profiles: async () => "factory-bwrap (unconfined)\nunpriv_bwrap (enforce)\n" });
+  const ubuntu26 = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: job, local: false, has: async () => true, read: restricted, profiles: async () => "pendulum-bwrap (unconfined)\nunpriv_bwrap (enforce)\n" });
   assert.equal(ubuntu26.at(-1).status, "FAIL", "bwrap-userns-restrict still loaded");
   const hosted = await claudeSandboxChecks({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" }, local: false, has: async () => true, read: restricted, profiles: async () => "" });
   assert.deepEqual(names(hosted), ["claude sandbox: bwrap:PASS", "claude sandbox: socat:PASS", "claude sandbox: rg:PASS"], "the Action loads the profile on GitHub's hosted runners");
@@ -185,17 +185,17 @@ test("the agent's unit keeps ProtectKernelTunables, but Claude Code's (bwrap mou
     assert.ok(asAgent("true", [], {}, [], AGENT.home)[1].includes("--property=ProtectKernelTunables=yes"));
     const claude = asClaudeAgent("/usr/bin/env", ["claude"], {}, [], AGENT.home)[1];
     assert.ok(!claude.includes("--property=ProtectKernelTunables=yes"));
-    for (const p of ["--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict", "--property=ProtectKernelModules=yes", "--uid=factory-agent"]) assert.ok(claude.includes(p), p);
+    for (const p of ["--property=NoNewPrivileges=yes", "--property=ProtectSystem=strict", "--property=ProtectKernelModules=yes", "--uid=pendulum-agent"]) assert.ok(claude.includes(p), p);
   } finally {
     setAgent(null);
   }
 });
 
 test("uidOf reads a user's uid from /etc/passwd", () => {
-  const passwd = () => "root:x:0:0::/root:/bin/bash\nfactory-agent:x:1002:1002::/home/factory-agent:/bin/bash\n";
-  assert.equal(uidOf("factory-agent", passwd), 1002);
+  const passwd = () => "root:x:0:0::/root:/bin/bash\npendulum-agent:x:1002:1002::/home/pendulum-agent:/bin/bash\n";
+  assert.equal(uidOf("pendulum-agent", passwd), 1002);
   assert.equal(uidOf("nobody-here", passwd), null);
-  assert.equal(runnerLayout({ user: "x", uid: 7, home: "/h", tmp: "/h/tmp" }).editDiffs, "/h/.factory-claude/cmd/claude-7/bash-edit-diff");
+  assert.equal(runnerLayout({ user: "x", uid: 7, home: "/h", tmp: "/h/tmp" }).editDiffs, "/h/.pendulum-claude/cmd/claude-7/bash-edit-diff");
 });
 
 test("the default hosts carry GitHub's Git LFS download hosts, never an upload host", () => {
@@ -206,13 +206,13 @@ test("the default hosts carry GitHub's Git LFS download hosts, never an upload h
 test("#61: Claude Code's own TMPDIR on a runner is the /tmp its unit makes private, never a directory in the agent's home", () => {
   // With blockReadsOutsideWorkingDirectories, the sandbox could not read a TMPDIR in the agent's home (outside the
   // working directories), and every sandboxed command lost its network, the proxy's bridge included.
-  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: {}, services: [] });
+  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/pendulum-agent/repo", env: {}, services: [] });
   const [, launch] = runnerLaunch(runner, "claude", []);
   assert.equal(launch.find((a) => a.startsWith("TMPDIR=")), "TMPDIR=/tmp");
   const { args } = harnessCommand({ harness: "claude", prompt: "p", runner });
   const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
   assert.equal(settings.permissions.blockReadsOutsideWorkingDirectories, true, "the bar it is fitted to");
-  for (const v of Object.values(runner)) if (typeof v === "string") assert.ok(!/\.factory-claude\/tmp$/.test(v), "no own TMPDIR left in the agent's home");
+  for (const v of Object.values(runner)) if (typeof v === "string") assert.ok(!/\.pendulum-claude\/tmp$/.test(v), "no own TMPDIR left in the agent's home");
 });
 
 test("services: the loopback ports that started listening after the setup began, at most SERVICES_MAX", async () => {
@@ -252,7 +252,7 @@ test("services: a socket the agent uid owns is never offered, whatever the reap 
 
 test("services: the env file relays each port inside the sandbox through its proxy, only where the sandbox's proxy is set", async () => {
   const layout = runnerLayout(AGENT);
-  assert.equal(envFileText(layout, []), "export HOME='/home/factory-agent'\nexport TMPDIR='/home/factory-agent/tmp'\n");
+  assert.equal(envFileText(layout, []), "export HOME='/home/pendulum-agent'\nexport TMPDIR='/home/pendulum-agent/tmp'\n");
   const text = envFileText(layout, [5432, 6379]);
   assert.match(text, /for __f_p in 5432 6379; do/);
   assert.match(text, /TCP4-LISTEN:\$__f_p,bind=127\.0\.0\.1/);
@@ -287,7 +287,7 @@ test("services: the relay starts for a proxy login of srt or srt.<session>, and 
 });
 
 test("services: their 127.0.0.1 ports join Claude's allowed hosts on a runner", () => {
-  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/factory-agent/repo", env: {}, services: [5432] });
+  const runner = claudeRunner({ harness: "claude", agent: AGENT, clone: "/home/pendulum-agent/repo", env: {}, services: [5432] });
   assert.deepEqual(runner.services, [5432]);
   const { args } = harnessCommand({ harness: "claude", prompt: "p", runner });
   const hosts = JSON.parse(args[args.indexOf("--settings") + 1]).sandbox.network.allowedDomains;

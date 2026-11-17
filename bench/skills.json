@@ -1,204 +1,204 @@
 {
   "version": 2,
   "skills": {
-    "factory-deliver-pr": {
-      "sha256": "b9790896ecce4df67c523359618db358456e972219888ac5b3399c89889556d3",
+    "pendulum-deliver-pr": {
+      "sha256": "8afb36942d8930123756a1f976070eb0b3b2991371d3e89171e7675a99d1d02b",
       "lines": 42,
       "words": 686,
       "files": {
         "agents/openai.yaml": {
-          "sha256": "72295268a0ebb8ffa0a896f704b097a86ad1e385fb7fc7379f5735e8e88ff347",
+          "sha256": "cbe5d74901f6e33d497b36e6530a4e209f04e0ff41e3fab2b31a4f39310fbbe9",
           "lines": 4,
           "words": 22
         },
         "reference.md": {
-          "sha256": "d284f416064eb648a78c293a9cfd5a8f50b9024d6aeea53d3c102c8e7d7cc73b",
+          "sha256": "254c6bef52e8121ca94a7b213a64f3ec6fb7687247983790eb0602aee54fe2c4",
           "lines": 24,
           "words": 656
         }
       }
     },
-    "factory-doctor": {
-      "sha256": "5590d3ba981af1d3019abc2273de484f7eb759a82760b2da9b7cec6d03a17bda",
+    "pendulum-doctor": {
+      "sha256": "b38faa0fed66ead37ecc3e0b695e728e6e94fc209127496f3ab90b8c928f0bee",
       "lines": 43,
       "words": 698,
       "files": {
         "reference.md": {
-          "sha256": "c9efe5a36df23655a362898f49ea60afc1948cbce4e3e4b92ce28974654a70ad",
+          "sha256": "ee9ef05c1ae6e07a79583382ba53dde51a552d169f812da0a63a2f89fe8a4881",
           "lines": 4,
           "words": 111
         }
       }
     },
-    "factory-draft": {
-      "sha256": "412763c6df72d85367f242297201deb5fe62907425576a101c8a669d9262396f",
+    "pendulum-draft": {
+      "sha256": "a364a845c5d0c55bc3ff9b4a24306fa98cc1213a25c395ca63862a315242cb1b",
       "lines": 33,
       "words": 456
     },
-    "factory-file": {
-      "sha256": "30d37c1c90e92431099ee8847f5730b28b20337a79b20dff0c2f3efd64db0d0c",
+    "pendulum-file": {
+      "sha256": "bc97675cc66e433366f347ea14e3ce65229607dc5e70aeed6fbb23419a6e6773",
       "lines": 41,
       "words": 689,
       "files": {
         "reference.md": {
-          "sha256": "e58bf7f74fb262054a679ce58f4a0fe4b19a9378dcdd46711fcf64c84e3404c1",
+          "sha256": "21449e12653255762f5661ff04e4aa19dc4bb8f459dd0c70a84b3b456ece4e50",
           "lines": 35,
           "words": 506
         }
       }
     },
-    "factory-handover": {
-      "sha256": "c9b3a2e159fa52bd7198e43b2fd0f3765bffcfc7764289b39e3a8117dc898819",
+    "pendulum-handover": {
+      "sha256": "9f179dd99936956d90e4182acb6260fa2e94c36c7b4e4e204b2f1a393ce8a63f",
       "lines": 21,
       "words": 457
     },
-    "factory-implement-split": {
-      "sha256": "421d5fffa2df941deddcba3059f6db0c1a6f282adc9be097ba9ea927d77940fb",
+    "pendulum-implement-split": {
+      "sha256": "a0bc2d346e521faa1a706364c5d4ddb2771a8b8f530048d6a090230c817637eb",
       "lines": 40,
       "words": 700,
       "files": {
         "agents/openai.yaml": {
-          "sha256": "0c0a0ee14bfd6452f70ca61e8ce2ba89ad3fac7bdea0ff82e2814356cab5d371",
+          "sha256": "c74f2fc74862dce1f78001b7a84f6a40282786637751cff4227eff3f31a81d28",
           "lines": 4,
           "words": 22
         }
       }
     },
-    "factory-objective-plan": {
-      "sha256": "3cce347aff343a9ba314f765fa0a79c54d8eb498b845e034c3df6d5dbfaa8c6f",
+    "pendulum-objective-plan": {
+      "sha256": "828f2b5748e874b35fb9599265a2e6606858dd91bb22dc7a0d84bf88346fc5af",
       "lines": 43,
       "words": 690,
       "files": {
         "agents/openai.yaml": {
-          "sha256": "7e390742e1f5b3e7b9679b5e54b40614ab93b67e6a76684d12d820bc14465761",
+          "sha256": "bf47446976d64f9b856f82a1c3c3084eaad0e221b331aac987398a6fbd7e9aa0",
           "lines": 4,
           "words": 22
         }
       }
     },
-    "factory-prove-acceptance": {
-      "sha256": "62128d57b926a8992d3e7179f569a1b17818af43ba3382a361456212c63e4eca",
+    "pendulum-prove-acceptance": {
+      "sha256": "65bcea43d46c9721a549c54146bf5d7f501cfbd7b8095eb37f8787c02badbcd3",
       "lines": 42,
       "words": 698,
       "files": {
         "agents/openai.yaml": {
-          "sha256": "0bb5f0ed87eba912b2e01a1993bcdf14245c8f2d530feb1b05304e84bdd6849f",
+          "sha256": "1547cc657528cab6dd0ccfc3ec669c9bdb22d5ca1e2bd716f9577cd8cf049136",
           "lines": 4,
           "words": 22
         }
       }
     },
-    "factory-queue": {
-      "sha256": "c24ea329ef5cec38a7a58011a804917a8b6d3ccbec2ff762bd9c35f0ecd560cd",
+    "pendulum-queue": {
+      "sha256": "2f52bcd80220834b49a97b72effefd1af3cb0712ea67d680133d0189b6c5e5c1",
       "lines": 44,
       "words": 644,
       "files": {
         "reference.md": {
-          "sha256": "2cec9713e1adf9af6080fbadc95809ce6aae4bd62a1dd8d783e32c72fc905022",
+          "sha256": "0930e78a16fbe3ee8fed8f13a879eda92cdafff0fd2dd0b195355967fcc480ac",
           "lines": 18,
           "words": 383
         }
       }
     },
-    "factory-restart": {
-      "sha256": "7710d83e56faa057152168a39efb7ce776e3ff5128c3217f572e71143b2a3588",
+    "pendulum-restart": {
+      "sha256": "adfdac434adaf1482f2ad5ba0fc76777bee9b40d521d92f88a85847856d3d7d5",
       "lines": 31,
       "words": 506
     },
-    "factory-review": {
-      "sha256": "31aa29b77b2e1c75b23918d70dd9c72e7f9db6e0eaa3b6c580c88d5188a9db89",
+    "pendulum-review": {
+      "sha256": "b1fdc13ede2e21c76d92688f1ce24e1c4f6f656ad3294acba5e6dcbd6180b7f4",
       "lines": 40,
       "words": 699,
       "files": {
         "reference.md": {
-          "sha256": "d91b2f327b380f8c6b9f123e96e49bed6bc78de900b591146aedd9639e7e3cf9",
+          "sha256": "a46592f2580e9316ac6534d2a010f2b29cdea4b2246872526ab9c0503457dd02",
           "lines": 14,
           "words": 214
         }
       }
     },
-    "factory-review-pr": {
-      "sha256": "405c81fbd881a88f92da7b9468e8a8338293fdf7db78b8d45f9f3025b6386679",
+    "pendulum-review-pr": {
+      "sha256": "b4e3d0177b2df85829cb84d8bfe0b1e817120a43b9a1fcbb0973191c1149e14d",
       "lines": 50,
       "words": 689,
       "files": {
         "agents/openai.yaml": {
-          "sha256": "7b2d3226382ada52c859b3e1909507c0a61c3801a48a2cfb2993b0f9a7bd1de5",
+          "sha256": "f063214cb1f6d39628390a15f88c1ebe5130b8aaf8c96e86743775e00caebb4e",
           "lines": 4,
           "words": 22
         },
         "reference.md": {
-          "sha256": "293c5f1977f07fe44f6ed8b0fa74df8f1cf4fa80766bfdbf514b79ab90a625b9",
+          "sha256": "4c86b8a739b0d904f6ad19e684e4ff75c43a501d8722b0a6ef23f6135c99a8e9",
           "lines": 54,
           "words": 1011
         }
       }
     },
-    "factory-run": {
-      "sha256": "4786c87dd082e54684a560dfa5271641455de6ccd8df2e3d6e64e58a6b167bdf",
+    "pendulum-run": {
+      "sha256": "f4f5e5f1cc0f648daba2b7c3f614f6777ec3d3e7acc151c6e0cbcd627192fddb",
       "lines": 51,
       "words": 699,
       "files": {
         "reference.md": {
-          "sha256": "35c7877ac9a7418a8f1b7ab1880d7f78f166de1621fdaa500748774acde0237e",
+          "sha256": "f2108baad9ce2f7c8e223fab1af4648c562cd10a3b16f7cdda430ba44a9921bf",
           "lines": 17,
           "words": 266
         }
       }
     },
-    "factory-score": {
-      "sha256": "95ed607ef04cbb748b78d240cb3f340c118396e2d31d56792872e6950d49e2a8",
+    "pendulum-score": {
+      "sha256": "8cdce6350a461eb0b605357706f93635f2740e7023819559b7a74d1e9d54b3c5",
       "lines": 30,
       "words": 545
     },
-    "factory-scoring": {
-      "sha256": "e6fac839e0002b435224c5f6bce10643e56f4c04d266d3e055ab3f3bef3af314",
+    "pendulum-scoring": {
+      "sha256": "08d63a27a8a659d5381bff98f05cd41ebfd0d2a82f709b203fccf828f344ccba",
       "lines": 35,
       "words": 689,
       "files": {
         "reference.md": {
-          "sha256": "bede505f936f2b9b24dfe6546041ff933f01a6557ce9f0d0beef75bc241a3014",
+          "sha256": "e0db0aa05eb79b044a5d91c0004117eefe8fe4dd1d38a2c0bc555b47a3d19756",
           "lines": 52,
           "words": 1301
         }
       }
     },
-    "factory-serve": {
-      "sha256": "825de476cd987a5a445444781a575a8df975aec20415e9cdef7be139a765d08f",
+    "pendulum-serve": {
+      "sha256": "8c3bf2bdf905ba9c305a1e5ffdc377f2c165eb3dc65b6b5185df5d32c5e7553f",
       "lines": 31,
       "words": 612,
       "files": {
         "reference.md": {
-          "sha256": "e05a0b8d6e915318570215583ff1a3f8888641c0241f1828a3e50ec5b1383efa",
+          "sha256": "178e4e76b1375e01d18e56a407c5e547d662cefd5dcc1d48d853a967fd0520b3",
           "lines": 8,
           "words": 236
         }
       }
     },
-    "factory-setup": {
-      "sha256": "25cc517ca9ffaf65cd248852e05382002a0c10dd70ab003204ccdee82a7dd4d8",
+    "pendulum-setup": {
+      "sha256": "5862da556bbea9ceeeb068a1b584788f391020b31eabde96eef3ab75bf4d8c59",
       "lines": 47,
       "words": 688,
       "files": {
         "local.md": {
-          "sha256": "95722204fb36e6faa11caf8520d8e9582a483ac400b3495fbe96cb0d2349f474",
+          "sha256": "63a6a2f3b22066422d3046cb76b1baff6801703f5310f0d5df2e252ecc510844",
           "lines": 36,
           "words": 669
         },
         "reference.md": {
-          "sha256": "db0d5c06e90488024634af7208efa202faf3c8aed53a65008e322149ed4ec257",
+          "sha256": "1d634b66442069097fcadebf9f73b773293a420859667ed20751586c12cdf43b",
           "lines": 48,
           "words": 924
         }
       }
     },
-    "factory-start": {
-      "sha256": "0b7516aadd7621b62987a4ae2d1625219578e96da8dfd92fb0b72df6576d85c8",
+    "pendulum-start": {
+      "sha256": "91c0450a64213f0d4b292d0c58031f5d262e9432cc1e0a00f16eda6302176ad8",
       "lines": 36,
       "words": 601
     },
-    "factory-stop": {
-      "sha256": "7d3866987f8b6e57a26c9238855f75b115d4abe2b53573b1f55d89e01190c9ca",
+    "pendulum-stop": {
+      "sha256": "6ea303b46d476d3377c28d0a53ae2576a9b314e4ccfc7e501c5711869321fbd4",
       "lines": 30,
       "words": 459
     }

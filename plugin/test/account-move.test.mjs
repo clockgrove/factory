@@ -9,16 +9,16 @@ import { test } from "node:test";
 // The stage script serve starts is this file's fake worker: it notes the account its env was made for, waits for FAKE_GO
 // when told to (a stage still running), then writes the result.json a test gives it, with that account's name as the real
 // worker records it (session.mjs writeUsage `account`). A limit with no reset ends it `paused` only when serve's env says
-// automatic choice picked its account (FACTORY_STAGE_AUTO_ACCOUNT: harness.mjs LIMIT.moves); else it Blocks recording
+// automatic choice picked its account (PENDULUM_STAGE_AUTO_ACCOUNT: harness.mjs LIMIT.moves); else it Blocks recording
 // the refusal (`limitRefused`), as the real stage does. Set before local.mjs is loaded, so serve's real start, hold, pause
 // and resume paths run.
 const root = realpathSync(mkdtempSync(join(tmpdir(), "plugin-")));
 mkdirSync(join(root, "scripts"));
 writeFileSync(
   join(root, "scripts", "worker.mjs"),
-  'import { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, `${process.env.FAKE_ACCOUNT}\\n`);\nif (process.env.FAKE_GO) while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\nconst r = { ...JSON.parse(process.env.FAKE_RESULT), account: process.env.FAKE_ACCOUNT };\nif (r.usageLimit?.noReset && process.env.FACTORY_STAGE_AUTO_ACCOUNT !== "1") Object.assign(r, { exit: "blocked", usageLimit: undefined, limitRefused: { harness: r.usageLimit.harness } });\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), JSON.stringify(r));\n',
+  'import { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst a = process.argv;\nappendFileSync(process.env.FAKE_RAN, `${process.env.FAKE_ACCOUNT}\\n`);\nif (process.env.FAKE_GO) while (!existsSync(process.env.FAKE_GO)) await new Promise((r) => setTimeout(r, 20));\nconst r = { ...JSON.parse(process.env.FAKE_RESULT), account: process.env.FAKE_ACCOUNT };\nif (r.usageLimit?.noReset && process.env.PENDULUM_STAGE_AUTO_ACCOUNT !== "1") Object.assign(r, { exit: "blocked", usageLimit: undefined, limitRefused: { harness: r.usageLimit.harness } });\nwriteFileSync(join(a[a.indexOf("--usage-dir") + 1], "result.json"), JSON.stringify(r));\n',
 );
-process.env.FACTORY_PLUGIN_ROOT = root;
+process.env.PENDULUM_PLUGIN_ROOT = root;
 const { RETRY } = await import("../scripts/lib/github.mjs");
 const { logTo } = await import("../scripts/lib/inputs.mjs");
 const { accountHolds, holdsDir } = await import("../scripts/lib/holds.mjs");
@@ -30,13 +30,13 @@ const { choiceTrusted, objectiveSha } = await import("../scripts/lib/objective-t
 RETRY.sleep = async () => {};
 const MIN = 60_000;
 const REPO = { owner: "acme", name: "app", full: "acme/app" };
-const NOTICE = "<!-- factory:8:account-limit -->";
+const NOTICE = "<!-- pendulum:8:account-limit -->";
 
 /** A stand-in home: Claude Code accounts alpha (the default), beta and gamma, and a Codex account cx. Every file is a dummy. */
 function fakeHome() {
   const h = realpathSync(mkdtempSync(join(tmpdir(), "move-")));
-  for (const d of [".claude", ".codex", ".config/factory", "work/claude-a", "work/claude-b", "work/claude-c", "work/codex-x"]) mkdirSync(join(h, d), { recursive: true, mode: 0o700 });
-  chmodSync(join(h, ".config", "factory"), 0o700);
+  for (const d of [".claude", ".codex", ".config/pendulum", "work/claude-a", "work/claude-b", "work/claude-c", "work/codex-x"]) mkdirSync(join(h, d), { recursive: true, mode: 0o700 });
+  chmodSync(join(h, ".config", "pendulum"), 0o700);
   const at = (d) => join(h, "work", d);
   writeFileSync(accountsFile(h), JSON.stringify({ claude: [{ name: "alpha", home: at("claude-a") }, { name: "beta", home: at("claude-b") }, { name: "gamma", home: at("claude-c") }], codex: [{ name: "cx", home: at("codex-x") }] }), { mode: 0o600 });
   return h;
@@ -58,7 +58,7 @@ async function withHome(h, fn) {
  * another login is given), comments, the people who can push (`writers`), and a count of timeline reads. The issue's
  * `updated_at` moves as GitHub's does: on a label change and a new comment. Every write is kept in `writes`.
  */
-function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:running"]) {
+function fakeGitHub(labels = ["pendulum:objective", "pendulum:local", "pendulum:running"]) {
   const state = { labels: new Set(labels), timeline: [], comments: [], writes: [], timelineReads: 0, writers: new Set(["maintainer", "kirk"]), updated: 0, now: () => Date.now() };
   const touch = () => (state.updated += 1);
   let id = 100;
@@ -122,7 +122,7 @@ function fakeGitHub(labels = ["factory:objective", "factory:local", "factory:run
       state.timeline.push({ event: "unlabeled", label: { name }, created_at: new Date(Date.UTC(2026, 10, 15) + state.timeline.length * 1000).toISOString(), actor: { login: by, id: 5, type: "User" } });
     },
     notices: () => state.comments.filter((c) => c.body.startsWith(NOTICE)),
-    blocked: () => state.comments.filter((c) => c.body.includes("factory:block")),
+    blocked: () => state.comments.filter((c) => c.body.includes("pendulum:block")),
     restore() {
       globalThis.fetch = realFetch;
       if (saved === undefined) delete process.env.GITHUB_API_URL;
@@ -140,7 +140,7 @@ function serveOn(h, clock) {
   const dev = join(h, "work", `repo-${Math.random().toString(36).slice(2, 8)}`);
   const loop = Object.assign(Object.create(Local.prototype), { dev, harness: "claude", repo: REPO, repoFull: REPO.full, wf: {}, opts: { token: "t" }, stopping: false, firstSetup: new Map(), children: new Set(), clock, holder: holderId(machineIdentity(), process.pid), claimRetryMs: 0 });
   loop.holds = accountHolds({ dir: holdsDir(h) });
-  loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1" });
+  loop.baseEnv = () => ({ PENDULUM_LOCAL_ALL: "1" });
   loop.harnessReady = () => [];
   const clone = join(loop.ws(8), "repo");
   mkdirSync(clone, { recursive: true });
@@ -155,7 +155,7 @@ function serveOn(h, clock) {
   writeFileSync(ran, "");
   loop.result = {};
   loop.wait = false;
-  loop.stageEnv = (issue, usageDir, c, stageTmp, script, harness, hosts, account) => ({ PATH: `${bin}:${process.env.PATH}`, FACTORY_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], FAKE_RAN: ran, FAKE_ACCOUNT: account?.name ?? "none", FAKE_RESULT: JSON.stringify(loop.result), ...(loop.wait ? { FAKE_GO: join(dev, "go") } : {}) });
+  loop.stageEnv = (issue, usageDir, c, stageTmp, script, harness, hosts, account) => ({ PATH: `${bin}:${process.env.PATH}`, PENDULUM_LOCAL_SRT_GIT: join(dev, "none.json"), TMPDIR: stageTmp, pnpm_config_store_dir: caches[0], BUN_INSTALL_CACHE_DIR: caches[1], FAKE_RAN: ran, FAKE_ACCOUNT: account?.name ?? "none", FAKE_RESULT: JSON.stringify(loop.result), ...(loop.wait ? { FAKE_GO: join(dev, "go") } : {}) });
   loop.go = () => writeFileSync(join(dev, "go"), "");
   loop.ran = () => readFileSync(ran, "utf8").split("\n").filter(Boolean);
   return loop;
@@ -166,32 +166,32 @@ const limited = (reset, since, window = "five_hour") => ({ exit: "paused", usd: 
 const work = (loop) => loop.withClaim(8, () => loop.stage(8, "work", "worker.mjs", []));
 
 test("#265: the label's name, decided on the names alone: one pins, two move nothing, a name is an account of the Objective's harness or a problem naming the label", () => {
-  assert.deepEqual(accountPin(["factory:objective"]), { label: null });
-  assert.deepEqual(accountPin(["factory:objective", { name: "factory:account:Beta" }]), { label: "factory:account:Beta", name: "beta" });
-  assert.deepEqual(accountPin(["factory:account:beta", "factory:account:gamma"]), { label: null, two: ["factory:account:beta", "factory:account:gamma"] });
+  assert.deepEqual(accountPin(["pendulum:objective"]), { label: null });
+  assert.deepEqual(accountPin(["pendulum:objective", { name: "pendulum:account:Beta" }]), { label: "pendulum:account:Beta", name: "beta" });
+  assert.deepEqual(accountPin(["pendulum:account:beta", "pendulum:account:gamma"]), { label: null, two: ["pendulum:account:beta", "pendulum:account:gamma"] });
   const h = fakeHome();
   const loaded = loadAccounts({ home: h, env: {} });
   assert.equal(loaded.ok, true, JSON.stringify(loaded.problems));
   assert.equal(pinnedAccount(loaded, "claude", "beta").account.name, "beta");
-  assert.match(pinnedAccount(loaded, "claude", "cx").problem, /^`factory:account:cx` names a Codex account, and this Objective runs on Claude Code$/);
-  assert.match(pinnedAccount(loaded, "claude", "nobody").problem, /^`factory:account:nobody` names no Claude Code account this machine declares \(`alpha`, `beta`, `gamma`\)$/);
+  assert.match(pinnedAccount(loaded, "claude", "cx").problem, /^`pendulum:account:cx` names a Codex account, and this Objective runs on Claude Code$/);
+  assert.match(pinnedAccount(loaded, "claude", "nobody").problem, /^`pendulum:account:nobody` names no Claude Code account this machine declares \(`alpha`, `beta`, `gamma`\)$/);
   assert.match(pinnedAccount(loaded, "copilot", "copilot").account.name, /^copilot$/, "a harness that declares none has its one account");
   assert.match(pinnedAccount(loaded, "claude", "claude").problem, /names no Claude Code account/, "with accounts declared, the harness's own name is none of them");
   assert.match(pinnedAccount(loaded, "claude", "`@x").problem, /^an account label whose name is no account name names no/, "a name that is no account name is never echoed");
 });
 
 test("#265: the label is no edit to the Objective: the plan's record and the choice-label trust check ignore it", async () => {
-  assert.equal(objectiveSha("t", "b", ["factory:objective", "factory:account:beta"]), objectiveSha("t", "b", ["factory:objective"]));
+  assert.equal(objectiveSha("t", "b", ["pendulum:objective", "pendulum:account:beta"]), objectiveSha("t", "b", ["pendulum:objective"]));
   let reads = 0;
-  const t = await choiceTrusted(REPO, 8, ["factory:objective", "factory:account:beta"], {}, { labelers: async () => (reads += 1, {}) });
+  const t = await choiceTrusted(REPO, 8, ["pendulum:objective", "pendulum:account:beta"], {}, { labelers: async () => (reads += 1, {}) });
   assert.equal(t.ok, true);
   assert.equal(reads, 0, "no timeline read for it");
 });
 
 test("#265/#267: off local mode, with no accounts declared there, the label does nothing, and the stage's progress says so once", () => {
-  assert.match(accountLabelNote(["factory:objective", "factory:account:beta"], false), /^`factory:account:beta` does nothing on this route: this repository declares no accounts for GitHub Actions and the cloud sandbox/);
-  assert.equal(accountLabelNote(["factory:objective", "factory:account:beta"], true), "", "local mode acts on it");
-  assert.equal(accountLabelNote(["factory:objective"], false), "");
+  assert.match(accountLabelNote(["pendulum:objective", "pendulum:account:beta"], false), /^`pendulum:account:beta` does nothing on this route: this repository declares no accounts for GitHub Actions and the cloud sandbox/);
+  assert.equal(accountLabelNote(["pendulum:objective", "pendulum:account:beta"], true), "", "local mode acts on it");
+  assert.equal(accountLabelNote(["pendulum:objective"], false), "");
   for (const script of ["worker.mjs", "review.mjs"]) {
     const src = readFileSync(join(import.meta.dirname, "..", "scripts", script), "utf8");
     const gate = src.indexOf("await choiceGate(");
@@ -213,7 +213,7 @@ test("#264/#265: a hold keeps the limit's window, and the pause notice names the
   const body = pauseNoticeBody({ harness: "claude", account: "alpha", reset: t + 60 * MIN, window: "five_hour", free: ["beta", "gamma"] });
   assert.match(body, /Claude Code account `alpha` reached it \(window `five_hour`\), which resets at /);
   assert.ok(body.includes(new Date(t + 60 * MIN).toISOString()));
-  assert.match(body, /Free now: `beta` \(apply `factory:account:beta`\), `gamma` \(apply `factory:account:gamma`\)\./);
+  assert.match(body, /Free now: `beta` \(apply `pendulum:account:beta`\), `gamma` \(apply `pendulum:account:gamma`\)\./);
   assert.ok(!body.includes("@"));
   assert.match(pauseNoticeBody({ harness: "claude", account: "alpha", reset: t, window: "`@someone` ran" }), /\(its window was not reported\)/, "harness text in no other form is not shown");
   assert.match(pauseNoticeBody({ harness: "codex", account: "codex", reset: t, free: [] }), /Codex \(this machine's one Codex login\) reached it \(its window was not reported\)[\s\S]*No other Codex account on this machine is free now\./);
@@ -237,13 +237,13 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
       assert.equal(gh.notices().length, 1);
       const first = gh.notices()[0].body;
       assert.match(first, /Claude Code account `alpha` reached it \(window `five_hour`\), which resets at /);
-      assert.match(first, /Free now: `beta` \(apply `factory:account:beta`\), `gamma` \(apply `factory:account:gamma`\)/);
+      assert.match(first, /Free now: `beta` \(apply `pendulum:account:beta`\), `gamma` \(apply `pendulum:account:gamma`\)/);
       assert.ok(!first.includes("@"), "no @mention");
       assert.ok(!first.includes(h), "no path");
       assert.deepEqual(await loop.pausedHere(new Map()), [], "no label: it waits for alpha's reset");
       assert.equal(reads(gh), 0, "and reads nothing to decide it");
-      // A person who can push applies factory:account:beta: resumed now, its labeler read once over several ticks.
-      gh.apply("factory:account:beta");
+      // A person who can push applies pendulum:account:beta: resumed now, its labeler read once over several ticks.
+      gh.apply("pendulum:account:beta");
       for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), [8]);
       assert.equal(reads(gh), 1, "once per label change, not every tick");
       // The resume's stage runs on beta, its env made for beta; a stage start reads the labeler afresh.
@@ -258,7 +258,7 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
       assert.equal((await work(loop)).account, "beta");
       assert.equal(gh.notices().length, 1, "one comment, updated in place");
       assert.match(gh.notices()[0].body, /Claude Code account `beta` reached it \(window `seven_day`\)/);
-      assert.match(gh.notices()[0].body, /Free now: `gamma` \(apply `factory:account:gamma`\)\. /);
+      assert.match(gh.notices()[0].body, /Free now: `gamma` \(apply `pendulum:account:gamma`\)\. /);
       // The label stays on beta, which is held: it waits for beta's reset, though alpha comes free first.
       t += 60 * MIN;
       assert.deepEqual(await loop.pausedHere(new Map()), [], "the pinned account is held: wait");
@@ -267,7 +267,7 @@ test("#265: a pause posts one notice, updated in place; a trusted label moves th
       assert.deepEqual([held.exit, held.account, held.usageLimit.held], ["paused", "beta", true]);
       assert.equal(loop.ran().length, 3);
       // A person who can push takes the label off: back to the default, alpha, free now: resumed before beta's reset.
-      gh.remove("factory:account:beta");
+      gh.remove("pendulum:account:beta");
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
       loop.result = delivered;
       assert.equal((await work(loop)).account, "alpha");
@@ -285,36 +285,36 @@ test("#265: someone who cannot push moves nothing: removing a trusted pin leaves
   try {
     await withHome(h, async () => {
       const loop = serveOn(h, () => t);
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       loop.result = limited(t + 120 * MIN, t);
       assert.equal((await work(loop)).account, "beta");
       // alpha, the default, is free: a removal by a stranger does not move it there.
-      gh.remove("factory:account:beta", "stranger");
+      gh.remove("pendulum:account:beta", "stranger");
       for (let i = 0; i < 2; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
-      assert.match(gh.notices()[0].body, /`factory:account:beta` was removed by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective off that account, so it stays paused/);
+      assert.match(gh.notices()[0].body, /`pendulum:account:beta` was removed by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Pendulum does not move the Objective off that account, so it stays paused/);
       // The pin back, and a stranger adds a second label: two labels, it waits, past beta's reset too, said once.
-      gh.apply("factory:account:beta");
-      gh.apply("factory:account:gamma", "stranger");
+      gh.apply("pendulum:account:beta");
+      gh.apply("pendulum:account:gamma", "stranger");
       const patches = () => gh.state.writes.filter((w) => w.startsWith("PATCH /issues/comments/") && w.includes("account-limit")).length;
       const before = patches();
       t += 121 * MIN;
       for (let i = 0; i < 3; i++) assert.deepEqual(await loop.pausedHere(new Map()), []);
       assert.equal(patches() - before, 1, "said once");
-      assert.match(gh.notices()[0].body, /`factory:account:beta`, `factory:account:gamma`: more than one account label moves nothing, so the Objective waits, on no account, until one is left/);
+      assert.match(gh.notices()[0].body, /`pendulum:account:beta`, `pendulum:account:gamma`: more than one account label moves nothing, so the Objective waits, on no account, until one is left/);
       // A stage started anyway (a race with the tick) starts nothing and Blocks nothing: it waits.
       const waits = await loop.withClaim(8, () => loop.stage(8, "work", "worker.mjs", []));
       assert.equal(waits.exit, "paused");
       assert.equal(loop.ran().length, 1, "nothing ran, on the default or anywhere");
       assert.deepEqual(await loop.pausedHere(new Map()), [], "still two labels: still waiting");
       // One left: it goes on, on that one.
-      gh.remove("factory:account:gamma");
+      gh.remove("pendulum:account:gamma");
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
-      assert.match(gh.notices()[0].body, /^<!-- factory:8:account-limit -->\nFactory: one account label or none is left, so the Objective goes on\.$/, "the note no longer says it waits");
+      assert.match(gh.notices()[0].body, /^<!-- pendulum:8:account-limit -->\nPendulum: one account label or none is left, so the Objective goes on\.$/, "the note no longer says it waits");
       loop.result = delivered;
       assert.equal((await work(loop)).account, "beta");
       assert.equal(gh.blocked().length, 0, "never Blocked for it");
       // The dispatcher holds a queued Objective with two labels, whatever its accounts' holds.
-      assert.match(loop.limitHold(["factory:objective", "factory:account:beta", "factory:account:gamma"], 8, "x"), /more than one account label moves nothing/);
+      assert.match(loop.limitHold(["pendulum:objective", "pendulum:account:beta", "pendulum:account:gamma"], 8, "x"), /more than one account label moves nothing/);
       await Promise.all(loop.notesInFlight ?? []);
     });
   } finally {
@@ -330,17 +330,17 @@ test("#265: a stage start reads the labeler afresh, so a label removed and appli
     await withHome(h, async () => {
       const loop = serveOn(h, () => t);
       loop.result = delivered;
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
       // Removed, and applied again by a stranger, with no tick between: Blocked, nothing ran on beta.
-      gh.remove("factory:account:beta");
-      gh.apply("factory:account:beta", "stranger");
+      gh.remove("pendulum:account:beta");
+      gh.apply("pendulum:account:beta", "stranger");
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "blocked");
-      assert.match(gh.blocked().at(-1).body, /`factory:account:beta` was applied by `stranger`/);
+      assert.match(gh.blocked().at(-1).body, /`pendulum:account:beta` was applied by `stranger`/);
       assert.deepEqual(loop.ran(), ["beta"]);
       // The other way: kirk takes it off and applies it himself, no tick between: it runs on beta.
-      gh.remove("factory:account:beta");
-      gh.apply("factory:account:beta");
+      gh.remove("pendulum:account:beta");
+      gh.apply("pendulum:account:beta");
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
       // kirk loses push access: the next stage start knows it.
       gh.state.writers.delete("kirk");
@@ -362,19 +362,19 @@ test("#265: a paused Objective's kept check follows the issue's updated_at: a st
       const loop = serveOn(h, () => t);
       loop.result = limited(t + 60 * MIN, t);
       await work(loop);
-      gh.apply("factory:account:beta", "stranger");
+      gh.apply("pendulum:account:beta", "stranger");
       assert.deepEqual(await loop.pausedHere(new Map()), []);
-      gh.remove("factory:account:beta");
-      gh.apply("factory:account:beta");
+      gh.remove("pendulum:account:beta");
+      gh.apply("pendulum:account:beta");
       assert.deepEqual(await loop.pausedHere(new Map()), [8], "read again: the issue changed");
       // And the reverse: a trusted label removed and re-applied by a stranger before the next tick does not move it.
       const other = serveOn(h, () => t);
       other.result = limited(t + 60 * MIN, t);
-      gh.remove("factory:account:beta");
+      gh.remove("pendulum:account:beta");
       await work(other);
-      gh.apply("factory:account:beta");
-      gh.remove("factory:account:beta");
-      gh.apply("factory:account:beta", "stranger");
+      gh.apply("pendulum:account:beta");
+      gh.remove("pendulum:account:beta");
+      gh.apply("pendulum:account:beta", "stranger");
       assert.deepEqual(await other.pausedHere(new Map()), []);
     });
   } finally {
@@ -393,7 +393,7 @@ test("#265: a running stage finishes on its own account and the pin applies from
       loop.wait = true;
       const running = loop.stage(8, "work", "worker.mjs", []);
       while (loop.ran().length === 0) await new Promise((r) => setTimeout(r, 20));
-      gh.apply("factory:account:gamma");
+      gh.apply("pendulum:account:gamma");
       loop.go();
       assert.equal((await running).account, "alpha", "it finishes where it started");
       loop.wait = false;
@@ -402,18 +402,18 @@ test("#265: a running stage finishes on its own account and the pin applies from
       // alpha held: an unpinned Objective waits; a trusted pin to beta starts once its labeler is read (in the
       // background, for the next tick); until then the default is weighed.
       loop.holds.limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
-      assert.match(loop.limitHold(["factory:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /);
-      gh.remove("factory:account:gamma");
-      gh.apply("factory:account:beta");
-      const pinned = ["factory:objective", "factory:account:beta"];
+      assert.match(loop.limitHold(["pendulum:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /);
+      gh.remove("pendulum:account:gamma");
+      gh.apply("pendulum:account:beta");
+      const pinned = ["pendulum:objective", "pendulum:account:beta"];
       assert.match(loop.limitHold(pinned, 8, "u2"), /alpha's usage limit is spent/, "labeler not known yet: the default");
       await loop.pinReading.get(8);
       assert.equal(loop.limitHold(pinned, 8, "u2"), null, "trusted: beta, free");
       // A stranger's pin to a held account never holds a queued Objective whose default is free.
       loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 8 * 24 * 60 * MIN, now: t });
-      gh.remove("factory:account:beta");
-      gh.apply("factory:account:gamma", "stranger");
-      const strangers = ["factory:objective", "factory:account:gamma"];
+      gh.remove("pendulum:account:beta");
+      gh.apply("pendulum:account:gamma", "stranger");
+      const strangers = ["pendulum:objective", "pendulum:account:gamma"];
       assert.match(loop.limitHold(strangers, 8, "u3"), /alpha's usage limit is spent/);
       await loop.pinReading.get(8);
       assert.match(loop.limitHold(strangers, 8, "u3"), /alpha's usage limit is spent/, "refused: the default, not gamma's eight days");
@@ -424,10 +424,10 @@ test("#265: a running stage finishes on its own account and the pin applies from
 });
 
 for (const [what, apply, says] of [
-  ["an unknown name", (gh) => gh.apply("factory:account:nobody"), /`factory:account:nobody` names no Claude Code account this machine declares \(`alpha`, `beta`, `gamma`\), so it stays paused/],
-  ["an unknown name from someone who cannot push", (gh) => gh.apply("factory:account:nobody", "stranger"), /`factory:account:nobody` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective to that account, so it stays paused/],
-  ["another harness's account", (gh) => gh.apply("factory:account:cx"), /`factory:account:cx` names a Codex account, and this Objective runs on Claude Code, so it stays paused/],
-  ["a labeler who cannot push", (gh) => gh.apply("factory:account:beta", "stranger"), /`factory:account:beta` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Factory does not move the Objective to that account, so it stays paused/],
+  ["an unknown name", (gh) => gh.apply("pendulum:account:nobody"), /`pendulum:account:nobody` names no Claude Code account this machine declares \(`alpha`, `beta`, `gamma`\), so it stays paused/],
+  ["an unknown name from someone who cannot push", (gh) => gh.apply("pendulum:account:nobody", "stranger"), /`pendulum:account:nobody` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Pendulum does not move the Objective to that account, so it stays paused/],
+  ["another harness's account", (gh) => gh.apply("pendulum:account:cx"), /`pendulum:account:cx` names a Codex account, and this Objective runs on Claude Code, so it stays paused/],
+  ["a labeler who cannot push", (gh) => gh.apply("pendulum:account:beta", "stranger"), /`pendulum:account:beta` was applied by `stranger`, who cannot push to acme\/app and is not a pinned maintainer, so Pendulum does not move the Objective to that account, so it stays paused/],
 ]) {
   test(`#265: ${what}: a paused Objective stays paused, said once on its notice; at a stage start it Blocks, cause setup, naming the problem`, async () => {
     const h = fakeHome();
@@ -457,11 +457,11 @@ for (const [what, apply, says] of [
         const block = gh.blocked()[0].body;
         assert.match(block, new RegExp(says.source.replace(/, so it stays paused$/, "").replace(/^`/, "local mode: `")));
         assert.match(block, /"cause":"setup"/);
-        assert.match(block, /Apply one `factory:account:<name>` naming an account of this Objective's harness/);
+        assert.match(block, /Apply one `pendulum:account:<name>` naming an account of this Objective's harness/);
         // The problem fixed (the label off, by someone who can push; the Objective re-applied), then back: said again.
         gh.remove(accountLabelsOf(gh)[0]);
-        gh.state.labels.delete("factory:blocked");
-        gh.state.labels.add("factory:running");
+        gh.state.labels.delete("pendulum:blocked");
+        gh.state.labels.add("pendulum:running");
         loop.result = delivered;
         assert.equal((await loop.stage(8, "work", "worker.mjs", [])).exit, "delivered");
         loop.result = limited(t + 60 * MIN, t);
@@ -476,7 +476,7 @@ for (const [what, apply, says] of [
   });
 }
 
-const accountLabelsOf = (gh) => [...gh.state.labels].filter((l) => l.startsWith("factory:account:"));
+const accountLabelsOf = (gh) => [...gh.state.labels].filter((l) => l.startsWith("pendulum:account:"));
 
 for (const what of ["a usage limit's reset a week out", "two account labels"]) {
   test(`#265: a paused Objective's claim stays alive while its loop is, so ${what} is never Blocked as a loop gone away after a day; its claim is written about once an hour`, async () => {
@@ -490,11 +490,11 @@ for (const what of ["a usage limit's reset a week out", "two account labels"]) {
       await withHome(h, async () => {
         const loop = serveOn(h, () => t);
         if (what === "two account labels") {
-          gh.apply("factory:account:beta");
-          gh.apply("factory:account:gamma");
+          gh.apply("pendulum:account:beta");
+          gh.apply("pendulum:account:gamma");
         } else loop.result = limited(t + 7 * 24 * 60 * MIN, t, "seven_day");
         assert.equal((await work(loop)).exit, "paused");
-        const claimWrites = () => gh.state.writes.filter((w) => w.includes("factory:8:local")).length;
+        const claimWrites = () => gh.state.writes.filter((w) => w.includes("pendulum:8:local")).length;
         const before = claimWrites();
         for (let i = 0; i < 60; i++) {
           t += 30 * MIN;
@@ -531,19 +531,19 @@ test("#266: the choice: a free account, the one the Objective paused on first, t
   assert.deepEqual(harnessAccounts({ ok: true, accounts: { claude: [], codex: [], copilot: [] } }, "codex"), [{ name: "codex", harness: "codex", declared: false }]);
 });
 
-test("#266: the setting is FACTORY_LOCAL_AUTO_ACCOUNT=1, off unset, empty or 0; any other value is named and leaves it off; no stage's env carries it", () => {
-  assert.deepEqual(autoAccountSetting({ FACTORY_LOCAL_AUTO_ACCOUNT: "1" }), { on: true, problem: null });
-  for (const v of [undefined, "", "0"]) assert.deepEqual(autoAccountSetting(v === undefined ? {} : { FACTORY_LOCAL_AUTO_ACCOUNT: v }), { on: false, problem: null });
-  assert.deepEqual(autoAccountSetting({ FACTORY_LOCAL_AUTO_ACCOUNT: "yes" }), { on: false, problem: "FACTORY_LOCAL_AUTO_ACCOUNT is neither 1 nor 0, so automatic account choice is off" });
-  const saved = [process.env.FACTORY_LOCAL_AUTO_ACCOUNT, process.env.FACTORY_LOCAL_MAX_CONCURRENT];
-  process.env.FACTORY_LOCAL_AUTO_ACCOUNT = "1";
-  process.env.FACTORY_LOCAL_MAX_CONCURRENT = "3";
+test("#266: the setting is PENDULUM_LOCAL_AUTO_ACCOUNT=1, off unset, empty or 0; any other value is named and leaves it off; no stage's env carries it", () => {
+  assert.deepEqual(autoAccountSetting({ PENDULUM_LOCAL_AUTO_ACCOUNT: "1" }), { on: true, problem: null });
+  for (const v of [undefined, "", "0"]) assert.deepEqual(autoAccountSetting(v === undefined ? {} : { PENDULUM_LOCAL_AUTO_ACCOUNT: v }), { on: false, problem: null });
+  assert.deepEqual(autoAccountSetting({ PENDULUM_LOCAL_AUTO_ACCOUNT: "yes" }), { on: false, problem: "PENDULUM_LOCAL_AUTO_ACCOUNT is neither 1 nor 0, so automatic account choice is off" });
+  const saved = [process.env.PENDULUM_LOCAL_AUTO_ACCOUNT, process.env.PENDULUM_LOCAL_MAX_CONCURRENT];
+  process.env.PENDULUM_LOCAL_AUTO_ACCOUNT = "1";
+  process.env.PENDULUM_LOCAL_MAX_CONCURRENT = "3";
   try {
-    const env = Local.prototype.baseEnv.call({ wf: { FACTORY_LOCAL_AUTO_ACCOUNT: "1" }, harness: "claude" });
-    assert.equal(env.FACTORY_LOCAL_MAX_CONCURRENT, "3", "another local setting reaches the stage");
-    assert.ok(!("FACTORY_LOCAL_AUTO_ACCOUNT" in env), "this one does not, from the shell or the workflow");
+    const env = Local.prototype.baseEnv.call({ wf: { PENDULUM_LOCAL_AUTO_ACCOUNT: "1" }, harness: "claude" });
+    assert.equal(env.PENDULUM_LOCAL_MAX_CONCURRENT, "3", "another local setting reaches the stage");
+    assert.ok(!("PENDULUM_LOCAL_AUTO_ACCOUNT" in env), "this one does not, from the shell or the workflow");
   } finally {
-    for (const [k, v] of [["FACTORY_LOCAL_AUTO_ACCOUNT", saved[0]], ["FACTORY_LOCAL_MAX_CONCURRENT", saved[1]]]) v === undefined ? delete process.env[k] : (process.env[k] = v);
+    for (const [k, v] of [["PENDULUM_LOCAL_AUTO_ACCOUNT", saved[0]], ["PENDULUM_LOCAL_MAX_CONCURRENT", saved[1]]]) v === undefined ? delete process.env[k] : (process.env[k] = v);
   }
 });
 
@@ -589,10 +589,10 @@ test("#266: off, a stage runs on its pin or the default, as before; on, a stage 
       off.result = delivered;
       for (let i = 0; i < 2; i++, step()) assert.equal((await off.stage(8, "work", "worker.mjs", [])).account, "alpha");
       off.holds.limit({ harness: "claude", account: "alpha", reset: t + 60 * MIN, now: t });
-      assert.match(off.limitHold(["factory:objective"], 8, "u0"), /^claude account alpha's usage limit is spent until /, "off: held on the default though beta is free");
+      assert.match(off.limitHold(["pendulum:objective"], 8, "u0"), /^claude account alpha's usage limit is spent until /, "off: held on the default though beta is free");
       const held = await off.stage(8, "work", "worker.mjs", []);
       assert.deepEqual([held.exit, held.account], ["paused", "alpha"]);
-      assert.equal(off.limitHold(["factory:objective"], 8, "u0") !== null, true);
+      assert.equal(off.limitHold(["pendulum:objective"], 8, "u0") !== null, true);
       t += 61 * MIN;
       // On, in two serves on the one machine: alpha, limited an hour ago, comes after beta and gamma, which have no
       // limit remembered and take turns, whichever serve starts the stage.
@@ -616,10 +616,10 @@ test("#266: off, a stage runs on its pin or the default, as before; on, a stage 
       }
       assert.deepEqual(order, ["alpha", "beta", "gamma", "alpha"]);
       // A pin wins over the turn (beta's): every stage on gamma while it stays.
-      gh.apply("factory:account:gamma");
+      gh.apply("pendulum:account:gamma");
       step();
       assert.deepEqual([(await one.stage(8, "work", "worker.mjs", [])).account, (await two.stage(8, "work", "worker.mjs", [])).account], ["gamma", "gamma"]);
-      gh.remove("factory:account:gamma");
+      gh.remove("pendulum:account:gamma");
       step();
       assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "beta", "back to the turns");
       assert.equal(gh.blocked().length, 0);
@@ -654,11 +654,11 @@ test("#391: on, a stage starts on the free account with the most quota left by t
         assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta", "in either serve");
       }
       // A pinned stage on gamma leaves its reading too: gamma now has the most left.
-      gh.apply("factory:account:gamma");
+      gh.apply("pendulum:account:gamma");
       t += 1000;
       one.result = reading(0.05);
       assert.equal((await one.stage(8, "work", "worker.mjs", [])).account, "gamma");
-      gh.remove("factory:account:gamma");
+      gh.remove("pendulum:account:gamma");
       t += 1000;
       two.result = reading(0.05);
       assert.equal((await two.stage(8, "work", "worker.mjs", [])).account, "gamma");
@@ -720,11 +720,11 @@ test("#391: on, the Objective's next stage stays on its previous stage's account
       const loop = autoServe(h, () => t);
       // Each account measured through a pin: beta has the most left; alpha's stage is the last, its cache warm an hour.
       for (const [name, used] of [["beta", 0.1], ["gamma", 0.5], ["alpha", 0.8]]) {
-        gh.apply(`factory:account:${name}`);
+        gh.apply(`pendulum:account:${name}`);
         t += 1000;
         loop.result = reading(used, name === "alpha" ? t + 60 * MIN : null);
         assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, name);
-        gh.remove(`factory:account:${name}`);
+        gh.remove(`pendulum:account:${name}`);
       }
       t += 1000;
       loop.result = reading(0.8, t + 60 * MIN);
@@ -773,7 +773,7 @@ test("#266: on, a paused Objective resumes on a free account with no label and n
       assert.deepEqual([paused.exit, paused.account], ["paused", "alpha"]);
       const notice = gh.notices()[0].body;
       assert.match(notice, /Claude Code account `alpha` reached it/);
-      assert.match(notice, /Free now: `beta`, `gamma`\. This machine chooses accounts by itself, so `factory serve` here resumes this Objective on a free one at its next tick, with no label/);
+      assert.match(notice, /Free now: `beta`, `gamma`\. This machine chooses accounts by itself, so `pendulum serve` here resumes this Objective on a free one at its next tick, with no label/);
       assert.ok(!notice.includes("(apply"), "no label to apply");
       // The next tick resumes it, reading nothing to decide; its stage starts on beta (alpha, where it paused, is held).
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
@@ -787,13 +787,13 @@ test("#266: on, a paused Objective resumes on a free account with no label and n
       loop.result = delivered;
       assert.equal((await work(loop)).account, "beta");
       // Held only while every account is: alpha alone held lets a queued Objective start; all three hold it until the first reset.
-      assert.equal(loop.limitHold(["factory:objective"], 8, "u1"), null);
+      assert.equal(loop.limitHold(["pendulum:objective"], 8, "u1"), null);
       loop.holds.limit({ harness: "claude", account: "beta", reset: t + 120 * MIN, now: t });
       loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 90 * MIN, now: t });
-      const line = loop.limitHold(["factory:objective"], 8, "u1");
+      const line = loop.limitHold(["pendulum:objective"], 8, "u1");
       assert.equal(line, `every Claude Code account on this machine has its usage limit spent; the first, claude account gamma, resets at ${new Date(t + 90 * MIN).toISOString()}`);
       loop.auto = false;
-      assert.match(loop.limitHold(["factory:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /, "off: the default's hold, as before");
+      assert.match(loop.limitHold(["pendulum:objective"], 8, "u1"), /^claude account alpha's usage limit is spent until /, "off: the default's hold, as before");
       loop.auto = true;
       // A stage that starts anyway is held on gamma, the first to reset, and waits for it; then goes on there.
       const held = await work(loop);
@@ -817,10 +817,10 @@ test("#266: on, an Objective pinned by a label stays on its account: paused ther
   try {
     await withHome(h, async () => {
       const loop = autoServe(h, () => t);
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       loop.result = limited(t + 60 * MIN, t);
       assert.equal((await work(loop)).account, "beta");
-      assert.match(gh.notices()[0].body, /Free now: `alpha` \(apply `factory:account:alpha`\), `gamma` \(apply `factory:account:gamma`\)\. Applying one moves/);
+      assert.match(gh.notices()[0].body, /Free now: `alpha` \(apply `pendulum:account:alpha`\), `gamma` \(apply `pendulum:account:gamma`\)\. Applying one moves/);
       assert.ok(!gh.notices()[0].body.includes("chooses accounts by itself"));
       for (let i = 0; i < 2; i++) assert.deepEqual(await loop.pausedHere(new Map()), [], "alpha and gamma are free, but the pin holds it on beta");
       t += 61 * MIN;
@@ -918,7 +918,7 @@ test("#266: a usage limit with no reset reported Blocks as before, and automatic
       // Off: alpha is the default and nothing holds it; its pass is served, which ends the guess for every serve.
       const off = serveOn(h, () => now);
       off.result = delivered;
-      assert.equal(off.limitHold(["factory:objective"], 8, "u"), null);
+      assert.equal(off.limitHold(["pendulum:objective"], 8, "u"), null);
       assert.equal((await off.stage(8, "work", "worker.mjs", [])).account, "alpha");
       assert.ok(loop.freeAccounts("claude", "none").includes("alpha"));
     });
@@ -957,22 +957,22 @@ test("#266: a paused Objective's move and its stage weigh the same account; when
   try {
     await withHome(h, async () => {
       const loop = autoServe(h, () => t);
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       loop.result = limited(t + 60 * MIN, t);
       assert.equal((await work(loop)).account, "beta");
-      assert.match(gh.notices()[0].body, /\(apply `factory:account:alpha`\)/);
-      gh.remove("factory:account:beta");
+      assert.match(gh.notices()[0].body, /\(apply `pendulum:account:alpha`\)/);
+      gh.remove("pendulum:account:beta");
       assert.deepEqual(await loop.pausedHere(new Map()), [8]);
-      assert.match(gh.notices()[0].body, /This machine chooses accounts by itself, so `factory serve` here resumes this Objective on a free one at its next tick/, "said again once the pin is gone");
+      assert.match(gh.notices()[0].body, /This machine chooses accounts by itself, so `pendulum serve` here resumes this Objective on a free one at its next tick/, "said again once the pin is gone");
       assert.ok(!gh.notices()[0].body.includes("(apply"));
       // A pause held on gamma at its start, after a stage that paused on beta: once beta and alpha are free, the move and
       // the stage both weigh beta first (where the session is), though alpha has no limit remembered.
       t += 61 * MIN;
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       loop.holds.limit({ harness: "claude", account: "beta", reset: t + 20 * MIN, now: t });
       loop.result = limited(t + 20 * MIN, t);
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "beta");
-      gh.remove("factory:account:beta");
+      gh.remove("pendulum:account:beta");
       t += 21 * MIN;
       loop.holds.limit({ harness: "claude", account: "gamma", reset: t + 60 * MIN, now: t });
       const off = { harness: "claude", hold: "gamma", account: "gamma", reset: t + 60 * MIN, pinned: false, pin: null };
@@ -980,7 +980,7 @@ test("#266: a paused Objective's move and its stage weigh the same account; when
       logTo({ write: (x) => lines.push(x) });
       let due;
       try {
-        due = await loop.movesEarly(8, off, ["factory:objective"], "u9");
+        due = await loop.movesEarly(8, off, ["pendulum:objective"], "u9");
       } finally {
         logTo(null);
       }
@@ -1001,7 +1001,7 @@ test("#266: no-reset refusals in a row on one account are passed over 1, 4, then
   try {
     await withHome(h, async () => {
       const loop = autoServe(h, () => t);
-      gh.apply("factory:account:alpha");
+      gh.apply("pendulum:account:alpha");
       loop.result = { exit: "blocked", tokens: { output: 500 }, limitRefused: { harness: "claude" } };
       const ends = [];
       for (let i = 0; i < 3; i++) {
@@ -1013,7 +1013,7 @@ test("#266: no-reset refusals in a row on one account are passed over 1, 4, then
       assert.equal(loop.holds.until("alpha", t), null, "never a hold");
       // Off: a refusal writes no guess.
       const off = serveOn(h, () => t);
-      gh.remove("factory:account:alpha");
+      gh.remove("pendulum:account:alpha");
       off.result = loop.result;
       assert.equal((await off.stage(8, "work", "worker.mjs", [])).account, "alpha");
       assert.equal(off.holds.avoidUntil("beta", t), null);
@@ -1044,7 +1044,7 @@ test("#266: with every account held and the first to end a guess, the pause says
       const loop = autoServe(h, () => t);
       loop.holds.spent({ harness: "claude", account: "alpha", now: t });
       for (const n of ["beta", "gamma"]) loop.holds.limit({ harness: "claude", account: n, reset: t + 120 * MIN, now: t });
-      assert.match(loop.limitHold(["factory:objective"], 8, "u"), /the first, claude account alpha, resets at about /);
+      assert.match(loop.limitHold(["pendulum:objective"], 8, "u"), /the first, claude account alpha, resets at about /);
       const held = await work(loop);
       assert.deepEqual([held.exit, held.account, held.usageLimit.guessed], ["paused", "alpha", true]);
       const body = gh.notices()[0].body;
@@ -1107,7 +1107,7 @@ test("#332: on, with every other account held or passed over, a limit with no re
       const blocks = gh.blocked();
       assert.equal(blocks.length, 1, "one Block");
       const at = (ms) => new Date(ms).toISOString().replaceAll(".", "\\.");
-      assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\. Re-apply \`factory:objective\` once a Claude Code account is free again\\.`));
+      assert.match(blocks[0].body, new RegExp(`Claude Code account \`alpha\` reached its usage limit or quota with no reset reported, and no other Claude Code account on this machine is free: \`alpha\` passed over until about ${at(t + 60 * MIN)} \\(no reset reported\\); \`beta\` held until ${at(t + 120 * MIN)}; \`gamma\` passed over until about ${at(t + 59 * MIN)} \\(no reset reported\\)\\. Re-apply \`pendulum:objective\` once a Claude Code account is free again\\.`));
       assert.match(blocks[0].body, /"cause":"provider-quota"/);
       assert.equal(loop.offline?.has(8) ?? false, false, "not kept paused");
       assert.deepEqual(await loop.pausedHere(new Map()), [], "nothing resumes it");
@@ -1125,13 +1125,13 @@ test("#332: a pinned Objective, or any with the setting off, still Blocks on a l
   try {
     await withHome(h, async () => {
       const on = autoServe(h, () => t);
-      gh.apply("factory:account:beta");
+      gh.apply("pendulum:account:beta");
       on.result = noReset(t);
       const pinned = await work(on);
       assert.deepEqual([pinned.exit, pinned.account], ["blocked", "beta"], "pinned: Blocked on its own account");
       assert.equal(on.offline?.has(8) ?? false, false);
       assert.equal(on.holds.avoidUntil("beta", t), t + 60 * MIN, "its guess, for other Objectives");
-      gh.remove("factory:account:beta");
+      gh.remove("pendulum:account:beta");
       t += 1000;
       const off = serveOn(h, () => t);
       off.result = noReset(t);
@@ -1151,7 +1151,7 @@ test("#332: a Codex stage's limit feeds the same holds: with no reset, a guess a
   const at = (d) => join(h, "work", d);
   writeFileSync(accountsFile(h), JSON.stringify({ claude: [{ name: "alpha", home: at("claude-a") }], codex: [{ name: "cx", home: at("codex-x") }, { name: "cy", home: at("codex-y") }] }), { mode: 0o600 });
   const gh = fakeGitHub();
-  gh.apply("factory:harness:codex");
+  gh.apply("pendulum:harness:codex");
   let t = Date.now();
   try {
     await withHome(h, async () => {
@@ -1198,15 +1198,15 @@ test("#332: a guess is remembered a day past its end, so a limit again within th
 
 test("#402: a usage limit with no reset passes its account over for machine.json's guess_hours, by how many in a row, in a stage's end and a paused stage's alike", async () => {
   const h = fakeHome();
-  mkdirSync(join(h, ".cache", "factory"), { recursive: true });
-  writeFileSync(join(h, ".cache", "factory", "machine.json"), JSON.stringify({ stages: 8, guess_hours: [2, 6] }));
+  mkdirSync(join(h, ".cache", "pendulum"), { recursive: true });
+  writeFileSync(join(h, ".cache", "pendulum", "machine.json"), JSON.stringify({ stages: 8, guess_hours: [2, 6] }));
   const gh = fakeGitHub();
   let now = Date.now();
   try {
     await withHome(h, async () => {
       const loop = autoServe(h, () => now);
       // The repository's guess_hours too: machine.json's wins on this machine.
-      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
+      loop.baseEnv = () => ({ PENDULUM_LOCAL_ALL: "1", PENDULUM_GUESS_HOURS: "3, 9" });
       loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
       assert.equal(loop.holds.avoidUntil("alpha", now), now + 120 * MIN, "two hours, not the default's one nor the repository's three");
@@ -1224,7 +1224,7 @@ test("#402: a usage limit with no reset passes its account over for machine.json
   try {
     await withHome(plain, async () => {
       const loop = autoServe(plain, () => now);
-      loop.baseEnv = () => ({ FACTORY_LOCAL_ALL: "1", FACTORY_GUESS_HOURS: "3, 9" });
+      loop.baseEnv = () => ({ PENDULUM_LOCAL_ALL: "1", PENDULUM_GUESS_HOURS: "3, 9" });
       loop.result = { exit: "blocked", tokens: { output: 0 }, limitRefused: { harness: "claude" } };
       assert.equal((await loop.stage(8, "work", "worker.mjs", [])).account, "alpha");
       assert.equal(loop.holds.avoidUntil("alpha", now), now + 180 * MIN);
@@ -1234,13 +1234,13 @@ test("#402: a usage limit with no reset passes its account over for machine.json
   }
 });
 
-test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {
+test("#332: PENDULUM_LOCAL_ENV never carries a control variable into a stage, so no stage moves on a limit unless serve chose its account; a serve with automatic choice off writes no guess", async () => {
   const { localBaseEnv } = await import("../scripts/lib/local.mjs");
-  const { FACTORY_CONTROL_KEYS } = await import("../scripts/lib/inputs.mjs");
-  const shell = { PATH: "/bin", FACTORY_STAGE_AUTO_ACCOUNT: "1", FACTORY_STAGE_ACCOUNT: "beta", DATABASE_URL: "postgres://x" };
-  const base = localBaseEnv(shell, ["FACTORY_STAGE_AUTO_ACCOUNT", "FACTORY_STAGE_ACCOUNT", "DATABASE_URL"]);
+  const { PENDULUM_CONTROL_KEYS } = await import("../scripts/lib/inputs.mjs");
+  const shell = { PATH: "/bin", PENDULUM_STAGE_AUTO_ACCOUNT: "1", PENDULUM_STAGE_ACCOUNT: "beta", DATABASE_URL: "postgres://x" };
+  const base = localBaseEnv(shell, ["PENDULUM_STAGE_AUTO_ACCOUNT", "PENDULUM_STAGE_ACCOUNT", "DATABASE_URL"]);
   assert.equal(base.DATABASE_URL, "postgres://x");
-  for (const k of FACTORY_CONTROL_KEYS) assert.ok(!(k in base), k);
+  for (const k of PENDULUM_CONTROL_KEYS) assert.ok(!(k in base), k);
   const h = fakeHome();
   const gh = fakeGitHub();
   const t = Date.now();
@@ -1250,7 +1250,7 @@ test("#332: FACTORY_LOCAL_ENV never carries a control variable into a stage, so 
       await off.spentPaused(8, { stage: "work", account: "alpha", hold: { key: "alpha", shared: true }, usageLimit: { harness: "claude", reset: null, since: new Date(t).toISOString(), noReset: true } });
       assert.equal(off.holds.avoidUntil("alpha", t), null, "no guess");
       assert.equal(gh.blocked().length, 1, "Blocked, as with no move");
-      assert.match(gh.blocked()[0].body, /Re-apply `factory:objective` once a Claude Code account is free again\./);
+      assert.match(gh.blocked()[0].body, /Re-apply `pendulum:objective` once a Claude Code account is free again\./);
     });
   } finally {
     gh.restore();

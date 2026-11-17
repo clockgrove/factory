@@ -18,7 +18,7 @@ export function objectiveMarkdown(blocks = []) {
 
 /**
  * The issue body for one record: the Objective's text, then the Work Item's criteria as numbered entries under the
- * exact `## Acceptance` heading Factory's issues use (logic.mjs acceptanceEntries), so the reviewer gets them by id.
+ * exact `## Acceptance` heading Pendulum's issues use (logic.mjs acceptanceEntries), so the reviewer gets them by id.
  */
 export function replayIssueBody({ blocks = [], item, criteria = [] }) {
   const acceptance = criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");

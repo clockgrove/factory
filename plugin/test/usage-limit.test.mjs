@@ -66,7 +66,7 @@ test("copilot's quota stays a provider-quota refusal with no reset", () => {
 
 /** A fake claude: its first `limited` runs print the usage-limit run (reset at `resetS`) and exit 1, later ones succeed; argv logged. */
 function fakeClaude({ limited = 1, resetS = RESET_S, usd = 0 } = {}) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-claude-limit-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-claude-limit-"));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "limit.jsonl"), withReset(LIMIT_RUN, resetS).replace('"total_cost_usd":0', `"total_cost_usd":${usd}`));
   const ok = [{ type: "system", subtype: "init", session_id: "00000000-0000-0000-0000-000000000254" }, { type: "result", subtype: "success", is_error: false, num_turns: 2, result: "done", session_id: "00000000-0000-0000-0000-000000000254", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: {} }];
@@ -165,7 +165,7 @@ test("usageLimitExit: locally the stage ends paused with the reset and writes no
   assert.equal(blocks.length, 1);
   const [reason, cause] = blocks[0];
   assert.equal(cause, "provider-quota");
-  assert.equal(blockMarker(cause), '<!-- factory:block {"cause":"provider-quota"} -->');
+  assert.equal(blockMarker(cause), '<!-- pendulum:block {"cause":"provider-quota"} -->');
   assert.match(reason, new RegExp(`usage limit \\(HTTP 429 rate_limit usage_limit_reached\\), which resets at ${RESET.replaceAll(".", "\\.")}`));
   assert.equal(ends[1][0], "blocked");
 });
@@ -217,11 +217,11 @@ test("runHarness, real, fake claude: with another account free (automatic accoun
   }
 });
 
-test("#423 runHarness, real, fake claude: the stage's waits are the repository's: usage_limit_waits, usage_limit_move_minutes and, locally, FACTORY_LOCAL_WAIT_MINUTES", async () => {
+test("#423 runHarness, real, fake claude: the stage's waits are the repository's: usage_limit_waits, usage_limit_move_minutes and, locally, PENDULUM_LOCAL_WAIT_MINUTES", async () => {
   const saved = { waits: LIMIT.waits, movePastMs: LIMIT.movePastMs, stageWaitMs: OUTAGE.stageWaitMs };
   try {
     // No wait in place at all: a reset ten minutes out ends the stage, nothing runs again.
-    stageLimits(resolveInputs({ env: { FACTORY_USAGE_LIMIT_WAITS: "0" } }));
+    stageLimits(resolveInputs({ env: { PENDULUM_USAGE_LIMIT_WAITS: "0" } }));
     const none = fakeClaude();
     await inStage(none.bin, Date.parse(RESET) - 10 * 60_000, async ({ waits }) => {
       waitOutages({ until: (since) => since + OUTAGE.stageWaitMs });
@@ -231,7 +231,7 @@ test("#423 runHarness, real, fake claude: the stage's waits are the repository's
 
     // A move past thirty minutes: with another account free, a reset fifty minutes out (waited for at the default hour)
     // ends the stage so the Objective goes on there.
-    stageLimits(resolveInputs({ env: { FACTORY_USAGE_LIMIT_MOVE_MINUTES: "30" } }));
+    stageLimits(resolveInputs({ env: { PENDULUM_USAGE_LIMIT_MOVE_MINUTES: "30" } }));
     assert.equal(LIMIT.waits, 2, "the default again");
     LIMIT.elsewhere = async () => true;
     const moved = fakeClaude();
@@ -243,7 +243,7 @@ test("#423 runHarness, real, fake claude: the stage's waits are the repository's
     LIMIT.elsewhere = null;
 
     // Locally, an in-place bound of thirty minutes: a reset twenty minutes out (past the default fifteen) is waited for.
-    stageLimits(resolveInputs({ env: {} }), { local: true, env: { FACTORY_LOCAL_WAIT_MINUTES: "30" } });
+    stageLimits(resolveInputs({ env: {} }), { local: true, env: { PENDULUM_LOCAL_WAIT_MINUTES: "30" } });
     assert.equal(OUTAGE.stageWaitMs, 30 * 60_000);
     const near = fakeClaude();
     await inStage(near.bin, Date.parse(RESET) - 20 * 60_000, async () => {
@@ -376,7 +376,7 @@ test("codex: a named type with no full window takes the latest reset of any wind
  * `resetS`), print the usage-limit stream and exit 1; later ones print a completed turn. argv and stdin logged.
  */
 function fakeCodex({ limited = 1, resetS = RESET_S, rollout = CODEX_ROLLOUT } = {}) {
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-limit-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-limit-"));
   const home = join(bin, "codex-home");
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "limit.jsonl"), CODEX_STREAM);
@@ -513,11 +513,11 @@ test("#332 runHarness, real, fake codex: a prose-only limit whose snapshot names
 });
 
 test("#332: the stage moves on a limit with no reset only when automatic choice picked its account: locally serve's env says so, on Actions the setting with no pin", () => {
-  assert.equal(stageMoves({ local: true, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), true);
+  assert.equal(stageMoves({ local: true, env: { PENDULUM_STAGE_AUTO_ACCOUNT: "1" } }), true);
   assert.equal(stageMoves({ local: true, env: {} }), false, "a pin, or the setting off: serve sets nothing");
-  assert.equal(stageMoves({ local: false, limits: {}, pinned: false, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), true);
+  assert.equal(stageMoves({ local: false, limits: {}, pinned: false, env: { PENDULUM_STAGE_AUTO_ACCOUNT: "1" } }), true);
   assert.equal(stageMoves({ local: false, limits: {}, pinned: true }), false, "pinned");
-  assert.equal(stageMoves({ local: false, limits: null, env: { FACTORY_STAGE_AUTO_ACCOUNT: "1" } }), false, "off on Actions: serve's key means nothing there");
+  assert.equal(stageMoves({ local: false, limits: null, env: { PENDULUM_STAGE_AUTO_ACCOUNT: "1" } }), false, "off on Actions: serve's key means nothing there");
 });
 
 test("#332 usageLimitExit: a Copilot quota with no reset pauses locally with no reset and writes nothing; elsewhere, not moved, it Blocks provider-quota as a refusal", async () => {

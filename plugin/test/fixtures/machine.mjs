@@ -24,7 +24,7 @@ export function fakeProc(dir, { cpu = 0, cpu10 = cpu, mem = 0, load = 0.5, avail
 /** A home of its own whose machine budget is `stages` (machine.json), so a test never takes the budget from the size of the machine it runs on. */
 export function budgetHome(stages = 8) {
   const dir = mkdtempSync(join(tmpdir(), "home-"));
-  mkdirSync(join(dir, ".cache", "factory"), { recursive: true });
-  writeFileSync(join(dir, ".cache", "factory", "machine.json"), JSON.stringify({ stages }));
+  mkdirSync(join(dir, ".cache", "pendulum"), { recursive: true });
+  writeFileSync(join(dir, ".cache", "pendulum", "machine.json"), JSON.stringify({ stages }));
   return dir;
 }

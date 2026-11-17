@@ -23,7 +23,7 @@ const KEY = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.expor
 const TEN_MIN = 10 * 60_000;
 
 /**
- * GitHub with the Factory App installed on o/r. It mints installation tokens ghs_1, ghs_2, ... (`expiresIn` ms each) and
+ * GitHub with the Pendulum App installed on o/r. It mints installation tokens ghs_1, ghs_2, ... (`expiresIn` ms each) and
  * takes only the ones not revoked (`revoke`) and not expired, answering 401 Bad credentials to any other. A token is
  * also refused for its first `delay(token)` uses, as GitHub does while it spreads a new token to its servers. `skewMs`: GitHub's
  * clock ahead of this machine's, in its Date header. Every request is recorded with its Authorization header; `onRequest`
@@ -38,7 +38,7 @@ function github({ expiresIn = 60 * 60_000, delay = () => 0, skewMs = 0, onReques
   const json = (status, data) => new Response(status === 204 ? null : JSON.stringify(data), { status, headers: { "content-type": "application/json", date: new Date(Date.now() + skewMs).toUTCString() } });
   const answer = async (u, method, init, auth) => {
     // The App's own calls (JWT): the App, its installation, a new token.
-    if (u === "/app") return json(200, { slug: "factory", name: "Factory" });
+    if (u === "/app") return json(200, { slug: "pendulum", name: "Pendulum" });
     if (u === "/repos/o/r/installation") return json(200, { id: 1, account: { type: "Organization" }, permissions: { contents: "write", pull_requests: "write", issues: "write", checks: "read", statuses: "read", metadata: "read", organization_projects: "write" } });
     if (method === "POST" && u === "/app/installations/1/access_tokens") {
       minted += 1;
@@ -54,7 +54,7 @@ function github({ expiresIn = 60 * 60_000, delay = () => 0, skewMs = 0, onReques
     if (method === "GET" && /\/pulls\/\d+\/reviews/.test(u)) return json(200, []);
     if (method === "GET" && /\/issues\/\d+\/comments/.test(u)) return json(200, comments);
     if (method === "POST" && /\/issues\/\d+\/comments$/.test(u)) {
-      const c = { id: 100 + comments.length, body: JSON.parse(init.body).body, user: { login: "factory[bot]", type: "Bot" }, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      const c = { id: 100 + comments.length, body: JSON.parse(init.body).body, user: { login: "pendulum[bot]", type: "Bot" }, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
       comments.push(c);
       return json(201, c);
     }
@@ -110,7 +110,7 @@ test("#405: the review stage's third-party step, ending for a review still to co
     // ghs_1 is old: GitHub has it everywhere.
     const keeper = await keeperOf();
     // The stage's request options and arguments, as review.mjs main builds them.
-    return thirdPartyGate({ repo, issue: 7, pr: { number: 12, head: { sha: "a".repeat(40) } }, labels: [{ name: "factory:objective" }, { name: "factory:in-review" }], names: ["greptile-apps[bot]"], own: async () => ["factory[bot]"], skip: false, progress: async (l) => progress.push(l), opts: { token: keeper.getter, notice: null }, beforeEnd: async () => (stopChecked += 1) });
+    return thirdPartyGate({ repo, issue: 7, pr: { number: 12, head: { sha: "a".repeat(40) } }, labels: [{ name: "pendulum:objective" }, { name: "pendulum:in-review" }], names: ["greptile-apps[bot]"], own: async () => ["pendulum[bot]"], skip: false, progress: async (l) => progress.push(l), opts: { token: keeper.getter, notice: null }, beforeEnd: async () => (stopChecked += 1) });
   });
   assert.deepEqual(value.wait.missing, ["greptile-apps[bot]"], "the stage ends waiting");
   assert.equal(stopChecked, 1, "the stop check came first");
@@ -121,17 +121,17 @@ test("#405: the review stage's third-party step, ending for a review still to co
       "GET /repos/o/r/pulls/12/reviews ghs_1",
       "GET /repos/o/r/issues/12/comments ghs_1",
       "POST /repos/o/r/issues/12/comments ghs_1",
-      "DELETE /repos/o/r/issues/12/labels/factory:review ghs_1",
-      "DELETE /repos/o/r/issues/12/labels/factory:review ghs_2",
-      "DELETE /repos/o/r/issues/12/labels/factory:review ghs_2",
+      "DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_1",
+      "DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_2",
+      "DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_2",
     ],
     "the label's DELETE is refused with the replaced token, refused once with the new one while GitHub spreads it, then done",
   );
   assert.equal(gh.calls().at(-1).status, 204);
   assert.equal(gh.minted(), 2, "one refresh");
   assert.deepEqual(slept, [PROPAGATION.stepMs]);
-  said(lines, /GitHub DELETE repos\/o\/r\/issues\/12\/labels\/factory%3Areview: HTTP 401 on the App installation token; refreshed it, trying once more/);
-  said(lines, /GitHub DELETE repos\/o\/r\/issues\/12\/labels\/factory%3Areview: HTTP 401 on an App installation token minted \d+\.\d s before; GitHub may not have it everywhere yet, so the same token goes again in 1 s \(wait 1 of 3\)/);
+  said(lines, /GitHub DELETE repos\/o\/r\/issues\/12\/labels\/pendulum%3Areview: HTTP 401 on the App installation token; refreshed it, trying once more/);
+  said(lines, /GitHub DELETE repos\/o\/r\/issues\/12\/labels\/pendulum%3Areview: HTTP 401 on an App installation token minted \d+\.\d s before; GitHub may not have it everywhere yet, so the same token goes again in 1 s \(wait 1 of 3\)/);
   assert.ok(!lines.join("").includes("ghs_"), "no token in the log");
 });
 
@@ -139,7 +139,7 @@ test("#405: a burst of 401s on a token GitHub has just made sends the same token
   const gh = github({ delay: () => 3 });
   const { lines } = await withGitHub(gh, async () => {
     const keeper = await keeperOf({ age: 0 });
-    await Promise.all([1, 2, 3, 4, 5].map((n) => removeLabel(repo, n, "factory:review", { token: keeper.getter })));
+    await Promise.all([1, 2, 3, 4, 5].map((n) => removeLabel(repo, n, "pendulum:review", { token: keeper.getter })));
     assert.equal(gh.minted(), 1, "no call minted");
     assert.ok(gh.calls().every((c) => c.auth === "Bearer ghs_1"));
     assert.equal(gh.calls().filter((c) => c.status === 204).length, 5, "each call done");
@@ -147,7 +147,7 @@ test("#405: a burst of 401s on a token GitHub has just made sends the same token
     gh.revoke("ghs_1");
     slept.length = 0;
     const before = gh.calls().length;
-    await assert.rejects(removeLabel(repo, 9, "factory:review", { token: keeper.getter }), (e) => e.status === 401);
+    await assert.rejects(removeLabel(repo, 9, "pendulum:review", { token: keeper.getter }), (e) => e.status === 401);
     assert.equal(gh.calls().length - before, 1 + PROPAGATION.tries);
     assert.deepEqual(slept, [1000, 2000, 3000]);
     assert.equal(gh.minted(), 1);
@@ -162,7 +162,7 @@ test("#405: a 401 is refreshed once, and only on a minted App token: a second 40
     // GitHub refuses every token: one refresh, the new token's delay waited for, then the 401 stands.
     const realFetch = gh.fetch;
     globalThis.fetch = async (url, init) => (String(url).includes("/labels/") ? new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }) : realFetch(url, init));
-    await assert.rejects(removeLabel(repo, 12, "factory:review", { token: keeper.getter }), (e) => e.status === 401);
+    await assert.rejects(removeLabel(repo, 12, "pendulum:review", { token: keeper.getter }), (e) => e.status === 401);
     assert.equal(gh.minted(), 2, "one refresh, no more");
     // A token the keeper was given (local mode's, a launcher's) cannot be refreshed here: one request, no mint.
     const fixed = await new TokenKeeper({ fixedToken: "github_pat_x", owner: "o", repo: "r" }).start();
@@ -171,7 +171,7 @@ test("#405: a 401 is refreshed once, and only on a minted App token: a second 40
       sent += 1;
       return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
     };
-    await assert.rejects(removeLabel(repo, 12, "factory:review", { token: fixed.getter }), (e) => e.status === 401);
+    await assert.rejects(removeLabel(repo, 12, "pendulum:review", { token: fixed.getter }), (e) => e.status === 401);
     assert.equal(sent, 1);
     assert.equal(gh.minted(), 2);
   });
@@ -188,9 +188,9 @@ test("#405: a mint whose read-only token or hand-over then fails still replaced 
       },
     });
     gh.revoke("ghs_1");
-    await removeLabel(repo, 12, "factory:review", { token: keeper.getter });
+    await removeLabel(repo, 12, "pendulum:review", { token: keeper.getter });
   });
-  assert.deepEqual(auths(gh.calls()), ["DELETE /repos/o/r/issues/12/labels/factory:review ghs_1", "DELETE /repos/o/r/issues/12/labels/factory:review ghs_2"]);
+  assert.deepEqual(auths(gh.calls()), ["DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_1", "DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_2"]);
   said(lines, /HTTP 401 on the App installation token; refreshed it \(what follows a mint failed: putFiles failed\), trying once more/);
 });
 
@@ -205,8 +205,8 @@ test("#405: a token refreshed while a call was in flight is the retry's, with no
     // Later: GitHub's expires_at is 30 s ahead on its clock, ten and a half minutes ahead on this machine's. It is at its
     // expiry, so it is refreshed first.
     keeper.expiresAt = Date.now() + TEN_MIN + 30_000;
-    await removeLabel(repo, 12, "factory:review", { token: keeper.getter });
-    assert.deepEqual(auths(gh.calls()).slice(1), ["DELETE /repos/o/r/issues/12/labels/factory:review ghs_2"]);
+    await removeLabel(repo, 12, "pendulum:review", { token: keeper.getter });
+    assert.deepEqual(auths(gh.calls()).slice(1), ["DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_2"]);
     assert.equal(gh.minted(), 2);
     // The keeper's timer refreshes while a request with the older token is in flight; GitHub refuses that one.
     keeper.mintedAt -= TEN_MIN;
@@ -218,8 +218,8 @@ test("#405: a token refreshed while a call was in flight is the retry's, with no
       }
       return realFetch(url, init);
     };
-    await removeLabel(repo, 12, "factory:review", { token: keeper.getter });
-    assert.deepEqual(auths(gh.calls()).slice(2), ["DELETE /repos/o/r/issues/12/labels/factory:review ghs_2", "DELETE /repos/o/r/issues/12/labels/factory:review ghs_3"]);
+    await removeLabel(repo, 12, "pendulum:review", { token: keeper.getter });
+    assert.deepEqual(auths(gh.calls()).slice(2), ["DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_2", "DELETE /repos/o/r/issues/12/labels/pendulum:review ghs_3"]);
     assert.equal(gh.minted(), 3, "the timer's mint only");
     // GitHub's clock as this machine's again, for the tests after.
     globalThis.fetch = github().fetch;
@@ -266,7 +266,7 @@ test("#405: local mode's notice token refused with 401 is minted again by the pa
     Date.now = () => realNow() + TEN_MIN;
     gh.revoke("ghs_1");
     try {
-      return await noticePost({ notice, token: "github_pat_local", what: "Blocked notice", post: (o) => upsertComment(repo, 7, "<!-- factory:7:blocked:x -->", "Blocked", o) });
+      return await noticePost({ notice, token: "github_pat_local", what: "Blocked notice", post: (o) => upsertComment(repo, 7, "<!-- pendulum:7:blocked:x -->", "Blocked", o) });
     } finally {
       Date.now = realNow;
     }
@@ -280,9 +280,9 @@ test("#405: local mode's notice token refused with 401 is minted again by the pa
 test("#405: the agent's token file is replaced whole: a reader that opened the old one reads it all, the path gives the new one, nothing else is left", async () => {
   const { putFiles } = await import("../scripts/lib/handoff.mjs");
   const { readTokenFiles } = await import("../scripts/lib/agent.mjs");
-  const home = mkdtempSync(join(tmpdir(), "factory-agent-home-"));
-  mkdirSync(join(home, ".factory"));
-  const file = join(home, ".factory", "read-token");
+  const home = mkdtempSync(join(tmpdir(), "pendulum-agent-home-"));
+  mkdirSync(join(home, ".pendulum"));
+  const file = join(home, ".pendulum", "read-token");
   writeFileSync(file, "ghs_old_read_token\n");
   const before = statSync(file).ino;
   // A reader mid-read (git's credential helper running `cat`) holds the old file open.
@@ -298,6 +298,6 @@ test("#405: the agent's token file is replaced whole: a reader that opened the o
   }
   assert.equal(readFileSync(file, "utf8"), "ghs_new_read_token\n");
   assert.notEqual(statSync(file).ino, before, "a new file renamed over the old");
-  assert.deepEqual(readdirSync(join(home, ".factory")), ["read-token"], "no temporary file is left");
+  assert.deepEqual(readdirSync(join(home, ".pendulum")), ["read-token"], "no temporary file is left");
   assert.match(readFileSync(join(home, ".config", "gh", "hosts.yml"), "utf8"), /oauth_token: ghs_new_read_token/);
 });

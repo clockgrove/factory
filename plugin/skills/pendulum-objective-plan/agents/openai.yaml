@@ -1,0 +1,3 @@
+# Codex: never loaded on a user's prompt, only by an explicit $pendulum-objective-plan mention (Pendulum's task card and prompts).
+policy:
+  allow_implicit_invocation: false

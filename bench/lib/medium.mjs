@@ -20,7 +20,7 @@ A caller can list notes as plain lines: \`notes list --format ${sfx}\` prints on
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: tags are joined by a semicolon with no spaces; the tab is U+0009; titles and tags are printed as stored, with no escaping.
+Filed by the Pendulum adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: tags are joined by a semicolon with no spaces; the tab is U+0009; titles and tags are printed as stored, with no escaping.
 `,
   }),
   (sfx) => ({
@@ -40,7 +40,7 @@ A caller can see the newest note titles at a glance: \`notes ${sfx} --limit N\` 
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the separator is exactly one space, one vertical bar, one space; \`list()\` from \`src/notes.mjs\` supplies the rows.
+Filed by the Pendulum adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the separator is exactly one space, one vertical bar, one space; \`list()\` from \`src/notes.mjs\` supplies the rows.
 `,
   }),
   (sfx) => ({
@@ -60,7 +60,7 @@ A note can carry a counter: \`notes bump-${sfx} <id>\` increments it and prints 
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the counter is a plain \`INTEGER\` column with no cap in code; a bump past 2147483647 is out of scope, so the database error there stands; the migration name's timestamp prefix is the one given above.
+Filed by the Pendulum adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the counter is a plain \`INTEGER\` column with no cap in code; a bump past 2147483647 is out of scope, so the database error there stands; the migration name's timestamp prefix is the one given above.
 `,
   }),
   (sfx) => ({
@@ -79,7 +79,7 @@ A note whose title contains the word \`${sfx}\` is refused at \`notes add\`.
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: a missing title is the title-required rule's business, so \`check\` returns null for a non-string title.
+Filed by the Pendulum adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: a missing title is the title-required rule's business, so \`check\` returns null for a non-string title.
 `,
   }),
   (sfx) => ({
@@ -99,7 +99,7 @@ A caller can find the nearest notes among those carrying a tag: \`notes ${sfx} -
 - \`AGENTS.md\`
 
 ## Context
-Filed by the Factory adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the tag filter is \`tag = ANY(tags)\`; distance is pgvector's \`<->\`.
+Filed by the Pendulum adopter drill (bench/drill.mjs, medium set) at ${new Date().toISOString()}. Recorded decision: the tag filter is \`tag = ANY(tags)\`; distance is pgvector's \`<->\`.
 `,
   }),
 ];

@@ -17,6 +17,17 @@ jobs:
         run: python3 -c 'import glob, yaml; [yaml.safe_load(open(f)) for f in ["action.yml", *glob.glob(".github/workflows/*.yml")]]'
       # plugin/vendor holds the libraries the plugin ships (it runs with nothing installed): byte for byte what
       # tools/deps/package-lock.json installs, with no install scripts (docs/PLAN.md, "Dependencies").
+      # The product's old name is gone (#465): a case-insensitive match in a tracked path or line fails, outside
+      # plugin/vendor (third-party code, byte for byte what the lockfile installs). The one way past it is an entry in
+      # tools/old-name-allowlist.txt: the line's path and exact text, with its reason above it. The pattern is written
+      # f[a]ctory so this step does not match itself.
+      - name: The old product name is gone
+        run: |
+          paths="$(git ls-files -- . ':!plugin/vendor' | grep -i 'f[a]ctory' || true)"
+          if [ -n "$paths" ]; then echo "::error::the old product name is in these paths:"; echo "$paths"; exit 1; fi
+          allowed="$(grep -v -e '^#' -e '^$' tools/old-name-allowlist.txt || true)"
+          lines="$(git grep -nai -e 'f[a]ctory' -- . ':!plugin/vendor' ':!tools/old-name-allowlist.txt' | sed -E 's/^([^:]+):[0-9]+:/\1:/' | grep -a -vxF -f <(printf '%s\n' "$allowed") || true)"
+          if [ -n "$lines" ]; then echo "::error::the old product name is in these lines (path:text), and tools/old-name-allowlist.txt does not list them:"; echo "$lines"; exit 1; fi
       - name: The vendored libraries match their lockfile
         run: |
           npm ci --ignore-scripts --no-audit --no-fund --prefix tools/deps
@@ -28,7 +39,7 @@ jobs:
       # Every skill follows the Agent Skills standard (agentskills.io): its name matches its folder, its description and
       # frontmatter are what Claude Code, Codex and Copilot accept. A skill they would drop silently fails here instead.
       # skills-ref's own rules, through tools/deps/skills-validate.py, which also lets a skill carry the one harness field
-      # Factory sets (Claude Code's user-invocable: false, on the internal stage skills) that the standard does not define.
+      # Pendulum sets (Claude Code's user-invocable: false, on the internal stage skills) that the standard does not define.
       - name: Every skill follows the Agent Skills standard
         run: |
           python3 -m venv "$RUNNER_TEMP/skills-ref"

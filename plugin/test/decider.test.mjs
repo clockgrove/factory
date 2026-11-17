@@ -38,7 +38,7 @@ const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "fake.json"), "utf8"
 const prompt = fs.readFileSync(0, "utf8");
 const args = process.argv.slice(2);
 const e = process.env;
-fs.appendFileSync(cfg.log, JSON.stringify({ at: "start", t: Date.now(), args, prompt, cwd: process.cwd(), env: { MDS: e.CLAUDE_CODE_DISABLE_CLAUDE_MDS ?? null, MEMORY: e.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null, TOKEN: e.CLAUDE_CODE_OAUTH_TOKEN ?? null, SHELL_SECRETS: e.FACTORY_SHELL_SECRETS ?? null, ALLOW_ALL: e.COPILOT_ALLOW_ALL ?? null } }) + "\\n");
+fs.appendFileSync(cfg.log, JSON.stringify({ at: "start", t: Date.now(), args, prompt, cwd: process.cwd(), env: { MDS: e.CLAUDE_CODE_DISABLE_CLAUDE_MDS ?? null, MEMORY: e.CLAUDE_CODE_DISABLE_AUTO_MEMORY ?? null, TOKEN: e.CLAUDE_CODE_OAUTH_TOKEN ?? null, SHELL_SECRETS: e.PENDULUM_SHELL_SECRETS ?? null, ALLOW_ALL: e.COPILOT_ALLOW_ALL ?? null } }) + "\\n");
 const v = (cfg.variants || []).find((x) => args.some((a) => a.includes(x.arg))) || cfg;
 setTimeout(() => {
   if (cfg.rollout && e.CODEX_HOME) {
@@ -54,7 +54,7 @@ setTimeout(() => {
 `;
 
 function fakeHarness(name, out, { code = 0, sleepMs = 0, echo = false, variants = [], rollout = null, thread = null } = {}) {
-  const bin = mkdtempSync(join(tmpdir(), `factory-decider-${name}-`));
+  const bin = mkdtempSync(join(tmpdir(), `pendulum-decider-${name}-`));
   const log = join(bin, "calls.jsonl");
   writeFileSync(join(bin, "fake.json"), JSON.stringify({ log, out, code, sleepMs, echo, variants, rollout, thread }));
   writeFileSync(join(bin, name), `#!${process.execPath}\n${FAKE}`, { mode: 0o755 });
@@ -104,7 +104,7 @@ const INPUT = "Failing CI job: test\nLog of the failing job (key lines):\nError:
 
 test("#379: with no AI Gateway key the stage's Claude Code answers the typed question in one call with no tools, and its spend joins the stage's usage", async () => {
   const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"flaky_or_infra","confidence":0.82}'));
-  const { stage, kept } = stageOf(bin, "claude", { FACTORY_SHELL_SECRETS: "dummy-packed" });
+  const { stage, kept } = stageOf(bin, "claude", { PENDULUM_SHELL_SECRETS: "dummy-packed" });
   const d = openDecider({ inputs: {}, env: {}, model: "perplexity/pplx-decider-v1.2", stage });
   assert.equal(d.name, "harness");
   assert.equal(d.off, null);
@@ -164,8 +164,8 @@ test("#379: a fence marker the input happens to hold cannot close the fence", ()
 });
 
 test("#379: Codex and Copilot are asked the same way: no shell, no write, no session; the answer is the harness's own last message, never the prompt it echoes", async () => {
-  // Off a runner Codex keeps its thread's rollout for the call (a usage limit is read there), and Factory removes it.
-  const codexHome = mkdtempSync(join(tmpdir(), "factory-decider-codexhome-"));
+  // Off a runner Codex keeps its thread's rollout for the call (a usage limit is read there), and Pendulum removes it.
+  const codexHome = mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-"));
   // A thread of the stage's own, in the same folder: never touched.
   const day = join(codexHome, "sessions", "2026", "11", "16");
   mkdirSync(day, { recursive: true });
@@ -209,7 +209,7 @@ test("#379: a usage limit on a decision call is no answer and no hold: nothing i
   assert.equal(kept.length, 1);
   assert.equal(kept[0].refusal, undefined);
   // A Blocked stage's usage with that record names no spent account (writeUsage limitRefused).
-  const dir = mkdtempSync(join(tmpdir(), "factory-decider-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-decider-usage-"));
   const usage = writeUsage(dir, { harness: "claude", model: "m-1", records: kept, passes: 0, exit: "blocked", reason: "r", credentialBasis: "login" });
   assert.equal(usage.limitRefused, undefined);
   assert.equal(usage.usageLimit, undefined);
@@ -232,7 +232,7 @@ test("#379: one stage runs at most three decision calls at once on its harness, 
   const records = [kept[0], pass];
   assert.ok(Math.abs(sumSpend(records) - 1.58) < 1e-9, "max_usd counts it");
   assert.equal(costByPhase(records), "", "no pass of its own in the exit line");
-  const dir = mkdtempSync(join(tmpdir(), "factory-decider-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-decider-usage-"));
   const usage = writeUsage(dir, { harness: "claude", model: "m-1", records, passes: 1, exit: "pr", reason: "", credentialBasis: "login" });
   assert.equal(usage.runs, 1, "the decision record is no run");
   assert.equal(usage.basis, pass.basis, "the pass is the base, not the decision record");
@@ -288,7 +288,7 @@ test("#379: red-check triage and the drift advisory ask the stage's harness when
   assert.equal(openDrift({ inputs: {}, env: {} }), null, "no stage, no key: no advisory, as before");
 });
 
-test("#379: doctor names the decider: the stage's harness without a key, the gateway's models with one, a warning for a key file Factory refuses", () => {
+test("#379: doctor names the decider: the stage's harness without a key, the gateway's models with one, a warning for a key file Pendulum refuses", () => {
   const actions = { GITHUB_ACTIONS: "true" };
   const h = deciderCheck({ inputs: { harness: "codex" }, env: actions });
   assert.equal(h.status, "PASS");
@@ -296,9 +296,9 @@ test("#379: doctor names the decider: the stage's harness without a key, the gat
   const g = deciderCheck({ inputs: { aiGatewayApiKey: "k" }, env: actions });
   assert.equal(g.status, "PASS");
   assert.match(g.detail, /AI Gateway's decision models \(triage perplexity\/pplx-decider-v1\.2, drift baseten\/elephant-1\)/);
-  const home = mkdtempSync(join(tmpdir(), "factory-decider-home-"));
-  mkdirSync(join(home, ".config", "factory"), { recursive: true });
-  writeFileSync(join(home, ".config", "factory", "ai-gateway-key"), "k\n", { mode: 0o644 });
+  const home = mkdtempSync(join(tmpdir(), "pendulum-decider-home-"));
+  mkdirSync(join(home, ".config", "pendulum"), { recursive: true });
+  writeFileSync(join(home, ".config", "pendulum", "ai-gateway-key"), "k\n", { mode: 0o644 });
   const w = deciderCheck({ inputs: { harness: "claude" }, env: {}, home });
   assert.equal(w.status, "WARN");
   assert.match(w.detail, /key-file-mode/);
@@ -313,7 +313,7 @@ test("#379: a Codex subscription's usage limit is read from the call's own rollo
     o.payload.rate_limits = { ...o.payload.rate_limits, primary: { ...o.payload.rate_limits.primary, used_percent: 100 } };
     return JSON.stringify(o);
   }).join("\n");
-  const codexHome = mkdtempSync(join(tmpdir(), "factory-decider-codexhome-"));
+  const codexHome = mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-"));
   const { bin, calls } = fakeHarness("codex", fixture("codex-0.167-usage-limit.jsonl"), { code: 1, rollout: `${snapshot}\n`, thread });
   const { stage, kept } = stageOf(bin, "codex", { CODEX_HOME: codexHome });
   const d = openDecider({ inputs: {}, env: {}, stage });
@@ -327,7 +327,7 @@ test("#379: a Codex subscription's usage limit is read from the call's own rollo
 test("#379: a model that refuses the low reasoning effort is asked once more with its own, and both runs' spend is kept", async () => {
   const refused = jsonl([{ type: "thread.started", thread_id: "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0aaa" }, { type: "turn.started" }, { type: "turn.failed", error: { message: JSON.stringify({ status: 400, error: { type: "invalid_request_error", code: "unsupported_value", param: "reasoning.effort", message: "Unsupported value" } }) } }]);
   const { bin, calls } = fakeHarness("codex", codexSays('{"choice":"base_failure","confidence":0.75}'), { variants: [{ arg: "model_reasoning_effort", out: refused, code: 1 }] });
-  const { stage, kept } = stageOf(bin, "codex", { CODEX_HOME: mkdtempSync(join(tmpdir(), "factory-decider-codexhome-")) });
+  const { stage, kept } = stageOf(bin, "codex", { CODEX_HOME: mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-")) });
   assert.deepEqual(await openDecider({ inputs: {}, env: {}, stage }).decide(INPUT, TRIAGE_QUESTION), { verdict: "base_failure", confidence: 0.75 });
   const c = calls();
   assert.equal(c.length, 2);
@@ -342,7 +342,7 @@ test("#379: a model that refuses the low reasoning effort is asked once more wit
 
 test("#379: the two production launches: locally in the stage's outer sandbox, on a runner as the agent in a home of its own; no worker secret by name or value, no Copilot trust variable", () => {
   holdSecrets(["held-worker-value-0123456789"]);
-  const given = { PATH: "/usr/bin:/bin", HOME: "/home/dev", TMPDIR: "/stage/tmp", CLAUDE_CONFIG_DIR: "/home/dev/.claude-b", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", OTHER_NAME: "held-worker-value-0123456789", FACTORY_SHELL_SECRETS: "packed", COPILOT_ALLOW_ALL: "1", GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS: "1" };
+  const given = { PATH: "/usr/bin:/bin", HOME: "/home/dev", TMPDIR: "/stage/tmp", CLAUDE_CONFIG_DIR: "/home/dev/.claude-b", CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-dummy", OTHER_NAME: "held-worker-value-0123456789", PENDULUM_SHELL_SECRETS: "packed", COPILOT_ALLOW_ALL: "1", GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS: "1" };
   const local = decisionLaunch({ harness: "claude", model: "m-1", prompt: "q", env: given, agent: null, outer: "/ws/.sandbox/srt-harness.json", dir: "/cache/s/decision-abc123" });
   assert.equal(local.cmd, "srt");
   assert.deepEqual(local.args.slice(0, 6), ["-s", "/ws/.sandbox/srt-harness.json", "--", "env", "TMPDIR=/stage/tmp", "claude"]);
@@ -350,32 +350,32 @@ test("#379: the two production launches: locally in the stage's outer sandbox, o
   assert.equal(local.stdin, "q");
   assert.equal(local.env.CLAUDE_CONFIG_DIR, "/home/dev/.claude-b", "the stage account's login");
   assert.equal(local.env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat-dummy");
-  for (const k of ["OTHER_NAME", "FACTORY_SHELL_SECRETS", "COPILOT_ALLOW_ALL", "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"]) assert.equal(local.env[k], undefined, k);
+  for (const k of ["OTHER_NAME", "PENDULUM_SHELL_SECRETS", "COPILOT_ALLOW_ALL", "GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"]) assert.equal(local.env[k], undefined, k);
   assert.equal(decisionLaunch({ harness: "claude", prompt: "q", env: given, agent: null, outer: null, dir: "/d" }).cmd, "claude", "no outer sandbox: as is");
 
-  const agent = { user: "factory-agent", home: "/home/factory-agent", tmp: "/home/factory-agent/tmp", allow: new Set() };
+  const agent = { user: "pendulum-agent", home: "/home/pendulum-agent", tmp: "/home/pendulum-agent/tmp", allow: new Set() };
   setAgent(agent);
   try {
-    const run = decisionLaunch({ harness: "codex", model: "m-1", prompt: "q", env: { ...given, PATH: "/home/factory-agent/.npm/bin:relative:/usr/local/bin:/usr/bin", CODEX_API_KEY: "sk-dummy-key" }, agent });
+    const run = decisionLaunch({ harness: "codex", model: "m-1", prompt: "q", env: { ...given, PATH: "/home/pendulum-agent/.npm/bin:relative:/usr/local/bin:/usr/bin", CODEX_API_KEY: "sk-dummy-key" }, agent });
     assert.equal(run.cmd, "/usr/bin/sudo");
     assert.equal(run.cwd, null);
     const sep = run.args.indexOf("--");
-    assert.deepEqual(run.args.slice(sep + 1, sep + 6), ["/usr/bin/env", "/bin/sh", "-c", DECISION_SH, "factory-decision"]);
+    assert.deepEqual(run.args.slice(sep + 1, sep + 6), ["/usr/bin/env", "/bin/sh", "-c", DECISION_SH, "pendulum-decision"]);
     assert.equal(run.args[sep + 6], "codex");
     assert.ok(run.args.includes("--ephemeral"), "on a runner Codex runs on an API key: no rollout kept");
     assert.ok(run.args.includes("--setenv=PATH=/usr/local/bin:/usr/bin"), "absolute entries outside the agent's home only");
     assert.ok(run.args.includes("--property=PrivateTmp=yes"), "the home DECISION_SH makes is in a private /tmp");
     const preserved = run.args.find((a) => a.startsWith("--preserve-env=")).slice("--preserve-env=".length).split(",");
     assert.ok(preserved.includes("CODEX_API_KEY"), "the stage's credential");
-    for (const k of ["OTHER_NAME", "FACTORY_SHELL_SECRETS", "COPILOT_ALLOW_ALL", "CLAUDE_CONFIG_DIR", "HOME"]) assert.ok(!preserved.includes(k), k);
+    for (const k of ["OTHER_NAME", "PENDULUM_SHELL_SECRETS", "COPILOT_ALLOW_ALL", "CLAUDE_CONFIG_DIR", "HOME"]) assert.ok(!preserved.includes(k), k);
     assert.equal(run.env.OTHER_NAME, undefined);
-    assert.match(DECISION_SH, /mktemp -d \/tmp\/factory-decision/);
+    assert.match(DECISION_SH, /mktemp -d \/tmp\/pendulum-decision/);
   } finally {
     setAgent(null);
   }
 });
 
-test("#379: a gateway that refuses Factory's key hands this question and the rest of the stage to the stage's harness, said once", async () => {
+test("#379: a gateway that refuses Pendulum's key hands this question and the rest of the stage to the stage's harness, said once", async () => {
   const { bin, calls } = fakeHarness("claude", claudeSays('{"choice":"change_caused","confidence":0.88}'));
   const { stage } = stageOf(bin, "claude");
   const realFetch = globalThis.fetch;
@@ -401,9 +401,9 @@ test("#379: a gateway that refuses Factory's key hands this question and the res
 
 test("#379: the decision_route setting: auto by default, gateway only, or off", async () => {
   assert.equal(resolveInputs({ env: {} }).decisionRoute, "auto");
-  assert.equal(resolveInputs({ env: { FACTORY_DECISION_ROUTE: "OFF" } }).decisionRoute, "off");
-  assert.equal(resolveInputs({ env: { FACTORY_DECISION_ROUTE: "gateway" } }).decisionRoute, "gateway");
-  assert.equal(resolveInputs({ env: { FACTORY_DECISION_ROUTE: "nonsense" } }).decisionRoute, "auto");
+  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "OFF" } }).decisionRoute, "off");
+  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "gateway" } }).decisionRoute, "gateway");
+  assert.equal(resolveInputs({ env: { PENDULUM_DECISION_ROUTE: "nonsense" } }).decisionRoute, "auto");
   const { stage } = stageOf("/nonexistent", "claude");
   const repo = { full: "o/r" };
   assert.equal(openTriage({ inputs: { decisionRoute: "off" }, env: {}, repo, issue: 1, prNumber: 2, stage }).off, "route-off");

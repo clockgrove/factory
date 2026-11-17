@@ -5,21 +5,21 @@
  * uploads. One row per Objective; the standing scorecard is their union.
  *
  *   node bench/score.mjs --repo OWNER/NAME --issue N [--issue M ...]
- *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed factory:objective issue
+ *   node bench/score.mjs --repo OWNER/NAME --since 2026-11-01     every closed pendulum:objective issue
  *
- *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.9.0     consecutive walk-away merges per harness from a tag
- *   node bench/score.mjs --streak --repo A/X --repo B/Y --since v0.9.0  each repository's streak, then the pooled streak
+ *   node bench/score.mjs --streak --repo OWNER/NAME --since v0.10.0    consecutive walk-away merges per harness from a tag
+ *   node bench/score.mjs --streak --repo A/X --repo B/Y --since v0.10.0 each repository's streak, then the pooled streak
  *                                                                        across them (any harness, in the order they ended)
  *
- *   --since DATE|TAG       a date, or a Factory tag (its Release's time, read from --factory)
+ *   --since DATE|TAG       a date, or a Pendulum tag (its Release's time, read from --pendulum)
  *   --streak               print the streak per harness instead of the row table: Objectives whose clock started at or
- *                          after --since, in the order they ended; any human input (a hand-started or re-run Factory
+ *                          after --since, in the order they ended; any human input (a hand-started or re-run Pendulum
  *                          workflow run included), a Blocked card, an unmerged end or a later P1 escape breaks it
  *   --repo OWNER/NAME      the repository; give it more than once with --streak and --since for the pooled streak
  *                          (then --issue, --usage, --minutes, --owner-minutes, --read, --md, --snapshot and --replay
  *                          are not taken)
- *   --factory OWNER/NAME   the repository --since TAG is read from (default clockgrove/factory)
- *   --workflow FILE        the adopter's Factory workflow file (default factory.yml): a person's dispatch or re-run of it is input
+ *   --pendulum OWNER/NAME   the repository --since TAG is read from (default clockgrove/pendulum)
+ *   --workflow FILE        the adopter's Pendulum workflow file (default pendulum.yml): a person's dispatch or re-run of it is input
  *   --usage DIR            result.json / events.jsonl files to read instead of
  *                          downloading artifacts (<DIR>/<issue>/ per issue, an
  *                          issue without one having no usage; or, for one
@@ -35,16 +35,16 @@
  *                          the row carries the pair for bench/judge.mjs
  *   --bot LOGIN            another machine login to ignore (the App's
  *                          `<slug>[bot]` and any `*[bot]` are ignored already)
- *   --app LOGIN            Factory's App login (`<slug>[bot]`), whose marker
+ *   --app LOGIN            Pendulum's App login (`<slug>[bot]`), whose marker
  *                          comments alone are read (default: the App that
- *                          applied factory:running to the issue)
- *   --label NAME           the Objective label (default factory:objective)
+ *                          applied pendulum:running to the issue)
+ *   --label NAME           the Objective label (default pendulum:objective)
  *   --clock-after DATE     start each clock at the first label event at or
- *                          after DATE (an issue an earlier Factory ran under
+ *                          after DATE (an issue an earlier Pendulum ran under
  *                          the same label keeps its old events; this floors them)
  *   --check CMD            validation command(s) for the grade-auto line
  *   --stall-minutes N      a merged Objective idle longer than N minutes after
- *                          Factory's last action is a stall, not a walk-away
+ *                          Pendulum's last action is a stall, not a walk-away
  *                          (default 60, a merge queue's default timeout; lower it on a scratch repository with quick CI)
  *   --no-jobs              skip the job log (runner minutes become unknown)
  *   --out FILE             write the rows as JSON to FILE
@@ -105,7 +105,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       issue: { type: "string", multiple: true },
       since: { type: "string" },
       streak: { type: "boolean" },
-      factory: { type: "string" },
+      pendulum: { type: "string" },
       workflow: { type: "string" },
       usage: { type: "string" },
       minutes: { type: "string", multiple: true },
@@ -155,11 +155,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (issues.some((n) => !Number.isSafeInteger(n) || n <= 0)) usage("--issue takes issue numbers");
   if (!issues.length && !values.since) usage("Give --issue N (one or more) or --since DATE");
   const sinceTag = values.since && /^v\d+(\.\d+){0,2}$/.test(values.since) ? values.since : null;
-  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Factory tag, such as v0.9.0");
+  if (values.since && !sinceTag && Number.isNaN(Date.parse(values.since))) usage("--since takes a date, such as 2026-11-01, or a Pendulum tag, such as v0.10.0");
   if (values.streak && !values.since) usage("--streak needs --since TAG (or a date): the streak counts from there");
-  const factoryRepo = values.factory ?? "clockgrove/factory";
-  if (!/^[^/]+\/[^/]+$/.test(factoryRepo)) usage("--factory takes OWNER/NAME");
-  if (values.workflow !== undefined && !/^[A-Za-z0-9._-]+\.ya?ml$/.test(values.workflow)) usage("--workflow takes a workflow file name, such as factory.yml");
+  const pendulumRepo = values.pendulum ?? "clockgrove/pendulum";
+  if (!/^[^/]+\/[^/]+$/.test(pendulumRepo)) usage("--pendulum takes OWNER/NAME");
+  if (values.workflow !== undefined && !/^[A-Za-z0-9._-]+\.ya?ml$/.test(values.workflow)) usage("--workflow takes a workflow file name, such as pendulum.yml");
   if (values["clock-after"] && Number.isNaN(Date.parse(values["clock-after"]))) usage("--clock-after takes a date, such as 2026-11-03");
   const clockAfter = values["clock-after"] ? new Date(values["clock-after"]).toISOString() : null;
   const stallMinutes = values["stall-minutes"] === undefined ? STALL_MINUTES : Number(values["stall-minutes"]);
@@ -217,8 +217,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let sinceAt = values.since && !sinceTag ? new Date(values.since).toISOString() : null;
   try {
     if (sinceTag) {
-      sinceAt = await tagTime(api, factoryRepo, sinceTag);
-      if (!sinceAt) usage(`--since ${sinceTag}: no such tag in ${factoryRepo}`);
+      sinceAt = await tagTime(api, pendulumRepo, sinceTag);
+      if (!sinceAt) usage(`--since ${sinceTag}: no such tag in ${pendulumRepo}`);
     }
     for (const repo of repos) {
       const numbers = issues.length ? issues : await listObjectives(api, repo, { since: sinceAt, label });

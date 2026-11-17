@@ -1,17 +1,17 @@
 // Usage-limit holds per account on GitHub Actions and the cloud sandbox, and automatic account choice there (#268).
 // Local mode keeps its holds in the machine's files (holds.mjs); these routes have no machine that outlives a job, so
-// the same records live on GitHub, written by Factory's App alone: one comment per usage limit met, on Factory's own
-// holds issue (HOLDS_TITLE, label `factory:holds`, closed and locked as the sandbox image's record issue is: github.mjs
+// the same records live on GitHub, written by Pendulum's App alone: one comment per usage limit met, on Pendulum's own
+// holds issue (HOLDS_TITLE, label `pendulum:holds`, closed and locked as the sandbox image's record issue is: github.mjs
 // findRecordIssue; normally one, two only after a race at the first limit until a writer moves the newer one's records
-// over and retires it). Only comments by Factory's own login there count (isSelf), and only as written: a record is
+// over and retires it). Only comments by Pendulum's own login there count (isSelf), and only as written: a record is
 // never edited, so one edited since (its updated_at is not its created_at: a person who can edit comments did it) holds
 // nothing. So no one else can make, move or lengthen a hold; a person who deletes a hold's comment lifts it, and one
 // who unlocks or retitles the issue drops every hold on it. Each record is a new comment, so jobs that meet limits at
 // once each add theirs and lose none; a writer deletes the records forgotten (holds.mjs forgotten: an hour after a
 // hold's end, a day after a guess's). A reader makes one labelled issues query (a miss is "no holds") and lists that
-// issue's comments; only a writer searches Factory's own issues past the label before it opens the issue, on its first
+// issue's comments; only a writer searches Pendulum's own issues past the label before it opens the issue, on its first
 // limit. Only a stage whose harness has more than one account and the setting on reads or writes anything: with
-// FACTORY_AUTO_ACCOUNT off, or one account, nothing here runs and every stage runs exactly as before. The records hold
+// PENDULUM_AUTO_ACCOUNT off, or one account, nothing here runs and every stage runs exactly as before. The records hold
 // no secret: a harness, an account's name, times, a count and the limit's window.
 //
 // Hold semantics are holds.mjs's own (accountHolds over these records): a limit holds its account until the provider's
@@ -30,7 +30,7 @@
 // whose provider served it and reported none (Copilot, an API key) writes that as a fact, which ranks the account
 // after every one that reports a reading.
 //
-// A person who can push lifts a hold with `factory hold release <account> --repo OWNER/NAME` (#376): a release record,
+// A person who can push lifts a hold with `pendulum hold release <account> --repo OWNER/NAME` (#376): a release record,
 // a comment of theirs on the holds issue (RELEASE_LINE), which ends every record of that account made before it, as a
 // local release does (holds.mjs standing). The issue is locked, so only people with write access can comment there; a
 // reader counts a release only from a person who can push (logic.mjs pushAuthor, else their permission read), and only
@@ -43,17 +43,17 @@ import { HOLD_MAX_MS, accountHolds, clamped, forgotten as forgottenAt, heldRecor
 import { guessHoursMs, input, log } from "./inputs.mjs";
 import { isSelf, pushAuthor, selfLogin } from "./logic.mjs";
 
-/** Factory's holds issue: the label is a hint to find it, the exact title and Factory's own login are what count. */
-export const HOLDS_LABEL = "factory:holds";
-export const HOLDS_TITLE = "Factory: account holds";
-const HOLDS_BODY = "Factory keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, and each account's latest quota reading, which automatic account choice (`FACTORY_AUTO_ACCOUNT`) reads. Factory reads only its own comments, and a release by a person who can push (`factory hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
+/** Pendulum's holds issue: the label is a hint to find it, the exact title and Pendulum's own login are what count. */
+export const HOLDS_LABEL = "pendulum:holds";
+export const HOLDS_TITLE = "Pendulum: account holds";
+const HOLDS_BODY = "Pendulum keeps the usage-limit holds of this repository's accounts on GitHub Actions and the cloud sandbox here: one comment per limit met, and each account's latest quota reading, which automatic account choice (`PENDULUM_AUTO_ACCOUNT`) reads. Pendulum reads only its own comments, and a release by a person who can push (`pendulum hold release <account> --repo OWNER/NAME`), which lifts that account's holds. Do not reopen.";
 
 const iso = (ms) => new Date(ms).toISOString();
-const LINE = /^<!-- factory:hold (\{[^\n]*\}) -->(?:\r?\n|$)/;
+const LINE = /^<!-- pendulum:hold (\{[^\n]*\}) -->(?:\r?\n|$)/;
 /** A hold record's first line (`<` and `>` escaped, as the image record's). */
-export const holdLine = (r) => `<!-- factory:hold ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+export const holdLine = (r) => `<!-- pendulum:hold ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
 const edited = (c) => !!(c.updated_at && c.created_at && c.updated_at !== c.created_at);
-/** The record a comment carries: Factory's own comment's (`own`) first line, parsed, unchecked; else null. */
+/** The record a comment carries: Pendulum's own comment's (`own`) first line, parsed, unchecked; else null. */
 const rawRecord = (c, own = isSelf) => {
   if (!own(c) || edited(c)) return null;
   const m = LINE.exec(String(c.body || ""));
@@ -65,11 +65,11 @@ const rawRecord = (c, own = isSelf) => {
   }
 };
 
-/** A quota reading's first line (holds.mjs reading's record), Factory's own: `<` and `>` escaped, as a hold record's. */
-const QUOTA_LINE = /^<!-- factory:quota (\{[^\n]*\}) -->(?:\r?\n|$)/;
-export const quotaLine = (r) => `<!-- factory:quota ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+/** A quota reading's first line (holds.mjs reading's record), Pendulum's own: `<` and `>` escaped, as a hold record's. */
+const QUOTA_LINE = /^<!-- pendulum:quota (\{[^\n]*\}) -->(?:\r?\n|$)/;
+export const quotaLine = (r) => `<!-- pendulum:quota ${JSON.stringify(r).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
 
-/** The quota reading a comment carries: Factory's own comment's, never edited, checked (holds.mjs readingOf); else null. */
+/** The quota reading a comment carries: Pendulum's own comment's, never edited, checked (holds.mjs readingOf); else null. */
 const quotaOf = (c, own = isSelf) => {
   if (!own(c) || edited(c)) return null;
   const m = QUOTA_LINE.exec(String(c.body || ""));
@@ -81,9 +81,9 @@ const quotaOf = (c, own = isSelf) => {
   }
 };
 
-/** A release record's first line, a person's (factory hold release): the account's hold key alone. */
-export const RELEASE_LINE = /^<!-- factory:release (\{[^\n]*\}) -->(?:\r?\n|$)/;
-export const releaseLine = (account) => `<!-- factory:release ${JSON.stringify({ account })} -->`;
+/** A release record's first line, a person's (pendulum hold release): the account's hold key alone. */
+export const RELEASE_LINE = /^<!-- pendulum:release (\{[^\n]*\}) -->(?:\r?\n|$)/;
+export const releaseLine = (account) => `<!-- pendulum:release ${JSON.stringify({ account })} -->`;
 const WRITE = new Set(["admin", "maintain", "write"]);
 
 /** Whether a login can push to `repo` (its permission read once per login per `pushCheck`); a failed read is no. */
@@ -118,9 +118,9 @@ async function releaseOf(c, canPush, now) {
 /**
  * The holds recorded on issue `number` at `now`: {records (heldRecord's), releases (releaseOf's), readings (quotaOf's,
  * each with its comment's `id`), forgotten (ids of record comments a writer deletes: forgotten (holds.mjs), a quota
- * reading every window of which has reset and that is no `silent` one, or Factory's own edited since written, which
+ * reading every window of which has reset and that is no `silent` one, or Pendulum's own edited since written, which
  * count for nothing)}. `own`:
- * whose comments are Factory's records (isSelf; a person's view names the issue's author).
+ * whose comments are Pendulum's records (isSelf; a person's view names the issue's author).
  */
 async function recordsOn(repo, number, opts, now, own = isSelf) {
   const records = [];
@@ -157,15 +157,15 @@ async function recordsOn(repo, number, opts, now, own = isSelf) {
 }
 
 const selfKnown = async (opts) => {
-  // Factory's own login decides which records count: unknown, nothing is read as held, and nothing is written.
-  if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Factory's own login is unknown, so its holds cannot be told from anyone else's");
+  // Pendulum's own login decides which records count: unknown, nothing is read as held, and nothing is written.
+  if (!selfLogin() && !(await primeSelf(opts))) throw new Error("Pendulum's own login is unknown, so its holds cannot be told from anyone else's");
 };
 
 const hasLabel = (i) => (i.labels || []).some((l) => (typeof l === "string" ? l : l?.name) === HOLDS_LABEL);
 const ownHolds = (i, actions) => !i.pull_request && isSelf(i) && i.title === HOLDS_TITLE && (!actions || i.locked === true);
 
 /**
- * Factory's holds issues as a reader finds them: one labelled query (no other page), its own with the exact title,
+ * Pendulum's holds issues as a reader finds them: one labelled query (no other page), its own with the exact title,
  * locked on Actions, oldest first. Normally one; two only after a race at the first limit, until a writer retires the
  * newer, and every one's records count meanwhile, so a hold written to either is read.
  */
@@ -195,16 +195,16 @@ export async function readHolds(repo, opts, { now = Date.now(), actions } = {}) 
 }
 
 /**
- * The holds on GitHub as a person's token reads them (`factory hold list --repo`, #376), which does not know Factory's
- * App by its login: Factory's holds issues are the labelled ones with the exact title, locked, opened by an App, whose
+ * The holds on GitHub as a person's token reads them (`pendulum hold list --repo`, #376), which does not know Pendulum's
+ * App by its login: Pendulum's holds issues are the labelled ones with the exact title, locked, opened by an App, whose
  * records are that App's own comments. {issue (the oldest's number, or null), store (holds.mjs accountHolds over them)}.
- * Issues of two Apps are refused, naming them, since which one is Factory's cannot be told. A failed read throws.
+ * Issues of two Apps are refused, naming them, since which one is Pendulum's cannot be told. A failed read throws.
  */
 export async function personHolds(repo, opts, { now = Date.now() } = {}) {
   const list = (await rest(`repos/${repo.full}/issues?labels=${encodeURIComponent(HOLDS_LABEL)}&state=all&sort=created&direction=asc&per_page=100`, opts)) || [];
   const issues = list.filter((i) => !i.pull_request && i.user?.type === "Bot" && i.title === HOLDS_TITLE && i.locked === true).sort((a, b) => a.number - b.number);
   const apps = [...new Set(issues.map((i) => i.user.login))];
-  if (apps.length > 1) throw new Error(`more than one App opened a holds issue (${issues.map((i) => `#${i.number} by ${i.user.login}`).join(", ")}), so Factory's cannot be told; close and unlock the ones that are not Factory's App's`);
+  if (apps.length > 1) throw new Error(`more than one App opened a holds issue (${issues.map((i) => `#${i.number} by ${i.user.login}`).join(", ")}), so Pendulum's cannot be told; close and unlock the ones that are not Pendulum's App's`);
   const own = (c) => c.user?.login === apps[0];
   const records = [];
   for (const i of issues) {
@@ -215,7 +215,7 @@ export async function personHolds(repo, opts, { now = Date.now() } = {}) {
 }
 
 /**
- * Release `account`'s holds on GitHub (`factory hold release --repo`, #376): a release record, the person's own comment on
+ * Release `account`'s holds on GitHub (`pendulum hold release --repo`, #376): a release record, the person's own comment on
  * the oldest holds issue, which every reader takes as the end of each record of that account made before it. Returns
  * {released (holds.mjs list's entry for it, or null when nothing of it is held: then nothing is written), known (the
  * keys of the accounts that are), issue, refused (why readers will not count the comment posted, read back as a reader
@@ -226,28 +226,28 @@ export async function releaseRouteHold(repo, account, opts, { now = Date.now() }
   const known = store.list(now);
   const released = known.find((x) => x.account === account) ?? null;
   if (!released) return { released, known: known.map((x) => x.account), issue };
-  const text = `Factory: account \`${account}\` (${HARNESS_NAMES[released.harness] || released.harness}) released by a person; every hold and guess on it recorded before this comment is over, and its back-off count starts again.`;
+  const text = `Pendulum: account \`${account}\` (${HARNESS_NAMES[released.harness] || released.harness}) released by a person; every hold and guess on it recorded before this comment is over, and its back-off count starts again.`;
   const posted = await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${releaseLine(account)}\n${text}` } });
   const who = posted?.user?.login || "an unknown login";
   const counts = !!posted && (await releaseOf(posted, pushCheck(repo, opts), Infinity)) !== null;
-  const refused = counts ? null : posted?.user?.type !== "User" ? `it was posted as ${who}, which is no person (an App's or a workflow's token), and Factory counts a release only from a person who can push` : `${who} cannot push to ${repo.full}, and Factory counts a release only from a person who can push`;
+  const refused = counts ? null : posted?.user?.type !== "User" ? `it was posted as ${who}, which is no person (an App's or a workflow's token), and Pendulum counts a release only from a person who can push` : `${who} cannot push to ${repo.full}, and Pendulum counts a release only from a person who can push`;
   return { released, known: known.map((x) => x.account), issue, refused };
 }
 
-/** An issue of Factory's that is no holds record (a stray from a race or a failed lock): retitled, its label off, closed. */
+/** An issue of Pendulum's that is no holds record (a stray from a race or a failed lock): retitled, its label off, closed. */
 async function retire(repo, number, opts) {
   await rest(`repos/${repo.full}/issues/${number}`, { ...opts, method: "PATCH", body: { title: `${HOLDS_TITLE} (unused)`, state: "closed", state_reason: "not_planned" } }).catch(() => {});
   await removeLabel(repo, number, HOLDS_LABEL, opts).catch(() => {});
 }
 
-/** How young an unlocked holds issue of Factory's may be and still be one another job is opening: never retired. */
+/** How young an unlocked holds issue of Pendulum's may be and still be one another job is opening: never retired. */
 export const OPENING_MS = 10 * 60_000;
 
 /**
- * The writer's holds issues: {record (the oldest of Factory's own issues with HOLDS_TITLE that is locked, on Actions; any
+ * The writer's holds issues: {record (the oldest of Pendulum's own issues with HOLDS_TITLE that is locked, on Actions; any
  * off it: its number, or null), strays (the others to retire once this writer's own record is written: a newer locked one
  * a race opened, an unlocked one a failed lock left; never an unlocked one opened within OPENING_MS, which another job may
- * still be closing and locking), relabel (whether the record's label was taken off)}. `scan`: every page of Factory's own
+ * still be closing and locking), relabel (whether the record's label was taken off)}. `scan`: every page of Pendulum's own
  * issues by creator; else the labelled query's alone.
  */
 async function writerIssues(repo, opts, { actions = process.env.GITHUB_ACTIONS === "true", scan, now }) {
@@ -261,7 +261,7 @@ async function writerIssues(repo, opts, { actions = process.env.GITHUB_ACTIONS =
 }
 
 /**
- * The writer's holds issues (writerIssues), the record issue found by its label, else by Factory's own issues, else
+ * The writer's holds issues (writerIssues), the record issue found by its label, else by Pendulum's own issues, else
  * opened, closed and locked, then looked for again: of two jobs that opened one each at once, both write to the oldest.
  * A failed read or write throws.
  */
@@ -271,13 +271,13 @@ async function recordIssue(repo, opts, { actions, now }) {
   if (!found.record) found = await writerIssues(repo, opts, { actions, scan: true, now });
   if (!found.record) {
     try {
-      await openRecordIssue(repo, { label: HOLDS_LABEL, color: "5319e7", description: "Factory's account holds record", title: HOLDS_TITLE, body: HOLDS_BODY }, opts);
+      await openRecordIssue(repo, { label: HOLDS_LABEL, color: "5319e7", description: "Pendulum's account holds record", title: HOLDS_TITLE, body: HOLDS_BODY }, opts);
     } catch (e) {
       if (e.issue) await retire(repo, e.issue, opts);
       throw e;
     }
     found = await writerIssues(repo, opts, { actions, scan: true, now });
-    if (!found.record) throw new Error("Factory's holds issue was opened but is not found as its own, locked issue");
+    if (!found.record) throw new Error("Pendulum's holds issue was opened but is not found as its own, locked issue");
   }
   return found;
 }
@@ -304,7 +304,7 @@ export async function writeReading(repo, { harness, account, windows = {}, silen
   if (!r) return null;
   const pct = (w) => `${Math.round(w.used * 100)}%`;
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
-  const text = silent ? `Factory: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Factory: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${iso(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
+  const text = silent ? `Pendulum: ${name} ran a stage and its provider reported no quota reading, so automatic account choice puts it after the accounts that report one.` : `Pendulum: ${name} has used ${Object.entries(r.windows).map(([w, v]) => `${pct(v)} of ${w} until ${iso(v.resetsAt)}`).join(", ")}, as its provider last reported.`;
   await rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${quotaLine(r)}\n${text}` } });
   if (found.relabel) await addLabels(repo, issue, [HOLDS_LABEL], opts).catch(() => {});
   const gone = read.readings.filter((x) => x.account === account || (declared && !declared.includes(x.account))).map((x) => x.id);
@@ -315,7 +315,7 @@ export async function writeReading(repo, { harness, account, windows = {}, silen
 /**
  * Record that a stage on `account` met its usage limit: `kind` "limit", reset at `reset` (ms, the provider's), or "spent"
  * (no reset reported: a guess, by `steps`, the guess_hours setting). The hold is holds.mjs's (limit, spent) over the
- * records on the holds issues now; it is written as a new comment on the oldest. With none by its label, Factory's own issues are searched by creator (one whose
+ * records on the holds issues now; it is written as a new comment on the oldest. With none by its label, Pendulum's own issues are searched by creator (one whose
  * label was taken off is found again); with none there either, the issue is opened, closed and locked, then looked for
  * again: of two jobs that opened one each at once, both write to the oldest. Only once this writer's record is written:
  * its label goes back on, the forgotten and edited records go, and each stray's live records are copied to the record
@@ -334,8 +334,8 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   const name = `account \`${account}\` (${HARNESS_NAMES[harness] || harness})`;
   const human =
     kind === "spent"
-      ? `Factory: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}.`
-      : `Factory: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${iso(until)}.`;
+      ? `Pendulum: ${name} reached its usage limit with no reset reported; automatic account choice passes it over until ${iso(until)}.`
+      : `Pendulum: ${name} reached its usage limit${made?.window ? ` (${made.window})` : ""}; it is held until ${iso(until)}.`;
   const post = (r, text) => rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body: `${holdLine(r)}\n${text}` } });
   await post(made, human);
   // Its record is written: the clean-up, each step on its own, none failing the hold.
@@ -343,7 +343,7 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
   for (const id of read.forgotten) await rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "DELETE" }).catch(() => {});
   for (const x of strays) {
     try {
-      for (const r of x.records) await post(r, `Factory: a hold on account \`${r.account}\` copied from #${x.n}, which Factory no longer uses.`);
+      for (const r of x.records) await post(r, `Pendulum: a hold on account \`${r.account}\` copied from #${x.n}, which Pendulum no longer uses.`);
       await retire(repo, x.n, opts);
     } catch {
       // left for the next writer: its records still count (readHolds reads every holds issue found)
@@ -358,13 +358,13 @@ export async function writeHold(repo, { kind, harness, account, reset = null, wi
  */
 export const routeTurn = (issue, n) => createHash("sha256").update(String(Number(issue) || 0)).digest().readUInt32BE(0) % n;
 
-const PROGRESS = /^<!-- factory:\d+:progress:(?:work|review):[^\n]* -->/;
-const HARNESS_LINE = /^<!-- factory:harness (\{[^\n]*\}) -->$/m;
+const PROGRESS = /^<!-- pendulum:\d+:progress:(?:work|review):[^\n]* -->/;
+const HARNESS_LINE = /^<!-- pendulum:harness (\{[^\n]*\}) -->$/m;
 
 /**
  * How many stages started on each of `names` (a `harness`'s accounts) since that account's newest quota record
  * (`store`'s readingAt; with none, every one the read shows), read from what the stages already write: each stage's
- * progress comment on its Objective, Factory's own, made at the stage's start, whose harness line (logic.mjs
+ * progress comment on its Objective, Pendulum's own, made at the stage's start, whose harness line (logic.mjs
  * harnessMarker) names its account. One read, never more: the newest page of the repository's issue comments updated
  * since the oldest of those records (`GET /issues/comments`, sorted by creation, newest first). A stage's comment names
  * its account from its first write after the stage resolved its harness, so one still setting up is not seen yet; and
@@ -458,7 +458,7 @@ const heldText = (store, name, t) => {
 export function routeLimits({ repo, issue, stage, pr = null, harness, account, pinned = false, env = process.env, opts, now = () => Date.now() }) {
   const names = routeAutoAccounts(env, harness);
   if (!names || !names.includes(account)) return null;
-  // The guess's steps: the repository's guess_hours (inputs.mjs), Factory's default when it is not a list of hours.
+  // The guess's steps: the repository's guess_hours (inputs.mjs), Pendulum's default when it is not a list of hours.
   const steps = guessHoursMs(input("guess_hours", { env })) ?? undefined;
   const others = names.filter((n) => n !== account);
   const free = (store, t) => others.filter((n) => store.avoidUntil(n, t) === null);

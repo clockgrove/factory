@@ -20,7 +20,7 @@ RETRY.sleep = async () => {};
 // #2647: two sibling Objectives add a function to one module. The first merges; the second, reviewed and green, then
 // conflicts at its merge. It goes back for a rebase (no Block) and merges after it; a third sibling's conflict sends it back again.
 
-const SELF = "factory-app[bot]";
+const SELF = "pendulum-app[bot]";
 const repo = { full: "o/r", owner: "o", name: "r" };
 
 /** A real git repository: GitHub's mergeable state for a PR is git's own answer for its head against main. */
@@ -39,7 +39,7 @@ function gitRepo() {
   git("add", "store.mjs");
   git("commit", "-q", "-m", "base");
   const conflicts = (head) => spawnSync("git", ["-C", dir, "merge-tree", "--write-tree", "main", head]).status === 1;
-  // o/r on the test's git server (temp.mjs GITHUB_SERVER_URL), where Factory's trial merges fetch from: `publish()`
+  // o/r on the test's git server (temp.mjs GITHUB_SERVER_URL), where Pendulum's trial merges fetch from: `publish()`
   // pushes every branch there as it is now.
   const origin = join(process.env.GITHUB_SERVER_URL, "o", "r.git");
   const publish = () => {
@@ -63,7 +63,7 @@ function fakeGitHub(g) {
   // `removals`: the queue's removals of the PR (its timeline); `waiting`: the PRs in the queue; `entries`: the queue's
   // entries as `{pr, head}` (mergeQueueHeads); `mainAt`: main's commit time.
   // `threads`: the PR's review threads (GraphQL's shape); `protection`: branch protection requires resolved conversations;
-  // `rules`: the active rules GitHub lists for main; `labelled`: labels added; `resolved`: threads Factory resolved.
+  // `rules`: the active rules GitHub lists for main; `labelled`: labels added; `resolved`: threads Pendulum resolved.
   // `checkRuns`: the check runs on any head; `queueTimeout`: the merge queue ruleset's check timeout (minutes), with which
   // the repository and its rulesets are read (0: a ruleset with no merge queue), else they are unread. `entry`: a queued
   // PR's merge queue entry (GraphQL's shape), else none is read; `entryFails`: the entry read fails.
@@ -91,7 +91,7 @@ function fakeGitHub(g) {
     const body = init.body ? JSON.parse(init.body) : null;
     let m;
     // The Objective's issue, open and labelled: the merge pass reads it before any merge (session.mjs mergeReadyOne).
-    if (method === "GET" && /\/issues\/\d+$/.test(u.split("?")[0])) return json(200, { number: Number(/(\d+)$/.exec(u.split("?")[0])[1]), state: "open", labels: [{ name: "factory:objective" }] });
+    if (method === "GET" && /\/issues\/\d+$/.test(u.split("?")[0])) return json(200, { number: Number(/(\d+)$/.exec(u.split("?")[0])[1]), state: "open", labels: [{ name: "pendulum:objective" }] });
     if (/\/graphql$/.test(u)) {
       const q = body.query;
       if (q.includes("isInMergeQueue")) return json(200, { data: { repository: { pullRequest: { isInMergeQueue: queued.has(body.variables.n) } } } });
@@ -168,7 +168,7 @@ function fakeGitHub(g) {
     return json(404, { message: `Not Found: ${method} ${u}` });
   };
   const open = (number, issue, sha) => {
-    prs[number] = { number, state: "open", draft: false, merged: false, node_id: `PR_${number}`, title: `Objective ${issue}`, labels: [], head: { sha, ref: `factory/${issue}` }, base: { ref: "main" }, reviews: [{ id: number, user: { login: SELF }, body: `${marker(issue, "review")}\nFactory reviewer`, submitted_at: new Date().toISOString() }] };
+    prs[number] = { number, state: "open", draft: false, merged: false, node_id: `PR_${number}`, title: `Objective ${issue}`, labels: [], head: { sha, ref: `pendulum/${issue}` }, base: { ref: "main" }, reviews: [{ id: number, user: { login: SELF }, body: `${marker(issue, "review")}\nPendulum reviewer`, submitted_at: new Date().toISOString() }] };
     return prs[number];
   };
   return { fetch, prs, comments, enqueued, attempts, open, queued, state };
@@ -193,8 +193,8 @@ async function withGitHub(fn) {
 test("#2647: two sibling PRs on one file: the second conflicts at its merge, goes back for a rebase, merges; a third sibling's conflict sends it back again", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();
-    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(11, 1, one);
     const pr12 = gh.open(12, 2, two);
     // Both reviewed and validated at their heads; neither conflicts yet.
@@ -226,14 +226,14 @@ test("#2647: two sibling PRs on one file: the second conflicts at its merge, goe
     await gh.fetch("https://api.github.com/repos/o/r/issues/12/comments", { method: "POST", body: JSON.stringify({ body: ontoRecord(2, { from: two, base: one, files: ["store.mjs"] }) }) });
 
     // The worker rebases keeping both functions, and the review records the new head: it merges with no person.
-    const rebased = g.commit("factory/2", "main", "export const version = 1;\nexport function saveOne() {}\nexport function saveTwo() {}\n", "two, rebased");
+    const rebased = g.commit("pendulum/2", "main", "export const version = 1;\nexport function saveOne() {}\nexport function saveTwo() {}\n", "two, rebased");
     pr12.head.sha = rebased;
     await recordMergeable(repo, 12, 2, rebased, { token: "t" });
     assert.equal(await merge(2, 12), "queued");
     assert.deepEqual(gh.enqueued.at(-1), { pr: 12, sha: rebased });
 
     // A third sibling lands on the same lines first: a new base, so it goes back again rather than Blocking.
-    const three = g.commit("factory/3", one, "export const version = 1;\nexport function saveOne() {}\nexport function saveThree() {}\n", "three");
+    const three = g.commit("pendulum/3", one, "export const version = 1;\nexport function saveOne() {}\nexport function saveThree() {}\n", "three");
     g.git("update-ref", "refs/heads/main", three);
     assert.equal(await merge(2, 12), "conflict");
     assert.deepEqual(gh.attempts, [11, 12], "the second conflict is read before any enqueue too");
@@ -247,10 +247,10 @@ test("#243: a PR the merge queue took out for a conflict waits while a PR in the
   await withGitHub(async (g, gh) => {
     const base = g.main();
     // Two siblings write the same line of store.mjs: each merges into main cleanly, but not both.
-    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
     // A third changes another file only.
-    g.git("checkout", "-q", "-B", "factory/3", base);
+    g.git("checkout", "-q", "-B", "pendulum/3", base);
     writeFileSync(join(g.dir, "other.mjs"), "export const other = 3;\n");
     g.git("add", "other.mjs");
     g.git("commit", "-q", "-m", "three");
@@ -319,8 +319,8 @@ test("#243: a queue-conflict wait whose queue cannot be read holds this tick; on
 test("#2647: a conflict GitHub had not worked out when the PR was read is read again after its refusal: conflict, not a thrown error", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();
-    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
     g.git("update-ref", "refs/heads/main", one);
     const pr = gh.open(12, 2, two);
     pr.unknownOnce = true;
@@ -333,7 +333,7 @@ test("#2647: a conflict GitHub had not worked out when the PR was read is read a
 test("#2647: a merge refusal on a PR that does not conflict is still thrown (the review stage decides on it)", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();
-    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const real = gh.fetch;
@@ -344,7 +344,7 @@ test("#2647: a merge refusal on a PR that does not conflict is still thrown (the
 
 test("#2669: the dispatcher's merge pass queues or merges the PR just before the review stage's own call: success, not a refusal", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     // The review stage reads the PR out of the queue; the dispatcher's tick enqueues it before the review's enqueue lands.
@@ -360,7 +360,7 @@ test("#2669: the dispatcher's merge pass queues or merges the PR just before the
     assert.equal(mergeBlockReason("queued", report), null);
 
     // No merge queue: the dispatcher's pass merges it first and GitHub refuses the review's merge (405).
-    const three = g.commit("factory/3", g.main(), "export const version = 1;\nexport function saveThree() {}\n", "three");
+    const three = g.commit("pendulum/3", g.main(), "export const version = 1;\nexport function saveThree() {}\n", "three");
     gh.open(13, 3, three);
     await recordMergeable(repo, 13, 3, three, { token: "t" });
     const direct = () => mergeReadyOne(repo, { issue: 3, prNumber: 13, queue: false, checkNames: ["ci"] }, { token: "t" });
@@ -372,10 +372,10 @@ test("#2669: the dispatcher's merge pass queues or merges the PR just before the
 
 test("#2669: a refusal while the PR sits in the queue at another head is still thrown", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     const pr = gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
-    const pushed = g.commit("factory/2", two, "export const version = 1;\nexport function saveTwo() { return 2; }\n", "two, pushed");
+    const pushed = g.commit("pendulum/2", two, "export const version = 1;\nexport function saveTwo() { return 2; }\n", "two, pushed");
     gh.state.race = async () => {
       pr.head.sha = pushed;
       gh.queued.add(12);
@@ -386,7 +386,7 @@ test("#2669: a refusal while the PR sits in the queue at another head is still t
 
 test("#2669: a refusal whose read-again fails for now throws that read's transient error (the review job's next tick), not the refusal", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.race = async () => gh.queued.add(12);
@@ -417,7 +417,7 @@ test("#243: local --wait sends a conflicting PR back each time other PRs merged;
   const ran = [];
   const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async (issue, o) => (ran.push([issue, o]), { exit: "delivered" }) });
   const gh = (recent, already, stuck = null) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: recent, recent, already, stuck, record: stuck }), prComment: async (_r, n, body) => posted.push([n, body]), applyExit: async (_r, x) => exits.push(x) });
-  const inputs = { objectiveLabel: "factory:objective", notify: "" };
+  const inputs = { objectiveLabel: "pendulum:objective", notify: "" };
 
   assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(0, false) }), true);
   assert.deepEqual(ran, [[2, { wait: true }]], "the worker rebases and the review runs again, waiting for the merge");
@@ -455,7 +455,7 @@ test("#402: local --wait sends back and Blocks at the repository's rebase_limit"
   const loop = Object.assign(Object.create(Local.prototype), { repo, opts: { token: "t" }, work: async () => ({ exit: "delivered" }) });
   const gh = (recent) => ({ getPrSettled: async () => pr, rebaseMarkers: async () => ({ effective: recent, recent, already: false, stuck: null, record: null }), prComment: async (_r, n, body) => posted.push(body), applyExit: async (_r, x) => exits.push(x) });
   const { resolveInputs } = await import("../scripts/lib/inputs.mjs");
-  const inputs = { ...resolveInputs({ env: { FACTORY_REBASE_LIMIT: "2" } }), objectiveLabel: "factory:objective", notify: "" };
+  const inputs = { ...resolveInputs({ env: { PENDULUM_REBASE_LIMIT: "2" } }), objectiveLabel: "pendulum:objective", notify: "" };
   assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(1) }), true);
   assert.match(posted[0], /rebase 2 of at most 2 in 24 h/);
   assert.equal(await loop.sendBack(2, 12, inputs, { gh: gh(2) }), false);
@@ -470,13 +470,13 @@ function sendBackLoop(workAnswers) {
 }
 const dirtyPr = (over = {}) => ({ number: 12, state: "open", head: { sha: "a".repeat(40) }, base: { ref: "main" }, mergeable_state: "dirty", ...over });
 const failing = (status) => Object.assign(new Error(`GitHub said ${status}`), { status });
-const inputs = { objectiveLabel: "factory:objective", notify: "" };
+const inputs = { objectiveLabel: "pendulum:objective", notify: "" };
 
 test("#2647: --wait follows a merge-time conflict into the send-back, and polls again when the send-back says retry", async () => {
   await withGitHub(async (g, gh) => {
     const base = g.main();
-    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const two = g.commit("factory/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const two = g.commit("pendulum/2", base, "export const version = 1;\nexport function saveTwo() {}\n", "two");
     g.git("update-ref", "refs/heads/main", one);
     gh.open(12, 2, two);
     const answers = ["retry", true];
@@ -552,10 +552,10 @@ test("#243: the dispatcher and a --wait loop Blocking the same send-back conditi
 
 test("#205: an Objective edited since its plan does not merge; with its plan's text it does", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
-    // The plan comment Factory wrote, recording the text it was made from; the issue's text as GitHub returns it now.
+    // The plan comment Pendulum wrote, recording the text it was made from; the issue's text as GitHub returns it now.
     const issue = { title: "Objective", body: "Save two." };
     (gh.comments[2] ||= []).push({ id: 900, user: { login: SELF }, body: `${marker(2, "plan")}${planTextMarker({ sha256: objectiveSha("Objective", "Save two."), label: null })}\n## Plan`, created_at: new Date().toISOString() });
     const real = gh.fetch;
@@ -572,7 +572,7 @@ test("#205: an Objective edited since its plan does not merge; with its plan's t
 
 test("#205: an Objective edited while its PR waits in the merge queue is taken out of it and does not merge", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const issue = { title: "Objective", body: "Save two." };
@@ -602,7 +602,7 @@ test("#205: an Objective edited while its PR waits in the merge queue is taken o
 
 test("#400: an edit since the plan by a writer merges once judged wording only; one no decider here can judge goes to the review stage", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     // The plan comment records the text it was made from; the body since edited by kirk, who can push.
@@ -618,7 +618,7 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
     // The dispatcher on Actions holds no AI Gateway key: the review label goes back on, and nothing merges.
     const noKey = () => openEditCheck({ inputs: {}, env: { GITHUB_ACTIONS: "true" } });
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: noKey }, { token: "t" }), "text-edit");
-    assert.deepEqual([gh.state.labelled, gh.enqueued], [["12:factory:review"], []]);
+    assert.deepEqual([gh.state.labelled, gh.enqueued], [["12:pendulum:review"], []]);
     assert.equal(mergeBlockReason("text-edit"), null, "no Block");
     // With decision_route off, as before: Blocked.
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], editCheck: () => openEditCheck({ inputs: { decisionRoute: "off" } }) }, { token: "t" }), "edited");
@@ -629,7 +629,7 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
     assert.equal(asked.length, 1);
     assert.match(gh.comments[2].find((c) => c.id === 900).body, /"verdicts":\{"[0-9a-f]{64}":"wording"\}/);
     // Said on the issue: a merge progress comment naming the verdict, the decider and its confidence.
-    assert.ok(gh.comments[2].some((c) => c.body.startsWith("<!-- factory:2:progress:merge:") && /edit judged wording-only by given \(perplexity\/pplx-decider-v1\.2\) \(0\.90\); plan kept/.test(c.body)), gh.comments[2].map((c) => c.body).join("\n---\n"));
+    assert.ok(gh.comments[2].some((c) => c.body.startsWith("<!-- pendulum:2:progress:merge:") && /edit judged wording-only by given \(perplexity\/pplx-decider-v1\.2\) \(0\.90\); plan kept/.test(c.body)), gh.comments[2].map((c) => c.body).join("\n---\n"));
   });
 });
 
@@ -637,12 +637,12 @@ test("#400: an edit since the plan by a writer merges once judged wording only; 
 // thread (a CodeQL alert) was still open, so the merge failed and the Objective Blocked with the generic merge failure.
 const codeql = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "codeql-pr-339.json"), "utf8"));
 const RULESET = { type: "pull_request", ruleset_source_type: "Repository", ruleset_id: 1, parameters: { required_review_thread_resolution: true } };
-const reply = (body, author = { __typename: "Bot", login: "factory-app" }, authorAssociation = "NONE") => ({ body, authorAssociation, author, pullRequestReview: { body: "", authorAssociation, author } });
+const reply = (body, author = { __typename: "Bot", login: "pendulum-app" }, authorAssociation = "NONE") => ({ body, authorAssociation, author, pullRequestReview: { body: "", authorAssociation, author } });
 const personThread = { id: "PRRT_person", isResolved: false, path: "src/store.ts", line: null, originalLine: 41, comments: { nodes: [reply("Why a second store?", { __typename: "User", login: "dana" }, "MEMBER")] } };
 
-test("#331 #368: code scanning's open comment at the merge goes to the answer pass; Factory's answer alone leaves it open, and once the finding check resolved its thread the PR merges", async () => {
+test("#331 #368: code scanning's open comment at the merge goes to the answer pass; Pendulum's answer alone leaves it open, and once the finding check resolved its thread the PR merges", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const thread = structuredClone(codeql.thread);
@@ -651,12 +651,12 @@ test("#331 #368: code scanning's open comment at the merge goes to the answer pa
     const report = {};
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "code-scanning");
     assert.deepEqual(gh.attempts, [], "no merge GitHub would refuse");
-    assert.deepEqual(gh.state.labelled, ["12:factory:review"], "the review runs again; its answer pass takes the comment");
+    assert.deepEqual(gh.state.labelled, ["12:pendulum:review"], "the review runs again; its answer pass takes the comment");
     assert.equal(mergeBlockReason("code-scanning", report), null, "not a Block");
     // The answer pass replied in its thread, and the finding check did not read it as resolving the alert: still open.
-    thread.comments.nodes.push(reply("<!-- factory:2:reply:4580153891 -->\nFixed in abc1234: the key is checked against __proto__."));
+    thread.comments.nodes.push(reply("<!-- pendulum:2:reply:4580153891 -->\nFixed in abc1234: the key is checked against __proto__."));
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "code-scanning");
-    assert.deepEqual(gh.state.resolved, [], "Factory's own answer resolves nothing at the merge");
+    assert.deepEqual(gh.state.resolved, [], "Pendulum's own answer resolves nothing at the merge");
     // The finding check's yes resolved the thread (finding-check.mjs): the merge goes on.
     thread.isResolved = true;
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "queued");
@@ -666,7 +666,7 @@ test("#331 #368: code scanning's open comment at the merge goes to the answer pa
 
 test("#331: another unresolved thread a ruleset or branch protection requires resolved Blocks naming its author, file and line, never as a merge failure", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.threads = [structuredClone(personThread)];
@@ -675,9 +675,9 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report }, { token: "t" }), "threads");
     assert.deepEqual(gh.attempts, []);
     const why = mergeBlockReason("threads", report);
-    assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then re-apply `factory:objective` to resume");
+    assert.equal(why, "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: dana on src/store.ts:41. Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
-    assert.deepEqual(gh.state.labelled, [], "a person's thread is not Factory's to answer");
+    assert.deepEqual(gh.state.labelled, [], "a person's thread is not Pendulum's to answer");
 
     // Branch protection's own setting, read without admin (refUpdateRule).
     gh.state.rules = [];
@@ -694,7 +694,7 @@ test("#331: another unresolved thread a ruleset or branch protection requires re
 
 test("#331: a thread opened between the read and the merge is named from the threads after GitHub's refusal", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.rules = [RULESET];
@@ -709,13 +709,13 @@ test("#331: a thread opened between the read and the merge is named from the thr
 
 test("#331: local --wait takes code scanning's comment to the review stage, and Blocks on another thread with its name", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.threads = [structuredClone(codeql.thread)];
     gh.state.rules = [RULESET];
     const reviewed = [];
-    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ FACTORY_CI_CHECKS: "ci" }), review: async (issue, prNumber) => (reviewed.push([issue, prNumber]), { exit: "delivered" }) });
+    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ PENDULUM_CI_CHECKS: "ci" }), review: async (issue, prNumber) => (reviewed.push([issue, prNumber]), { exit: "delivered" }) });
     assert.equal(await loop.followMerge(2, 12, { pollMs: 1 }), true);
     assert.deepEqual(reviewed, [[2, 12]], "the review stage answers it");
     gh.state.threads = [structuredClone(personThread)];
@@ -727,9 +727,9 @@ test("#331: local --wait takes code scanning's comment to the review stage, and 
   });
 });
 
-test("#331: code scanning's review rounds at the merge are bounded per re-entry, counted in Factory's record; past the bound it Blocks naming each open alert", async () => {
+test("#331: code scanning's review rounds at the merge are bounded per re-entry, counted in Pendulum's record; past the bound it Blocks naming each open alert", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     gh.state.rules = [RULESET];
@@ -743,20 +743,20 @@ test("#331: code scanning's review rounds at the merge are bounded per re-entry,
     gh.state.threads = [alert("A3", 260), alert("A4", 12)];
     const report = {};
     assert.equal(await pass(report), "threads");
-    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 open alert(s) on PR #12 after 2 answer rounds: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `factory:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "code scanning still has 2 open alert(s) on PR #12 after 2 answer rounds: packages/application/src/wake-triage-cases.ts:260; packages/application/src/wake-triage-cases.ts:12. Fix them on the branch or resolve them on the PR, then re-apply `pendulum:objective` to resume");
     assert.equal(mergeBlockCause("threads", report), "work");
     assert.equal(gh.state.labelled.length, 2, "two rounds, two review labels");
     assert.equal((gh.comments[2] || []).filter((c) => c.body.startsWith(marker(2, "answer-rounds"))).length, 1, "one record on the issue");
     assert.deepEqual(gh.attempts, []);
     // A re-entry (the Objective label applied again) starts the count over.
-    gh.state.timeline = [{ event: "labeled", label: { name: "factory:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
+    gh.state.timeline = [{ event: "labeled", label: { name: "pendulum:objective" }, created_at: new Date(Date.now() + 1000).toISOString() }];
     assert.equal(await pass(), "code-scanning");
   });
 });
 
 test("#331: a person's reply in code scanning's thread is no answer: the thread stays open and goes to the answer pass", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const thread = structuredClone(codeql.thread);
@@ -769,12 +769,12 @@ test("#331: a person's reply in code scanning's thread is no answer: the thread 
 
 test("#331: threads resolved just now that GitHub's merge check does not count yet: one more try after a moment, not a refusal", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
-    // Factory's reviewer's finding a maintainer answered: a person's answer, resolved at the merge.
-    const factory = { __typename: "Bot", login: "factory-app" };
-    const root = { body: "acceptance 1: a second store", authorAssociation: "NONE", author: factory, pullRequestReview: { body: `${marker(2, "review")}\nFactory's review`, authorAssociation: "NONE", author: factory } };
+    // Pendulum's reviewer's finding a maintainer answered: a person's answer, resolved at the merge.
+    const pendulum = { __typename: "Bot", login: "pendulum-app" };
+    const root = { body: "acceptance 1: a second store", authorAssociation: "NONE", author: pendulum, pullRequestReview: { body: `${marker(2, "review")}\nPendulum's review`, authorAssociation: "NONE", author: pendulum } };
     const thread = { id: "PRRT_ours", isResolved: false, path: "src/store.ts", line: 41, originalLine: 41, comments: { nodes: [root, reply("Keep it: decided on the issue.", { __typename: "User", login: "dana" }, "MEMBER")] } };
     gh.state.threads = [thread];
     gh.state.rules = [RULESET];
@@ -787,7 +787,7 @@ test("#331: threads resolved just now that GitHub's merge check does not count y
 
 test("#331: a named reviewer's comment posted after the answer pass Blocks under the rule, saying so; no review runs for it", async () => {
   await withGitHub(async (g, gh) => {
-    const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+    const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
     gh.open(12, 2, two);
     await recordMergeable(repo, 12, 2, two, { token: "t" });
     const greptile = { __typename: "Bot", login: "greptile-apps" };
@@ -795,7 +795,7 @@ test("#331: a named reviewer's comment posted after the answer pass Blocks under
     gh.state.rules = [RULESET];
     const report = {};
     assert.equal(await mergeReadyOne(repo, { issue: 2, prNumber: 12, queue: true, checkNames: ["ci"], report, thirdParty: ["greptile-apps[bot]"] }, { token: "t" }), "threads");
-    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: greptile-apps[bot] on src/a.ts:3 (posted after the answer pass). Answer or resolve each on the PR, then re-apply `factory:objective` to resume");
+    assert.equal(mergeBlockReason("threads", report), "PR #12 cannot merge: a ruleset on main requires every review conversation resolved, and 1 is open: greptile-apps[bot] on src/a.ts:3 (posted after the answer pass). Answer or resolve each on the PR, then re-apply `pendulum:objective` to resume");
     assert.deepEqual(gh.state.labelled, []);
   });
 });
@@ -817,7 +817,7 @@ async function followOnClock(pollMs, step, env = {}) {
     step(min);
   };
   try {
-    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ FACTORY_CI_CHECKS: "ci", ...env }), pause });
+    const loop = Object.assign(Object.create(Local.prototype), { repo, repoFull: "o/r", opts: { token: "t" }, baseEnv: () => ({ PENDULUM_CI_CHECKS: "ci", ...env }), pause });
     const answer = await loop.followMerge(2, 12, { pollMs });
     return { answer, minutes: (Date.now() - start) / 60_000, lines: lines.join("") };
   } finally {
@@ -828,7 +828,7 @@ async function followOnClock(pollMs, step, env = {}) {
 
 /** PR #12 for Objective 2, reviewed and recorded mergeable at its head. */
 async function reviewedPr(g, gh) {
-  const two = g.commit("factory/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
+  const two = g.commit("pendulum/2", g.main(), "export const version = 1;\nexport function saveTwo() {}\n", "two");
   const pr = gh.open(12, 2, two);
   await recordMergeable(repo, 12, 2, two, { token: "t" });
   return pr;
@@ -877,8 +877,8 @@ test("#438: local --wait follows a PR waiting for the queue ahead while that que
   await withGitHub(async (g, gh) => {
     const base = g.main();
     // Siblings that write the same line of store.mjs as PR #12: each in the queue conflicts with it by a trial merge.
-    const one = g.commit("factory/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
-    const four = g.commit("factory/4", base, "export const version = 1;\nexport function saveFour() {}\n", "four");
+    const one = g.commit("pendulum/1", base, "export const version = 1;\nexport function saveOne() {}\n", "one");
+    const four = g.commit("pendulum/4", base, "export const version = 1;\nexport function saveFour() {}\n", "four");
     await reviewedPr(g, gh);
     g.publish();
     gh.state.queueTimeout = 60;
@@ -923,15 +923,15 @@ test("#438: with auto_merge off, local --wait follows a PR a person put in the q
         if (min >= 10) gh.queued.add(12), (gh.state.entry = entryAt(min >= 30 ? "AWAITING_CHECKS" : "QUEUED", 1));
         if (min >= 90) mergedNow(pr), gh.queued.delete(12);
       },
-      { FACTORY_AUTO_MERGE: "false" },
+      { PENDULUM_AUTO_MERGE: "false" },
     );
     assert.equal(r.answer, true, r.lines);
     assert.equal(r.minutes, 90);
-    assert.deepEqual(gh.attempts, [], "Factory merges and enqueues nothing with auto_merge off");
+    assert.deepEqual(gh.attempts, [], "Pendulum merges and enqueues nothing with auto_merge off");
 
     // Never enqueued: it stops after the bound, waiting on a person, not on a hung check.
     Object.assign(pr, { merged: false, merged_at: null, state: "open" });
-    r = await followOnClock(10 * 60_000, () => {}, { FACTORY_AUTO_MERGE: "false" });
+    r = await followOnClock(10 * 60_000, () => {}, { PENDULUM_AUTO_MERGE: "false" });
     assert.equal(r.answer, false);
     assert.equal(r.minutes, 50);
     assert.match(r.lines, /stopped following PR #12 after 50 min with no person merging it or putting it in the merge queue \(auto_merge is off\)\n/);

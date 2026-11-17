@@ -10,7 +10,7 @@ import { LOCAL_BOUNDS, localBound, valueProblem } from "../scripts/lib/inputs.mj
 import { bootId } from "../scripts/lib/proc.mjs";
 import { Local, checkToken, deadHereHolder, holderId, machineIdentity, thisBoot } from "../scripts/local.mjs";
 
-const TOKEN_PROBE_MAX = LOCAL_BOUNDS.FACTORY_LOCAL_TOKEN_PROBE_MAX.fallback;
+const TOKEN_PROBE_MAX = LOCAL_BOUNDS.PENDULUM_LOCAL_TOKEN_PROBE_MAX.fallback;
 
 RETRY.sleep = async () => {};
 
@@ -62,7 +62,7 @@ test("#421: checkToken never passes on a partial check: a listing that fails, mo
     assert.equal(probed.length, 0);
   });
   await withGitHub({ count: TOKEN_PROBE_MAX + 2, probe: () => 404 }, async (probed) => {
-    await assert.rejects(checkToken("acme/app", "github_pat_x"), new RegExp(`lists ${TOKEN_PROBE_MAX + 1} other repositories it could write to, more than the ${TOKEN_PROBE_MAX} Factory probes for write access \\(FACTORY_LOCAL_TOKEN_PROBE_MAX\\)`));
+    await assert.rejects(checkToken("acme/app", "github_pat_x"), new RegExp(`lists ${TOKEN_PROBE_MAX + 1} other repositories it could write to, more than the ${TOKEN_PROBE_MAX} Pendulum probes for write access \\(PENDULUM_LOCAL_TOKEN_PROBE_MAX\\)`));
     assert.equal(probed.length, 0, "refused before any probe");
   });
   await withGitHub({ count: 3, probe: (n) => (n === "dev/r2" ? 400 : 404) }, async () => {
@@ -85,7 +85,7 @@ test("#421: checkToken probes only the listed repositories its person can push t
   });
   // The cap counts the repositories to probe, as the setting sets it.
   await withGitHub({ count: 4, probe: () => 404 }, async (probed) => {
-    await assert.rejects(checkToken("acme/app", "github_pat_x", { max: 2 }), /lists 3 other repositories it could write to, more than the 2 Factory probes/);
+    await assert.rejects(checkToken("acme/app", "github_pat_x", { max: 2 }), /lists 3 other repositories it could write to, more than the 2 Pendulum probes/);
     assert.equal(probed.length, 0);
   });
 });
@@ -154,32 +154,32 @@ test("#421: a write probe GitHub's rate limit turns away is no answer: the token
 });
 
 test("#421: the lapse and token-probe limits are bounded local settings: this machine's over the repository's, a value out of bounds the default, said once", () => {
-  assert.deepEqual(localBound("FACTORY_LOCAL_LAPSE_MAX", ""), { value: 3, problem: null });
-  assert.deepEqual(localBound("FACTORY_LOCAL_TOKEN_PROBE_MAX", undefined), { value: 100, problem: null });
-  assert.equal(localBound("FACTORY_LOCAL_LAPSE_MAX", "5").value, 5);
-  for (const v of ["1", "11", "2.5", "lots"]) assert.equal(localBound("FACTORY_LOCAL_LAPSE_MAX", v).value, 3, v);
-  assert.equal(localBound("FACTORY_LOCAL_TOKEN_PROBE_MAX", "1001").value, 100);
-  assert.equal(valueProblem("FACTORY_LOCAL_TOKEN_PROBE_MAX", "0"), "not a whole number from 1 to 1000", "a repository variable out of bounds is named and ignored");
-  assert.equal(valueProblem("FACTORY_LOCAL_LAPSE_MAX", "4"), null);
-  const saved = process.env.FACTORY_LOCAL_LAPSE_MAX;
+  assert.deepEqual(localBound("PENDULUM_LOCAL_LAPSE_MAX", ""), { value: 3, problem: null });
+  assert.deepEqual(localBound("PENDULUM_LOCAL_TOKEN_PROBE_MAX", undefined), { value: 100, problem: null });
+  assert.equal(localBound("PENDULUM_LOCAL_LAPSE_MAX", "5").value, 5);
+  for (const v of ["1", "11", "2.5", "lots"]) assert.equal(localBound("PENDULUM_LOCAL_LAPSE_MAX", v).value, 3, v);
+  assert.equal(localBound("PENDULUM_LOCAL_TOKEN_PROBE_MAX", "1001").value, 100);
+  assert.equal(valueProblem("PENDULUM_LOCAL_TOKEN_PROBE_MAX", "0"), "not a whole number from 1 to 1000", "a repository variable out of bounds is named and ignored");
+  assert.equal(valueProblem("PENDULUM_LOCAL_LAPSE_MAX", "4"), null);
+  const saved = process.env.PENDULUM_LOCAL_LAPSE_MAX;
   const lines = [];
   const write = process.stdout.write;
   process.stdout.write = (c, ...more) => (lines.push(String(c)), true);
   try {
-    delete process.env.FACTORY_LOCAL_LAPSE_MAX;
-    const loop = Object.assign(Object.create(Local.prototype), { wf: { FACTORY_LOCAL_LAPSE_MAX: "6" } });
-    assert.equal(loop.bounded("FACTORY_LOCAL_LAPSE_MAX"), 6, "the repository's");
-    process.env.FACTORY_LOCAL_LAPSE_MAX = "4";
-    assert.equal(loop.bounded("FACTORY_LOCAL_LAPSE_MAX"), 4, "this machine's over it");
-    process.env.FACTORY_LOCAL_LAPSE_MAX = "99";
-    assert.equal(loop.bounded("FACTORY_LOCAL_LAPSE_MAX"), 3);
-    assert.equal(loop.bounded("FACTORY_LOCAL_LAPSE_MAX"), 3);
+    delete process.env.PENDULUM_LOCAL_LAPSE_MAX;
+    const loop = Object.assign(Object.create(Local.prototype), { wf: { PENDULUM_LOCAL_LAPSE_MAX: "6" } });
+    assert.equal(loop.bounded("PENDULUM_LOCAL_LAPSE_MAX"), 6, "the repository's");
+    process.env.PENDULUM_LOCAL_LAPSE_MAX = "4";
+    assert.equal(loop.bounded("PENDULUM_LOCAL_LAPSE_MAX"), 4, "this machine's over it");
+    process.env.PENDULUM_LOCAL_LAPSE_MAX = "99";
+    assert.equal(loop.bounded("PENDULUM_LOCAL_LAPSE_MAX"), 3);
+    assert.equal(loop.bounded("PENDULUM_LOCAL_LAPSE_MAX"), 3);
   } finally {
     process.stdout.write = write;
-    if (saved === undefined) delete process.env.FACTORY_LOCAL_LAPSE_MAX;
-    else process.env.FACTORY_LOCAL_LAPSE_MAX = saved;
+    if (saved === undefined) delete process.env.PENDULUM_LOCAL_LAPSE_MAX;
+    else process.env.PENDULUM_LOCAL_LAPSE_MAX = saved;
   }
-  assert.equal(lines.filter((l) => l.includes('FACTORY_LOCAL_LAPSE_MAX "99" is not a whole number from 2 to 10; using 3')).length, 1, "said once");
+  assert.equal(lines.filter((l) => l.includes('PENDULUM_LOCAL_LAPSE_MAX "99" is not a whole number from 2 to 10; using 3')).length, 1, "said once");
 });
 
 test("#421: a claim holder's boot is proc.mjs bootId's (macOS: the boot time's exact second), the same at every call; with none, the pid alone decides", () => {

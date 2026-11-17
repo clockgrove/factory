@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// baseline.mjs: one line that says how Factory is doing on a repository, from the standing scorecard.
+// baseline.mjs: one line that says how Pendulum is doing on a repository, from the standing scorecard.
 //
 //   node bench/baseline.mjs --scorecard FILE [--repo OWNER/NAME] [--last N] [--since DATE] [--label NAME] [--append]
 //

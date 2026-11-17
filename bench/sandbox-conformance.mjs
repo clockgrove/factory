@@ -4,7 +4,7 @@
  * (plugin/scripts/lib/adapters/sandbox.mjs) against its real vendor, every contract operation once.
  *
  * Creates the smallest sandbox, runs commands (streamed output, exit codes, env and cwd, a time limit), makes a second
- * Linux user and checks the uid split Factory relies on (the user runs as its own uid, cannot sudo, cannot read the
+ * Linux user and checks the uid split Pendulum relies on (the user runs as its own uid, cannot sudo, cannot read the
  * default user's private file, and sees only the variables its run passed), moves files in and out, checks the network
  * allow-list, stops, resumes and finds the file and the user still there, lists by tag, reads the cost and destroys.
  * Then the image operations: snapshots a sandbox (kept, stopped, tagged with the snapshot, which the project's listing
@@ -22,7 +22,7 @@ import { ERROR_CODES, OPERATIONS, SandboxError, checkRates, openSandbox, stageVe
 const { values } = parseArgs({ options: { vendor: { type: "string", default: "vercel" }, image: { type: "string" }, json: { type: "string" } } });
 // Without --image: the adapter's base image for Node.js 24 (what an image build would start from).
 let IMAGE = values.image;
-const AGENT = "factory-agent";
+const AGENT = "pendulum-agent";
 const ALLOWED_HOST = "example.com";
 const OTHER_HOST = "github.com";
 // The whole run's budget: past it, the sandbox is destroyed and the run fails.
@@ -47,7 +47,7 @@ row("adapter has every operation", OPERATIONS.every((op) => typeof adapter[op] =
 IMAGE ??= adapter.baseImage("24");
 
 const runTag = `conf-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
-const TAGS = { factory: "conformance", run: runTag };
+const TAGS = { pendulum: "conformance", run: runTag };
 let id = null;
 let destroyed = false;
 let snapshotId = null;
@@ -78,7 +78,7 @@ const bash = (script, opts) => sh(["bash", "-c", script], opts);
 async function main() {
   // Structured errors: an id that does not exist is not_found, by code.
   try {
-    await adapter.readFile(`factory-conformance-missing-${randomBytes(4).toString("hex")}`, "/etc/hostname");
+    await adapter.readFile(`pendulum-conformance-missing-${randomBytes(4).toString("hex")}`, "/etc/hostname");
     row("missing sandbox is a not_found error", false, "no error");
   } catch (e) {
     row("missing sandbox is a not_found error", e instanceof SandboxError && e.code === "not_found", e instanceof SandboxError ? `code ${e.code}, status ${e.status}` : e?.message);
@@ -112,10 +112,10 @@ async function main() {
   const t = await sh(["sleep", "60"], { timeoutMs: 3000 });
   row("time limit kills the command", t.timedOut && t.durationMs < 30_000, `exit ${t.exitCode}, ${t.durationMs} ms`);
 
-  // The default user is Factory's: it may sudo. Its home holds a file only it may read.
+  // The default user is Pendulum's: it may sudo. Its home holds a file only it may read.
   const me = await bash('printf "%s %s %s" "$(id -un)" "$(id -u)" "$HOME"; sudo -n true && printf " sudo"');
   const [defUser, defUid, defHome, sudo] = me.stdout.split(" ");
-  row("default user can sudo (Factory's setup)", me.exitCode === 0 && sudo === "sudo", `${defUser} uid ${defUid} home ${defHome}`);
+  row("default user can sudo (Pendulum's setup)", me.exitCode === 0 && sudo === "sudo", `${defUser} uid ${defUid} home ${defHome}`);
   const root = await sh(["id", "-u"], { user: "root" });
   row("run as root", root.stdout.trim() === "0", `uid ${root.stdout.trim()}`);
   const secret = randomBytes(16).toString("hex");

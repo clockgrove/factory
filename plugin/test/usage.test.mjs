@@ -143,34 +143,34 @@ test("the reviewer's effort reaches the command line: Codex as its agent file sa
   const source = JSON.parse(readFileSync(join(import.meta.dirname, "..", "agents", "source.json"), "utf8")).agents.find((a) => a.name === "reviewer");
   assert.equal(source.models.codex.reasoning_effort, "high");
   const flags = /^(--effort|--reasoning-effort)$|^model_reasoning_effort=/;
-  const r = resolveInputs({ env: { FACTORY_HARNESS: "codex" } });
+  const r = resolveInputs({ env: { PENDULUM_HARNESS: "codex" } });
   const c = harnessCommand({ harness: "codex", model: r.reviewerModel, prompt: "P", maxUsd: 5, effort: r.reviewerEffort });
   assert.deepEqual(c.args.filter((a) => flags.test(a)), ['model_reasoning_effort="high"'], "codex: the reviewer runs at its agent file's high");
   for (const [h, flag] of [["claude", "--effort"], ["copilot", "--reasoning-effort"]]) {
-    const d = resolveInputs({ env: { FACTORY_HARNESS: h } });
+    const d = resolveInputs({ env: { PENDULUM_HARNESS: h } });
     assert.equal(d.reviewerEffort, "", `${h}: no default, the CLI's own`);
     assert.equal(harnessCommand({ harness: h, model: d.reviewerModel, prompt: "P", maxUsd: 5, agent: "reviewer", effort: d.reviewerEffort }).args.filter((a) => flags.test(a)).length, 0, `${h}: nothing passed by default`);
-    const set = resolveInputs({ env: { FACTORY_HARNESS: h, FACTORY_REVIEWER_EFFORT: "max" } });
+    const set = resolveInputs({ env: { PENDULUM_HARNESS: h, PENDULUM_REVIEWER_EFFORT: "max" } });
     const a = harnessCommand({ harness: h, model: set.reviewerModel, prompt: "P", maxUsd: 5, agent: "reviewer", effort: set.reviewerEffort }).args;
     assert.deepEqual(a.slice(a.indexOf(flag), a.indexOf(flag) + 2), [flag, "max"], `${h}: an owner's setting is passed`);
   }
   // The owner's setting, from the env block or `with:`, wins; an env block written for another harness does not apply.
-  assert.equal(resolveInputs({ env: { FACTORY_HARNESS: "codex", FACTORY_REVIEWER_EFFORT: "xhigh" } }).reviewerEffort, "xhigh");
-  assert.equal(resolveInputs({ env: { FACTORY_HARNESS: "claude", FACTORY_REVIEWER_EFFORT: "max", FACTORY_INPUT_REVIEWER_EFFORT: "high" } }).reviewerEffort, "high");
-  assert.equal(resolveInputs({ env: { FACTORY_HARNESS: "claude", FACTORY_REVIEWER_EFFORT: "low", FACTORY_INPUT_HARNESS: "codex" } }).reviewerEffort, "high");
+  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "codex", PENDULUM_REVIEWER_EFFORT: "xhigh" } }).reviewerEffort, "xhigh");
+  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "claude", PENDULUM_REVIEWER_EFFORT: "max", PENDULUM_INPUT_REVIEWER_EFFORT: "high" } }).reviewerEffort, "high");
+  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "claude", PENDULUM_REVIEWER_EFFORT: "low", PENDULUM_INPUT_HARNESS: "codex" } }).reviewerEffort, "high");
   // The worker's effort stays its own.
-  assert.equal(resolveInputs({ env: { FACTORY_HARNESS: "codex" } }).effort, "");
+  assert.equal(resolveInputs({ env: { PENDULUM_HARNESS: "codex" } }).effort, "");
 });
 
 test("the answer pass runs at the worker's effort, not the CLI default", async () => {
   const { workerRun } = await import("../scripts/review.mjs");
   const flags = /^(--effort|--reasoning-effort)$|^model_reasoning_effort=/;
   const effortArgs = (env) => harnessCommand({ ...workerRun(resolveInputs({ env })), prompt: "P", maxUsd: 5 }).args.filter((a) => flags.test(a) || a === "medium" || a === "high");
-  assert.deepEqual(effortArgs({ FACTORY_HARNESS: "claude" }), ["--effort", "medium"], "claude: the worker's pinned medium");
-  assert.deepEqual(effortArgs({ FACTORY_HARNESS: "codex", FACTORY_EFFORT: "high" }), ['model_reasoning_effort="high"'], "codex: an owner's worker effort");
-  assert.deepEqual(effortArgs({ FACTORY_HARNESS: "codex" }), [], "codex: no worker default, the CLI's own");
-  assert.deepEqual(effortArgs({ FACTORY_HARNESS: "copilot", FACTORY_EFFORT: "high" }), ["--reasoning-effort", "high"]);
-  const r = resolveInputs({ env: { FACTORY_HARNESS: "codex", FACTORY_EFFORT: "high", FACTORY_REVIEWER_EFFORT: "low" } });
+  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "claude" }), ["--effort", "medium"], "claude: the worker's pinned medium");
+  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "codex", PENDULUM_EFFORT: "high" }), ['model_reasoning_effort="high"'], "codex: an owner's worker effort");
+  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "codex" }), [], "codex: no worker default, the CLI's own");
+  assert.deepEqual(effortArgs({ PENDULUM_HARNESS: "copilot", PENDULUM_EFFORT: "high" }), ["--reasoning-effort", "high"]);
+  const r = resolveInputs({ env: { PENDULUM_HARNESS: "codex", PENDULUM_EFFORT: "high", PENDULUM_REVIEWER_EFFORT: "low" } });
   assert.deepEqual(workerRun(r), { harness: "codex", model: r.model, effort: "high" }, "the worker's effort, never the reviewer's");
 });
 
@@ -210,7 +210,7 @@ test("harness command lines are the documented headless flags; the prompt goes o
   const lc = harnessCommand({ harness: "claude", prompt: "P", local });
   assert.ok(lc.args.includes("--settings") && !lc.args.includes("--dangerously-skip-permissions"));
   const lx = harnessCommand({ harness: "codex", prompt: "P", local });
-  assert.ok(lx.args.includes('default_permissions="factory"') && lx.args.includes("features.network_proxy=true") && !lx.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.ok(lx.args.includes('default_permissions="pendulum"') && lx.args.includes("features.network_proxy=true") && !lx.args.includes("--dangerously-bypass-approvals-and-sandbox"));
   assert.match(lx.args.find((a) => a.startsWith("shell_environment_policy.exclude")), /"CODEX_API_KEY"/);
   assert.ok(lx.args.includes("--ignore-user-config") && lx.args.includes("features.apps=false") && lx.args.includes('projects={"/c"={trust_level="untrusted"}}'));
   const lp = harnessCommand({ harness: "copilot", prompt: "P", local });
@@ -225,7 +225,7 @@ test("on every route the model's commands never see a credential: Codex excludes
     const exclude = x.args.filter((a) => a.startsWith("shell_environment_policy.exclude="));
     assert.equal(exclude.length, 1, `codex ${route ? "local" : "runner"}: one exclude list`);
     assert.equal(x.args[x.args.indexOf(exclude[0]) - 1], "-c");
-    for (const k of ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN", "FACTORY_APP_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_TOKEN"]) assert.ok(exclude[0].includes(JSON.stringify(k)), `codex: ${k} excluded`);
+    for (const k of ["CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN", "PENDULUM_APP_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_TOKEN"]) assert.ok(exclude[0].includes(JSON.stringify(k)), `codex: ${k} excluded`);
     const p = harnessCommand({ harness: "copilot", prompt: "P", local: route });
     const secret = p.args.filter((a) => a.startsWith("--secret-env-vars="));
     assert.equal(secret.length, 1, `copilot ${route ? "local" : "runner"}: one secret list`);
@@ -255,12 +255,12 @@ test("localSandbox: a writable directory swapped for a symlink is refused", () =
   const root = mkdtempSync(join(tmpdir(), "ls-"));
   const real = join(root, "real");
   mkdirSync(real);
-  const env = (dir) => ({ FACTORY_LOCAL: "1", FACTORY_LOCAL_SANDBOX: JSON.stringify({ addDirs: [dir], clone: null }) });
+  const env = (dir) => ({ PENDULUM_LOCAL: "1", PENDULUM_LOCAL_SANDBOX: JSON.stringify({ addDirs: [dir], clone: null }) });
   assert.deepEqual(localSandbox(env(real)).addDirs, [real]);
   const swapped = join(root, "swapped");
   symlinkSync(real, swapped);
   assert.throws(() => localSandbox(env(swapped)), /now resolves to/);
-  assert.throws(() => localSandbox({ FACTORY_LOCAL: "1" }), /refusing to run the harness unsandboxed/);
+  assert.throws(() => localSandbox({ PENDULUM_LOCAL: "1" }), /refusing to run the harness unsandboxed/);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -279,19 +279,19 @@ test("credential: on a developer's machine, api with no key falls back to the CL
 });
 
 test("model, App, runner and GitHub secrets never reach a child", () => {
-  const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", FACTORY_INPUT_CODEX_API_KEY: "ck", FACTORY_INPUT_APP_PRIVATE_KEY: "pem", FACTORY_INPUT_COPILOT_GITHUB_TOKEN: "cp", FACTORY_INPUT_APP_TOKEN: "ghs", FACTORY_INPUT_MODEL: "m", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc", ACTIONS_ID_TOKEN_REQUEST_URL: "u", ACTIONS_RUNTIME_TOKEN: "rt", FACTORY_APP_TOKEN: "ghs", FACTORY_APP_PRIVATE_KEY: "pem", GITHUB_TOKEN: "job", GH_CONFIG_DIR: "/auth", FACTORY_GIT_TOKEN: "w", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "x" }, { GH_TOKEN: "t" });
-  assert.deepEqual(e, { PATH: "/bin", FACTORY_INPUT_MODEL: "m" });
+  const e = scrubbedEnv({ PATH: "/bin", ANTHROPIC_API_KEY: "sk", CODEX_API_KEY: "ck", PENDULUM_INPUT_CODEX_API_KEY: "ck", PENDULUM_INPUT_APP_PRIVATE_KEY: "pem", PENDULUM_INPUT_COPILOT_GITHUB_TOKEN: "cp", PENDULUM_INPUT_APP_TOKEN: "ghs", PENDULUM_INPUT_MODEL: "m", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "oidc", ACTIONS_ID_TOKEN_REQUEST_URL: "u", ACTIONS_RUNTIME_TOKEN: "rt", PENDULUM_APP_TOKEN: "ghs", PENDULUM_APP_PRIVATE_KEY: "pem", GITHUB_TOKEN: "job", GH_CONFIG_DIR: "/auth", PENDULUM_GIT_TOKEN: "w", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "x" }, { GH_TOKEN: "t" });
+  assert.deepEqual(e, { PATH: "/bin", PENDULUM_INPUT_MODEL: "m" });
 });
 
 test("scrubbedEnv: an undefined or null extra value removes the key (the dispatch run's GITHUB_SHA never reaches a child)", () => {
-  const e = scrubbedEnv({ PATH: "/bin", GITHUB_SHA: "abc", GITHUB_REF: "refs/heads/main", KEEP: "1" }, { GITHUB_SHA: undefined, GITHUB_REF: "refs/heads/factory/7", GONE: null });
-  assert.deepEqual(e, { PATH: "/bin", GITHUB_REF: "refs/heads/factory/7", KEEP: "1" });
+  const e = scrubbedEnv({ PATH: "/bin", GITHUB_SHA: "abc", GITHUB_REF: "refs/heads/main", KEEP: "1" }, { GITHUB_SHA: undefined, GITHUB_REF: "refs/heads/pendulum/7", GONE: null });
+  assert.deepEqual(e, { PATH: "/bin", GITHUB_REF: "refs/heads/pendulum/7", KEEP: "1" });
 });
 
 test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach the job's later children", async () => {
   const { writeFileSync: write } = await import("node:fs");
   const { runnerFileEnv } = await import("../scripts/lib/checkout.mjs");
-  const dir = mkdtempSync(join(tmpdir(), "factory-runner-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-runner-"));
   write(join(dir, "path"), "/usr/lib/postgresql/18/bin\n/usr/bin\n\n");
   write(join(dir, "env"), "PGHOST=localhost\nNOTE<<EOF\nline one\nline two\nEOF\nBAD LINE\n");
   const out = runnerFileEnv({ PATH: "/usr/bin:/bin", GITHUB_PATH: join(dir, "path"), GITHUB_ENV: join(dir, "env") });
@@ -302,9 +302,9 @@ test("runnerFileEnv: a setup command's GITHUB_PATH and GITHUB_ENV writes reach t
 test("sessions: a Codex rollout is saved into the usage directory and restored locally from the newest earlier stage", async () => {
   const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
   const root = mkdtempSync(join(tmpdir(), "sess-"));
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
   process.env.CODEX_HOME = join(root, "codex");
-  process.env.FACTORY_LOCAL = "1";
+  process.env.PENDULUM_LOCAL = "1";
   try {
     const rel = join("2026", "11", "06", "rollout-2026-11-06T16-42-54-t1.jsonl");
     mkdirSync(join(root, "codex", "sessions", "2026", "11", "06"), { recursive: true });
@@ -332,9 +332,9 @@ test("sessions: locally the restore reads every earlier stage directory, past an
   const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
   const { utimesSync } = await import("node:fs");
   const root = mkdtempSync(join(tmpdir(), "sess-"));
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
   process.env.CODEX_HOME = join(root, "codex");
-  process.env.FACTORY_LOCAL = "1";
+  process.env.PENDULUM_LOCAL = "1";
   try {
     const rel = join("2026", "11", "15", "rollout-2026-11-15T08-00-00-w1.jsonl");
     mkdirSync(join(root, "codex", "sessions", "2026", "11", "15"), { recursive: true });
@@ -363,9 +363,9 @@ test("sessions: locally the restore reads every earlier stage directory, past an
 test("sessions: a stage saves every session it ran (the reviewer's own too), masked, and only the lineage's is restored", async () => {
   const { restoreTranscript, saveTranscript } = await import("../scripts/lib/session.mjs");
   const root = mkdtempSync(join(tmpdir(), "sess-"));
-  const saved = { CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
   process.env.CODEX_HOME = join(root, "codex");
-  process.env.FACTORY_LOCAL = "1";
+  process.env.PENDULUM_LOCAL = "1";
   try {
     const day = join(root, "codex", "sessions", "2026", "11", "11");
     mkdirSync(day, { recursive: true });
@@ -437,7 +437,7 @@ test("a resumed Codex pass counts its own share, in this process and from an ear
   // Real Codex 0.167.0 streams: `codex exec`, then `codex exec resume` on its thread at high effort. turn.completed
   // carries the thread's running total; the rollout's own last_token_usage for the resumed turn was input 22888,
   // cached 12288, output 50 of which reasoning 43 (total_tokens 22938 = input + output).
-  const bin = mkdtempSync(join(tmpdir(), "factory-codex-resume-"));
+  const bin = mkdtempSync(join(tmpdir(), "pendulum-codex-resume-"));
   const fixtures = join(import.meta.dirname, "fixtures");
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const fs = require("node:fs");
@@ -445,7 +445,7 @@ const resume = process.argv[3] === "resume" ? process.argv[4] : null;
 const text = fs.readFileSync(${JSON.stringify(fixtures)} + (resume ? "/codex-0.167-thread-resumed.jsonl" : "/codex-0.167-thread.jsonl"), "utf8");
 process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e724", resume) : text);
 `, { mode: 0o755 });
-  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, FACTORY_LOCAL: process.env.FACTORY_LOCAL };
+  const saved = { PATH: process.env.PATH, CODEX_HOME: process.env.CODEX_HOME, PENDULUM_LOCAL: process.env.PENDULUM_LOCAL };
   process.env.PATH = `${bin}:${saved.PATH}`;
   const model = "gpt-6.1-sol";
   // Each pass feeds a live counter as the progress line does (session.mjs liveActivity), resumed passes told their prior.
@@ -471,17 +471,17 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
     assert.deepEqual(fix.sessionTotal.tokens, { input: 39039, output: 55, cached: 24576, written: 0 });
     near(mergeUsage([first, fix]).usd, priceCodex(model, fix.sessionTotal.tokens), "the run costs what the thread reported last");
 
-    // A later stage restores the thread: the prior total is the one Factory recorded in the saving stage's result.json.
-    const root = mkdtempSync(join(tmpdir(), "factory-codex-stage-"));
+    // A later stage restores the thread: the prior total is the one Pendulum recorded in the saving stage's result.json.
+    const root = mkdtempSync(join(tmpdir(), "pendulum-codex-stage-"));
     process.env.CODEX_HOME = join(root, "codex");
-    process.env.FACTORY_LOCAL = "1";
+    process.env.PENDULUM_LOCAL = "1";
     const rel = join("2026", "11", "10", "rollout-2026-11-10T10-30-46-t2.jsonl");
     const usageDir = join(root, "ws", "usage-work-1");
     mkdirSync(join(usageDir, "transcript", "2026", "11", "10"), { recursive: true });
     writeFileSync(join(usageDir, "transcript", rel), "{}\n");
     writeFileSync(join(usageDir, "result.json"), JSON.stringify({ session: { harness: "codex", id: "t2", files: [rel], checkout: "/c" }, sessionTotal: first.sessionTotal }));
     assert.equal((await restoreTranscript({ checkout: "/c", workDir: join(root, "ws"), harness: "codex" })).id, "t2");
-    delete process.env.FACTORY_LOCAL;
+    delete process.env.PENDULUM_LOCAL;
     const review = await run("t2", "review-fix-1");
     assert.deepEqual(review.tokens, fix.tokens, "a restored thread counts only its own share too");
     assert.deepEqual(shown(), { input: 22888, output: 50, written: 0 });
@@ -504,18 +504,18 @@ test("a session total is only subtracted when it is a running total", async () =
 test("prompt cache TTL: off by default; auto asks Claude Code for an hour on an API key only; an explicit setting wins; other harnesses get none", () => {
   assert.equal(promptCacheTtl("claude", { ANTHROPIC_API_KEY: "k" }), null, "off until the A/B is run");
   assert.equal(resolveInputs({ env: {} }).promptCacheTtl, "off");
-  assert.equal(resolveInputs({ env: { FACTORY_PROMPT_CACHE_TTL: " AUTO " } }).promptCacheTtl, "auto");
-  assert.equal(resolveInputs({ env: { FACTORY_INPUT_PROMPT_CACHE_TTL: "2h" } }).promptCacheTtl, "off", "an invalid value warns and reads as off");
-  const auto = { FACTORY_PROMPT_CACHE_TTL: "auto" };
+  assert.equal(resolveInputs({ env: { PENDULUM_PROMPT_CACHE_TTL: " AUTO " } }).promptCacheTtl, "auto");
+  assert.equal(resolveInputs({ env: { PENDULUM_INPUT_PROMPT_CACHE_TTL: "2h" } }).promptCacheTtl, "off", "an invalid value warns and reads as off");
+  const auto = { PENDULUM_PROMPT_CACHE_TTL: "auto" };
   assert.equal(promptCacheTtl("claude", { ...auto, ANTHROPIC_API_KEY: "k" }), "1h");
   assert.equal(promptCacheTtl("claude", { ...auto, ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h", "the API key wins over the OAuth token, so it is what bills");
   assert.equal(promptCacheTtl("claude", { ...auto, CLAUDE_CODE_OAUTH_TOKEN: "t" }), null, "a plan token already gets an hour");
   assert.equal(promptCacheTtl("claude", auto), null, "a CLI login is left to the CLI");
-  assert.equal(promptCacheTtl("claude", { FACTORY_PROMPT_CACHE_TTL: "off", ANTHROPIC_API_KEY: "k" }), null);
-  assert.equal(promptCacheTtl("claude", { FACTORY_PROMPT_CACHE_TTL: "5m", ANTHROPIC_API_KEY: "k" }), "5m");
-  assert.equal(promptCacheTtl("claude", { FACTORY_PROMPT_CACHE_TTL: "1H", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h");
-  assert.equal(promptCacheTtl("claude", { FACTORY_PROMPT_CACHE_TTL: "2h", ANTHROPIC_API_KEY: "k" }), null, "a value Claude Code would ignore is not sent");
-  for (const h of ["codex", "copilot"]) assert.equal(promptCacheTtl(h, { ANTHROPIC_API_KEY: "k", FACTORY_PROMPT_CACHE_TTL: "1h" }), null);
+  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "off", ANTHROPIC_API_KEY: "k" }), null);
+  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "5m", ANTHROPIC_API_KEY: "k" }), "5m");
+  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "1H", CLAUDE_CODE_OAUTH_TOKEN: "t" }), "1h");
+  assert.equal(promptCacheTtl("claude", { PENDULUM_PROMPT_CACHE_TTL: "2h", ANTHROPIC_API_KEY: "k" }), null, "a value Claude Code would ignore is not sent");
+  for (const h of ["codex", "copilot"]) assert.equal(promptCacheTtl(h, { ANTHROPIC_API_KEY: "k", PENDULUM_PROMPT_CACHE_TTL: "1h" }), null);
   assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p", cacheTtl: "1h" }).env, { CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" });
   assert.deepEqual(harnessCommand({ harness: "claude", prompt: "p" }).env, {});
 });
@@ -586,7 +586,7 @@ test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the config
   assert.equal(copilotCount({ premiumRequests: 2, aiCredits: 6.385 }), "; 2 premium requests, 6.385 AI credits");
   assert.equal(copilotCount({ premiumRequests: null, aiCredits: null }), "", "other harnesses add nothing");
   // A usage file with tokens but no AI credits (an older CLI) is unmetered, never zero.
-  const dir = mkdtempSync(join(tmpdir(), "factory-copilot-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-copilot-"));
   writeFileSync(join(dir, "u.json"), JSON.stringify({ totalPremiumRequestCost: 3, modelMetrics: { m: { usage: { inputTokens: 10, outputTokens: 2 } } } }));
   const old = parseCopilot("", null, 0, { usageFile: join(dir, "u.json") });
   rmSync(dir, { recursive: true, force: true });
@@ -596,7 +596,7 @@ test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the config
 });
 
 test("copilot metering cannot be talked down: negative or forged-low credits, unpriced states, another session's total, an edited saved session", () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-copilot-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-copilot-"));
   const real = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "copilot-1.0.107-usage.json"), "utf8"));
   const write = (name, patch) => {
     writeFileSync(join(dir, name), JSON.stringify({ ...real, ...patch }));
@@ -629,7 +629,7 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   const first = parseCopilot("", null, 0, { usageFile: join(import.meta.dirname, "fixtures", "copilot-1.0.107-usage.json") });
   const other = parseCopilot("", null, 0, { usageFile: write("o.json", { ...JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "copilot-1.0.107-usage-resumed.json"), "utf8")), sessionStartTime: "2026-11-08T22:00:00.000Z" }) });
   assert.equal(sinceSession(other, { ...first, models: null }).usd, other.usd);
-  // A restored session's total (the harness wrote that file) is bounded by what Factory recorded for the stage.
+  // A restored session's total (the harness wrote that file) is bounded by what Pendulum recorded for the stage.
   const seed = { usd: 50, aiu: 5000, premiumRequests: 40, tokens: { input: 9e6, output: 9e4, cached: 8e6, written: 9e5 }, sessionStartTime: first.sessionStartTime };
   assert.deepEqual(clampTotal(seed, { usd: 0.06, aiCredits: 6.123, premiumRequests: 1, tokens: { input: 24476, output: 4, cached: 0, written: 24472 } }), { ...seed, usd: 0.06, aiu: 6.123, premiumRequests: 1, tokens: { input: 24476, output: 4, cached: 0, written: 24472 } });
   assert.equal(clampTotal(seed, { usd: null }), null, "nothing recorded: nothing subtracted");
@@ -651,8 +651,8 @@ test("copilot caps: --max-ai-credits from what is left (per process, at least 30
   assert.equal(unmeteredRun({ harness: "codex", usd: null, turns: 3 }), false);
   assert.equal(decideExit({ harness: { budgetExceeded: true, unmetered: true } }).reason, "unmetered: max_usd cannot be enforced");
   assert.equal(decideExit({ harness: { budgetExceeded: true } }).reason, "dollar cap reached");
-  assert.equal(copilotCreditUsd({ FACTORY_INPUT_COPILOT_CREDIT_USD: "0.02" }), 0.02);
-  for (const bad of ["0", "-1", "abc"]) assert.equal(copilotCreditUsd({ FACTORY_INPUT_COPILOT_CREDIT_USD: bad }), 0.01, bad);
+  assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: "0.02" }), 0.02);
+  for (const bad of ["0", "-1", "abc"]) assert.equal(copilotCreditUsd({ PENDULUM_INPUT_COPILOT_CREDIT_USD: bad }), 0.01, bad);
   assert.equal(copilotCreditUsd({}), 0.01);
 });
 
@@ -660,7 +660,7 @@ test("copilot follow-ups: the session's running total is recorded and bounds a r
   const { writeUsage, exitRecord } = await import("../scripts/lib/session.mjs");
   const { runHarness } = await import("../scripts/lib/harness.mjs");
   // A three-stage session: this stage's own spend is small, the session's total is not; the seed is bounded by the total.
-  const dir = mkdtempSync(join(tmpdir(), "factory-usage-"));
+  const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   const total = { usd: 0.5, tokens: { input: 9e4, output: 900, cached: 6e4, written: 2e4 }, models: null, premiumRequests: 3, aiu: 50, sessionStartTime: "2026-11-08T21:01:11.345Z" };
   const result = writeUsage(dir, { harness: "copilot", model: "m", records: [{ harness: "copilot", sessionId: "other", usd: 0.01, tokens: {}, sessionTotal: { usd: 9 } }, { harness: "copilot", sessionId: "s1", usd: 0.06, tokens: { input: 1, output: 1, cached: 0, written: 0 }, sessionTotal: total }], passes: 0, exit: "delivered", reason: "", credentialBasis: "x", session: { harness: "copilot", id: "s1", files: ["s1"] } });
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")).sessionTotal, total);

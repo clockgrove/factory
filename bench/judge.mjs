@@ -57,7 +57,7 @@ const timeoutMinutes = Number(values["timeout-minutes"] ?? 20);
 if (!(timeoutMinutes > 0)) usage("--timeout-minutes takes a number more than 0");
 
 // The 0.5 judge reads a definition file beside a graders/ directory; 0.6 gives it a stub.
-const home = mkdtempSync(join(tmpdir(), "factory-judge-"));
+const home = mkdtempSync(join(tmpdir(), "pendulum-judge-"));
 mkdirSync(join(home, "benchmarks"));
 const file = join(home, "benchmarks", "pair.json");
 writeFileSync(file, `${JSON.stringify({ id: "pair", judge: { command: values.judge, timeoutMinutes } }, null, 2)}\n`);

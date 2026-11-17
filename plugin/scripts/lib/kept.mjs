@@ -4,7 +4,7 @@
 // each hunk alone, which names the one not kept. The decision model sits behind the decider adapter
 // (adapters/decider.mjs, docs/ADAPTERS.md), with the key, the model setting and the confidence floor of red-check triage
 // (triage.mjs). Only the typed label and its confidence reach code: `kept` at the confidence floor (triage.mjs
-// confidenceFloor) or more keeps the hunks asked about; anything else does not. This runs in Factory's own process,
+// confidenceFloor) or more keeps the hunks asked about; anything else does not. This runs in Pendulum's own process,
 // never in a harness. The hunks and the file are the worker's and the repository's text: they go in delimited, as data
 // the model is told not to follow.
 import { randomBytes } from "node:crypto";

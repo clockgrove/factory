@@ -1,5 +1,5 @@
 {
-  "source": "clockgrove/clockgrove PR #339 (public), read 2026-11-15: code scanning's line comment as REST returns it and its review thread as GraphQL returns it, trimmed to the fields Factory reads",
+  "source": "clockgrove/clockgrove PR #339 (public), read 2026-11-15: code scanning's line comment as REST returns it and its review thread as GraphQL returns it, trimmed to the fields Pendulum reads",
   "comment": {
     "id": 4580153891,
     "pull_request_review_id": 5912832433,

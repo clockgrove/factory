@@ -577,6 +577,8 @@ test("#479 dispatcher: an answer check's gateway call outside any stage is carri
   const spent = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
   assert.ok(Math.abs(spent.spentToday - 0.0031) < 1e-9);
   assert.equal(spent.unknownToday, 0);
+  const { localSpendToday } = await import("../scripts/lib/github.mjs");
+  assert.deepEqual((await onGitHub(gh, () => localSpendToday(REPO, { token: "t" }))).byBilling, { api: 0.0031 }, "billed to the gateway key: `api`");
   // A call the gateway gives no cost for (no generation named) is unknown, carried by the answered record; the screen goes on.
   gh.gateway.cost = null;
   gh.comment(47, PERSON, "use the second one");

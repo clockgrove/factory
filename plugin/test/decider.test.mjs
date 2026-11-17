@@ -706,6 +706,13 @@ test("#479: a gateway decision call in a stage is running, of unknown cost, unti
     assert.ok(Math.abs(usage.gatewayDecisionUsd - 0.0042) < 1e-9);
     assert.equal(usage.gatewayDecisionCalls, 1);
     assert.equal(usage.runs, 0, "a decision record is no run");
+    // Billed to the gateway key (#508's usage.mjs BILLING): its dollars are `api`, and it names no harness pass's kind.
+    assert.equal(records[0].billing, "api");
+    assert.deepEqual(usage.usdByBilling, { api: 0.0042 });
+    const pass = { harness: "claude", label: "work-1", usd: 1, billing: "subscription", tokens: { input: 1, output: 1, cached: 0, written: 0 }, started: "2026-11-16T00:00:00Z", ended: "2026-11-16T00:05:00Z" };
+    const mixed = writeUsage(mkdtempSync(join(tmpdir(), "pendulum-gw-usage-")), { harness: "claude", model: "m-1", records: [pass, ...records], passes: 1, exit: "pr", reason: "", credentialBasis: "login", billing: "subscription" });
+    assert.equal(mixed.billing, "subscription", "the stage's kind is its harness passes'");
+    assert.deepEqual(mixed.usdByBilling, { subscription: 1, api: 0.0042 });
   });
 });
 

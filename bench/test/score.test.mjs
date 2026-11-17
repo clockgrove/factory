@@ -1215,6 +1215,7 @@ test("#479 cost: decision calls outside a stage (the decision-spend lines in Pen
   assert.ok(Math.abs(row.cost.usd - before - 0.0031) < 1e-9);
   assert.equal(row.cost.usdUnknown, 1);
   assert.deepEqual(row.cost.usdUnknownWhy, ["decision"]);
+  assert.ok(Math.abs((row.cost.usdByBilling?.api ?? 0) - 0.0031) < 1e-9, "billed to the gateway key: `api`");
   assert.match(row.cost.basis, /includes 0\.0031 USD of decision calls outside a stage \(the AI Gateway's cost, 2 comment\(s\)\)/);
   // On Actions the stage dollars are the artifacts', and the comment still adds its own.
   const artifact = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-63/result.json", usd: 0.2, gatewayDecisionUsd: 0.0042, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };

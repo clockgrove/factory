@@ -529,6 +529,8 @@ runs:
         PENDULUM_USAGE_DIR: ${{ runner.temp }}/pendulum-usage
         # The scripts, skills, agents and task card are one tree: the plugin beside this action.
         PENDULUM_PLUGIN_ROOT: ${{ github.action_path }}/plugin
+        # The ref the workflow's uses: names for this action: the Pendulum build its records name (release.mjs pendulumBuild).
+        PENDULUM_ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
         # The launcher sets its own (an ended sandbox stage's usage, or none). Work and review upload the directory the next

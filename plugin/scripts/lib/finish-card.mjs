@@ -1125,6 +1125,15 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
  * dollars, and of its stages whose harness line names no model, for their model; read only when there is such a stage.
  * A failed read or write throws.
  */
+/**
+ * Whether the newest PR on Objective `n`'s branch (`pendulum/<n>`) merged: when a finish card is due (postFinishCard's
+ * test, wait.mjs closedAs). One read. A failed read throws.
+ */
+export async function newestPrMerged(repo, n, opts) {
+  const branch = (await rest(`repos/${repo.full}/pulls?state=all&head=${encodeURIComponent(`${repo.owner}:pendulum/${n}`)}&sort=created&direction=desc&per_page=1`, opts)) || [];
+  return !!branch[0]?.merged_at;
+}
+
 export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
   const n = issue.number;
   const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));

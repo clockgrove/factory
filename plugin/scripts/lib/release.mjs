@@ -53,19 +53,20 @@ export function runningPendulum(root = OWN_ROOT, version = PENDULUM_VERSION, hom
  * The Pendulum build this process runs, as the records it writes name it (#565): its release version (plugin.json's)
  * when it is that release, else that version with the build it really is as semver build metadata
  * (`0.10.2+1a2b3c4d5e6f`), so a candidate between releases never records itself as the last tag. On GitHub Actions the
- * build is the ref the workflow's `uses:` named (`GITHUB_ACTION_REF`, else the last part of `GITHUB_ACTION_PATH`, the
- * runner's checkout of it): the release's tag, or a moving tag of its line (`v0`, `v0.10`), is the release; a commit
- * SHA is its first 12 characters; any other ref (a branch) is its name. Elsewhere it is runningPendulum's: a release,
- * or a git checkout of Pendulum's own at a commit that is not its release (`+<commit>`, `.dirty` with a tracked file
- * changed). A copy with no git checkout of its own (an installed plugin) is taken as its manifest's release.
+ * build is the ref the workflow's `uses:` named, which action.yml passes as PENDULUM_ACTION_REF (`github.action_ref`):
+ * the release's tag, or a moving tag of its line (`v0`, `v0.10`), is the release; a commit SHA is its first 12
+ * characters (a SHA pin of a release too: a SHA is never taken for a tag); any other ref (a branch) is its name, and
+ * none given is `+unknown`. Elsewhere it is runningPendulum's: a release, or a git checkout of Pendulum's own at a
+ * commit that is not its release (`+<commit>`, `.dirty` with a tracked file changed). A copy with no git checkout of
+ * its own (an installed plugin) is taken as its manifest's release.
  */
 export function pendulumBuild({ env = process.env, version = PENDULUM_VERSION, running = null } = {}) {
   const meta = (m) => `${version}+${String(m).replace(/[^A-Za-z0-9.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 40) || "unknown"}`;
-  const ref = env.GITHUB_ACTIONS ? String(env.GITHUB_ACTION_REF || (env.GITHUB_ACTION_PATH ? env.GITHUB_ACTION_PATH.split(/[\\/]/).filter(Boolean).at(-1) : "") || "") : "";
-  if (ref) {
+  if (env.GITHUB_ACTIONS) {
+    const ref = String(env.PENDULUM_ACTION_REF || "").trim();
     const [major, minor] = version.split(".");
     if (ref === `v${version}` || ref === `v${major}` || ref === `v${major}.${minor}`) return version;
-    return meta(COMMIT.test(ref) ? ref.slice(0, 12) : ref);
+    return meta(!ref ? "unknown" : COMMIT.test(ref) ? ref.slice(0, 12) : ref);
   }
   const r = running ?? (OWN_BUILD.running ??= runningPendulum());
   if (!r?.commit || r.release) return version;

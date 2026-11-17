@@ -400,11 +400,11 @@ test("finish card: an Actions stage's dollars come from its usage artifact, its 
  * comments; `labels3` its labels), #7 Blocked with a PR a person merged, #8 closed with its PR still open. Comments posted
  * are there on the next read. `failCard`: the status the card's POST answers with; `failBody`: the PR body PATCH's.
  */
-function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false } = {}) {
-  const issue = (number, labels) => ({ number, state: "closed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
-  const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, ["pendulum:objective", "pendulum:in-review"])];
+function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective", "pendulum:in-review"], labels8 = ["pendulum:objective", "pendulum:in-review"], dropLabels = false } = {}) {
+  const issue = (number, labels) => ({ number, state: "closed", state_reason: "completed", closed_at: real.issue.closed_at, labels: labels.map((name) => ({ name })), body: "", user: { login: "kirkmarple-clockgrove", type: "User" } });
+  const closed = [issue(3, labels3), issue(7, ["pendulum:objective", "pendulum:blocked"]), issue(8, labels8)];
   const comments = { 3: withSpend({ work: { usd: 0.35637 }, review: { usd: 0.163442 } }), 7: [], 8: [] };
-  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, state: "open", merged_at: null, created_at: "2026-11-17T02:20:00Z" }] };
+  const prs = { 3: [{ ...real.pr, user: bot }], 7: [{ number: 70, merged_at: "2026-11-17T02:27:36Z", created_at: "2026-11-17T02:20:00Z" }], 8: [{ number: 80, node_id: "PR_80", state: "open", draft: false, merged_at: null, created_at: "2026-11-17T02:20:00Z" }] };
   const writes = [];
   const reads = [];
   let nextId = 100;
@@ -420,6 +420,7 @@ function fakeRepo({ failCard = 0, failBody = 0, labels3 = ["pendulum:objective",
     if (method === "GET" && p === "/branches/main/protection") return json({ required_status_checks: { checks: [{ context: "test", app_id: 15368 }] } });
     if (method === "GET" && p === "/issues") return json(u.searchParams.get("state") === "closed" ? closed : []);
     if (method === "GET" && p === "/pulls" && u.searchParams.get("state") === "all") return json(prs[/pendulum\/(\d+)$/.exec(u.searchParams.get("head"))[1]] || []);
+    if (method === "GET" && p === "/pulls" && u.searchParams.get("state") === "open") return json((prs[/pendulum\/(\d+)$/.exec(u.searchParams.get("head"))[1]] || []).filter((x) => x.state === "open"));
     if (method === "GET" && p === "/pulls/4") return json({ ...real.pr, user: bot });
     if (method === "GET" && p === "/issues/4/timeline") return json(real.prTimeline);
     if (method === "GET" && p === "/pulls/4/reviews") return json(real.reviews);
@@ -547,6 +548,22 @@ test("finish card (#565 W3): the Action's tick on a pendulum:local Objective's c
   assert.deepEqual(loop.finished, [3], "the loop's later tick posts the card");
   assert.ok(fake.writes.some((w) => w.startsWith(`POST /issues/3/comments ${finishMarker(3)}`)));
   assert.ok(fake.writes.some((w) => w.startsWith("POST /issues/3/comments <!-- pendulum:3:done -->")), "and its Done record");
+  // A person closed a pendulum:local Objective by hand with its PR still open (#80): no card is due, so the Action tidies
+  // it at once, its PR stopped (out of the merge queue, back to a draft), never left queued for a day.
+  const open = fakeRepo({ labels8: local, dropLabels: true });
+  const openTick = await tickOver(open);
+  assert.ok(openTick.done.includes(8));
+  assert.ok(open.writes.some((w) => w.startsWith("DELETE /issues/8/labels/")), "its state label goes");
+  assert.ok(open.writes.some((w) => w.startsWith("DELETE /issues/80/labels/")), "its PR stopped: the review label off");
+  // Closed as not planned: no card is due either.
+  const dropped = fakeRepo({ labels3: local, dropLabels: true });
+  const fetchAll = dropped.fetch;
+  dropped.fetch = async (url, init) => {
+    const r = await fetchAll(url, init);
+    if (new URL(url).pathname.endsWith("/issues") && (init?.method || "GET") === "GET") return new Response(JSON.stringify((await r.json()).map((i) => (i.number === 3 ? { ...i, state_reason: "not_planned" } : i))), { status: 200, headers: { "content-type": "application/json" } });
+    return r;
+  };
+  assert.ok((await tickOver(dropped)).done.includes(3), "closed as not planned: tidied at once");
   // Its loop not running: a day after the close the Action tidies it, with no card.
   const late = fakeRepo({ labels3: local, dropLabels: true });
   const lateTick = await tickOver(late, { now: new Date(Date.parse(real.issue.closed_at) + 25 * 3600_000) });

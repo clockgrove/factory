@@ -35,6 +35,12 @@ export function decisionCostOf(doc, headerId = null) {
   return costOf({ providerMetadata: { gateway: gw } }, "sdk", null, headerId);
 }
 
+/** Whether an answer's `usage` counts tokens: `input_tokens` or `output_tokens` (the endpoint's), or the AI SDK's camelCase. */
+const usedTokens = (doc) => {
+  const u = doc && typeof doc === "object" && !Array.isArray(doc) && doc.usage && typeof doc.usage === "object" ? doc.usage : null;
+  return [u?.input_tokens, u?.output_tokens, u?.inputTokens, u?.outputTokens].some((n) => typeof n === "number" && n > 0);
+};
+
 /**
  * What one answer of the endpoint cost, before any lookup, by the relay's rules: `{usd, id, reported}`.
  * - $0 for a call the gateway refused before any model ran: a redirect (never followed); a 400 or 422 whose
@@ -42,7 +48,8 @@ export function decisionCostOf(doc, headerId = null) {
  *   404, 413 or 429; its budget or credits 402 (gatewayRefusalOf); another 4xx with a PRE_MODEL_ERRORS type; a 5xx whose
  *   type is one of UNAVAILABLE_ERRORS that names no generation. A refusal that names a generation is looked up all the
  *   same, as the relay does, and a cost its record gives counts.
- * - A 2xx answer's own reported cost (`providerMetadata.gateway.cost`): `reported`, and no lookup.
+ * - A 2xx answer's own reported cost (decisionCostOf): `reported`, and no lookup; a reported $0 for an answer whose
+ *   `usage` counts tokens is null (unknown), with no lookup either: under BYOK the gateway may report 0.
  * - Else null (unknown), unless the generation it names (`id`: the gateway's metadata, its top-level `generationId` or
  *   `id`, or the `x-generation-id` header) is looked up and found.
  */
@@ -55,6 +62,9 @@ export function answerCost(status, doc, headerId = null) {
   if (status === 400 || status === 422) return type && PRE_MODEL_ERRORS.has(type) ? { usd: 0, id, reported: false } : { usd: null, id, reported: false };
   if (UNBILLED.has(status)) return { usd: 0, id, reported: false };
   if (status === 402 && gatewayRefusalOf(doc)) return { usd: 0, id: null, reported: false };
+  // A reported $0 for an answer that used tokens is no figure (#565): under BYOK the provider bills the user's own key
+  // and the gateway may report 0, so the call is of unknown cost (`decision-no-cost`), never looked up to a $0 record.
+  if (ok && said.usd === 0 && usedTokens(doc)) return { usd: null, id: null, reported: false };
   if (ok) return { usd: said.usd, id, reported: said.usd !== null };
   if (type && status >= 400 && status < 500 && PRE_MODEL_ERRORS.has(type)) return { usd: 0, id, reported: false };
   const top = type ?? errorTypeOf(doc, { topLevel: true });

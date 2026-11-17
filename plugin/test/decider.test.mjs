@@ -692,6 +692,22 @@ test("#565 W1: a decision answer in the endpoint's documented shape is priced fr
     assert.deepEqual(await a.spend.settled, { usd: 0.0000096 }, `${model}: a known cost, not a run of unknown cost`);
     assert.equal(seen.lookups, 0);
   }
+  // A reported $0 for an answer that used tokens (BYOK: the provider bills the user's own key) is unknown, never a known
+  // $0, and no record is looked up to make it one; a $0 with no tokens counted stays $0.
+  const byok = documentedAnswer("baseten/elephant-1", "0", GEN);
+  assert.deepEqual(answerCost(200, byok), { usd: null, id: null, reported: false });
+  assert.deepEqual(answerCost(200, { ...byok, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } }), { usd: 0, id: GEN, reported: true });
+  const zero = { lookups: 0 };
+  const zeroFetch = async (url) => {
+    if (new URL(url).pathname === "/v1/generation") {
+      zero.lookups += 1;
+      return new Response(JSON.stringify({ data: { id: GEN, total_cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify(byok), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const z = await gatewayDecider({ key: "vck_dummy_key_123", model: "m", fetchImpl: zeroFetch, lookupDelaysMs: [1], lookupMaxMs: 5_000 }).decide(INPUT, KEPT_QUESTION);
+  assert.deepEqual(await z.spend.settled, { usd: null, usdUnknown: 1, usdUnknownWhy: ["decision-no-cost"] });
+  assert.equal(zero.lookups, 0);
   // Its generation alone (no cost in the answer): looked up by the id at `provider_metadata.gateway.generationId`.
   const noCost = documentedAnswer("baseten/elephant-1", undefined, GEN);
   assert.deepEqual(answerCost(200, noCost), { usd: null, id: GEN, reported: false });

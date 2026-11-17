@@ -2849,8 +2849,9 @@ export function spendOf(body) {
  * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none) and its known dollars by billing
  * (`usdByBilling`, usage.mjs BILLING; absent when the line names none) and by pass kind (`usdByPass`, usage.mjs passRead;
  * absent when it names none), and what the stage ran again (`rerun`, usage.mjs rerunRead; `judgeOnly`, a review stage
- * started only to judge answers already made). `running`: a line written while its stage ran (not its final figure),
- * with `usdRunning` of its unknown runs still open then (in flight, not unreported). `noPass`: the stage ran no pass of
+ * started only to judge answers already made). `running`: the line was written while its stage ran (not its final
+ * figure), with `usdRunning` of its unknown runs still open then (in flight, not unreported). Both are as of that write,
+ * never "running now": a stage killed after it (SIGKILL, a machine restart) leaves the line as it was. `noPass`: the stage ran no pass of
  * a kind (usage.mjs PASS_KINDS): no work, review, answer, fix or conflict pass, so it is no round of any. Null when the
  * body has no spend line.
  */

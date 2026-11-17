@@ -25,20 +25,27 @@ test("the Claude Code manifest registers every Claude agent definition the plugi
   assert.deepEqual([...listed].sort(), [...shipped].sort());
 });
 
-test("the listing icon: the plugin's copy is docs/img/icon.png byte for byte, a square PNG of 512 to 2048 px, and the Claude Code icon and the Codex logo name it", () => {
+test("the listing icon: the plugin's copy is docs/img/icon.png byte for byte, a square PNG of 512 to 2048 px within 50 KB, and the Claude Code icon and the Codex logo name it", () => {
   const icon = readFileSync(join(plugin, "assets", "icon.png"));
   assert.ok(icon.equals(readFileSync(join(plugin, "..", "docs", "img", "icon.png"))), "plugin/assets/icon.png differs from docs/img/icon.png");
   assert.ok(icon.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) && icon.toString("latin1", 12, 16) === "IHDR", "not a PNG");
   const [w, h] = [icon.readUInt32BE(16), icon.readUInt32BE(20)];
   assert.ok(w === h && w >= 512 && w <= 2048, `${w}x${h}`);
+  assert.ok(icon.length <= 50 * 1024, `${icon.length} bytes`);
   const { interface: codex } = read(".codex-plugin/plugin.json");
   assert.deepEqual([read(".claude-plugin/plugin.json").icon, codex.logo, codex.composerIcon], ["./assets/icon.png", "./assets/icon.png", "./assets/icon.png"]);
 });
 
-test("every manifest and marketplace entry lists the plugin with one description and one set of keywords, and the two Codex marketplace files are the same", () => {
+test("every manifest and marketplace entry lists the plugin with one description and one set of keywords, and the two Codex marketplace files differ only in where the plugin comes from", () => {
   const market = (p) => JSON.parse(readFileSync(join(plugin, "..", p), "utf8"));
   const codexMarket = market(".agents/plugins/marketplace.json");
-  assert.deepEqual(read(".agents/plugins/marketplace.json"), codexMarket);
+  // The repository's marketplace names the plugin folder beside it; the plugin folder's own copy, which has no checkout
+  // around it, names that folder in this repository on GitHub.
+  const here = (m) => ({ ...m, plugins: m.plugins.map(({ source, ...e }) => e) });
+  assert.deepEqual(here(read(".agents/plugins/marketplace.json")), here(codexMarket));
+  assert.deepEqual(codexMarket.plugins.map((e) => e.source), [{ source: "local", path: "./plugin" }]);
+  assert.deepEqual(read(".agents/plugins/marketplace.json").plugins.map((e) => e.source), [{ source: "git-subdir", url: "https://github.com/clockgrove/pendulum.git", path: "plugin", ref: "main" }]);
+  assert.deepEqual(codexMarket.plugins.map((e) => e.policy), [{ installation: "AVAILABLE", authentication: "ON_USE" }]);
   const listings = {
     "plugin.json": read("plugin.json"),
     ".claude-plugin/plugin.json": read(".claude-plugin/plugin.json"),
@@ -50,4 +57,10 @@ test("every manifest and marketplace entry lists the plugin with one description
   assert.equal(new Set(Object.values(descriptions)).size, 1, JSON.stringify(descriptions, null, 1));
   const keywords = Object.fromEntries(Object.entries(listings).map(([p, m]) => [p, JSON.stringify(m.keywords)]));
   assert.equal(new Set(Object.values(keywords)).size, 1, JSON.stringify(keywords, null, 1));
+});
+
+test("the plugin folder carries the repository's license byte for byte and a security policy of its own", () => {
+  assert.ok(readFileSync(join(plugin, "LICENSE")).equals(readFileSync(join(plugin, "..", "LICENSE"))), "plugin/LICENSE differs from LICENSE");
+  assert.equal(read(".codex-plugin/plugin.json").license, "MIT");
+  assert.ok(readFileSync(join(plugin, "SECURITY.md"), "utf8").includes("https://github.com/clockgrove/pendulum/blob/main/SECURITY.md"));
 });

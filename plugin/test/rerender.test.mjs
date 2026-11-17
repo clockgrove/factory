@@ -1,10 +1,11 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
+import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { keptArgs, keptNotify, pickRunner, settingsReport, workflowSettings, workflowText } from "../scripts/setup.mjs";
 
 const PLUGIN = join(import.meta.dirname, "..");
@@ -403,4 +404,31 @@ test("#465: setup never pins a latest release from before the first Pendulum rel
     if (before === undefined) delete process.env.GITHUB_API_URL;
     else process.env.GITHUB_API_URL = before;
   }
+});
+
+/** Every `uses:` value in a parsed workflow or action manifest, wherever it sits (a step's, a reusable workflow job's). */
+const usesOf = (node) => (Array.isArray(node) ? node.flatMap(usesOf) : node && typeof node === "object" ? Object.entries(node).flatMap(([k, v]) => (k === "uses" && typeof v === "string" ? [v.trim()] : usesOf(v))) : []);
+
+test("every action the rendered workflow (both routes), the Action and this repository's workflows call is pinned: Pendulum to a release tag, any other to a full commit SHA with its version beside it, in a file Dependabot updates", () => {
+  const ROOT = join(PLUGIN, "..");
+  const workflows = readdirSync(join(ROOT, ".github", "workflows")).filter((f) => /\.ya?ml$/.test(f)).map((f) => [`.github/workflows/${f}`, readFileSync(join(ROOT, ".github", "workflows", f), "utf8")]);
+  const files = [["rendered, runner route", render({}).text], ["rendered, sandbox route", render({ sandbox: "vercel" }).text], ["action.yml", readFileSync(join(ROOT, "action.yml"), "utf8")], ...workflows];
+  let thirdParty = 0;
+  for (const [name, text] of files) {
+    for (const uses of usesOf(parseYaml(text))) {
+      if (uses.startsWith("./")) continue;
+      if (uses.startsWith("clockgrove/pendulum@")) {
+        assert.equal(uses, `clockgrove/pendulum@${LATEST}`, name);
+        continue;
+      }
+      thirdParty++;
+      assert.match(uses, /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/, `${name}: ${uses}`);
+      assert.ok(text.split("\n").some((l) => /^\s*(-\s+)?uses:\s*(\S+)\s+#\s+v\d+\.\d+\.\d+\s*$/.exec(l)?.[2] === uses), `${name}: ${uses} has no "# vX.Y.Z" beside it`);
+    }
+  }
+  assert.ok(thirdParty >= 10, `${thirdParty} third-party actions read`);
+  // Dependabot reads action.yml and .github/workflows from "/", and every YAML file directly in any other directory.
+  const actions = parseYaml(readFileSync(join(ROOT, ".github", "dependabot.yml"), "utf8")).updates.filter((u) => u["package-ecosystem"] === "github-actions");
+  const dirs = new Set(actions.flatMap((u) => u.directories || [u.directory]));
+  assert.ok(dirs.has("/") && dirs.has("/plugin"), JSON.stringify([...dirs]));
 });

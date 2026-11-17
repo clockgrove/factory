@@ -51,7 +51,7 @@ With the plugin, ask a session in your repository's clone to set up Pendulum (th
    node <pendulum clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --ci-checks "<your CI check names>" --yes  # apply
    ```
 
-   It writes `.github/workflows/pendulum.yml` pinned to the latest release, and creates the labels, the Project board (on a repository an organization owns; its node id goes into the workflow as `PENDULUM_PROJECT` when the workflow step runs too, by which every route finds the board; Pendulum uses a recorded board only when it is linked to this repository) and the `pendulum` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step; repeat it (or give `a,b`) for several. `--apply app` (the next step) runs only when named. If your CI workflow lacks `merge_group:` under `on:`, add it.
+   It writes `.github/workflows/pendulum.yml` pinned to the latest release (the other actions it calls are pinned to full commit SHAs, each with its version in a comment, which Dependabot's `github-actions` updates understand), and creates the labels, the Project board (on a repository an organization owns; its node id goes into the workflow as `PENDULUM_PROJECT` when the workflow step runs too, by which every route finds the board; Pendulum uses a recorded board only when it is linked to this repository) and the `pendulum` ruleset with your `gh` login. `--apply labels|project|protection|workflow` runs one step; repeat it (or give `a,b`) for several. `--apply app` (the next step) runs only when named. If your CI workflow lacks `merge_group:` under `on:`, add it.
 2. **The GitHub App.** In your repository's clone, run setup's App step:
 
    ```sh

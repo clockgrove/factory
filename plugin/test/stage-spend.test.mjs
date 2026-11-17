@@ -84,7 +84,7 @@ const f = process.env.FAKE_STATE + "/thread.json";
 const resume = process.argv[3] === "resume" ? process.argv[4] : null;
 const t = resume && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : { input: 0, cached: 0, output: 0 };
 const split = process.env.FAKE_SPLIT === "1";
-const add = (k) => { t.input += 200000 * k; t.cached += 100000 * k; t.output += 5000 * k; fs.writeFileSync(f, JSON.stringify(t)); };
+const add = (k) => { t.input += 60000 * k; t.cached += 30000 * k; t.output += 1500 * k; fs.writeFileSync(f, JSON.stringify(t)); };
 add(split ? 0.5 : 1);
 const id = resume || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724";
 console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
@@ -248,8 +248,9 @@ async function stages(plan) {
   return plan.map((_, i) => lineOf(last.get(`s${i}`)));
 }
 
-// The price of one full pass of the fake (gpt-6.1-sol, from the table), the unit every expectation is in.
-const PASS = (await import("../scripts/lib/usage.mjs")).priceCodex("gpt-6.1-sol", { input: 200000, output: 5000, cached: 100000, written: 0 });
+// The price of one full pass of the fake (gpt-6.1-sol, from the table), the unit every expectation is in. Its thread
+// stays under the long-context threshold over every plan's passes, since the fake writes no rollout to read requests from.
+const PASS = (await import("../scripts/lib/usage.mjs")).priceCodex("gpt-6.1-sol", { input: 60000, output: 1500, cached: 30000, written: 0 });
 const near = (a, b) => Math.abs(a - b) < 1e-6;
 
 // The killed stage's line holds the dollars its harness had reported when its last write landed, and each pass still

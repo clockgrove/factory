@@ -73,7 +73,7 @@ test("codex: JSONL turn.completed usage summed and priced from the table", () =>
   const p = CODEX_PRICES.perMillion["gpt-6.1-sol"];
   const expected = Math.round(((150000 - 115000) * p.input + 115000 * p.cached + 10000 * p.output) / 1e6 * 10000) / 10000;
   assert.equal(rec.usd, expected);
-  assert.match(rec.basis, new RegExp(`priced from table dated ${CODEX_PRICES.date}`));
+  assert.match(rec.basis, new RegExp(`priced at OpenAI's Standard rates from table dated ${CODEX_PRICES.date}`));
   assert.equal(finalText("codex", fixture("codex-events.jsonl")).split("\n")[0], "Plan posted.");
 });
 

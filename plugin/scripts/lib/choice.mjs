@@ -6,7 +6,7 @@
 // A `pendulum:host:<host>` label (#278) opens one more network host to that Objective's sandboxes alone, under the same
 // rule: it counts once a person who can push applied it, and the plan's record covers it.
 import { DEFAULTS, resolveInputs } from "./inputs.mjs";
-import { CODEX_PRICES, bareModel, codexRate } from "./usage.mjs";
+import { CODEX_PRICES, bareModel, codexRow } from "./usage.mjs";
 import { isSandboxHost, wildcardRefusal } from "./local.mjs";
 
 export const HARNESSES = ["claude", "codex", "copilot"];
@@ -103,9 +103,11 @@ export function modelProblem(harness, model, { gateway = false } = {}) {
   if (harness === "claude") return null;
   if (harness === "codex") {
     if (m.includes("/") && !gateway) return { reason: `${tick(m)} has a provider prefix, which only the AI Gateway takes, and this repository runs Codex on CODEX_API_KEY`, fix: `Name the model without its prefix (${tick(bareModel(m))}).` };
-    if (codexRate(CODEX_PRICES, m)) return null;
+    const row = codexRow(CODEX_PRICES, m);
+    if (row.rate) return null;
     const some = Object.keys(CODEX_PRICES.perMillion).slice(0, 3).map(tick).join(", ");
-    return { reason: `${tick(bareModel(m))} has no row in Pendulum's Codex price table, so max_usd could not stop its runs`, fix: `Name a model the table prices (${some}, …: plugin/scripts/lib/codex-prices.json), or choose the harness that runs ${tick(m)} with ${other("codex")}.` };
+    const what = row.why === "price-ended" ? `${tick(bareModel(m))} is priced in Pendulum's Codex price table at OpenAI's promotional rate for ${tick(row.id)}, which ended ${CODEX_PRICES.perMillion[row.id].until}` : `${tick(bareModel(m))} has no row in Pendulum's Codex price table`;
+    return { reason: `${what}, so max_usd could not stop its runs`, fix: `Name a model the table prices (${some}, …: plugin/scripts/lib/codex-prices.json), or choose the harness that runs ${tick(m)} with ${other("codex")}.` };
   }
   if (harness === "copilot") {
     if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(m)) return null;

@@ -87,7 +87,8 @@ function scratchRecords() {
 function world() {
   const recs = scratchRecords();
   const comments = [
-    ...scratch,
+    // Copies: a test that edits one of its comments edits its own world alone.
+    ...scratch.map((c) => ({ ...c })),
     progress(5, "work", "local-a1", { user: ME, spend: { usd: 1.2, parts: { usdByBilling: { subscription: 1.2 }, billing: "subscription" } }, account: "alpha" }),
     progress(5, "review", "local-b2", { user: ME, h: "copilot", model: "claude-sonnet-5-5", spend: { usd: 0.3, parts: { usdByBilling: { credits: 0.3 }, billing: "credits" } }, account: "beta", at: "2026-11-17T03:10:00Z" }),
     comment(5, `<!-- pendulum:5:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 3, usd: 0.02 })}`, { user: ME, at: "2026-11-17T03:20:00Z" }),
@@ -1084,4 +1085,71 @@ test("report (#544): a run with a sandbox, decision lines, comments Pendulum can
   assert.deepEqual(readSummary(blank.body, 3).stages, []);
   empty.comments.push(blank);
   assert.equal((await report(empty, { issue: 3 })).json.source.read.summaries, 0);
+});
+
+// ------------------------------------------------------------------ #559: a stage's model is its own records'
+
+/**
+ * ledgeredWorld with #3's work stage on Copilot at its default model: its harness line names none, nor does its ledger
+ * line (written with no published models), so only its usage record can name it: `model` (null: none). Its review
+ * stage stays on Claude, under its harness line's claude-fable-5-2.
+ */
+function modellessWorld(model) {
+  const w = ledgeredWorld();
+  const work = w.artifacts["pendulum-usage-3"][0];
+  const { model: _drop, ...rest } = work.record;
+  work.record = { ...rest, harness: "copilot", ...(model ? { model } : {}) };
+  w.recs.work = work.record;
+  w.comments = w.comments.map((c) =>
+    c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->")
+      ? { ...c, body: c.body.replace(/^<!-- pendulum:harness \{[^\n]*\} -->$/m, harnessMarker("copilot", "", { worker: null, subagent: null, reviewer: "claude-fable-5-2", labels: [] })).replace("harness claude (claude-opus-5-5) attempt 1", "harness copilot attempt 1").replace(/^<!-- pendulum:ledger [^\n]*$/m, ledgerMarker(work.record.ledger, { version: PENDULUM_VERSION, published: null })) }
+      : c,
+  );
+  return w;
+}
+
+test("report (#559): a stage whose lines name no model is under its own usage record's model on the stage path, as on its finish card, never another stage's", async () => {
+  const work = modellessWorld("claude-sonnet-5.5").comments.find((c) => c.body.startsWith("<!-- pendulum:3:progress:work:"));
+  assert.equal(ledgerOfComment(work.body).model, null, "its ledger line names no model");
+  const stages = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3 });
+  assert.deepEqual(stages.json.breakdowns.model.map((x) => [x.key, x.stages, x.cost.usd.api]), [["claude-sonnet-5.5", 1, 0.35637], ["claude-fable-5-2", 1, 0.163442]]);
+  assert.deepEqual(stages.json.source.missing, []);
+  // Its finish card reads the same record for it (modellessStages): the two paths agree on every figure.
+  const w = modellessWorld("claude-sonnet-5.5");
+  w.comments.push(await finishCard3(w));
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(figures(card.json), figures(stages.json));
+});
+
+test("report (#559): the usage record read for a stage's model is planned: the calls planned are the calls made", async () => {
+  const { json: r, calls } = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3 });
+  // The login, the issue, its comments, its PRs, the two artifact lists and the two downloads of two calls each.
+  assert.deepEqual(r.source.calls.byKind, { user: 1, issues: 1, comments: 1, pulls: 1, "artifact lists": 2, "artifact downloads": 4 });
+  assert.equal(r.source.calls.planned, r.source.calls.made);
+  assert.equal(calls.length, r.source.calls.made - 2, "a download is one request here and counts two calls (gh run download lists its run's artifacts)");
+  // A local record in the clone that names its model: no artifact read for it.
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  const w = modellessWorld("claude-sonnet-5.5");
+  mkdirSync(join(clone, ".pendulum", "3", "usage-work-1"), { recursive: true });
+  writeFileSync(join(clone, ".pendulum", "3", "usage-work-1", "result.json"), JSON.stringify(w.artifacts["pendulum-usage-3"][0].record));
+  const fake = fakeGitHub(w);
+  const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  assert.deepEqual(artifactCalls(fake.calls), []);
+  assert.deepEqual(buildReport(read, { now: new Date(NOW).toISOString() }).breakdowns.model.map((x) => x.key), ["claude-sonnet-5.5", "claude-fable-5-2"]);
+});
+
+test("report (#559): a stage no record of its own names a model for is under no model, with the reason in source.missing, on both paths", async () => {
+  const stages = await report(modellessWorld(null), { issue: 3 });
+  assert.deepEqual(stages.json.breakdowns.model.map((x) => [x.key, x.stages]), [[null, 1], ["claude-fable-5-2", 1]]);
+  assert.deepEqual(stages.json.source.missing.map((m) => [m.code, m.issues]), [["no-model", [3]]]);
+  const w = modellessWorld(null);
+  w.comments.push(await finishCard3(w));
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(figures(card.json), figures(stages.json));
+  // The call budget stopped before the record: the reason is the stop.
+  const { json: stopped } = await report(modellessWorld("claude-sonnet-5.5"), { issue: 3, "max-calls": 4 });
+  assert.deepEqual(stopped.breakdowns.model.map((x) => [x.key, x.stages]), [[null, 1], ["claude-fable-5-2", 1]]);
+  assert.deepEqual(stopped.source.missing.find((m) => m.code === "model-stopped")?.issues, [3]);
 });

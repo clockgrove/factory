@@ -2439,13 +2439,18 @@ export const CANCEL_GRACE_MS = { SIGINT: 9_750, SIGTERM: 2_250, SIGHUP: 2_250 };
 /** The least time the cancel path's reap gets, whatever the record and the session took: its first kill always goes out. */
 export const CANCEL_REAP_MIN_MS = 500;
 
+/** The cancel path's reap while onCancel's `end` runs: cancelledEnd calls it right after the record (null otherwise). */
+let cancelReap = null;
+
 /**
  * A work or review stage's end when its GitHub Actions job is cancelled. The runner sends the step's process SIGINT, then
  * SIGTERM, then kills what is left, a few seconds apart; `end(sig)` (cancelledEnd) runs on the first of them, before the
- * process exits (proc.mjs trapStops and atStop), so it is synchronous and makes no network call. After it, whatever ended
- * it, the agent's harness is reaped (proc.mjs reapAgentNow): it runs as the agent uid in systemd units (or the namespace
- * launcher's cgroup), outside the step's process tree, so neither the stage's exit nor the runner's kill reaches it, and on a self-hosted runner it would run on.
- * The reap has what is left of the runner's grace since the signal (CANCEL_GRACE_MS), at most REAP_NOW_MS and at least
+ * process exits (proc.mjs trapStops and atStop), so it is synchronous and makes no network call. The agent's harness is
+ * reaped once (proc.mjs reapAgentNow): it runs as the agent uid in systemd units (or the namespace launcher's cgroup),
+ * outside the step's process tree, so neither the stage's exit nor the runner's kill reaches it, and on a self-hosted
+ * runner it would run on. cancelledEnd reaps right after it writes the record, before the masking and the session copy,
+ * which take what time is left; an `end` that wrote no record (one was there already) or threw is reaped after it. The
+ * reap has what is left of the runner's grace since the signal (CANCEL_GRACE_MS), at most REAP_NOW_MS and at least
  * CANCEL_REAP_MIN_MS; `resolve` stands in for runnerCommand there. Not in local mode, whose loop stops its own stages,
  * and not in a cloud sandbox, whose stage writes the record of a child it ended and reaps its agent (stage.mjs
  * afterKill). Returns what removes it.
@@ -2455,12 +2460,20 @@ export function onCancel(end, env = process.env, { resolve } = {}) {
   trapStops();
   return atStop((sig) => {
     const at = Date.now();
-    try {
-      end(sig);
-    } finally {
+    let done = false;
+    const reap = () => {
+      if (done) return;
+      done = true;
       const left = (CANCEL_GRACE_MS[sig] ?? CANCEL_GRACE_MS.SIGTERM) - (Date.now() - at);
       const reaped = reapAgentNow(Math.max(CANCEL_REAP_MIN_MS, Math.min(REAP_NOW_MS, left)), resolve ? { resolve } : {});
       if (reaped.length) log(`the cancelled stage's agent reaped: ${reaped.map((r) => `${r.step} ${r.end}`).join(", ")}`);
+    };
+    cancelReap = reap;
+    try {
+      end(sig);
+    } finally {
+      cancelReap = null;
+      reap();
     }
   });
 }
@@ -2470,9 +2483,10 @@ export function onCancel(end, env = process.env, { resolve } = {}) {
  * own record, not a stand-in: `exit` `cancelled`, writeUsage's fields as `fields()` gives them now (harness, model,
  * progressRun, ran and account, billing, the relay's totals), and the records a stop reads (stop.mjs stoppedRecords):
  * each pass that ended, with the dollars it reported, and each pass still running as a run of unknown cost (usage.mjs
- * UNKNOWN_WHY `unreported`). The files in `mask` (the stream, the call log) are masked of `secrets` first. Then, when
- * `sessionOf(records)` names a session a finished pass left (savedSessionNow's arguments), it is saved and the record
- * written again with it, so a stage killed during that copy still leaves its record. Returns the record, or null.
+ * UNKNOWN_WHY `unreported`). Once it is written, the agent is reaped (onCancel), then the files in `mask` (the stream,
+ * the call log) are masked of `secrets` and the record written again with the session when `sessionOf(records)` names
+ * one a finished pass left (savedSessionNow's arguments), so a stage killed during that copy still leaves its record.
+ * Returns the record, or null.
  */
 export function cancelledEnd(sig, { usageDir, mask = [], secrets = [], fields, sessionOf = null }) {
   if (existsSync(join(usageDir, "result.json"))) return null;
@@ -2480,6 +2494,13 @@ export function cancelledEnd(sig, { usageDir, mask = [], secrets = [], fields, s
   const usage = { ...fields(), records, exit: "cancelled", reason: `the job was cancelled (${sig})` };
   // The record first (redacted as it is written): a large stream's masking can outlast the runner's grace.
   let rec = writeUsage(usageDir, usage);
+  // Then the agent's harness stopped (onCancel), before the masking and the session copy take what time is left: on the
+  // agent uid the session comes from Pendulum's own capture, which the reap does not touch.
+  try {
+    cancelReap?.();
+  } catch (e) {
+    log(`the cancelled stage's agent was not reaped: ${String(e?.message || e).slice(0, 120)}`);
+  }
   for (const f of mask) {
     try {
       maskFile(f, secrets);

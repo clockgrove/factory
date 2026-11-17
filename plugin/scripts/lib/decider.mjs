@@ -8,6 +8,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { roundCallUsd } from "./adapters/decider-ai-gateway.mjs";
 import { openVendor } from "./adapters/decider.mjs";
 import { bookDecisionSpend } from "./decision-spend.mjs";
 import { log, mask } from "./inputs.mjs";
@@ -95,13 +96,13 @@ const harnessOf = (stage) => {
  * The stage's one record of its gateway decision calls, as the stage's usage keeps it, as a harness decision call's is
  * (harness.mjs keepDecision): labelled `decision`, `decider` "ai-gateway", billed `api` (to the gateway key), no tokens (the gateway's model is no
  * harness's), `calls` the tries that reached the gateway, `usd` the known dollars and `usdUnknown` the calls of unknown
- * cost (usage.mjs UNKNOWN_WHY `decision`). Its counts live beside it (GATEWAY_COUNTS), so nothing but usage fields is on
+ * cost (usage.mjs UNKNOWN_WHY, each call's reason). Its counts live beside it (GATEWAY_COUNTS), so nothing but usage fields is on
  * it.
  */
 const GATEWAY_COUNTS = new WeakMap();
 const gatewayRecord = (model) => {
   const rec = { harness: null, decider: "ai-gateway", billing: "api", model: model ?? null, label: "decision", usd: null, tokens: { input: null, output: null, cached: null, written: null }, turns: null, basis: "the AI Gateway's cost of each decision call (the cost its answer reports, else its generation's total_cost)", started: new Date().toISOString(), ended: null, ok: true, decision: true, calls: 0 };
-  GATEWAY_COUNTS.set(rec, { known: null, unknown: 0, settling: 0 });
+  GATEWAY_COUNTS.set(rec, { known: null, unknown: 0, settling: 0, why: new Set() });
   return rec;
 };
 // A call whose price is still settling is in neither figure: its meter is still open (harness.mjs openPasses counts it
@@ -112,7 +113,7 @@ const refresh = (rec) => {
   const c = GATEWAY_COUNTS.get(rec);
   rec.usd = c.known ?? (c.unknown ? null : 0);
   const n = c.unknown;
-  if (n) Object.assign(rec, { usdUnknown: n, usdUnknownWhy: ["decision"] });
+  if (n) Object.assign(rec, { usdUnknown: n, usdUnknownWhy: [...c.why] });
   else {
     delete rec.usdUnknown;
     delete rec.usdUnknownWhy;
@@ -133,7 +134,7 @@ export async function settleDecisionCosts({ timeoutMs = 120_000 } = {}) {
   if (!SETTLING.size) return;
   const pending = [...SETTLING];
   await Promise.race([Promise.all(pending.map((e) => e.done)), sleep(timeoutMs, null, { ref: false })]);
-  for (const e of pending) e.book(null);
+  for (const e of pending) e.book(null, "decision-unsettled");
 }
 
 /**
@@ -171,19 +172,22 @@ async function gatewayCall(vendor, input, question, opts, stage, reserve = false
       c.settling += spend.calls;
       refresh(rec);
       let booked = false;
-      // `price` null: none came (settleDecisionCosts' bound passed): every try of the call is of unknown cost.
-      const book = (price) => {
+      // `price` null: none came (settleDecisionCosts' bound passed): every try of the call is of unknown cost, as
+      // `decision-unsettled`; a price whose figure is unknown says why (adapters/decider-ai-gateway.mjs DECISION_UNKNOWN).
+      const book = (price, why = "decision") => {
         if (booked) return;
         booked = true;
         SETTLING.delete(entry);
         const usd = typeof price?.usd === "number" && Number.isFinite(price.usd) ? Math.max(0, price.usd) : null;
         const unknown = price ? (Number.isInteger(price.usdUnknown) ? price.usdUnknown : usd === null ? spend.calls : 0) : spend.calls;
+        const whys = unknown ? (price && Array.isArray(price.usdUnknownWhy) && price.usdUnknownWhy.length ? price.usdUnknownWhy : [why]) : [];
         c.settling -= spend.calls;
         c.unknown += unknown;
-        if (usd !== null) c.known = Math.round(((c.known ?? 0) + usd) * 1e6) / 1e6;
+        for (const w of whys) c.why.add(w);
+        if (usd !== null) c.known = roundCallUsd((c.known ?? 0) + usd);
         refresh(rec);
         // Billed to the gateway key: `api` (usage.mjs BILLING), whatever the stage's own credential is.
-        metered.end({ usd, billing: "api", ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}) });
+        metered.end({ usd, billing: "api", ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: whys } : {}) });
       };
       const entry = { book, done: null };
       entry.done = Promise.resolve(spend.settled).then(book, () => book(null));

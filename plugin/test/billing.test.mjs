@@ -278,7 +278,8 @@ test("api only on a known key: an API key, a Console login, a bearer token; a ba
 test("a Copilot run is Copilot AI credits, billed to the seat, everywhere", async () => {
   const cred = await credOf("copilot", "api", { copilotGithubToken: "github_pat_dummy" });
   const { records, usage, stored, body } = await stage({ harness: "copilot", model: "claude-sonnet-5.5", cred, run: async () => [await pass("copilot", "claude-sonnet-5.5", cred)] });
-  const usd = records[0].usd;
+  // The pass's credits unrounded (#565 W8); the stage's figures keep them to the micro-dollar.
+  const usd = Math.round(records[0].usd * 1e6) / 1e6;
   assert.ok(usd > 0 && /AI credits/.test(records[0].basis), `the credits priced: ${usd}`);
   assert.deepEqual([stored.billing, stored.usdByBilling], ["credits", { credits: usd }]);
   assert.equal(usdText(usage), `${usd} ${CREDITS}`);

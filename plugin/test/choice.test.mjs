@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CHOICE_PREFIXES, LABEL_MAX, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
-import { MODEL_DEFAULTS, PENDULUM_VERSION, resolveInputs, variableSettings } from "../scripts/lib/inputs.mjs";
+import { MODEL_DEFAULTS, resolveInputs, variableSettings } from "../scripts/lib/inputs.mjs";
+import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { harnessMarker, setMaintainers, setSelf } from "../scripts/lib/logic.mjs";
@@ -15,6 +16,9 @@ import { missingCredential, stageEnvironment } from "../scripts/launch.mjs";
 import { labelHarness } from "../scripts/objective-harness.mjs";
 import { defaultsCheck } from "../scripts/doctor.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
+
+/** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
+const PENDULUM_VERSION = pendulumBuild();
 
 const repo = { owner: "acme", name: "app", full: "acme/app" };
 const ROOT = join(import.meta.dirname, "..", "..");

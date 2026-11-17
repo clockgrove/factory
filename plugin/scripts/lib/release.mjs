@@ -25,7 +25,7 @@ export const releasesDir = (home = homedir()) => join(home, ".cache", "pendulum"
  * repository that vendors Pendulum has no commit of Pendulum's); and whether it is a release, which serve keeps current
  * with the workflow's pin (Local.followPin): a checkout serve fetched (releasesDir), or one at its own release's tag with
  * no tracked file changed. A branch, a commit between releases or a change of the developer's own is not.
- * {version, commit, root, release}.
+ * {version, commit, root, release, dirty}: `dirty`, a tracked file changed in its own checkout.
  */
 export function runningPendulum(root = OWN_ROOT, version = PENDULUM_VERSION, home = homedir()) {
   const git = (args) => {
@@ -44,9 +44,45 @@ export function runningPendulum(root = OWN_ROOT, version = PENDULUM_VERSION, hom
   }
   // A checkout serve fetched is a release as it stands (checked against its manifest before serve ran it): no `git status`
   // there, which would run a filter its config names in this process.
-  const atTag = !fetched && !!commit && git(["rev-parse", "--verify", "-q", `refs/tags/v${version}^{commit}`]) === commit && git(["status", "--porcelain", "--untracked-files=no"]) === "";
-  return { version, commit, root, release: !!commit && (fetched || atTag) };
+  const dirty = !fetched && !!commit && git(["status", "--porcelain", "--untracked-files=no"]) !== "";
+  const atTag = !fetched && !!commit && git(["rev-parse", "--verify", "-q", `refs/tags/v${version}^{commit}`]) === commit && !dirty;
+  return { version, commit, root, release: !!commit && (fetched || atTag), dirty };
 }
+
+/**
+ * The Pendulum build this process runs, as the records it writes name it (#565): its release version (plugin.json's)
+ * when it is that release, else that version with the build it really is as semver build metadata
+ * (`0.10.2+1a2b3c4d5e6f`), so a candidate between releases never records itself as the last tag.
+ * - In a cloud-sandbox stage, the launcher's own build, handed over as PENDULUM_STAGE_BUILD (the sandbox runs the
+ *   launcher's plugin, unpacked with no git checkout), when it is a build of this version.
+ * - On GitHub Actions, the ref the workflow's `uses:` named, which action.yml's first step reads (`github.action_ref`,
+ *   before any nested action) and passes as PENDULUM_ACTION_REF. It counts only when the runner's checkout of the
+ *   action (GITHUB_ACTION_PATH) ends with `/<ref>`, an exact match on a path the runner chose; else, or set but empty,
+ *   the build is `+unknown`. The release's tag, or a moving tag of its line (`v0`, `v0.10`), is the release; a commit
+ *   SHA is its first 12 characters (a SHA pin of a release too: a SHA is never taken for a tag); any other ref (a
+ *   branch) is its name.
+ * - Otherwise (PENDULUM_ACTION_REF not set at all: local mode, or a command run from a person's own workflow), it is
+ *   runningPendulum's: a release, or a git checkout of Pendulum's own at a commit that is not its release (`+<commit>`,
+ *   `.dirty` with a tracked file changed). A copy with no git checkout of its own (an installed plugin) is taken as its
+ *   manifest's release.
+ */
+export function pendulumBuild({ env = process.env, version = PENDULUM_VERSION, running = null } = {}) {
+  const meta = (m) => `${version}+${String(m).replace(/[^A-Za-z0-9.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 40) || "unknown"}`;
+  const handed = String(env.PENDULUM_STAGE_BUILD || "");
+  if (handed && (handed === version || (handed.startsWith(`${version}+`) && /^[A-Za-z0-9.-]{1,40}$/.test(handed.slice(version.length + 1))))) return handed;
+  if (env.PENDULUM_ACTION_REF !== undefined) {
+    const ref = String(env.PENDULUM_ACTION_REF).trim();
+    const path = String(env.GITHUB_ACTION_PATH || "").replace(/\/+$/, "");
+    if (!ref || !path.endsWith(`/${ref}`)) return meta("unknown");
+    const [major, minor] = version.split(".");
+    if (ref === `v${version}` || ref === `v${major}` || ref === `v${major}.${minor}`) return version;
+    return meta(COMMIT.test(ref) ? ref.slice(0, 12) : ref);
+  }
+  const r = running ?? (OWN_BUILD.running ??= runningPendulum());
+  if (!r?.commit || r.release) return version;
+  return meta(`${r.commit.slice(0, 12)}${r.dirty ? ".dirty" : ""}`);
+}
+const OWN_BUILD = { running: null };
 
 /** How this Pendulum names itself in serve's log: its release, and its commit when known. */
 export const runningName = (running) => `v${running.version}${running.commit ? ` (${running.commit.slice(0, 7)})` : ""}`;

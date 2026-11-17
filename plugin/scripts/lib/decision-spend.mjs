@@ -7,12 +7,13 @@
 // call; or, where the check writes no record, into the one decisions comment of the process's role on the issue
 // (flushDecisionSpend, `<!-- pendulum:<n>:decisions:<role> -->`, read fresh before each write). daily_usd (github.mjs localSpendToday) and the
 // scorecard and `pendulum report` (cost-join.mjs decisionSpendRecords) read the lines in Pendulum's own comments. Dollars are the gateway's
-// cost or unknown (usage.mjs UNKNOWN_WHY `decision`), never an estimate; a day of $0 known with nothing unknown is no
+// cost or unknown (usage.mjs UNKNOWN_WHY, with each call's reason), never an estimate; a day of $0 known with nothing unknown is no
 // line.
 import { setTimeout as sleep } from "node:timers/promises";
 import { listComments, rest } from "./github.mjs";
 import { log } from "./inputs.mjs";
 import { decisionSpendEntries, decisionSpendMarker, isSelf, selfLogin, trustedAuthor } from "./logic.mjs";
+import { roundCallUsd } from "./adapters/decider-ai-gateway.mjs";
 import { LOOKUP_MAX_MS } from "./gateway-relay.mjs";
 
 /** The roles that write a decisions comment of their own: one comment per role and Objective, its only writer. */
@@ -56,16 +57,19 @@ export async function takeDecisionSpend(repo, issue, { timeoutMs = SETTLE_MS } =
   const prices = await Promise.all(mine.map((e) => Promise.race([e.settled, timer])));
   const days = new Map();
   mine.forEach((e, i) => {
-    const p = prices[i] === late || !prices[i] ? { usd: null, usdUnknown: e.calls } : prices[i];
-    const d = days.get(e.date) ?? { date: e.date, calls: 0, usd: 0, usdUnknown: 0 };
+    // A price that had not come by the bound is `decision-unsettled`; one that came says why it is unknown.
+    const p = prices[i] === late ? { usd: null, usdUnknown: e.calls, usdUnknownWhy: ["decision-unsettled"] } : !prices[i] ? { usd: null, usdUnknown: e.calls } : prices[i];
+    const d = days.get(e.date) ?? { date: e.date, calls: 0, usd: 0, usdUnknown: 0, why: new Set() };
     d.calls += e.calls;
-    if (typeof p.usd === "number" && Number.isFinite(p.usd)) d.usd = Math.round((d.usd + Math.max(0, p.usd)) * 1e6) / 1e6;
-    d.usdUnknown += Number.isInteger(p.usdUnknown) && p.usdUnknown > 0 ? p.usdUnknown : typeof p.usd === "number" ? 0 : e.calls;
+    if (typeof p.usd === "number" && Number.isFinite(p.usd)) d.usd = roundCallUsd(d.usd + Math.max(0, p.usd));
+    const unknown = Number.isInteger(p.usdUnknown) && p.usdUnknown > 0 ? p.usdUnknown : typeof p.usd === "number" ? 0 : e.calls;
+    d.usdUnknown += unknown;
+    if (unknown) for (const w of Array.isArray(p.usdUnknownWhy) && p.usdUnknownWhy.length ? p.usdUnknownWhy : ["decision"]) d.why.add(w);
     days.set(e.date, d);
   });
-  const out = [...days.values()].filter((d) => d.usd > 0 || d.usdUnknown > 0).map((d) => ({ ...d, ...(d.usdUnknown ? { usdUnknownWhy: ["decision"] } : {}) }));
+  const out = [...days.values()].filter((d) => d.usd > 0 || d.usdUnknown > 0).map(({ why, ...d }) => ({ ...d, ...(d.usdUnknown ? { usdUnknownWhy: [...why] } : {}) }));
   out.put = () => {
-    for (const d of out) BOOKED.push({ repo, issue, date: d.date, calls: d.calls, settled: Promise.resolve({ usd: d.usd, usdUnknown: d.usdUnknown }) });
+    for (const d of out) BOOKED.push({ repo, issue, date: d.date, calls: d.calls, settled: Promise.resolve({ usd: d.usd, usdUnknown: d.usdUnknown, ...(d.usdUnknownWhy ? { usdUnknownWhy: d.usdUnknownWhy } : {}) }) });
   };
   return out;
 }
@@ -95,12 +99,13 @@ export async function carryDecisionSpend(repo, issue, write, { dryRun = false, t
 
 /** The decisions comment's body after its marker: the days it holds, `days` added to them. */
 export function decisionsBody(role, body, days) {
-  const by = new Map(decisionSpendEntries(body).map((d) => [d.date, { ...d, usdUnknown: d.usdUnknown ?? 0 }]));
+  const whyOf = (d) => (d.usdUnknown ? (Array.isArray(d.usdUnknownWhy) && d.usdUnknownWhy.length ? d.usdUnknownWhy : ["decision"]) : []);
+  const by = new Map(decisionSpendEntries(body).map((d) => [d.date, { ...d, usdUnknown: d.usdUnknown ?? 0, usdUnknownWhy: whyOf(d) }]));
   for (const d of days) {
-    const was = by.get(d.date) ?? { date: d.date, calls: 0, usd: 0, usdUnknown: 0 };
-    by.set(d.date, { date: d.date, calls: was.calls + d.calls, usd: Math.round((was.usd + d.usd) * 1e6) / 1e6, usdUnknown: was.usdUnknown + (d.usdUnknown ?? 0) });
+    const was = by.get(d.date) ?? { date: d.date, calls: 0, usd: 0, usdUnknown: 0, usdUnknownWhy: [] };
+    by.set(d.date, { date: d.date, calls: was.calls + d.calls, usd: roundCallUsd(was.usd + d.usd), usdUnknown: was.usdUnknown + (d.usdUnknown ?? 0), usdUnknownWhy: [...new Set([...was.usdUnknownWhy, ...whyOf(d)])] });
   }
-  const all = [...by.values()].sort((a, b) => a.date.localeCompare(b.date)).map((d) => ({ ...d, ...(d.usdUnknown ? { usdUnknownWhy: ["decision"] } : {}) }));
+  const all = [...by.values()].sort((a, b) => a.date.localeCompare(b.date)).map(({ usdUnknownWhy, ...d }) => ({ ...d, ...(d.usdUnknown ? { usdUnknownWhy } : {}) }));
   return `Decision calls about this Objective that Pendulum's ${role} made outside a stage, where no record of the check carries them, by UTC day:\n${all.map(dayLines).join("\n")}`;
 }
 

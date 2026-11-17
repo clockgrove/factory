@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessMarker, ledgerMarker, ledgerOfComment, rebaseCostMarker, setSelf, spendMarker, stageSpendLine } from "../scripts/lib/logic.mjs";
-import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
+import { pendulumBuild } from "../scripts/lib/release.mjs";
 import { progressTail, writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
 import { BILLING_WORDS } from "../scripts/lib/usage.mjs";
@@ -21,6 +21,9 @@ import { collectObjective } from "../../bench/lib/collect.mjs";
 import { scoreObjective } from "../../bench/lib/objective.mjs";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
+
+/** The Pendulum build a stage of this checkout records (#565 W6): its release at its tag, else with its commit. */
+const PENDULUM_VERSION = pendulumBuild();
 
 RETRY.sleep = async () => {};
 

@@ -23,7 +23,7 @@ import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_J
 import { addBilling } from "./lib/usage.mjs";
 import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
-import { FINISH_RETRY_MS, objectiveRecords, postFinishCard } from "./lib/finish-card.mjs";
+import { FINISH_RETRY_MS, cardable, newestPrMerged, objectiveRecords, postFinishCard } from "./lib/finish-card.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
 import { applyExit, hungChecks, mergeBlockCause, mergeBlockReason, mergeReadyOne, objectiveDecisions, queueBoundMs, queueEntryState, queueTimeoutMin, rebaseMarkers, rebaseNotice, rebaseBlock } from "./lib/session.mjs";
 import { backend } from "./lib/backend.mjs";
@@ -1571,9 +1571,22 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       // met a passing failure (GitHub's 5xx, its rate limit, the network) leaves the label for a later tick (the cron's or
       // the loop's; no wake of its own), up to FINISH_RETRY_MS after the close; after that, or on any other failure, the
       // tidy goes on without it. Under a person's login (a local loop) the PR body keeps no finish block: the card on the
-      // issue is the record.
+      // issue is the record. Another route's Objective whose card is due (closed as completed, not Blocked or on a
+      // Question, the newest PR on its branch merged) keeps its state label for that route's Done pass up to
+      // FINISH_RETRY_MS after its close (#565): the label is what makes that pass post its card, so a tidy here first
+      // would leave it none. One whose branch read failed waits for a later tick the same way. Any other (a hand-close
+      // with its PR still open, which applyStop below takes out of the merge queue), or one past that window (its route
+      // not running), is tidied here as before.
       const closed = recent.find((i) => i.number === number);
-      if (labels.length && closed && hasLocalLabel(closed) === (backend().name === "local")) {
+      const ours = !!closed && hasLocalLabel(closed) === (backend().name === "local");
+      if (labels.length && closed && !ours && closed.state_reason === "completed" && cardable(labels) && +now - Date.parse(closed.closed_at) < FINISH_RETRY_MS) {
+        const due = await newestPrMerged(repo, number, opts).catch((e) => {
+          log(`  #${number}: its branch could not be read (${String(e?.message || e).slice(0, 120)}); its state label waits for a later tick`);
+          return true;
+        });
+        if (due) continue;
+      }
+      if (labels.length && closed && ours) {
         const usageToken = inputs.githubToken || token;
         const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n, want) => objectiveRecords(repo, n, { token: usageToken, want, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
         if (card === "posted") {

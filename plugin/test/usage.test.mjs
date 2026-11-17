@@ -135,13 +135,13 @@ test("copilot 1.0.91: the real JSONL and usage file (captured Nov 2): session id
   assert.deepEqual(rec.tokens, { input: 24945, output: 4, cached: 0, written: 24943 });
   assert.equal(rec.premiumRequests, 1);
   assert.equal(rec.aiu, 6.24);
-  assert.equal(rec.usd, 0.0624, "AI credits at GitHub's $0.01");
+  assert.equal(rec.usd, 0.0624015, "AI credits at GitHub's $0.01, not rounded (#565 W8)");
   assert.match(rec.basis, /^harness-reported: 6\.24 AI credits from copilot --usage-output-file at \$0\.01\/credit, 1 premium request/);
   assert.equal(finalText("copilot", fixture("copilot-events.jsonl")), "ok");
   // Without the file the stream's usage checkpoint still gives the credits; tokens stay unknown, never zero.
   const bare = parseCopilot(fixture("copilot-events.jsonl"), null, 0);
   assert.deepEqual(bare.tokens, { input: null, output: null, cached: null, written: null });
-  assert.equal(bare.usd, 0.0624);
+  assert.equal(bare.usd, 0.0624015);
   assert.match(bare.basis, /from the stream's usage checkpoint/);
   assert.match(parseCopilot("", null, 0).basis, /^unknown: Copilot wrote no usage/);
 });
@@ -596,8 +596,8 @@ test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the config
   assert.equal(first.model, "claude-sonnet-5.5");
   assert.equal(first.premiumRequests, 1);
   assert.equal(first.aiu, 6.123);
-  assert.equal(first.usd, 0.0612, "6,122,800,000 nano-AIU is 6.12 credits: 24,472 cache-write tokens at $2.50 per million");
-  assert.equal(parseCopilot("", null, 0, { usageFile: file("copilot-1.0.107-usage.json"), creditUsd: 0.02 }).usd, 0.1225, "the rate is a setting");
+  assert.equal(first.usd, 0.061228, "6,122,800,000 nano-AIU is 6.1228 credits: 24,472 cache-write tokens at $2.50 per million");
+  assert.equal(parseCopilot("", null, 0, { usageFile: file("copilot-1.0.107-usage.json"), creditUsd: 0.02 }).usd, 0.122456, "the rate is a setting");
   // On --resume the file is the session's running total: two requests, both runs' tokens.
   const total = parseCopilot("", null, 0, { usageFile: file("copilot-1.0.107-usage-resumed.json") });
   assert.equal(total.premiumRequests, 2);
@@ -605,17 +605,19 @@ test("copilot 1.0.107 (captured Nov 8): dollars are the AI credits at the config
   const own = sinceSession(total, { usd: first.usd, tokens: first.tokens, models: null, premiumRequests: first.premiumRequests, aiu: first.aiu, sessionStartTime: first.sessionStartTime });
   assert.equal(own.premiumRequests, 1);
   assert.equal(own.aiu, 0.262);
-  assert.ok(Math.abs(own.usd - 0.0026) < 1e-9, `resumed pass usd ${own.usd}`);
+  assert.ok(Math.abs(own.usd - 0.0026177) < 1e-9, `resumed pass usd ${own.usd}`);
   assert.deepEqual(own.tokens, { input: 24525, output: 4, cached: 24472, written: 49 });
   // A session restored from an earlier job: its saved events' last session.shutdown snapshot is the prior total.
   const seeded = copilotSessionTotal(readFileSync(file("copilot-1.0.107-session-events.jsonl"), "utf8"));
-  assert.deepEqual({ usd: seeded.usd, premiumRequests: seeded.premiumRequests, aiu: seeded.aiu }, { usd: 0.0612, premiumRequests: 1, aiu: 6.123 });
+  assert.deepEqual({ usd: seeded.usd, premiumRequests: seeded.premiumRequests, aiu: seeded.aiu }, { usd: 0.061228, premiumRequests: 1, aiu: 6.123 });
   assert.equal(copilotSessionTotal('{"type":"session.start"}'), null);
   // A stage's runs are summed, premium requests and credits included; the progress line names both.
   const stage = mergeUsage([first, own]);
   assert.equal(stage.premiumRequests, 2);
   assert.equal(stage.aiu, 6.385);
-  assert.ok(Math.abs(stage.usd - 0.0638) < 1e-9, `stage usd ${stage.usd}`);
+  // #565 W8: the stage's passes add up to the session's credits' worth: no cent fraction lost to a pass's rounding.
+  assert.ok(Math.abs(stage.usd - total.usd) < 1e-9, `stage usd ${stage.usd}`);
+  assert.ok(Math.abs(stage.usd - 0.0638457) < 1e-9, `stage usd ${stage.usd}`);
   assert.equal(copilotCount({ premiumRequests: 2, aiCredits: 6.385 }), "; 2 premium requests, 6.385 AI credits");
   assert.equal(copilotCount({ premiumRequests: null, aiCredits: null }), "", "other harnesses add nothing");
   // A usage file with tokens but no AI credits (an older CLI) is a run of unknown cost, never zero.
@@ -653,7 +655,7 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   for (const status of ["pending", "unavailable", "complete\n::error::x"]) assert.equal(parseCopilot(turn, null, 0, { usageFile: write("s.json", { aiCreditsStatus: status }) }).usd, null, status);
   assert.match(parseCopilot(turn, null, 0, { usageFile: write("s.json", { aiCreditsStatus: "nope" }) }).basis, /AI credits unknown/);
   const partial = parseCopilot(turn, null, 0, { usageFile: write("p.json", { aiCreditsStatus: "partial" }) });
-  assert.equal(partial.usd, 0.0612);
+  assert.equal(partial.usd, 0.061228);
   assert.deepEqual([partial.usdUnknown, partial.usdUnknownWhy], [1, ["credits", "unreported"]], "partial credits, and no result line after them");
   assert.match(partial.basis, /AI credits partial: the rest unknown/);
   assert.equal(parseCopilot(turn, null, 0, { usageFile: write("z.json", { totalNanoAiu: 0 }) }).usd, null);

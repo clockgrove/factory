@@ -404,18 +404,19 @@ test("#367: the decision model judges whether the answer and fix passes wrote on
       assert.deepEqual([g.review, g.verdict, g.error], [true, null, code]);
       assert.match(g.why, new RegExp(`gave no answer .*\\(${code}\\)`));
     }
-    // A diff over the cap: a review pass, the model not asked, however it would answer.
+    // One hunk over the cap: not judged, that hunk named, a review pass, the model not asked, however it would answer.
     r.put("app.txt", Array.from({ length: 4000 }, (_, i) => `rewritten line ${i}`).join("\n") + "\n");
     r.run("commit", "-q", "-m", "a rewrite");
     const big = r.push();
     ({ ask, asked } = fakeAsk(yes));
     g = await gate(big, ask);
     assert.equal(g.review, true);
-    assert.match(g.why, /could not be told .*over \d+ bytes/);
+    assert.equal(g.why, `not judged: app.txt hunk 1 of 1 (@@ -1,3 +1,4000 @@) of what the answer and fix passes wrote, with the findings and failures, is over ${ANSWER_INPUT_BYTES} bytes, more than the decision model is given in one question`);
+    assert.deepEqual(g.notJudged, ["app.txt hunk 1 of 1 (@@ -1,3 +1,4000 @@)"]);
     assert.equal(asked.length, 0);
     assert.equal((await answerGate({ diff: "x".repeat(ANSWER_INPUT_BYTES + 1), comments, ask })).review, true, "the gate holds the cap itself");
     const long = [{ path: "app.txt", line: 2, body: "y".repeat(ANSWER_INPUT_BYTES) }];
-    assert.match((await answerGate({ diff: "diff --git a/app.txt b/app.txt\n", comments: long, ask })).why, /over \d+ bytes/, "the cap is on the whole input, the findings included");
+    assert.match((await answerGate({ diff: "diff --git a/app.txt b/app.txt\n", comments: long, ask })).why, /^not judged: app\.txt of .* over \d+ bytes/, "the cap is on each question, the findings included");
     assert.equal(asked.length, 0);
     assert.equal((await answerGate({ diff: null, comments, ask })).review, true, "what was written cannot be told");
     // Nothing written but a rebase: no question, nothing to review.
@@ -563,6 +564,107 @@ test("#367: a large answer that does only what the findings asked is covered: no
     const g = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: r.reviewed, head, comments, ask }));
     assert.equal(g.review, false);
     assert.equal(asked.length, 1);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+/** Each question's diff, in the order asked: the fenced text after the input's first line. */
+const askedDiff = (input) => /^Diff written after the review[^\n]*:\n(`{3,})\n([\s\S]*?)\n\1\n/.exec(input)[2];
+
+test("#515: an answer diff over 32 KiB across several files is judged in parts, each under the cap, covered when every part is", async () => {
+  const r = repos();
+  const comments = [{ id: 11, path: "app.txt", line: 2, body: "acceptance A: each module must list its cases" }];
+  const checks = ["--- quality: not ok 1 - the modules list no cases"];
+  try {
+    // Four new modules of about 10 KiB each: 40 KiB of diff, with the findings and failures over the cap together.
+    const names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+    for (const n of names) r.put(n, Array.from({ length: 250 }, (_, i) => `case ${i} of module ${n}, as the finding asked`).join("\n") + "\n");
+    r.run("commit", "-q", "-m", "answer");
+    const head = r.push();
+    const whole = await inMirror(r, (box) => sinceReview(box.git, { base: box.base, covered: r.reviewed, head }));
+    assert.ok(Buffer.byteLength(whole.diff) > 40 * 1024, String(Buffer.byteLength(whole.diff)));
+    const { ask, asked } = fakeAsk(yes);
+    const g = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: r.reviewed, head, comments, checks, ask }));
+    assert.deepEqual([g.review, g.verdict, g.confidence], [false, "only_asked", 0.93]);
+    assert.ok(asked.length >= 2, `${asked.length} question(s)`);
+    assert.equal(g.parts, asked.length);
+    assert.match(answerGateLine(g, ask), new RegExp(`^answer gate \\(test/decider\\): only_asked 0\\.93 \\(in ${asked.length} parts\\) → covered by the review$`));
+    for (const a of asked) {
+      assert.ok(Buffer.byteLength(a.input) <= ANSWER_INPUT_BYTES, `a question of ${Buffer.byteLength(a.input)} bytes`);
+      assert.equal(a.question, ANSWER_QUESTION);
+      assert.match(a.input, /^Diff written after the review, one part of it \(the other parts are judged on their own\):\n/);
+      assert.match(a.input, /^- "app\.txt" line 2: "acceptance A: each module must list its cases"$/m, "each part with the findings");
+      assert.match(a.input, /not ok 1 - the modules list no cases/, "and the failures");
+    }
+    // Every file is asked about once, whole: the parts together are the diff.
+    assert.deepEqual(asked.flatMap((a) => files(askedDiff(a.input))), names);
+    assert.equal(asked.map((a) => askedDiff(a.input)).join("\n"), whole.diff.replace(/\n$/, ""));
+    // One part read as more than asked holds all of it, naming that part.
+    const one = fakeAsk((input) => (/module c\.txt/.test(input) ? no : yes));
+    const held = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: r.reviewed, head, comments, checks, ask: one.ask }));
+    assert.deepEqual([held.review, held.verdict], [true, "more_than_asked"]);
+    assert.match(held.why, /^the decision model \(test\/decider\) read part \d of \d of what the answer and fix passes wrote \([^)]*c\.txt[^)]*\) as more than the findings and failing checks asked$/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test("#515: a single file over the cap is judged in hunks, each part carrying the file's header; the first part not covered is named", async () => {
+  const r = repos();
+  const comments = [{ id: 11, path: "big.txt", line: 1, body: "acceptance B: every tenth entry must say checked" }];
+  const row = (i, mark = "") => `entry ${String(i).padStart(4, "0")} of the long answer file${mark}, padded out to about sixty bytes`;
+  try {
+    r.put("big.txt", Array.from({ length: 1500 }, (_, i) => row(i + 1)).join("\n") + "\n");
+    r.run("commit", "-q", "-m", "big file");
+    r.push();
+    const reviewed = r.run("rev-parse", "HEAD");
+    // The answer marks every tenth entry: 150 hunks of one file, over 32 KiB of diff.
+    r.put("big.txt", Array.from({ length: 1500 }, (_, i) => row(i + 1, (i + 1) % 10 === 0 ? ", checked" : "")).join("\n") + "\n");
+    r.run("commit", "-q", "-m", "answer");
+    const head = r.push();
+    const whole = await inMirror(r, (box) => sinceReview(box.git, { base: box.base, covered: reviewed, head }));
+    assert.ok(Buffer.byteLength(whole.diff) > ANSWER_INPUT_BYTES);
+    const { ask, asked } = fakeAsk(yes);
+    const g = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: reviewed, head, comments, ask }));
+    assert.deepEqual([g.review, g.verdict], [false, "only_asked"]);
+    assert.ok(asked.length >= 2);
+    const header = /^diff --git a\/big\.txt b\/big\.txt\nindex [0-9a-f]+\.\.[0-9a-f]+ 100644\n--- a\/big\.txt\n\+\+\+ b\/big\.txt\n@@ /;
+    for (const a of asked) {
+      assert.ok(Buffer.byteLength(a.input) <= ANSWER_INPUT_BYTES);
+      assert.match(askedDiff(a.input), header, "each part names the file");
+    }
+    // Every hunk asked about exactly once, in order.
+    const hunks = asked.flatMap((a) => [...askedDiff(a.input).matchAll(/^@@ -(\d+)/gm)].map((m) => Number(m[1])));
+    assert.equal(hunks.length, 150);
+    assert.deepEqual(hunks, [...hunks].sort((x, y) => x - y));
+    // A part holding entry 0750's change read as more than asked: held, naming that part's hunks of the file.
+    const one = fakeAsk((input) => (/^\+entry 0750 /m.test(input) ? no : yes));
+    const held = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: reviewed, head, comments, ask: one.ask }));
+    assert.equal(held.review, true);
+    assert.match(held.why, /^the decision model \(test\/decider\) read part \d+ of \d+ of what the answer and fix passes wrote \(big\.txt hunks \d+ to \d+ of 150\) as more than the findings and failing checks asked$/);
+  } finally {
+    rmSync(r.root, { recursive: true, force: true });
+  }
+});
+
+test("#515: one part no question can hold leaves the answer not judged, naming exactly that hunk; the model is not asked", async () => {
+  const r = repos();
+  const comments = [{ id: 11, path: "app.txt", line: 2, body: "acceptance A: two is wrong" }];
+  try {
+    r.put("app.txt", "one\ntwo fixed\nthree\n");
+    for (const n of ["a.txt", "b.txt", "c.txt"]) r.put(n, Array.from({ length: 200 }, (_, i) => `small module ${n} line ${i}`).join("\n") + "\n");
+    // One new file of 40 KiB: a single hunk over the cap.
+    r.put("fixture.txt", Array.from({ length: 1000 }, (_, i) => `fixture row ${i} with forty bytes of text`).join("\n") + "\n");
+    r.run("commit", "-q", "-m", "answer");
+    const head = r.push();
+    const { ask, asked } = fakeAsk(yes);
+    const g = await inMirror(r, (box) => answerCovered(box.git, { base: box.base, from: r.reviewed, head, comments, ask }));
+    assert.deepEqual([g.review, g.verdict], [true, null]);
+    assert.deepEqual(g.notJudged, ["fixture.txt hunk 1 of 1 (@@ -0,0 +1,1000 @@)"]);
+    assert.equal(g.why, `not judged: fixture.txt hunk 1 of 1 (@@ -0,0 +1,1000 @@) of what the answer and fix passes wrote, with the findings and failures, is over ${ANSWER_INPUT_BYTES} bytes, more than the decision model is given in one question`);
+    assert.equal(asked.length, 0, "never a pass: the other parts' answers could not cover it");
+    assert.match(answerGateLine(g, ask), /^answer gate \(test\/decider\): no verdict → review pass: not judged: fixture\.txt hunk 1 of 1 /);
   } finally {
     rmSync(r.root, { recursive: true, force: true });
   }

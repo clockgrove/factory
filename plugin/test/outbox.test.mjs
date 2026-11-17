@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
-import { openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
+import { JUDGE_MAX_BYTES, JUDGE_PATH_MAX_BYTES, openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
 import { KEPT_QUESTION, keptInput, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
 import { setupPaths } from "../scripts/lib/logic.mjs";
@@ -2177,6 +2177,54 @@ test("#452: the rebase check shows a file over its limit as the lines around eac
   const b = hunkReader();
   assert.equal(await both.box.rebaseLeft({ from: both.from, onto: both.onto, judge: b.judge }), "");
   assert.match(b.asked[0].input, /\nLines 1 to 760 of the 2200 the file has in the rebased branch, around where hunk 1 applies:\n<<<BEGIN [0-9a-f]{16}>>>\nbranch line 1 of the added module\n[\s\S]*\nbranch line 700 of the added module\n/);
+});
+
+/**
+ * #515: a long doc table (1,200 rows) the branch edits every tenth row of, while main adds an introduction above it and
+ * edits row 600 too, so the rebase conflicts there. `resolve` gets the rows and returns the worker's resolved file.
+ */
+const tableRow = (i, note = `notes for row ${i} of the table`) => `| model-${i} | provider-${i % 7} | ${i * 3} tokens | ${note} |`;
+const table = (edit = () => null, intro = []) => [...intro, "| model | provider | context | notes |", "| --- | --- | --- | --- |", ...Array.from({ length: 1200 }, (_, k) => tableRow(k + 1, edit(k + 1) ?? undefined))].join("\n") + "\n";
+const branchNote = (i) => (i % 10 === 0 ? `branch note ${i}, checked against the vendor page` : null);
+const intro = Array.from({ length: 20 }, (_, i) => `Main's introduction, line ${i + 1}.`);
+
+async function tableConflict(resolved) {
+  const t = await sentBack({ base: { "docs/models.md": table() }, commits: [{ "docs/models.md": table(branchNote) }], main: { "docs/models.md": table((i) => (i === 600 ? "main note 600" : null), intro) } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  writeFileSync(join(t.r.work, "docs/models.md"), resolved);
+  t.go("add", "docs/models.md");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  return t;
+}
+
+test("#515: a long doc table both sides edited, over 32 KiB of the branch's diff, is judged hunk by hunk and kept when every added line survives", async () => {
+  const both = (i) => (i === 600 ? "branch note 600, checked against the vendor page; main note 600" : branchNote(i));
+  const t = await tableConflict(table(both, intro));
+  const branchDiff = t.r.run(t.r.work, "diff", `${t.onto}~1`, t.from, "--", "docs/models.md");
+  assert.ok(Buffer.byteLength(branchDiff) > JUDGE_PATH_MAX_BYTES, `the branch's diff is ${Buffer.byteLength(branchDiff)} bytes`);
+  const { asked, judge } = hunkReader();
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), "");
+  // Too large for one question: each of the 120 hunks asked alone, with the lines around it, each under the bound.
+  assert.deepEqual(asked.map((a) => a.hunks), Array.from({ length: 120 }, (_, i) => [i + 1]));
+  for (const a of asked) assert.ok(Buffer.byteLength(a.input) <= JUDGE_PATH_MAX_BYTES, `a question of ${Buffer.byteLength(a.input)} bytes`);
+  assert.match(asked[59].input, /\+\| model-600 \|[^\n]*branch note 600, checked against the vendor page \|\n[\s\S]*around where hunk 60 applies:\n[\s\S]*\| model-600 \|[^\n]*branch note 600, checked against the vendor page; main note 600 \|/);
+  // The worker's join drops one of the branch's rows: Blocked, naming that hunk.
+  const dropped = await tableConflict(table((i) => (i === 900 ? null : both(i)), intro));
+  const d = hunkReader();
+  assert.match(await dropped.box.rebaseLeft({ from: dropped.from, onto: dropped.onto, judge: d.judge }), /: docs\/models\.md \([0-9a-f]{7}\): hunk 90 of 120 \(@@ -89[0-9],7 \+89[0-9],7 @@\): the decision model \(fake\/model\) judged it lost at 0\.95$/);
+});
+
+test("#515: a hunk of the branch's change over 32 KiB is not judged, naming that hunk; the path's other hunks are not asked", async () => {
+  // The branch rewrites 600 rows in a row (one hunk over 32 KiB) and row 1100 alone (a small hunk).
+  const rewrite = (i) => (i <= 600 ? `rewritten row ${i}, with a much longer note than the table had before it` : i === 1100 ? "branch note 1100" : null);
+  const t = await sentBack({ base: { "docs/models.md": table() }, commits: [{ "docs/models.md": table(rewrite) }], main: { "docs/models.md": table((i) => (i === 1100 ? "main note 1100" : null), intro) } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  writeFileSync(join(t.r.work, "docs/models.md"), table((i) => (i === 1100 ? "branch note 1100; main note 1100" : rewrite(i)), intro));
+  t.go("add", "docs/models.md");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const { asked, judge } = hunkReader();
+  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), new RegExp(`: docs/models\\.md \\([0-9a-f]{7}\\): hunk 1 of 2 \\(@@ -1,605 \\+1,605 @@\\): not judged: the hunk is over ${JUDGE_MAX_BYTES / 1024} KiB$`));
+  assert.deepEqual(asked, []);
 });
 
 test("#452: the file a hunk is judged against: an empty file is shown empty, a missing one as missing", () => {

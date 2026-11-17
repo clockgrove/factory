@@ -52,9 +52,9 @@ const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // cannot be read, so every script the commands run counts as changed.
 const PACKAGE_JSON_MAX = 1024 * 1024;
 /**
- * The most of one diff, and of the file a hunk is judged against, the rebase check's decision model is given
- * (box.rebaseLeft): a larger diff is not judged; a larger file is shown as the lines around the hunk, JUDGE_VIEW_LINES
- * either side.
+ * The most of one hunk of the branch's change, and of the file it is judged against, the rebase check's decision model is
+ * given (box.rebaseLeft): a larger hunk is not judged, and names the path with that hunk; a larger file is shown as the
+ * lines around each hunk, JUDGE_VIEW_LINES either side.
  */
 export const JUDGE_MAX_BYTES = 32 * 1024;
 export const JUDGE_VIEW_LINES = 60;
@@ -584,7 +584,8 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * replay conflicted on: as the branch left it; any other: as replayed). Exactly not kept: the same blob with another
    * mode, a binary or Git LFS file, or a path the head moved or removed where git cannot merge the branch's change into
    * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE paths at a time, at most JUDGE_MAX_PATHS paths and
-   * JUDGE_MAX_MS in all; past either, or with a diff over JUDGE_MAX_BYTES, it is not judged. The branch's change is, for
+   * JUDGE_MAX_MS in all; past either it is not judged, and a hunk over JUDGE_MAX_BYTES (or the lines around it) is not
+   * judged, naming the path with that hunk, the other hunks unasked. The branch's change is, for
    * a replay conflict, its side from their base; for a path where merging the branch's change into the head conflicts,
    * its side of that merge; for any other path, what that merge would still change there. Its hunks are judged against
    * the head's file, whole or around each hunk (kept.mjs hunkView): all in one question, then, unless kept, each alone,
@@ -675,11 +676,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     queued.slice(JUDGE_MAX_PATHS).forEach((p) => verdicts.set(p, `not judged: the decision model is asked about ${JUDGE_MAX_PATHS} paths at most`));
     const out = `not judged: the check's ${JUDGE_MAX_MS / 60_000} minutes ran out`;
     // A judged path's hunks (kept.mjs hunksOf), each with the lines around it (kept.mjs hunkView) when the head's file is
-    // over JUDGE_MAX_BYTES, else the file whole; or why the path is decided without the model.
+    // over JUDGE_MAX_BYTES, else the file whole; a hunk over JUDGE_MAX_BYTES, or whose lines around it are, carries
+    // `over` (why it is not judged); or why the path is decided without the model.
     const ready = async (p) => {
       const { now, change } = prepare.get(p);
-      const branchDiff = await diff(change.before, change.after, p);
-      if (branchDiff === null) return `not judged: a diff over ${JUDGE_MAX_BYTES / 1024} KiB`;
+      const branchDiff = await diff(change.before, change.after, p, { max: readMaxBytes });
+      if (branchDiff === null) return `not judged: the branch's diff of the file is over ${readMaxBytes} bytes`;
       const list = hunksOf(branchDiff);
       if (!list.length) {
         const [b, a, n] = [oid(change.before), oid(change.after), oid(now)];
@@ -700,7 +702,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (r.truncated) return `not judged: the file is over ${readMaxBytes} bytes`;
         file = r.stdout;
       }
-      const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h }));
+      const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h, over: Buffer.byteLength(h.text) > JUDGE_MAX_BYTES ? `not judged: the hunk is over ${JUDGE_MAX_BYTES / 1024} KiB` : "" }));
       if (Buffer.byteLength(file ?? "") <= JUDGE_MAX_BYTES) return { file, hunks };
       // Where the change's lines are in the head's file: from its base side, or (what the merge would still change) the
       // head's own lines.
@@ -711,8 +713,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         moves = hunksOf(d);
       }
       for (const h of hunks) {
+        if (h.over) continue;
         h.view = hunkView({ file, hunk: h.raw, moves, max: JUDGE_MAX_BYTES, context: JUDGE_VIEW_LINES });
-        if (!h.view) return `not judged: the lines around hunk ${h.at} of ${hunks.length} are over ${JUDGE_MAX_BYTES / 1024} KiB`;
+        if (!h.view) h.over = `not judged: the lines around it are over ${JUDGE_MAX_BYTES / 1024} KiB`;
       }
       return { file: null, hunks };
     };
@@ -730,6 +733,9 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const item = (hs) => ({ path: p, of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
       const size = hunks.reduce((n, h) => n + Buffer.byteLength(h.text) + Buffer.byteLength(h.view?.file ?? ""), Buffer.byteLength(file ?? ""));
       const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
+      // A hunk no question can hold leaves the path not kept, each such hunk named; the others are not asked.
+      const unjudged = hunks.filter((h) => h.over);
+      if (unjudged.length) return unjudged.map((h) => named(h, h.over)).join(", ");
       let all = null;
       if (size <= JUDGE_PATH_MAX_BYTES) {
         if (over) return null;

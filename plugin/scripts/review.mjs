@@ -75,6 +75,7 @@ import {
   holdScope,
   observe,
   postValidated,
+  isValidated,
   progressReporter,
   remainingMs,
   unaddressedReviewComments,
@@ -1644,7 +1645,10 @@ async function main() {
   // through the stage's own validation path (runValidation, its sandbox and env), before any answer round is spent (#516).
   const judgeAnswers = async (findings, repliesText) => {
     const head = outbox.expected() || pr.head.sha;
-    const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, timeoutMs: () => remainingMs(deadlineAt) });
+    // The commit a finding was raised on counts as the code without the fix only when it was green: Pendulum's validated
+    // marker is on it and it is no red the stage held (heldRed), which the answer pass may have fixed beside the finding.
+    const beforeGreen = async (sha) => sha !== heldRed?.sha && (await isValidated(repo, pr.number, issue, sha, token));
+    const runTest = namedTestRunner({ checkout, commands: inputs.validation, env: passEnv, head, beforeGreen, timeoutMs: () => remainingMs(deadlineAt) });
     const r = await checkAnswers({ repo, issue, prNumber: pr.number, findings, repliesText, check: findingCheck, runTest, diffOf: (from) => answerDiff(outbox.git, { base: outbox.base, from, head }), since: reviewedAt, issueBody: issueData.body || "", rules: await findingRules(head), decisions, opts: token, progress }).catch((e) => (log(`finding check: ${String(e?.message || e).slice(0, 160)}; the findings stay open`), { unjudged: [], found: [] }));
     unjudged.push(...r.unjudged);
     checkFound.push(...(r.found || []));

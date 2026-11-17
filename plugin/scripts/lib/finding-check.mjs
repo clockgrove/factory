@@ -239,18 +239,23 @@ export const TEST_MIN_MS = 60_000;
  *   command (shell.mjs simpleCommand); `args`, each shell-quoted, follow it, and at least one is no option (a test, not
  *   a flag).
  * - Each run gets the stage's time left (`timeoutMs()`) less `reserveMs`, and none starts with under `minMs` of it.
+ * - The run without the fix counts only on a `before` known green (`beforeGreen(sha)`, the caller's: Pendulum's validated
+ *   marker on it and no held red there), since a command that runs more than the test fails on a red `before` anyway.
  * Returns `{fixed: true, head, before, run}` (fails without the fix, passes with it), `{failed: true, head, run, code}`
  * (fails on the head), `{passes: true, before, run}` (passes without the fix too: no evidence), or `{unchecked: why}`
  * (the reply then goes to the decision model, checkAnswers):
- * not a validation command, no test argument, a dependency manifest or lockfile changed since `before` (dependencyFile),
+ * not a validation command, no test argument, a `before` not known green, a dependency manifest or lockfile changed
+ * since `before` (dependencyFile),
  * a checkout not at the head or not clean, a run that timed out or changed tracked files, a `before` the checkout lacks,
  * too little time. Once the checkout cannot be put back on the head, no further test runs.
  */
-export function namedTestRunner({ checkout, commands = [], env = process.env, head = null, timeoutMs = () => 10 * 60_000, reserveMs = TEST_RESERVE_MS, minMs = TEST_MIN_MS }) {
+export function namedTestRunner({ checkout, commands = [], env = process.env, head = null, beforeGreen = async () => false, timeoutMs = () => 10 * 60_000, reserveMs = TEST_RESERVE_MS, minMs = TEST_MIN_MS }) {
   const known = new Set(commands.map((c) => commandText(c).trim()).filter(Boolean));
   const gitEnv = { ...scrubbedEnv(env), GIT_NO_REPLACE_OBJECTS: "1", GIT_TERMINAL_PROMPT: "0" };
   const git = (args) => exec(...backend(gitEnv).sandbox.git(["git", "-C", checkout, ...args], gitEnv), { env: gitEnv }).catch((e) => ({ code: null, stdout: "", stderr: String(e?.message || e) }));
   let broken = null;
+  // Whether each `before` is known green, asked once per commit.
+  const green = new Map();
   // The checkout as the stage left it: HEAD at the head, and no tracked file changed.
   const atHead = async () => {
     const h = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
@@ -293,6 +298,10 @@ export function namedTestRunner({ checkout, commands = [], env = process.env, he
       const left = await back();
       return { unchecked: after.unchecked || left || "the test changed tracked files" };
     }
+    // A red without the fix counts only where `before` was known green: a command that runs more than the named test (one
+    // that ignores its arguments) fails on a red `before` for any red it had, a flake or the red the answer pass fixed too.
+    if (!green.has(before)) green.set(before, Promise.resolve(beforeGreen(before)).catch(() => false));
+    if (!(await green.get(before))) return { unchecked: `${short(before)}, where the finding was raised, is not known green, so a failure there would not be the finding's` };
     // Without the fix: the tree of `before`, but the test's own files as the head has them.
     const changed = await git(["diff", "--name-only", "-z", before, head, "--"]);
     if (changed.code !== 0) return { unchecked: `the commit the finding was raised on, ${short(before)}, is not in the checkout` };

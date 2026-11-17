@@ -710,6 +710,9 @@ const raisedOn = (before, id, path, line, body) => ({ ...root(id, path, line, bo
 const testLine = (file) => `node scripts/test.mjs '${file}'`;
 const fixedWith = (id, ...args) => ({ id, body: "Fixed; the test shows it.", fixed: true, test: { command: "node scripts/test.mjs", args } });
 
+/** `beforeGreen` for a runner: the commits known green (the stage's validated marker on them, no held red there). */
+const greenAt = (...shas) => async (sha) => shas.includes(sha);
+
 /** The checkout is back on the head with no tracked file changed. */
 const atHeadClean = (repo) => {
   assert.equal(repo.git("rev-parse", "HEAD"), repo.head);
@@ -726,7 +729,7 @@ test("#516: a named test that fails without the fix and passes with it resolves 
     // The decision model would read it as unresolved, as on assetgrove #366: the test decides, and it is not asked.
     const fake = sure("unresolved", 0.95);
     const progress = [];
-    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: fakeCheck(fake), runTest, diffOf, since: RAISED, opts: { token: "t" }, progress: async (l) => progress.push(l) });
     assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [] });
     assert.equal(fake.asked.length, 0, "no decision call");
@@ -743,7 +746,7 @@ test("#516: a named test that fails without the fix and passes with it resolves 
   // and offers `test` to the answer pass only when there are validation commands.
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
-  assert.match(src, /const runTest = namedTestRunner\(\{ checkout, commands: inputs\.validation, env: passEnv, head, timeoutMs: \(\) => remainingMs\(deadlineAt\) \}\);\n\s+const r = await checkAnswers\(\{[^\n]*check: findingCheck, runTest,/);
+  assert.match(src, /const runTest = namedTestRunner\(\{ checkout, commands: inputs\.validation, env: passEnv, head, beforeGreen, timeoutMs: \(\) => remainingMs\(deadlineAt\) \}\);\n\s+const r = await checkAnswers\(\{[^\n]*check: findingCheck, runTest,/);
   assert.equal((src.match(/namedTests: inputs\.validation\.length > 0/g) || []).length, 2);
   const comments = [{ id: 1, path: "a", line: 1, body: "b" }];
   assert.match(answerPrompt({ taskCard: "", prNumber: 12, comments, namedTests: true }), /when a test fails without the fix and passes with it, "test": \{"command"/);
@@ -758,7 +761,7 @@ test("#516: a named test that fails on the head keeps the finding open with no d
     const replies = JSON.stringify([fixedWith(200, "test/store.test.mjs")]);
     await postReplies(REPO, 12, 7, replies, [200], { token: "t" });
     const fake = sure("fixed", 0.99);
-    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
     const note = `test failed: \`${testLine("test/store.test.mjs")}\` exited 1 on ${repo.head.slice(0, 7)}`;
     assert.deepEqual(out, { resolved: [], open: [200], unjudged: [], found: [{ id: 200, kind: "test-failed", note }] });
@@ -798,7 +801,7 @@ test("#516: a named test that is no evidence (passes without the fix too, names 
       const replies = JSON.stringify([fixedWith(100, ...args)]);
       await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
       const fake = sure("unresolved", 0.9);
-      const runTest = namedTestRunner({ checkout: r.dir, commands: r.commands, env: r.env, head: r.head, ...opts });
+      const runTest = namedTestRunner({ checkout: r.dir, commands: r.commands, env: r.env, head: r.head, beforeGreen: greenAt(r.before), ...opts });
       const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
       const note = `${pre}; judged not fixed: unresolved 0.90 (fake/decider)`;
       assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note }] }, pre);
@@ -814,7 +817,7 @@ test("#516: a named test that is no evidence (passes without the fix too, names 
   await withGitHub(gh, async () => {
     const replies = JSON.stringify([fixedWith(100, "test/other.test.mjs")]);
     await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
-    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(sure("fixed", 0.92)), runTest, diffOf, opts: { token: "t" } });
     assert.deepEqual(out, { resolved: [100], open: [], unjudged: [], found: [] });
     assert.match(evidenceOf(gh).get(100), /judged this answer fixed, at confidence 0\.92 \(default floor 0\.7\)/);
@@ -836,7 +839,7 @@ test("#516: a named test the runner cannot place stays unproven and goes to the 
       const replies = JSON.stringify([{ id: 100, body: "Fixed.", fixed: true, test: named }]);
       await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
       const fake = sure("unresolved", 0.9);
-      const runTest = runner ? namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, ...runner }) : null;
+      const runTest = runner ? namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before), ...runner }) : null;
       const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
       assert.deepEqual(out.found, [{ id: 100, kind: "not-fixed", note: `${pre}; judged not fixed: unresolved 0.90 (fake/decider)` }]);
       assert.equal(fake.asked.length, 1);
@@ -883,7 +886,7 @@ test("#516: with the decision model off, a named test still decides when it prov
   await withGitHub(gh, async () => {
     const replies = JSON.stringify([fixedWith(100, "test/guard.test.mjs"), fixedWith(200, "test/store.test.mjs"), fixedWith(300, "test/other.test.mjs")]);
     await postReplies(REPO, 12, 7, replies, [100, 200, 300], { token: "t" });
-    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: off, runTest, diffOf, opts: { token: "t" } });
     assert.deepEqual(out.resolved, [100, 300]);
     assert.deepEqual(out.open, [200]);
@@ -903,7 +906,7 @@ test("#516: a finding in the review body gets the test's evidence in its resolve
     assert.deepEqual(toAnswer.map((c) => [c.id, c.raisedOn]), [["r1-1", repo.before]]);
     const replies = JSON.stringify([fixedWith("r1-1", "test/guard.test.mjs")]);
     await postReplies(REPO, 12, 7, replies, ["r1-1"], { token: "t" });
-    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head });
+    const runTest = namedTestRunner({ checkout: repo.dir, commands: repo.commands, env: repo.env, head: repo.head, beforeGreen: greenAt(repo.before) });
     const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: fakeCheck(sure("unresolved", 0.9)), runTest, diffOf, opts: { token: "t" } });
     assert.deepEqual(out.resolved, ["r1-1"]);
     const said = gh.state.prComments.find((c) => c.body.startsWith(marker(7, "resolved", "r1-1")));
@@ -938,4 +941,50 @@ test("#516: Pendulum's evidence is never a person's answer: a thread a maintaine
     gh.state.lineComments.push({ id: 999, in_reply_to_id: 200, user: { login: "kirk", type: "User" }, author_association: "MEMBER", body: "Checked: fixed." });
     assert.deepEqual((await list()).map((c) => c.id), [100]);
   });
+});
+
+test("#516: a command that ignores its arguments fails on a before that was red for another reason: unless before is known green, that is no evidence, and the decision model judges the reply", async () => {
+  // `node scripts/all.mjs` runs every test file whatever it is given. `before` was red for a reason of its own (a test
+  // the answer pass fixed beside the finding, as with a held red), so the named test "fails without the fix" there.
+  const dir = mkdtempSync(join(tmpdir(), "fc-516-red-"));
+  const git = (...a) => execFileSync("git", ["-C", dir, ...a], { encoding: "utf8" }).trim();
+  const put = (path, text) => {
+    mkdirSync(join(dir, path, ".."), { recursive: true });
+    writeFileSync(join(dir, path), text);
+  };
+  const commit = (m) => (git("add", "-A"), git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", m), git("rev-parse", "HEAD"));
+  git("init", "-q", "-b", "main");
+  put("scripts/all.mjs", 'import { readdirSync } from "node:fs";\nimport { pathToFileURL } from "node:url";\nimport { resolve } from "node:path";\nfor (const f of readdirSync("test")) await import(pathToFileURL(resolve("test", f)).href);\n');
+  put("src/guard.mjs", "export const guard = (x) => x;\n");
+  put("test/clock.test.mjs", 'throw new Error("the clock test is red on its own");\n');
+  const before = commit("before");
+  put("src/guard.mjs", 'export const guard = (x) => {\n  if (x == null) throw new Error("x");\n  return x;\n};\n');
+  put("test/clock.test.mjs", "export {};\n");
+  put("test/guard.test.mjs", 'import { guard } from "../src/guard.mjs";\nlet threw = false;\ntry {\n  guard(null);\n} catch {\n  threw = true;\n}\nif (!threw) throw new Error("null input is not refused");\n');
+  const head = commit("fix");
+  const repo = { dir, before, head, git, commands: ["node scripts/all.mjs"], env: { PATH: process.env.PATH, HOME: process.env.HOME } };
+  const reply = { id: 100, body: "Fixed.", fixed: true, test: { command: "node scripts/all.mjs", args: ["test/guard.test.mjs"] } };
+  // Known green, the probe would read the unrelated red as the fix's: that is why it asks.
+  const asked = [];
+  const probe = await namedTestRunner({ ...repo, checkout: dir, beforeGreen: async (sha) => (asked.push(sha), true) })(reply.test, { before });
+  assert.equal(probe.fixed, true);
+  assert.deepEqual(asked, [before]);
+  atHeadClean(repo);
+  const gh = github({ lineComments: [raisedOn(before, 100, "src/guard.mjs", 1, "FINDING-A")] });
+  await withGitHub(gh, async () => {
+    const replies = JSON.stringify([reply]);
+    await postReplies(REPO, 12, 7, replies, [100], { token: "t" });
+    const fake = sure("unresolved", 0.9);
+    // Not validated (or the stage's held red): no evidence.
+    const runTest = namedTestRunner({ checkout: dir, commands: repo.commands, env: repo.env, head, beforeGreen: greenAt() });
+    const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: await list(), repliesText: replies, check: fakeCheck(fake), runTest, diffOf, opts: { token: "t" } });
+    assert.deepEqual(out, { resolved: [], open: [100], unjudged: [], found: [{ id: 100, kind: "not-fixed", note: `not checkable: ${before.slice(0, 7)}, where the finding was raised, is not known green, so a failure there would not be the finding's; judged not fixed: unresolved 0.90 (fake/decider)` }] });
+    assert.equal(fake.asked.length, 1);
+    assert.equal(evidenceOf(gh).size, 0);
+    atHeadClean(repo);
+  });
+  // The review stage counts a before as green only with its validated marker and when it is no held red.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(join(import.meta.dirname, "..", "scripts", "review.mjs"), "utf8");
+  assert.match(src, /const beforeGreen = async \(sha\) => sha !== heldRed\?\.sha && \(await isValidated\(repo, pr\.number, issue, sha, token\)\);\n\s+const runTest = namedTestRunner\(\{ checkout, commands: inputs\.validation, env: passEnv, head, beforeGreen,/);
 });

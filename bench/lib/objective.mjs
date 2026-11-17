@@ -42,7 +42,7 @@ const BLOCKED_LABEL = "pendulum:blocked";
 export const STALL_MINUTES = 60;
 const QUESTION_LABEL = "pendulum:question";
 /**
- * How a workflow hand-over is scored (bench/README.md, the pendulum-scoring skill), one rule per scoring run:
+ * How a workflow hand-over is scored (bench/README.md, the pendulum-score skill's reference), one rule per scoring run:
  *   owner-step  the default, for every repository: normal work. The Objective can still walk away; applying the
  *               posted hand-over is the owner's step after the merge, shown apart (`ownerStep`) with its own minutes.
  *   input       the strict read: each merged PR carrying the hand-over line is one asked-for human action, a miss.
@@ -972,7 +972,7 @@ export function scoreObjective(collected, opts = {}) {
     stall,
     firstHumanAction: split[0] ?? null,
     humanActions: actions.length,
-    // The split (bench/README.md, the pendulum-scoring skill): actions Pendulum asked for and the rest; requests are Pendulum's.
+    // The split (bench/README.md, the pendulum-score skill's reference): actions Pendulum asked for and the rest; requests are Pendulum's.
     interventions: { asked: asked.length, unprompted: unprompted.length, requests: requests.map(({ at, kind }) => ({ at, kind })), firstUnprompted: unprompted[0] ?? null },
     blocked: blocked ? { at: blocked.at, reason: blocked.reason } : null,
     unseen,

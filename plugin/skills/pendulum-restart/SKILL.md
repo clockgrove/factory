@@ -1,6 +1,6 @@
 ---
 name: pendulum-restart
-description: "Restart one Clockgrove Pendulum Objective from its issue's current text, in any state, on the user's yes: applies the pendulum:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Clockgrove Pendulum Objective, or says one was built from the wrong text. Not for pausing one (pendulum-stop), or letting one go on after a fix or an answer (re-applying pendulum:objective)."
+description: "Restart one Clockgrove Pendulum Objective from its issue's current text, in any state, on the user's yes: applies the pendulum:restart label, which stops a running stage and discards the earlier plan, branch and pull request. Use when the user asks to restart, redo or start over a Clockgrove Pendulum Objective, or says one was built from the wrong text. Not for pausing one (pendulum-stop), or letting one go on after a fix or an answer (pendulum-status)."
 ---
 
 # /pendulum:pendulum-restart <issue>
@@ -9,7 +9,7 @@ Restarting an Objective is applying the `pendulum:restart` label to its issue, i
 
 ## Check the issue
 
-Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue is not restarted: say so and stop. Note its state from its labels (`pendulum:running`, `pendulum:in-review`, `pendulum:blocked`, `pendulum:question`, or none: Queued). When it carries no `pendulum:objective` label it is stopped: the restart waits until that label is back, so offer to apply both. A draft (`pendulum:draft`) is not restarted until it is started (the pendulum-start skill): say so.
+Run `gh issue view <issue> --repo OWNER/NAME --json number,title,state,labels`. A closed issue is not restarted: say so and stop. Note its state from its labels (`pendulum:running`, `pendulum:in-review`, `pendulum:blocked`, `pendulum:question`, or none: Queued). When it carries no `pendulum:objective` label it is stopped: the restart waits until that label is back, so offer to apply both. A draft (`pendulum:draft`) is not restarted until it is started (the pendulum-file skill): say so.
 
 When the user only wants it to go on after a fix or an answer, a restart is not needed: re-applying `pendulum:objective` continues from its branch and pull request. Say so if that is what they described.
 

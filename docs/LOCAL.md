@@ -87,9 +87,9 @@ Copilot runs locally only on Linux and WSL2 hosts where its outer sandbox starts
 pendulum serve [--once] [--all] [--interval 30]   # a loop: the dispatcher's rules, every 30 s (/pendulum:pendulum-serve)
 pendulum run <issue> [--wait]                     # one Objective, from the stage its state calls for (and, with --wait, to merged) (/pendulum:pendulum-run)
 pendulum review <pr> [--wait]                     # a review re-run
-pendulum issue <issue> [--out FILE]               # the issue for a session (/pendulum:pendulum-run --here, /pendulum:pendulum-review), below
+pendulum issue <issue> [--out FILE]               # the issue for a session (/pendulum:pendulum-run --here, /pendulum:pendulum-review-here), below
 pendulum deliver <issue> [--out DIR]              # Pendulum's half of /pendulum:pendulum-run --here: push, PR, plan, replies, exit
-pendulum post-review <pr> <findings.json>         # post a /pendulum:pendulum-review pass made in a session
+pendulum post-review <pr> <findings.json>         # post a /pendulum:pendulum-review-here pass made in a session
 pendulum handover <issue> [--push] [--app ID]     # apply Pendulum's workflow hand-over on pendulum-workflow/<issue> and show it (/pendulum:pendulum-handover), below
 pendulum wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval 30] [--timeout S]   # one JSON line per event on the queue, for an agent that supervises it (below)
 pendulum hold list | pendulum hold release <account>   # this machine's usage-limit holds, or lift one account's (A harness's usage limit, below)

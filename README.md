@@ -61,7 +61,7 @@ Pendulum never handles a payment, and no bill comes from Clockgrove. To keep tho
 ## What it can touch
 
 - **Wherever Pendulum runs (GitHub Actions, local mode, the cloud sandbox), the worker and the reviewer cannot write to GitHub.** The worker only changes files in its own checkout, and Pendulum's scripts make every push, PR, comment and merge. On GitHub Actions they act as a GitHub App that you create for this one repository; in local mode, with a token you create for this one repository (and, if you add the App's key, as the App for Blocked and Question notices).
-- **The commands a worker runs are sandboxed** there and see none of your credentials unless you choose to share one. The exceptions are the commands that run inside your own agent session, `/pendulum:pendulum-run --here` and `/pendulum:pendulum-review` ([docs/USAGE.md](docs/USAGE.md)): they are not among the places Pendulum runs and work as you, unsandboxed, with your own GitHub login.
+- **The commands a worker runs are sandboxed** there and see none of your credentials unless you choose to share one. The exceptions are the commands that run inside your own agent session, `/pendulum:pendulum-run --here` and `/pendulum:pendulum-review-here` ([docs/USAGE.md](docs/USAGE.md)): they are not among the places Pendulum runs and work as you, unsandboxed, with your own GitHub login.
 - **Only people you trust can start a run.** Pendulum acts on an issue only when its author can push to the repository or is a maintainer you name during setup, so a stranger's issue cannot instruct the worker.
 - **One repository per Objective.** An Objective that needs a change in another repository stops before any code is written, with a Question on the issue.
 
@@ -151,21 +151,20 @@ Pendulum is a plugin of [Agent Skills](https://agentskills.io): one folder per s
 | --- | --- | --- |
 | [`pendulum-setup`](plugin/skills/pendulum-setup/SKILL.md) | "Set up Clockgrove Pendulum for this repository." | Installs Pendulum one consented step at a time and opens the pull request that adds the workflow file |
 | [`pendulum-doctor`](plugin/skills/pendulum-doctor/SKILL.md) | "Is Clockgrove Pendulum set up correctly here?" | Checks the repository, its settings, the credential and the runner; changes nothing |
-| [`pendulum-file`](plugin/skills/pendulum-file/SKILL.md) | "File a Clockgrove Pendulum Objective: ..." | Writes what you describe as an Objective issue, shows it, and creates it on your yes, started or as a draft |
-| [`pendulum-draft`](plugin/skills/pendulum-draft/SKILL.md) | "Let's keep working on Clockgrove Pendulum Objective 12." | Loads the draft from GitHub to refine it with you, and saves the changes back on your yes |
-| [`pendulum-start`](plugin/skills/pendulum-start/SKILL.md) | "Start Clockgrove Pendulum Objective 12." | Starts a draft on your yes, after the trust check: takes `pendulum:draft` off and applies `pendulum:objective` |
+| [`pendulum-file`](plugin/skills/pendulum-file/SKILL.md) | "File a Clockgrove Pendulum Objective: ...", "Let's keep working on Clockgrove Pendulum Objective 12.", "Start Clockgrove Pendulum Objective 12." | Writes what you describe as an Objective issue, shows it, and creates it on your yes, started or as a draft; refines a draft and saves it back, or starts it after the trust check, on your yes |
+| [`pendulum-status`](plugin/skills/pendulum-status/SKILL.md) | "What is Clockgrove Pendulum doing here?", "Why is Clockgrove Pendulum Objective 12 Blocked?" | Shows each Objective's state; for a Blocked one or a Question, the reason and the way on (resume, answer or restart), taken on your yes |
 | [`pendulum-stop`](plugin/skills/pendulum-stop/SKILL.md) | "Stop Clockgrove Pendulum Objective 12." | Removes the Objective's label on your yes: its run in progress ends and nothing picks it up again |
 | [`pendulum-restart`](plugin/skills/pendulum-restart/SKILL.md) | "Restart Clockgrove Pendulum Objective 12." | Applies `pendulum:restart` on your yes: the Objective starts over from the issue's current text |
 | [`pendulum-run`](plugin/skills/pendulum-run/SKILL.md) | "Run Clockgrove Pendulum Objective 42 here." | Runs one Objective on this machine, in local mode or in the session itself |
-| [`pendulum-review`](plugin/skills/pendulum-review/SKILL.md) | "Review Clockgrove Pendulum PR 57." | Runs the reviewer on one Pendulum PR in your session |
+| [`pendulum-review-here`](plugin/skills/pendulum-review-here/SKILL.md) | "Review Clockgrove Pendulum PR 57." | Runs the reviewer on one Pendulum PR in your session |
 | [`pendulum-serve`](plugin/skills/pendulum-serve/SKILL.md) | "Start the Clockgrove Pendulum local loop." | Starts the loop that runs Objectives on this machine ([docs/LOCAL.md](docs/LOCAL.md)) |
-| [`pendulum-queue`](plugin/skills/pendulum-queue/SKILL.md) | "Start the Clockgrove Pendulum queue." | Starts the unattended scheduler for the repository |
+| [`pendulum-kick`](plugin/skills/pendulum-kick/SKILL.md) | "Kick the Clockgrove Pendulum dispatcher." | Runs the Action's dispatcher now, which starts the Objectives that are ready |
 | [`pendulum-handover`](plugin/skills/pendulum-handover/SKILL.md) | "Apply the Clockgrove Pendulum workflow hand-over for Objective 12." | Puts the workflow change Pendulum handed over on a new branch and shows it; pushes it and opens its PR only after you read it and say yes |
 | [`pendulum-score`](plugin/skills/pendulum-score/SKILL.md) | "Show the Clockgrove Pendulum scorecard." | Prints the scorecard: whether each Objective merged with no one stepping in, quality, operator minutes, cost |
 
-Six more are loaded for you. The worker follows [`pendulum-objective-plan`](plugin/skills/pendulum-objective-plan/SKILL.md), [`pendulum-implement-split`](plugin/skills/pendulum-implement-split/SKILL.md), [`pendulum-prove-acceptance`](plugin/skills/pendulum-prove-acceptance/SKILL.md) and [`pendulum-deliver-pr`](plugin/skills/pendulum-deliver-pr/SKILL.md), in that order; the reviewer follows [`pendulum-review-pr`](plugin/skills/pendulum-review-pr/SKILL.md); and `pendulum-score` loads [`pendulum-scoring`](plugin/skills/pendulum-scoring/SKILL.md).
+Five more are loaded for you. The worker follows [`pendulum-objective-plan`](plugin/skills/pendulum-objective-plan/SKILL.md), [`pendulum-implement-split`](plugin/skills/pendulum-implement-split/SKILL.md), [`pendulum-prove-acceptance`](plugin/skills/pendulum-prove-acceptance/SKILL.md) and [`pendulum-deliver-pr`](plugin/skills/pendulum-deliver-pr/SKILL.md), in that order; and the reviewer follows [`pendulum-review-pr`](plugin/skills/pendulum-review-pr/SKILL.md).
 
-Install Pendulum as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, queue, review, handover and score skills run, so those skills do not work installed that way.
+Install Pendulum as a plugin (Quick start, step 1). Skill-only installers such as `npx skills add` and `gh skill install` copy the skill folders but not the plugin's scripts, which the setup, doctor, run, serve, kick, review-here, handover and score skills run, so those skills do not work installed that way.
 
 ## What Pendulum adds to your repository
 

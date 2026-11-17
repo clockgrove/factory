@@ -1,13 +1,13 @@
 ---
 name: pendulum-score
-description: "Build or print the Clockgrove Pendulum scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean. Not for what the numbers mean and how each is measured (pendulum-scoring)."
+description: "Build or print the Clockgrove Pendulum scorecard: one row per Objective with the four job-one numbers (walk-away, solution quality, operator minutes, dollars per merged Objective), read from the issue, the PR, the job log and the uploaded usage artifact; its reference says how each is measured, its unit and basis per harness. Use when the user asks for the scorecard, the cost of an Objective, whether an Objective walked away clean, or how Clockgrove Pendulum runs are scored. Not for what an Objective is doing now or why it is Blocked (pendulum-status)."
 ---
 
 # /pendulum:pendulum-score
 
 The scorecard script, `<pendulum clone>/bench/score.mjs`, is not part of the plugin: it runs from a clone of Pendulum's repository (`git clone https://github.com/clockgrove/pendulum`, Node 22 or newer). Without one, write the row by hand (Write the row).
 
-Load the `pendulum-scoring` skill first; it defines the four numbers, their units and their basis. This skill is the wiring.
+Read [reference.md](reference.md) first: it defines the four numbers, their units and their basis. This page is the wiring. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `pendulum` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
 
 ## Inputs per Objective
 
@@ -20,7 +20,7 @@ For a run made with `/pendulum:pendulum-run <issue> --here` there is no job log 
 
 ## Write the row
 
-With a clone, run `node <pendulum clone>/bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` starts each clock at the first label event on or after that date, for an issue whose earlier label events belong to no run being scored). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (the pendulum-scoring skill), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: the pendulum-scoring skill), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
+With a clone, run `node <pendulum clone>/bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` starts each clock at the first label event on or after that date, for an issue whose earlier label events belong to no run being scored). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (reference.md, Walk-away), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: reference.md, Workflow hand-over), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
 
 With no issue given, score every issue that carries `pendulum:objective` and closed since the date the user names, plus the open ones that are Blocked, Question, In review or Running (`--since <date>`); the table is oldest first.
 

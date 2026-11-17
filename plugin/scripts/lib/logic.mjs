@@ -2463,13 +2463,22 @@ const REPLY_AT_START = /^<!-- pendulum:\d+:reply:\S+ -->/;
  */
 export const pendulumReply = (reply) => trustedAuthor(reply) && REPLY_AT_START.test(String(reply?.body ?? ""));
 
+// Any of Pendulum's marked comments: a marker of an Objective's at the start.
+const MARKED_AT_START = /^<!-- pendulum:\d+:/;
+/**
+ * Whether `reply` is a person's answer in a review thread: by someone who can push (trustedAuthor), and not one of
+ * Pendulum's marked comments (its answer, or the evidence the finding check posts before it resolves a thread,
+ * finding-check.mjs), which never answers a finding. A thread a person reopens after Pendulum resolved it is open again.
+ */
+export const personAnswer = (reply) => trustedAuthor(reply) && !MARKED_AT_START.test(String(reply?.body ?? ""));
+
 /**
  * Whether a person's `reply` answers the line comment that a named reviewer or code scanning (`rootLogin`) opened, the
  * same on every side (the answer pass's list, the threads Pendulum resolves, the merge pass): a reply by someone who can
  * push (trustedAuthor) that is not Pendulum's own answer (pendulumReply). Never on code scanning's comment: a person's
  * "looking into it" leaves a security finding to the answer pass, and never lets Pendulum resolve it.
  */
-export const answersComment = (rootLogin, reply) => trustedAuthor(reply) && !pendulumReply(reply) && loginKey(rootLogin) !== CODE_SCANNING;
+export const answersComment = (rootLogin, reply) => personAnswer(reply) && loginKey(rootLogin) !== CODE_SCANNING;
 
 /**
  * Candidate decisions on an Objective: comments on its issue and PR by a person (never a bot, never a Pendulum marker
@@ -3491,7 +3500,9 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  * - `daily-cap`: the next 00:00 UTC, when daily_usd held Queued work back;
  * - `retry`: a read this run could not make, read again soon; never armed by a run a retry wake started;
  * - `third-party`: a review stage's wait for a third-party reviewer reaching its bound (third-party-review.mjs);
- * - `sibling-wait`: a hand-off to review waiting for a sibling on the same files reaching its bound (overlap.mjs).
+ * - `sibling-wait`: a hand-off to review waiting for a sibling on the same files reaching its bound (overlap.mjs);
+ * - `job-grace`: the end of a Running stint's grace on the runners (relaunch.mjs JOB_GRACE_MS) with no work job alive:
+ *   a job that never started, or ended with no tick of its own, is judged then.
  * The rest are their owners' (an event's launch, a local loop's serve) and the cron's backstop; the run lists them so
  * its log shows every wait: `launch-grace`, `review-grace`, `checks-grace`, `answer-grace`, `local-pause`.
  * On the sandbox route the sweep and the image job arm wakes of their own, whose tick runs the sweep:
@@ -3499,16 +3510,16 @@ export const quotaWaiting = (record, now = Date.now()) => Number.isFinite(Date.p
  *   the rest of a run that reached a cap), on every repository.
  * Every wake's tick is a `workflow_dispatch`, so it also ticks the dispatcher.
  */
-export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait"]);
+export const DISPATCH_WAKE_KINDS = Object.freeze(["lease", "quota", "start-retry", "daily-cap", "retry", "third-party", "sibling-wait", "job-grace"]);
 /** Every kind a wake job is named for and its tick carries (parseWake reads only these). */
 export const WAKE_KINDS = Object.freeze([...DISPATCH_WAKE_KINDS, "sweep"]);
 /**
  * The kinds a repository's dispatcher arms. A public repository's Actions minutes are free, so it sleeps to every kind. A private
- * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`); a stage's lease end,
+ * one pays for each sleeper's minutes, so it sleeps only to the short ones (`quota`, `start-retry`, `retry`, `job-grace`); a stage's lease end,
  * the UTC day's turn, which can keep a sleeper up for hours, and a third-party or sibling wait's bound, whose sleeper would bill the
  * minutes the wait frees, wait for an event or GitHub's cron backstop there. An unknown visibility counts as private.
  */
-export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry"]));
+export const wakeKinds = (isPublic) => (isPublic === true ? DISPATCH_WAKE_KINDS : Object.freeze(["quota", "start-retry", "retry", "job-grace"]));
 /** The kinds the sweep and the image job arm: `sweep` only, minutes each, so on every repository. */
 export const SWEEP_WAKE_KINDS = Object.freeze(["sweep"]);
 /** A wake fires at most this long after its deadline, and covers any deadline this long after its own. */

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, personAnswer, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -864,8 +864,8 @@ export async function postReview(repo, number, { body, comments, commitId }, opt
  * reviewer opened (the root belongs to the review carrying marker(issue, "review"), by a trusted author: trustedAuthor),
  * "named" for one a reviewer Pendulum answers opened (`thirdParty`: third-party-review.mjs answeredReviewers, matched on the
  * root comment's author), else null. `answered` is a person's answer, as the answer pass's list judges it: ours once a
- * reply by someone who can push (trustedAuthor) other than Pendulum's own answer exists (logic.mjs pendulumReply) or the
- * root is Pendulum's placeholder; named once a
+ * person's answer exists (logic.mjs personAnswer: by someone who can push, and none of Pendulum's marked comments, its
+ * answer or the finding check's evidence) or the root is Pendulum's placeholder; named once a
  * person's reply answers it (logic.mjs answersComment). Pendulum's own answer is the finding check's to judge
  * (finding-check.mjs): only its yes resolves the thread.
  */
@@ -897,7 +897,7 @@ export async function reviewThreads(repo, number, issue, opts, { thirdParty = []
     const author = root?.author ? asRest(root.author).user.login : null;
     const theirs = !!root && !ours && named.has(String(author || "").toLowerCase());
     const replies = comments.slice(1).map((c) => asRest(c.author, c.authorAssociation, c.body));
-    const answered = ours ? isPlaceholder(root.body) || replies.some((r) => trustedAuthor(r) && !pendulumReply(r)) : theirs ? replies.some((r) => answersComment(author, r)) : false;
+    const answered = ours ? isPlaceholder(root.body) || replies.some(personAnswer) : theirs ? replies.some((r) => answersComment(author, r)) : false;
     return { id: t.id, rootId: root?.databaseId ?? null, resolved: !!t.isResolved, author, path: t.path ?? null, line: t.line ?? t.originalLine ?? null, by: ours ? "ours" : theirs ? "named" : null, answered };
   });
 }
@@ -1747,12 +1747,20 @@ export async function activeWorkIssues(repo, opts) {
 }
 
 /**
+ * The work job's last step, which ticks the dispatcher as the job ends (workflow-template.yml): its name as the
+ * workflow file gives it, the part every rendered workflow carries.
+ */
+const FINAL_TICK_STEP = /^Dispatch tick \(this worker finished\b/;
+
+/**
  * The Objectives with a live Pendulum job, by kind: `work (N)` and `review (pendulum/N)` jobs not yet completed, and the
  * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
- * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
+ * `finishing`: the live work jobs whose final tick step (FINAL_TICK_STEP) has started or ended, so the tick it fires may
+ * read the job before GitHub marks it completed. `strict` throws on a failed read instead of treating it as "none
+ * running" (a caller that must fail safe).
  */
 export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
-  const out = { work: new Set(), review: new Set(), wakes: [] };
+  const out = { work: new Set(), review: new Set(), wakes: [], finishing: new Set() };
   const read = (path) => rest(path, opts).catch((e) => {
     if (strict) throw e;
     return null;
@@ -1765,6 +1773,7 @@ export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
         if (j.status === "completed") continue;
         const w = /^work \((\d+)\)$/.exec(j.name || "");
         if (w) out.work.add(Number(w[1]));
+        if (w && (j.steps || []).some((st) => FINAL_TICK_STEP.test(String(st?.name ?? "")) && (st.status === "in_progress" || st.status === "completed"))) out.finishing.add(Number(w[1]));
         const r = /^review \(pendulum\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
         const wake = parseWake(j.name);

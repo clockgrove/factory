@@ -60,7 +60,7 @@ import {
 } from "./github.mjs";
 import { PENDULUM_VERSION, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -703,8 +703,8 @@ export function buildPrompt({ templatePath, issue, issueTitle, issueBody, maxUsd
 /**
  * Reviewer findings still open. Line comments: the reviewer's root comments, and with `thirdParty` (third-party-review.mjs
  * logins) a named reviewer's, shaped and sanitised for the answer pass with `from` set (thirdPartyComment). One is
- * answered when a person answered it (a reply by someone who can push but Pendulum's own answer on the reviewer's
- * comment, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
+ * answered when a person answered it (a reply by someone who can push but one of Pendulum's marked comments, its answer or
+ * the finding check's evidence, on the reviewer's comment: logic.mjs personAnswer, since the pendulum-review-pr skill forbids the reviewer replying; logic.mjs answersComment on a named
  * reviewer's, never on code scanning's), or when its thread is resolved: the finding check's yes on Pendulum's own
  * answer (logic.mjs pendulumReply; finding-check.mjs) resolves it, as a person may, so an answer the check read as not
  * resolving the finding, or did not judge, leaves the finding open. `reviewIds` (Pendulum's own reviews on the PR) decides which roots are the reviewer's by structure, which
@@ -725,7 +725,7 @@ export async function unaddressedReviewComments(repo, prNumber, reviewerLogin, {
   const ourIds = new Set(roots.map((c) => c.id));
   const replies = comments.filter((c) => c.in_reply_to_id);
   // A person's answer, as ever; Pendulum's own answer, its latest per comment (the finding check's to judge).
-  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? trustedAuthor(c) && !pendulumReply(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
+  const byPerson = new Set(replies.filter((c) => (ourIds.has(c.in_reply_to_id) ? personAnswer(c) : answersComment(byId.get(c.in_reply_to_id)?.user?.login, c))).map((c) => c.in_reply_to_id));
   const answer = new Map(replies.filter(pendulumReply).map((c) => [c.in_reply_to_id, c.body]));
   const candidates = [...roots, ...theirs].filter((c) => !byPerson.has(c.id));
   // A resolved thread is an answered finding: resolved on the finding check's yes, or by a person.
@@ -3500,7 +3500,9 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
 
 /**
  * The review stage's exit with findings still open after its answer pass (decideExit's `findingsOpen`; `open`, those
- * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on).
+ * findings as unaddressedReviewComments lists them; `unjudged`, checkAnswers' answers the gateway gave no verdict on;
+ * `found`, what checkAnswers found on each it left open: a test that failed, an answer judged not fixed, a test that
+ * could not be run, each named beside its finding in the reason).
  * - A finding with no answer, or one the finding check read as not resolving it: within the answer rounds
  *   (takeAnswerRound), the review label goes back on and the exit is delivered with `rerun`, so the next review stage's
  *   answer pass takes it, with its earlier answer; past the bound the Block stands, naming each one and how to clear it.
@@ -3513,7 +3515,7 @@ const checkCause = (error) => (error === "auth" ? "setup" : error === "rate_limi
  * A record that cannot be read or written, or a label that cannot go back on, Blocks as any exit step does (exitStep).
  * Returns `decision`, changed.
  */
-export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], decider = null, limit = null }, opts) {
+export async function openFindingsExit(decision, { repo, issue, prNumber, objectiveLabel, open = [], unjudged = [], found = [], decider = null, limit = null }, opts) {
   delete decision.findingsOpen;
   const ctx = { issue, prNumber, objectiveLabel };
   const rec = await exitStep(decision, `the answer rounds on PR #${prNumber} could not be read`, () => readAnswerRounds(repo, ctx, opts));
@@ -3523,7 +3525,9 @@ export async function openFindingsExit(decision, { repo, issue, prNumber, object
   const judged = open.filter((c) => !errors.has(String(c.id)));
   const codes = [...new Set(pending.map((c) => errors.get(String(c.id))))];
   const check = { ids: pending.map((c) => c.id), error: codes.join(",") || null, ...(limit && pending.length ? { limit: true } : {}) };
-  const where = (list) => listed(list.map((c) => placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })));
+  // What the finding check found on each one it left open (finding-check.mjs FOUND): named beside its place.
+  const notes = new Map(found.map((x) => [String(x.id), x.note]));
+  const where = (list) => listed(list.map((c) => `${placeOf({ path: c.path, line: c.line ?? c.original_line ?? null })}${notes.has(String(c.id)) ? ` (${notes.get(String(c.id))})` : ""}`));
   const tries = pending.length ? checkState({ checks: [...rec.checks, check] }).failed : 0;
   // Who was asked, as each line names it: the stage's harness or the AI Gateway's model.
   const who = decider?.name === "harness" ? `the stage's own harness (${decider.model})` : `the AI Gateway's decision model${decider?.model ? ` (${decider.model})` : ""}`;

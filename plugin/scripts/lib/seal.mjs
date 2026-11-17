@@ -5,17 +5,22 @@
 // and its saved sessions (`transcript/`) hold what the agent read and ran, so unless the adopter publishes them
 // (`publish_transcripts`) or the repository is private, they go into the artifact sealed: one gzipped tar of them,
 // encrypted with AES-256-GCM (Node's crypto) under a key derived with HKDF-SHA256 from the Pendulum App's private key
-// and the repository's name, its additional data naming the Objective, the stage and the session. Every job that
+// and the repository's name, its additional data naming the Objective and the stage and holding a hash of the usage
+// record's session (recordDigest: the session, its files and checkout, and its total, which seeds the resumed
+// session's cost), so a record altered beside an untouched sealed file refuses the resume. Every job that
 // uploads or resumes holds that key already (the work, review, launch and sweep jobs), and a cloud sandbox stage gets
 // the derived key alone (PENDULUM_SEAL_KEY), never the App's key. The usage record (`result.json`) stays readable: the
 // scorer and daily_usd read it, and it carries the stream's call and session counts (`sessions`) the scorer would
 // otherwise read from the stream. Under the sealed policy a resume takes only a sealed session that opens with this
-// repository's key: anyone able to upload an artifact of the same name could otherwise plant one.
+// repository's key: anyone able to upload an artifact of the same name could otherwise plant one. Under the published
+// policy a session is readable, so a resume takes one only from a run of this repository's Pendulum workflow
+// (artifactRunProblem).
 import { spawn } from "node:child_process";
-import { createCipheriv, createDecipheriv, createPrivateKey, hkdfSync, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createPrivateKey, hkdfSync, randomBytes } from "node:crypto";
 import { appendFileSync, closeSync, cpSync, createReadStream, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
+import canonicalize from "../../vendor/canonicalize/lib/canonicalize.js";
 import { normalizePem } from "./app-token.mjs";
 import { log } from "./inputs.mjs";
 import { SAFE_PATH, runnerCommand } from "./proc.mjs";
@@ -26,8 +31,8 @@ export const PRIVATE_ENTRIES = ["events.jsonl", "transcript"];
 /** The sealed file in the artifact (no `.json` or `.jsonl` name: the scorer reads those as usage). */
 export const SEALED_FILE = "transcript.sealed";
 // The file: MAGIC, a 12-byte random nonce, the ciphertext and the 16-byte GCM tag. The additional data is MAGIC and the
-// binding (sealBinding): a sealed file opens only for the Objective, stage and session it was made for.
-const MAGIC = Buffer.from("PNDSEAL1");
+// binding (sealBinding): a sealed file opens only for the Objective, stage and usage record it was made for.
+const MAGIC = Buffer.from("PNDSEAL2");
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const HEAD_BYTES = MAGIC.length + NONCE_BYTES;
@@ -108,21 +113,43 @@ export function usageSeal({ key, publish, payload = {}, readRepo = null }) {
   return { key, policy: () => (asked ??= repoPrivate(payload, readRepo).then((isPrivate) => transcriptPolicy({ isPrivate, publish: publishOn(publish) }))) };
 }
 
+/**
+ * Why an artifact's run (`run`, the run as GitHub's REST API reads it) is not one a published session is resumed from,
+ * or null when it is: a run in `repoFull` itself (never a fork's pull request, whose run takes the workflow file as the
+ * fork has it) of the workflow file at `workflowPath`, this repository's Pendulum workflow. Under the published policy
+ * the session is readable, so nothing else vouches for it.
+ */
+export function artifactRunProblem(run, { repoFull, workflowPath }) {
+  const why = `with publish_transcripts on, a resume takes a session only from a run of ${workflowPath} in this repository`;
+  if (!run || typeof run !== "object") return `the artifact's run could not be read: ${why}`;
+  if (String(run.repository?.full_name ?? "").toLowerCase() !== String(repoFull).toLowerCase()) return `the artifact's run is in ${run.repository?.full_name ?? "an unnamed repository"}: ${why}`;
+  if (!Number.isInteger(run.repository?.id) || run.head_repository?.id !== run.repository.id) return `the artifact's run is on a fork's pull request (${run.head_repository?.full_name ?? "an unnamed head repository"}): ${why}`;
+  if (run.path !== workflowPath) return `the artifact's run is of ${run.path ?? "an unnamed workflow"}: ${why}`;
+  return null;
+}
+
 /** A usage artifact's stage, by its name: `pendulum-usage-<n>-review` is the review stage's, any other the work stage's. */
 export const artifactStage = (name) => (/-review$/.test(String(name || "")) ? "review" : "work");
 
-/** The session a usage directory's record names (`session.id`), or null. */
-function recordedSession(dir) {
+/**
+ * The SHA-256 (hex) of what a resume takes from a usage directory's record (`result.json`): its `session` (the id,
+ * harness, files and checkout) and its `sessionTotal` (the resumed session's cost seed), in RFC 8785 canonical JSON, so
+ * the same record hashes the same however it was written out. A missing or unreadable record hashes as both null; a
+ * record no canonical form exists for (a lone surrogate) throws.
+ */
+export function recordDigest(dir) {
+  let rec = null;
   try {
-    const id = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))?.session?.id;
-    return typeof id === "string" ? id : null;
+    rec = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
   } catch {
-    return null;
+    rec = null;
   }
+  const take = rec && typeof rec === "object" && !Array.isArray(rec) ? rec : {};
+  return createHash("sha256").update(canonicalize({ session: take.session ?? null, sessionTotal: take.sessionTotal ?? null })).digest("hex");
 }
 
-/** The additional data: MAGIC and what the sealed file is for (the Objective, the stage, the record's session). */
-const sealBinding = ({ issue, stage, session }) => Buffer.concat([MAGIC, Buffer.from(JSON.stringify({ issue: Number(issue) || 0, stage: stage === "review" ? "review" : "work", session: session ?? null }))]);
+/** The additional data: MAGIC and what the sealed file is for (the Objective, the stage, the record's digest). */
+const sealBinding = ({ issue, stage, record }) => Buffer.concat([MAGIC, Buffer.from(JSON.stringify({ issue: Number(issue) || 0, stage: stage === "review" ? "review" : "work", record: record ?? null }))]);
 
 /** The private entries present in `dir`: a regular file or a directory each, never a link. */
 const presentEntries = (dir) => PRIVATE_ENTRIES.filter((n) => {
@@ -192,7 +219,8 @@ function recordSessions(dir, events) {
  * The upload directory `to` from a stage's usage directory `from`, under `policy`, made beside `to` and renamed into
  * place as the last act: every regular file and directory but the transcript and the stream (no link, socket or device),
  * the stream's counts in the usage record, then the transcript and the stream readable (`private`, `published`) or, when
- * sealed, tarred straight from `from` and sealed under `key` for `bind` ({issue, stage}; the session is the record's).
+ * sealed, tarred straight from `from` and sealed under `key` for `bind` ({issue, stage}; the record's digest is the
+ * uploaded record's, recordDigest).
  * They are never written into the upload readable under the sealed policy: with no key, or a seal that failed, they are
  * left out. A throw leaves no `to` at all. Returns {policy, sealed, dropped} (the names) and a failed seal's `error`.
  */
@@ -215,7 +243,7 @@ export async function prepareUpload({ from, to, policy, key, bind = {} }) {
     } else if (names.length) {
       if (key) {
         try {
-          await sealInto(from, names, join(part, SEALED_FILE), key, { ...bind, session: recordedSession(from) });
+          await sealInto(from, names, join(part, SEALED_FILE), key, { ...bind, record: recordDigest(part) });
           out.sealed = names;
         } catch (e) {
           for (const f of [SEALED_FILE, `${SEALED_FILE}.part`]) rmSync(join(part, f), { force: true });
@@ -258,9 +286,9 @@ export async function sealCollected(dir, seal, bind, what = "the usage") {
 
 /**
  * A downloaded artifact's session for a resume, in `dir`, under `policy`: its SEALED_FILE opened with `key` for `bind`
- * ({issue, stage}; the session is the record's), which then alone supplies the transcript and the stream (a readable
- * copy beside it is removed first). Under the sealed policy an artifact without one is refused: only a session sealed
- * with this repository's key is resumed. Returns {ok: true}, or {ok: false, reason} (nothing is put back).
+ * ({issue, stage}; the digest of the record beside it, recordDigest), which then alone supplies the transcript and the
+ * stream (a readable copy beside it is removed first). Under the sealed policy an artifact without one is refused: only
+ * a session sealed with this repository's key is resumed. Returns {ok: true}, or {ok: false, reason} (nothing is put back).
  */
 export async function openSealed(dir, key, { policy = "sealed", bind = {} } = {}) {
   const file = join(dir, SEALED_FILE);
@@ -279,18 +307,24 @@ export async function openSealed(dir, key, { policy = "sealed", bind = {} } = {}
     closeSync(fd);
   }
   if (!head.subarray(0, MAGIC.length).equals(MAGIC)) return { ok: false, reason: "the sealed session is not in a form this Pendulum opens" };
+  let record;
+  try {
+    record = recordDigest(dir);
+  } catch {
+    return { ok: false, reason: "the usage record's session has no canonical form (an altered record)" };
+  }
   // Unpacked beside the record (one filesystem), then moved into place.
   const work = mkdtempSync(join(dir, ".unseal-"));
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, head.subarray(MAGIC.length));
-    decipher.setAAD(sealBinding({ ...bind, session: recordedSession(dir) }));
+    decipher.setAAD(sealBinding({ ...bind, record }));
     decipher.setAuthTag(tag);
     const tgz = join(work, "t.tgz");
     // GCM authenticates at the end: the archive is unpacked only once the whole file checked out.
     try {
       await pipeline(createReadStream(file, { start: HEAD_BYTES, end: size - TAG_BYTES - 1 }), decipher, createWriteStream(tgz, { mode: 0o600 }));
     } catch {
-      return { ok: false, reason: "the sealed session did not open: another key (the App's private key changed, or another repository's), another Objective's or stage's file, or an altered one" };
+      return { ok: false, reason: "the sealed session did not open: another key (the App's private key changed, or another repository's), another Objective's or stage's file, an altered one, or an altered usage record (its session or sessionTotal)" };
     }
     const out = join(work, "out");
     mkdirSync(out);

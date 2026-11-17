@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@actions/expressions": "0.3.61",
+    "canonicalize": "5.1.0",
     "smol-toml": "1.9.1",
     "tldts": "7.5.4",
     "unbash": "6.0.4",

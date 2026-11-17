@@ -799,7 +799,7 @@ export async function workflowTokenChecks({ repo, token }) {
   const perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, { token }).catch((e) => ({ error: e.status || e.message }));
   const defaultRead = perms?.error ? null : perms?.default_workflow_permissions === "read";
   if (perms?.error) out.push(WARN("default workflow token", `could not read the repository's default (${perms.error}; it needs admin), so every pull_request and merge_group workflow must set read-only permissions itself`, "run doctor with a gh login that administers the repository, or check Settings > Actions > Workflow permissions: read"));
-  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
+  else if (!defaultRead) out.push(FAIL("default workflow token", `the default GITHUB_TOKEN can write (${perms?.default_workflow_permissions})`, "node scripts/setup.mjs --apply default-token (its dry run names the workflows the change reaches), or Settings > Actions > General > Workflow permissions: Read repository contents and packages permissions"));
   else out.push(PASS("default workflow token", "read-only by default"));
   let list;
   try {
@@ -2359,9 +2359,20 @@ async function main() {
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {
     for (const r of results) process.stdout.write(`${r.status.padEnd(4)} ${r.name}: ${r.detail}${r.fix && r.status !== "PASS" ? `\n     fix: ${r.fix}` : ""}\n`);
-    process.stdout.write(fails ? `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes\n` : "\nready\n");
+    process.stdout.write(doctorFooter(results, repo));
   }
   process.exit(fails ? 1 : 0);
+}
+
+/**
+ * doctor's last line: "ready", or the failures and setup's command for the GitHub fixes. setup's `all` leaves out the
+ * default token, a repository-wide setting the repository's other workflows run on, so a FAIL there names its own step.
+ */
+export function doctorFooter(results, repo) {
+  const fails = results.filter((r) => r.status === "FAIL").length;
+  if (!fails) return "\nready\n";
+  const tokenFix = results.some((r) => r.status === "FAIL" && r.name === "default workflow token") ? `; the default workflow token needs its own step, --apply default-token, whose dry run names the workflows it reaches` : "";
+  return `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes${tokenFix}\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

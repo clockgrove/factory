@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Pendulum setup: apply the GitHub fixes doctor names, on consent.
-//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
+//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|default-token|workflow|all]  (several: repeat --apply, or a,b;
+//                          all, the default, is every step but app and default-token, which run only when named)
+//                          [--preset first-run]   the workflow's settings for a first run (PRESETS); a flag beside it wins
 //                          [--secret-scope repo|org] [--replace]   where the app step saves the App's secrets (default: the
 //                                                                    repository); --replace overwrites ones already there
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/pendulum.yml]
@@ -23,6 +25,10 @@
 //               no deletion, no force push (rulesets REST API).
 //               Rulesets and repository settings need `administration`, which the App does not
 //               have: this step runs with the user's own `gh` login (an admin), never the App.
+//   default-token  the repository's default GITHUB_TOKEN set to read-only (PUT actions/permissions/workflow), which
+//               doctor requires; the dry run names the workflows that run on that default and get a read-only token,
+//               and those that set their own permissions:, which it leaves alone. No workflow file changes. gh login.
+//               Only when named: `all` leaves it out, so a repin's `setup --yes` never changes a repository-wide setting.
 //   workflow    .github/workflows/pendulum.yml from workflow-template.yml with the inputs given: the work and review
 //               jobs, or with --sandbox the launch jobs and their triggers (a comment, a finished CI run). Over an
 //               existing file it keeps every setting that file states (env values, the launch gate's maintainer ids,
@@ -36,11 +42,11 @@ import { APP_SECRETS, appName, appPreflight, createAppFromManifest, manifestPerm
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
-import { DEFAULTS, PENDULUM_VERSION, SECRET_INPUTS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
+import { DEFAULTS, PENDULUM_VERSION, SECRET_INPUTS, VARIABLE_SETTINGS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
 import { ciRunner, ciWorkflowTriggers, pinRow, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
-import { parseYaml } from "./lib/yaml.mjs";
+import { parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef } from "./lib/accounts.mjs";
 
 export const LABELS = [
@@ -165,6 +171,82 @@ export async function applyProtection(repo, { ciChecks, queue }, opts) {
   // A squash commit's message is the PR's title and body (Pendulum's own text), never the branch's commit messages.
   await rest(`repos/${repo.full}`, { ...opts, method: "PATCH", body: { squash_merge_commit_title: "PR_TITLE", squash_merge_commit_message: "PR_BODY" } });
   return `ruleset "pendulum" on ${branch}: ${why ? `no merge queue (${why}; Pendulum runs on strict required checks), ` : "merge queue, "}${ciChecks.length ? `required checks ${ciChecks.join(", ")}` : "no required checks (pass --ci-checks)"}, no deletion or force push; squash commits take the PR's title and body`;
+}
+
+/** Whether a workflow run is another than Pendulum's own or GitHub's dynamic ones (code scanning's default setup). */
+const ciRun = (r) => !/(^|\/)pendulum\.ya?ml$/.test(r?.path || "") && !/^dynamic\//.test(r?.path || "");
+
+/**
+ * Candidate required checks for a person to choose from, never applied by setup itself (a guess is no decision):
+ * `{candidates, source, left}`, read as the user's own gh login. The candidates are the jobs that passed on the latest
+ * pull request's head in its pull_request workflows, by the names GitHub gave their checks; else, with none, the jobs of
+ * the workflows on pull_request, less those whose check name GitHub gives only when they run (`left`: a matrix, a called
+ * workflow, a name from an expression). Each is `{name, workflow, marks}`, `marks` naming why it may not suit: its
+ * workflow has no merge_group trigger while a merge queue is in play (`queue`), or a paths: filter on pull_request.
+ */
+export async function ciCheckCandidates(repo, opts, { queue = false } = {}) {
+  const docs = new Map();
+  const docOf = async (path) => {
+    if (!docs.has(path)) {
+      let doc = null;
+      try {
+        doc = parseYaml(String(await rest(`repos/${repo.full}/contents/${path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" })));
+      } catch {
+        // marked below as unread
+      }
+      docs.set(path, doc);
+    }
+    return docs.get(path);
+  };
+  const marks = (doc) => {
+    if (!doc) return ["its workflow file could not be read on the default branch"];
+    const out = [];
+    if (queue && !workflowEvents(doc).includes("merge_group")) out.push("its workflow has no merge_group trigger, so it never reports in the merge queue and a queued pull request waits for it until the queue times out");
+    const on = doc.on ?? doc.true;
+    const pr = on && typeof on === "object" && !Array.isArray(on) ? on.pull_request : null;
+    if (pr && typeof pr === "object" && (pr.paths !== undefined || pr["paths-ignore"] !== undefined)) out.push("its workflow has a paths filter on pull_request, so a pull request outside those paths never gets it and cannot merge");
+    return out;
+  };
+  const out = [];
+  const left = [];
+  let source = "";
+  const runs = (await rest(`repos/${repo.full}/actions/runs?event=pull_request&per_page=30`, opts).catch(() => null))?.workflow_runs || [];
+  const latest = runs.find(ciRun);
+  if (latest) {
+    for (const r of runs.filter((x) => ciRun(x) && x.head_sha === latest.head_sha)) {
+      const jobs = (await rest(`repos/${repo.full}/actions/runs/${r.id}/jobs?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+      const passed = jobs.filter((j) => j?.name && j.conclusion === "success");
+      if (passed.length) {
+        const m = marks(await docOf(r.path));
+        for (const j of passed) out.push({ name: j.name, workflow: r.name, marks: m });
+      }
+    }
+    const pr = latest.pull_requests?.[0]?.number;
+    source = `the checks that passed on ${pr ? `pull request #${pr}` : `pull request head ${String(latest.head_sha).slice(0, 7)}`}`;
+  }
+  if (!out.length) {
+    const list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, paginate: true }).catch(() => [])) || [];
+    for (const w of list) {
+      if (!ciRun(w) || w.state !== "active") continue;
+      const doc = await docOf(w.path);
+      if (!doc || !workflowEvents(doc).includes("pull_request")) continue;
+      const m = marks(doc);
+      for (const [id, j] of Object.entries(doc.jobs && typeof doc.jobs === "object" ? doc.jobs : {})) {
+        if (j?.strategy?.matrix || typeof j?.uses === "string" || (typeof j?.name === "string" && j.name.includes("${{"))) left.push(`${id} (${w.name})`);
+        else out.push({ name: typeof j?.name === "string" ? j.name : id, workflow: w.name, marks: m });
+      }
+    }
+    source = "the job names of the workflows on pull_request (no pull request has passed them yet)";
+  }
+  const seen = new Set();
+  return { candidates: out.filter((c) => !seen.has(c.name) && seen.add(c.name)), source, left };
+}
+
+/** The protection preview's account of the candidates: each with its workflow and marks, and how to apply some. */
+export function candidatesText({ candidates, source, left }) {
+  if (!candidates.length && !left.length) return "; no candidates found: pass --ci-checks with the checks your CI reports on pull requests";
+  const each = candidates.map((c) => `${JSON.stringify(c.name)} (${c.workflow}${c.marks.length ? `; ${c.marks.join("; ")}` : ""})`);
+  return `; candidates, from ${source}, none applied until you name them: ${each.join(", ") || "none"}${left.length ? `; their check names known only once they run: ${left.join(", ")}` : ""}; to require some, run this step again with --ci-checks "<the names, comma-separated>"`;
 }
 
 /** `login#id` for the workflow's notify user, so Pendulum trusts the account and not whoever holds the login later. */
@@ -482,7 +564,9 @@ export function settingsReport(before, after, explicit = {}) {
   const changed = [];
   const added = [];
   const moved = harnessMoved(before, explicit);
-  const why = (name) => (explicit[name] !== undefined ? ` (--${name.replace(/_/g, "-")})` : moved && MODEL_INPUTS.has(name) ? " (--harness: the new harness's default)" : "");
+  const preset = PRESETS[explicit.preset] || {};
+  const flag = (name) => (Object.hasOwn(preset, name) && String(explicit[name]) === preset[name] ? `--preset ${explicit.preset}` : `--${name.replace(/_/g, "-")}`);
+  const why = (name) => (explicit[name] !== undefined ? ` (${flag(name)})` : moved && MODEL_INPUTS.has(name) ? " (--harness: the new harness's default)" : "");
   for (const [k, v] of Object.entries(after.env)) {
     const reason = why(inputOfKey(k));
     if (Object.hasOwn(before.env, k) && before.env[k] === v) kept.push(k);
@@ -631,15 +715,185 @@ async function applyApp(repo, repoData, secretScope, { replace = false } = {}) {
   return `created the App ${app.slug} (id ${app.appId}) for ${repoData.owner.login} and saved ${app.saved.join(" and ")} as ${secretScope === "org" ? "organization" : "repository"} secrets; install it on ${repoData.full_name} only (Only select repositories): ${app.installUrl}`;
 }
 
-/** setup's steps, in the order it runs them: `all` (or no `--apply`) is these. */
+/**
+ * Named sets of workflow settings `--preset <name>` gives, each as the flag it stands for: a flag given beside the preset
+ * wins over it. `first-run`: a low per-job cap, one stage at a time and auto-merge off, for a repository's first
+ * Objectives, raised later by a re-render with the flag (`--max-usd 25`) or the repository variable.
+ */
+export const PRESETS = {
+  "first-run": { max_usd: "5", max_concurrent: "1", auto_merge: "false" },
+};
+
+/** The command line's flags with `--preset`'s settings under them; throws on a preset setup does not have. */
+export function withPreset(given) {
+  const name = given.preset;
+  if (name === undefined) return given;
+  if (!Object.hasOwn(PRESETS, name)) throw new Error(`--preset ${name}: no such preset (have: ${Object.keys(PRESETS).join(", ")})`);
+  return { ...PRESETS[name], ...given };
+}
+
+/** The jobs of a parsed workflow that run on the repository's default token: every job when the file sets no top-level `permissions:`, less those that set their own; none when it sets one. */
+export function defaultTokenJobs(doc) {
+  if (doc?.permissions !== undefined && doc?.permissions !== null) return [];
+  const jobs = doc?.jobs && typeof doc.jobs === "object" && !Array.isArray(doc.jobs) ? Object.entries(doc.jobs) : [];
+  return jobs.filter(([, job]) => job?.permissions === undefined || job?.permissions === null).map(([id]) => id);
+}
+
+/** Whether a `permissions:` value asks for more than a read-only token gives: `write-all`, or any scope at `write`. */
+export const asksWrite = (perms) => (typeof perms === "string" ? perms.trim() === "write-all" : Boolean(perms) && typeof perms === "object" && Object.values(perms).some((v) => String(v ?? "").trim() === "write"));
+
+/** Whether a parsed workflow, at its top level or in any job, asks for write (asksWrite). */
+const workflowAsksWrite = (doc) => asksWrite(doc?.permissions) || Object.values(doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {}).some((j) => asksWrite(j?.permissions));
+
+/** A job's `uses:` as the repository path of a local reusable workflow (`./.github/workflows/x.yml`), else null. */
+const localCallee = (uses) => (typeof uses === "string" && uses.startsWith("./") ? uses.slice(2) : null);
+
+/**
+ * The repository's default workflow token and the workflows it reaches: `{current, canApprove, relies, own, reusable,
+ * offBranch, unread}`. `current` is its default_workflow_permissions. `relies`: each workflow on the default branch with
+ * jobs that set no permissions (defaultTokenJobs), each job `{id, calls, writes}` where `calls` names the reusable
+ * workflow it calls and `writes` is whether that callee asks for write (null when it could not be read): a callee runs
+ * with its caller's token, so on a read-only default it cannot get the write it asks for. `own`: each one that sets its
+ * own permissions everywhere and calls nothing on the default. `reusable`: each one on `workflow_call`, whose token is
+ * its caller's. `offBranch`: listed by GitHub but not on the default branch (they run from other branches, on the same
+ * default). `unread`: could not be read or parsed.
+ */
+/** The default-token step's error for GitHub's refusal of the setting itself, read or write: what to fix. */
+function tokenSettingError(e, repo, doing) {
+  if (e?.status === 403 || e?.status === 404) return new Error(`${doing}: it needs a gh login that administers ${repo.full} (classic \`repo\` scope or fine-grained Administration: write) (HTTP ${e.status})`);
+  if (e?.status === 409) return new Error(`${doing}: your organization or enterprise sets this; ask an owner (HTTP 409)`);
+  return e;
+}
+
+export async function defaultTokenState(repo, opts) {
+  let perms;
+  try {
+    perms = await rest(`repos/${repo.full}/actions/permissions/workflow`, opts);
+  } catch (e) {
+    throw tokenSettingError(e, repo, "could not read the default workflow token");
+  }
+  const list = (await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, paginate: true })) || [];
+  const docs = new Map();
+  const offBranch = [];
+  const unread = [];
+  for (const w of list) {
+    // GitHub's dynamic workflows (code scanning's default setup) are no file in the repository.
+    if (/^dynamic\//.test(w.path)) continue;
+    try {
+      docs.set(w.path, parseYaml(String(await rest(`repos/${repo.full}/contents/${w.path}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }))));
+    } catch (e) {
+      if (e.status === 404) offBranch.push(w.path);
+      else unread.push(w.path);
+    }
+  }
+  const relies = [];
+  const own = [];
+  const reusable = [];
+  for (const [path, doc] of docs) {
+    const events = workflowEvents(doc);
+    if (events.includes("workflow_call")) reusable.push(path);
+    const ids = defaultTokenJobs(doc);
+    if (!ids.length) {
+      // On its own triggers it runs with its own permissions; called, with its caller's: listed for each role it has.
+      if (events.some((e) => e !== "workflow_call")) own.push(path);
+      continue;
+    }
+    const jobs = ids.map((id) => {
+      const uses = doc.jobs[id]?.uses;
+      if (typeof uses !== "string") return { id, calls: null, writes: null };
+      const callee = localCallee(uses);
+      return { id, calls: callee || uses, writes: callee && docs.has(callee) ? workflowAsksWrite(docs.get(callee)) : null };
+    });
+    relies.push({ path, jobs });
+  }
+  return { current: perms?.default_workflow_permissions ?? null, canApprove: perms?.can_approve_pull_request_reviews, relies, own, reusable, offBranch, unread };
+}
+
+/** One job of a relying workflow, as the default-token step names it. */
+const reliantJob = (j) => (!j.calls ? j.id : `${j.id}, which calls ${j.calls}${j.writes === true ? ", which asks for write: on a read-only default it cannot get it and the run fails" : j.writes === null ? " (not read here: check it asks for no write)" : ""}`);
+
+/** The default-token step's account of the workflows: which get a read-only token after it, which it leaves alone. */
+export const defaultTokenReach = ({ relies, own, reusable = [], offBranch = [], unread }) =>
+  [
+    relies.length ? `these set no permissions: of their own and get a read-only token: ${relies.map((r) => `${r.path} (jobs ${r.jobs.map(reliantJob).join("; ")})`).join("; ")}; one that pushes, comments, labels, releases or deploys with GITHUB_TOKEN needs permissions: added first` : "no workflow on the default branch relies on the default: each sets its own permissions:",
+    own.length && `left alone (they set their own permissions:): ${own.join(", ")}`,
+    reusable.length && `reusable (on: workflow_call), which run with their caller's token: ${reusable.join(", ")}`,
+    offBranch.length && `not on the default branch: ${offBranch.join(", ")}; they run from other branches, which also get the read-only default; check them by hand`,
+    unread.length && `could not read ${unread.join(", ")}: check them by hand`,
+  ]
+    .filter(Boolean)
+    .join("; ");
+
+/** setup's default-token step: the repository's default GITHUB_TOKEN made read-only (doctor's "default workflow token" row); workflow files are never changed. */
+export async function applyDefaultToken(repo, opts) {
+  const state = await defaultTokenState(repo, opts);
+  if (state.current === "read") return "the default workflow token is already read-only; nothing changed";
+  const body = { default_workflow_permissions: "read", ...(typeof state.canApprove === "boolean" ? { can_approve_pull_request_reviews: state.canApprove } : {}) };
+  try {
+    await rest(`repos/${repo.full}/actions/permissions/workflow`, { ...opts, method: "PUT", body });
+  } catch (e) {
+    throw tokenSettingError(e, repo, "the default workflow token was not changed");
+  }
+  return `the default workflow token is read-only now (it was ${state.current}); ${defaultTokenReach(state)}`;
+}
+
+/** The default-token step's dry-run line, after reading what it would change. */
+export async function defaultTokenPlan(repo, opts) {
+  let state;
+  try {
+    state = await defaultTokenState(repo, opts);
+  } catch (e) {
+    return `set the repository's default workflow token to read-only; ${e.message}`;
+  }
+  if (state.current === "read") return "nothing: the default workflow token is already read-only";
+  return `set the repository's default workflow token (now ${state.current}) to read-only, which doctor requires; workflow files are not changed: ${defaultTokenReach(state)}; runs as your gh login (needs admin)`;
+}
+
+/**
+ * The repository variables that set a preset's settings over the workflow file (Settings in layers), so the preset's
+ * value does not apply while they stand: one warning clause, or "" with none; a variable that cannot be read is named.
+ */
+export async function presetOverrides(repo, preset, opts) {
+  const keys = Object.keys(PRESETS[preset] || {}).map((k) => `PENDULUM_${k.toUpperCase()}`).filter((k) => VARIABLE_SETTINGS.has(k));
+  const over = [];
+  const unread = [];
+  for (const k of keys) {
+    try {
+      const v = await rest(`repos/${repo.full}/actions/variables/${k}`, opts);
+      over.push(`the repository variable ${k} (${v?.value})`);
+    } catch (e) {
+      if (e.status !== 404) unread.push(`the repository's variables (${e.status ? `HTTP ${e.status}` : e.message})`);
+    }
+  }
+  // An organization's variables shared with the repository reach the Action's jobs too (INSTALL.md, Settings in layers).
+  try {
+    const org = (await rest(`repos/${repo.full}/actions/organization-variables?per_page=30`, { ...opts, paginate: true })) || [];
+    for (const v of org) if (keys.includes(v?.name) && !over.some((o) => o.includes(` ${v.name} `))) over.push(`the organization variable ${v.name} (${v.value}), shared with this repository,`);
+  } catch (e) {
+    if (e.status !== 404) unread.push(`the organization variables shared with it (${e.status ? `HTTP ${e.status}` : e.message})`);
+  }
+  const warn = over.length ? `; WARNING: ${over.join(" and ")} ${over.length > 1 ? "set these" : "sets this"} over the workflow file, so the ${preset} preset's value does not apply while ${over.length > 1 ? "they stand" : "it stands"} (gh variable delete <name>)` : "";
+  const unknown = [...new Set(unread)];
+  return `${warn}${unknown.length ? `; could not read ${unknown.join(" or ")}: check no ${keys.join(" or ")} variable sets these over the preset` : ""}`;
+}
+
+/** setup's steps that `all` (or no `--apply`) runs, in the order it runs them. */
 export const SETUP_STEPS = ["labels", "project", "protection", "workflow"];
 /** The App step: it creates a new GitHub App each time, so it runs only when asked for by name, before the others. */
 export const APP_STEP = "app";
+/**
+ * The default-token step: it changes a repository-wide setting every other workflow runs on, so a plain `setup --yes`
+ * (a repin, a migration) never runs it; it runs only when named, and last, so its refusal skips no other step.
+ */
+export const DEFAULT_TOKEN_STEP = "default-token";
+/** Every step in the order setup runs them: the named-only ones in their place. */
+const STEP_ORDER = [APP_STEP, "labels", "project", "protection", "workflow", DEFAULT_TOKEN_STEP];
+const NAMED_ONLY = [APP_STEP, DEFAULT_TOKEN_STEP];
 
 /**
  * The steps `argv` asks for: every `--apply` given (`--apply a --apply b`, `--apply=a`, `--apply a,b`), in setup's own
- * order, `all` (or no `--apply`) for every step but `app`, which runs only when named. parseArgs keeps one value per
- * flag, so the flags are read here. Throws on a step setup does not have.
+ * order, `all` (or no `--apply`) for every step but `app` and `default-token`, which run only when named. parseArgs keeps
+ * one value per flag, so the flags are read here. Throws on a step setup does not have.
  */
 export function setupSteps(argv) {
   const asked = [];
@@ -648,15 +902,15 @@ export function setupSteps(argv) {
     else if (argv[i].startsWith("--apply=")) asked.push(argv[i].slice("--apply=".length));
   }
   const names = asked.flatMap((a) => a.split(",")).map((n) => n.trim()).filter(Boolean);
-  const unknown = names.filter((n) => n !== "all" && n !== APP_STEP && !SETUP_STEPS.includes(n));
-  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${[APP_STEP, ...SETUP_STEPS].join(", ")} or all (every step but ${APP_STEP})`);
-  const app = names.includes(APP_STEP) ? [APP_STEP] : [];
-  if (!names.length || names.includes("all")) return [...app, ...SETUP_STEPS];
-  return [...app, ...SETUP_STEPS.filter((n) => names.includes(n))];
+  const unknown = names.filter((n) => n !== "all" && !STEP_ORDER.includes(n));
+  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${STEP_ORDER.join(", ")} or all (every step but ${NAMED_ONLY.join(" and ")})`);
+  const all = !names.length || names.includes("all");
+  return STEP_ORDER.filter((n) => names.includes(n) || (all && SETUP_STEPS.includes(n)));
 }
 
 async function main() {
-  const explicit = parseArgs(process.argv.slice(2));
+  // A preset's settings count as flags given: a re-render takes them over the file's, and a flag beside it wins.
+  const explicit = withPreset(parseArgs(process.argv.slice(2)));
   const checkout = resolve(explicit.checkout || process.cwd());
   const steps = setupSteps(process.argv.slice(2));
   // A re-render keeps what the existing file states (its env block, the gate's ids, the runner, the CI workflow and a
@@ -694,14 +948,35 @@ async function main() {
   // The App step reads the repository (its owner and ids) with the user's own gh login: no App exists yet.
   const repoData = steps.includes(APP_STEP) ? await getRepo(repo, { token: null }) : null;
   if (repoData && secretScope === "org" && repoData.owner?.type !== "Organization") throw new Error(`--secret-scope org: ${repo.owner} is no organization; the secrets go on the repository`);
+  // The protection step's required checks: --ci-checks (`--ci-checks=` clears them), else the workflow file's, else the
+  // branch's existing required checks, which are exact. Anything else is only a candidate the person names to apply.
+  let protectionChecks = inputs.ciChecks;
+  let checksFrom = explicit.ci_checks !== undefined ? (inputs.ciChecks.length ? "--ci-checks" : "--ci-checks= clears them") : inputs.ciChecks.length ? "the workflow file's PENDULUM_CI_CHECKS" : "";
+  let candidates = "";
+  if (steps.includes("protection") && explicit.ci_checks === undefined && !inputs.ciChecks.length) {
+    const required = await requiredChecks(repo, { token: null }).catch(() => []);
+    if (required.length) {
+      protectionChecks = required;
+      checksFrom = "the default branch's required checks, kept";
+    } else {
+      const repoInfo = await getRepo(repo, { token: null }).catch(() => null);
+      const queue = args.merge_queue !== "false" && !noQueueReason(repoInfo);
+      candidates = candidatesText(await ciCheckCandidates(repo, { token: null }, { queue }));
+    }
+  }
+  const checksText = protectionChecks.length ? `${protectionChecks.join(", ")} (from ${checksFrom})` : `none${checksFrom ? ` (${checksFrom})` : ""}${candidates}`;
+  const presetNote = args.preset && steps.includes("workflow") ? await presetOverrides(repo, args.preset, { token: null }) : "";
   const plan = {
     app: repoData && appPlan(repoData, secretScope),
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,
     project: `create the Pendulum Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns (none on a repository a user owns: no GitHub App can move its cards)`,
-    protection: `create or update the "pendulum" ruleset on the default branch (a merge queue where GitHub offers one, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and set squash commits to take the PR's title and body; runs as your gh login (needs admin), not the App`,
-    workflow: `write ${args.out || ".github/workflows/pendulum.yml"} from workflow-template.yml${args.sandbox ? ` with launch jobs for the ${args.sandbox} sandbox (secrets VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)` : ""}${before ? `, keeping the settings the existing file states unless a flag gives one` : ""}`,
+    protection: `create or update the "pendulum" ruleset on the default branch (a merge queue where GitHub offers one, required checks ${checksText}, no deletion or force push) and set squash commits to take the PR's title and body; runs as your gh login (needs admin), not the App`,
+    "default-token": null,
+    workflow: `write ${args.out || ".github/workflows/pendulum.yml"} from workflow-template.yml${args.preset ? ` with the ${args.preset} preset (${Object.entries(PRESETS[args.preset]).map(([k, v]) => `${k} ${v}`).join(", ")}; a flag beside it wins)${presetNote}` : ""}${args.sandbox ? ` with launch jobs for the ${args.sandbox} sandbox (secrets VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID)` : ""}${before ? `, keeping the settings the existing file states unless a flag gives one` : ""}`,
   };
   if (!yes) {
+    // The default token's line reads which workflows the change reaches, as the user's own gh login (it needs admin).
+    if (steps.includes(DEFAULT_TOKEN_STEP)) plan["default-token"] = await defaultTokenPlan(repo, { token: null });
     process.stdout.write(`Dry run for ${repo.full}. Pass --yes to apply:\n`);
     for (const s of steps) process.stdout.write(`  ${s}: ${plan[s] || "unknown step"}\n`);
     return;
@@ -711,8 +986,10 @@ async function main() {
     if (s === APP_STEP) note = await applyApp(repo, repoData, secretScope, { replace: args.replace === "true" });
     else if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
-    else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });
-    else if (s === "workflow") note = await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts });
+    else if (s === "protection") note = `${await applyProtection(repo, { ciChecks: protectionChecks, queue: args.merge_queue !== "false" }, { token: null })}${protectionChecks.length ? ` (checks from ${checksFrom})` : checksFrom ? ` (${checksFrom})` : candidates}`;
+    // Repository Actions settings need administration, which the App does not have: the user's own gh login.
+    else if (s === DEFAULT_TOKEN_STEP) note = await applyDefaultToken(repo, { token: null });
+    else if (s === "workflow") note = `${await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts })}${presetNote}`;
     else throw new Error(`unknown step ${s}`);
     process.stdout.write(`${s}: ${note}\n`);
   }

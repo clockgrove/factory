@@ -9,11 +9,12 @@
 // comment by someone else who can push counts as a run of unknown cost, never its dollars; anyone else's counts nothing.
 
 import { DRAFT_LABEL } from "./stop.mjs";
-import { DEFAULTS } from "./inputs.mjs";
+import { DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
+import { stageHarnessOf } from "./cost-join.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
-import { BILLING_WORDS, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, PASS_KINDS, UNKNOWN_WHY, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
 const ms = (at) => (typeof at === "number" ? at : at ? Date.parse(at) : NaN);
@@ -80,6 +81,13 @@ function stageModel(body) {
 }
 /** A GitHub login as the card may print it, else null. */
 const login = (v) => (typeof v === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(v) ? v : null);
+const HARNESSES = new Set(["claude", "codex", "copilot"]);
+/** The reason codes (usage.mjs UNKNOWN_WHY) of `runs` runs of unknown cost: those `why` names, else `unreported`; none for no run. */
+const whyOf = (runs, why) => {
+  if (!(runs > 0)) return [];
+  const codes = [...new Set((Array.isArray(why) ? why : []).filter((w) => typeof w === "string" && Object.hasOwn(UNKNOWN_WHY, w)))].sort();
+  return codes.length ? codes : ["unreported"];
+};
 
 /**
  * The checks that gated a merge at `mergedAt`, from every attempt of every check run on the gate commit (`all`): per app
@@ -122,9 +130,13 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  *  inRun      whether a comment written at a time is in the Objective's run (finishData: its clock to its merge)
  *  partOf     the split part a stage started at a time worked on (1 for an Objective that never split)
  * Returns {stages, sandbox}: each stage {stage (work or review), rebase (a send-back's rebase line), conflict (that
- * line's conflict pass), part, at, start, end, model, usd (known dollars, null for none), unknown (runs of unknown cost),
- * byBilling, byPass (usage.mjs passRead: its dollars by pass kind, {} when its record names none), rerun (usage.mjs
- * rerunRead, or null), judgeOnly}, in time order; and the cloud sandbox's own cost {usd, unknown}, or null.
+ * line's conflict pass), part, at, start, end, model, harness (its harness line's, else its record's, else null), usd
+ * (known dollars, null for none), unknown (runs of unknown cost), why (their usage.mjs UNKNOWN_WHY codes: its line's or
+ * record's, `no-record` with neither, `unattributed` for one Pendulum cannot attribute), byBilling, byPass (usage.mjs
+ * passRead: its dollars by pass kind, {} when its record names none), rerun (usage.mjs rerunRead, or null), judgeOnly,
+ * sandbox (its own vendor comment's cost {usd, unknown}, or null)}, in time order; and the cloud sandbox's own cost
+ * {usd, unknown}, every vendor comment's, or null: beyond its stages' own, the runs of unknown cost of vendor comments
+ * Pendulum cannot attribute (sandboxWhy).
  */
 export function objectiveStages({ issue: n, comments = [], records = [], mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), inRun = () => true, partOf = () => 1 }) {
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
@@ -146,6 +158,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
   const endOf = (c) => (c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? c.updated_at : c.created_at);
   const stages = [];
   const keys = new Set();
+  const byKey = new Map();
   for (const c of own) {
     const m = progress.exec(c.body || "");
     if (!m || !inRun(c.created_at)) continue;
@@ -164,7 +177,11 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (unknown && !usd) usd = null;
     const rebase = rebaseCostOf(c.body);
     const from = line ?? rec ?? {};
-    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(record?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
+    const harness = stageHarnessOf(c.body)?.harness ?? (HARNESSES.has(record?.harness) ? record.harness : null);
+    const why = line || rec ? whyOf(unknown, from.usdUnknownWhy) : ["no-record"];
+    const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(record?.model), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null };
+    stages.push(s);
+    byKey.set(`${stage}:${key}`, s);
   }
   // The sandbox stages' vendor comments, matched to their stage's progress comment by key whenever they were written.
   // One with no progress comment (a stage that never wrote one) is a stage of its own, with the model dollars the vendor
@@ -174,17 +191,23 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const key = vendorHead.exec(c.body || "")?.[1];
     const parts = key ? spendParts(c.body) : null;
     if (!parts || (!keys.has(key) && !inRun(c.created_at))) continue;
-    sandbox = { usd: (sandbox?.usd ?? 0) + (parts.vendorUsd ?? 0), unknown: (sandbox?.unknown ?? 0) + (parts.vendorUsd === null ? 1 : 0) };
-    if (keys.has(key)) continue;
+    const vendor = { usd: parts.vendorUsd ?? 0, unknown: parts.vendorUsd === null ? 1 : 0 };
+    sandbox = { usd: (sandbox?.usd ?? 0) + vendor.usd, unknown: (sandbox?.unknown ?? 0) + vendor.unknown };
+    const had = byKey.get(key);
+    if (had) {
+      had.sandbox = { usd: (had.sandbox?.usd ?? 0) + vendor.usd, unknown: (had.sandbox?.unknown ?? 0) + vendor.unknown };
+      continue;
+    }
     const usd = parts.modelUsd;
     const unknown = Math.max((parts.usdUnknown ?? 0) - (parts.vendorUsd === null ? 1 : 0), usd === null ? 1 : 0);
-    stages.push({ stage: key.startsWith("review:") ? "review" : "work", rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: null, end: null, model: null, usd: unknown && !usd ? null : usd, unknown, byBilling: billingRead(parts.usdByBilling), byPass: {}, rerun: null, judgeOnly: false });
+    const s = { stage: key.startsWith("review:") ? "review" : "work", rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: null, end: null, model: null, harness: null, usd: unknown && !usd ? null : usd, unknown, why: whyOf(unknown, (parts.usdUnknownWhy ?? []).filter((w) => w !== "sandbox")), byBilling: billingRead(parts.usdByBilling), byPass: {}, rerun: null, judgeOnly: false, sandbox: vendor };
+    stages.push(s);
   }
   for (const c of vouched) {
     const m = progress.exec(c.body || "");
     if (m && inRun(c.created_at)) {
       keys.add(`${m[1]}:${m[2]}`);
-      stages.push({ stage: m[1], rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: null, usd: null, unknown: 1, byBilling: {}, byPass: {}, rerun: null, judgeOnly: false });
+      stages.push({ stage: m[1], rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: null, harness: null, usd: null, unknown: 1, why: ["unattributed"], byBilling: {}, byPass: {}, rerun: null, judgeOnly: false, sandbox: null });
     } else if (vendorHead.test(c.body || "") && inRun(c.created_at)) sandbox = { usd: sandbox?.usd ?? 0, unknown: (sandbox?.unknown ?? 0) + 1 };
   }
   stages.sort((a, b) => ms(a.at) - ms(b.at));
@@ -401,12 +424,22 @@ const stageName = (s, planned) => ({ build: planned ? "Plan + build" : "Build", 
 /** The same, short, for a timeline row (Mermaid section names: short, so the stock themes' margin fits them). */
 const rowName = (s) => ({ build: "Build", part: `Part ${s.part}`, work: "Work", rebase: "Rebase", review: "Review" })[s.kind];
 
-/** The totals the card shows: the wall clock (ms), the known dollars, the runs of unknown cost and the dollars by billing. */
+/** The reason codes of the cloud sandbox's runs of unknown cost: `sandbox` for a stage's own, `unattributed` for the rest. */
+export function sandboxWhy(d) {
+  const own = d.stages.reduce((n, s) => n + (s.sandbox?.unknown ?? 0), 0);
+  return [...(own ? ["sandbox"] : []), ...((d.sandbox?.unknown ?? 0) > own ? ["unattributed"] : [])];
+}
+
+/**
+ * The totals the card shows: the wall clock (ms), the known dollars, the runs of unknown cost with their reason codes
+ * (`why`) and the dollars by billing.
+ */
 export function finishTotals(d) {
   const usd = d.stages.reduce((s, x) => s + (x.usd ?? 0), 0) + (d.sandbox?.usd ?? 0);
   // No stage found at all: the run's cost was not read, so it is unknown, never $0.
   const unknown = d.stages.reduce((s, x) => s + (x.unknown || 0), 0) + (d.sandbox?.unknown ?? 0) + (d.stages.length ? 0 : 1);
-  return { wall: ms(d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
+  const why = [...new Set([...d.stages.flatMap((x) => (x.unknown ? x.why ?? [] : [])), ...sandboxWhy(d), ...(d.stages.length ? [] : ["no-record"])])].sort();
+  return { wall: ms(d.merged) - ms(d.started), usd: Math.round(usd * 1e6) / 1e6, unknown, why, byBilling: addBilling(...d.stages.map((s) => s.byBilling)) };
 }
 
 /**
@@ -642,8 +675,9 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6;
  * of it but its answer and fix passes), by what caused it, with how many stages it came from; and the cloud sandbox's
  * own cost, a row of its own. A stage whose kinds do not fit inside its own figure, or whose figure is unknown, cannot
  * be split exactly: it stays whole, under its churn when the whole stage is churn, else under its own kind. Each row
- * {name, usd (null: none known), unknown, byBilling, stages?, cents}; the rows' cents add up to the total's. `shown`
- * says whether it adds to the stage table: a split Objective, any churn, or any answer or fix pass.
+ * {name, usd (null: none known), unknown, byBilling, stages?, cents}, an asked row with its `part` and `what` (its
+ * kind), a churn row with its `row` (markChurn's code); the rows' cents add up to the total's. `shown` says whether it
+ * adds to the stage table: a split Objective, any churn, or any answer or fix pass.
  */
 export function spendBreakdown(d) {
   const asked = new Map();
@@ -701,7 +735,7 @@ export function spendBreakdown(d) {
   const word = (what) => ASKED[what] ?? ASKED.work;
   const askedRows = [...asked.values()].sort((a, b) => a.part - b.part || order.indexOf(a.what) - order.indexOf(b.what)).map((r) => done({ ...r, name: parts ? `Part ${r.part}: ${word(r.what).toLowerCase()}` : word(r.what) }));
   if (d.sandbox) askedRows.push({ name: "Cloud sandbox, every stage", usd: d.sandbox.unknown && !d.sandbox.usd ? null : d.sandbox.usd, unknown: d.sandbox.unknown, byBilling: {} });
-  const churnRows = Object.keys(CHURN).filter((k) => churn.has(k)).map((k) => done({ ...churn.get(k), name: CHURN[k] }));
+  const churnRows = Object.keys(CHURN).filter((k) => churn.has(k)).map((k) => done({ ...churn.get(k), row: k, name: CHURN[k] }));
   const c = centsOf([...askedRows, ...churnRows].map((r) => r.usd));
   askedRows.forEach((r, i) => (r.cents = c[i]));
   churnRows.forEach((r, i) => (r.cents = c[askedRows.length + i]));
@@ -770,6 +804,130 @@ export function renderFinishCard(d) {
   if (where.shown) parts.push("**Where the dollars went**", ...breakdownTables(where, t));
   parts.push(`<sub>${sources(d, t)}</sub>`, `<details><summary>Full run log</summary>\n\n${runLog(d)}\n\n</details>`);
   return parts.join("\n\n");
+}
+
+// ------------------------------------------------------------------ summary marker
+
+/** The summary marker's version: a change that renames, removes or retypes a field is a new one, which no older reader takes. */
+export const SUMMARY_VERSION = 1;
+const STAGE_KINDS = new Set(["build", "part", "work", "rebase", "review"]);
+/** A card stage's kind as the report counts stages: `work` (a build, a split part, any other work stage), `rebase` or `review`. */
+export const reportStageKind = (kind) => (kind === "review" || kind === "rebase" ? kind : "work");
+
+/**
+ * The finish card's figures as one machine-readable summary (#544), from the same finishData `d` the card is rendered
+ * from (finishTotals, costRows and spendBreakdown, never worked out another way), so a cross-Objective report reads one
+ * comment per merged Objective. See docs/REPORT.md "The finish card's summary".
+ */
+export function finishSummary(d) {
+  const t = finishTotals(d);
+  const rows = costRows(d);
+  const b = spendBreakdown(d);
+  const stageCounts = { work: 0, rebase: 0, review: 0 };
+  for (const s of d.stages) stageCounts[reportStageKind(s.kind)] += 1;
+  const money = (r) => ({ usd: r.usd, cents: r.cents, unknown: r.unknown, byBilling: billingRead(r.byBilling) });
+  return {
+    v: SUMMARY_VERSION,
+    pendulum: PENDULUM_VERSION,
+    issue: d.issue,
+    started: d.started,
+    merged: d.merged,
+    wallMs: t.wall,
+    prs: d.prs.map((p) => p.number),
+    commits: d.commits,
+    additions: d.additions,
+    deletions: d.deletions,
+    files: d.files,
+    checks: d.checks,
+    reviews: d.reviews ? { count: d.reviews.count, findings: d.reviews.findings } : null,
+    stageCounts,
+    cost: { usd: t.usd, cents: Math.round(t.usd * 100), unknown: t.unknown, why: t.why, byBilling: t.byBilling },
+    sandbox: d.sandbox ? { usd: d.sandbox.usd, cents: rows.at(-1).cents, unknown: d.sandbox.unknown, why: sandboxWhy(d) } : null,
+    stages: d.stages.map((s, i) => ({ kind: s.kind, part: s.part, model: s.model, harness: s.harness, ms: s.start ? ms(s.end) - ms(s.start) : null, ...money({ ...s, cents: rows[i].cents }), why: s.why, sandbox: s.sandbox, churn: s.churn.map((c) => c.row) })),
+    asked: b.asked.map((r) => ({ part: r.part ?? null, what: r.what ?? "sandbox", ...money(r) })),
+    churn: b.churn.map((r) => ({ row: r.row, stages: r.stages, ...money(r) })),
+  };
+}
+
+/** The summary marker: one hidden line, its JSON with `<` and `>` escaped so nothing in it can close the comment. */
+export const summaryMarker = (d) => `<!-- pendulum:${d.issue}:summary ${JSON.stringify(finishSummary(d)).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+
+/** The finish card comment's whole body: its `finish` marker, its summary marker and the card. */
+export const finishCardBody = (d) => `${finishMarker(d.issue)}\n${summaryMarker(d)}\n${renderFinishCard(d)}`;
+
+const usdOf = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+const countOf = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : undefined);
+const whyRead = (v) => (Array.isArray(v) && v.every((w) => typeof w === "string" && Object.hasOwn(UNKNOWN_WHY, w)) ? [...new Set(v)].sort() : undefined);
+const timeOf = (v) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : undefined);
+const billingOf = (v) => (v && typeof v === "object" && !Array.isArray(v) && Object.entries(v).every(([k, n]) => BILLING.includes(k) && usdOf(n) !== undefined) ? { ...v } : undefined);
+/** A summary's money fields read back, or undefined for a broken one. */
+const moneyRead = (r, { nullable = false } = {}) => {
+  const usd = nullable && r?.usd === null ? null : usdOf(r?.usd);
+  const unknown = countOf(r?.unknown);
+  const cents = r?.cents === null ? null : countOf(r?.cents);
+  const byBilling = billingOf(r?.byBilling ?? {});
+  return [usd, unknown, cents, byBilling].includes(undefined) ? undefined : { usd, cents, unknown, byBilling };
+};
+
+/**
+ * The summary in a finish card comment's `body` for Objective `n` (summaryMarker), read back: only a marker of this
+ * SUMMARY_VERSION for this issue whose every figure has its type, else null (a reader then reads the stages). Whose
+ * comment it is, is the caller's to check: the marker counts only on Pendulum's own (pendulumOwn).
+ */
+export function readSummary(body, n) {
+  const m = new RegExp(`^<!-- pendulum:${n}:summary (\\{[^\\n]*\\}) -->$`, "m").exec(String(body ?? ""));
+  if (!m) return null;
+  let v;
+  try {
+    v = JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+  if (!v || v.v !== SUMMARY_VERSION || v.issue !== n || !Array.isArray(v.stages) || !Array.isArray(v.prs)) return null;
+  const cost = moneyRead(v.cost);
+  const why = whyRead(v.cost?.why);
+  const sandbox = v.sandbox === null ? null : moneyRead(v.sandbox);
+  const sandboxWhy = v.sandbox === null ? [] : whyRead(v.sandbox?.why);
+  const stages = v.stages.map((s) => {
+    const money = moneyRead(s, { nullable: true });
+    const stageWhy = whyRead(s?.why);
+    const own = s?.sandbox === null || s?.sandbox === undefined ? null : moneyRead({ ...s.sandbox, cents: null });
+    if (!money || !stageWhy || own === undefined || !STAGE_KINDS.has(s.kind) || !countOf(s.part) || (s.model !== null && modelId(s.model) === null) || (s.harness !== null && !HARNESSES.has(s.harness)) || (s.ms !== null && countOf(s.ms) === undefined)) return null;
+    return { kind: s.kind, part: s.part, model: s.model, harness: s.harness, ms: s.ms, ...money, why: stageWhy, sandbox: own ? { usd: own.usd, unknown: own.unknown } : null, churn: Array.isArray(s.churn) ? s.churn.filter((c) => Object.hasOwn(CHURN, c)) : [] };
+  });
+  const asked = (Array.isArray(v.asked) ? v.asked : []).map((r) => {
+    const money = moneyRead(r, { nullable: true });
+    return money && [...PASS_KINDS, "sandbox"].includes(r.what) ? { part: countOf(r.part) ?? null, what: r.what, ...money } : null;
+  });
+  const churn = (Array.isArray(v.churn) ? v.churn : []).map((r) => {
+    const money = moneyRead(r, { nullable: true });
+    return money && Object.hasOwn(CHURN, r.row) && countOf(r.stages) !== undefined ? { row: r.row, stages: r.stages, ...money } : null;
+  });
+  const started = timeOf(v.started);
+  const merged = timeOf(v.merged);
+  if (!cost || !why || sandbox === undefined || !sandboxWhy || [...stages, ...asked, ...churn].includes(null) || !started || !merged || !v.prs.every((p) => countOf(p))) return null;
+  const counts = v.stageCounts && typeof v.stageCounts === "object" ? v.stageCounts : {};
+  return {
+    v: v.v,
+    pendulum: typeof v.pendulum === "string" && /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/.test(v.pendulum) ? v.pendulum : null,
+    issue: n,
+    started,
+    merged,
+    wallMs: countOf(v.wallMs) ?? null,
+    prs: v.prs,
+    commits: countOf(v.commits) ?? null,
+    additions: countOf(v.additions) ?? null,
+    deletions: countOf(v.deletions) ?? null,
+    files: countOf(v.files) ?? null,
+    checks: v.checks && countOf(v.checks.passed) !== undefined && countOf(v.checks.failed) !== undefined ? { passed: v.checks.passed, failed: v.checks.failed, required: v.checks.required === true } : null,
+    reviews: v.reviews && countOf(v.reviews.count) !== undefined && countOf(v.reviews.findings) !== undefined ? { count: v.reviews.count, findings: v.reviews.findings } : null,
+    stageCounts: { work: countOf(counts.work) ?? 0, rebase: countOf(counts.rebase) ?? 0, review: countOf(counts.review) ?? 0 },
+    cost: { ...cost, why },
+    sandbox: sandbox ? { usd: sandbox.usd, cents: sandbox.cents, unknown: sandbox.unknown, why: sandboxWhy } : null,
+    stages,
+    asked,
+    churn,
+  };
 }
 
 // ------------------------------------------------------------------ PR body
@@ -890,6 +1048,6 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
       log(`  #${n}: PR #${last.pr.number}'s body was not updated (${Number.isInteger(e?.status) ? `HTTP ${e.status}` : "error"}); the card is posted without it`);
     });
   }
-  await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body: `${finishMarker(n)}\n${renderFinishCard(d)}` } });
+  await rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body: finishCardBody(d) } });
   return "posted";
 }

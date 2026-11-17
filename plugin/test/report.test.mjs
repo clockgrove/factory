@@ -428,7 +428,7 @@ test("report: the command line: a period by default, one set at a time, dates an
   assert.equal(reportCheck({ since: "2026-11-02", until: "2026-11-01" }), "--since must come before --until");
   assert.equal(reportCheck({ issue: ["3", "x"] }), '--issue takes issue numbers (12, or 12,15), not "3 x"');
   assert.equal(reportCheck({ issue: ["3"], label: "a" }), "give one of --issue, --label or --parent");
-  assert.equal(reportCheck({ by: "model" }), '--by takes account, not "model"');
+  assert.equal(reportCheck({ by: "model" }), '--by takes account or pass, not "model"');
   assert.equal(reportCheck({ since: "2026-11-01T10:00:00+02:00" }), null);
   assert.throws(() => parseArgs(["report", "--by", "model"]), /--by takes account/);
   assert.deepEqual(parseArgs(["report", "--issue", "3", "--issue", "7,8", "--json"]).flags.issue, ["3", "7,8"]);
@@ -724,4 +724,83 @@ test("report (#533): the budget goes to dollars before ledgers: Objectives with 
   const lists = calls.filter((c) => c.includes("/actions/artifacts?name=")).map((c) => new URL(`https://x${c.slice(4)}`).searchParams.get("name"));
   // #7 and #8 have a stage with no spend line (their dollars); #3 and #5 need only ledgers.
   assert.deepEqual(lists, ["pendulum-usage-7", "pendulum-usage-7-review", "pendulum-usage-8", "pendulum-usage-8-review", "pendulum-usage-3", "pendulum-usage-3-review", "pendulum-usage-5", "pendulum-usage-5-review"]);
+});
+
+/**
+ * #3's finish card as Pendulum's App posts it, built by the real card (finish-card.mjs finishData and finishCardBody)
+ * from #3's own comments and usage records in `w`; `edit` changes its body (a forger's figures).
+ */
+async function finishCard3(w, { user = BOT, association, app, edit = (b) => b } = {}) {
+  // Through the module's namespace, so the suite loads on a tree without the summary and these tests alone fail there.
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const d = card.finishData({ repo: REPO.full, issue: real.issue, timeline: real.timeline, comments: w.comments.filter((c) => c.issue_url === issueUrl(3)), pulls: [{ pr: real.pr, timeline: real.prTimeline, reviews: real.reviews, reviewComments: real.reviewComments }], checks: real.checks, records: [{ ...w.recs.work, artifact: "pendulum-usage-3" }, { ...w.recs.review, artifact: "pendulum-usage-3-review" }], mine: card.pendulumOwn(APP.id) });
+  return comment(3, edit(card.finishCardBody(d)), { user, at: "2026-11-17T02:28:00Z", ...(association ? { association } : {}), ...(app !== undefined ? { app } : {}) });
+}
+const artifactCalls = (calls) => calls.filter((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD"));
+
+test("report (#544): a merged Objective is read from its finish card's summary, one comment, with no usage artifact; its figures equal its stages'", async () => {
+  const w = world();
+  w.comments.push(await finishCard3(w));
+  // The per-stage path: --by pass reads every stage and its records.
+  const stages = await report(w, { issue: 3, by: "pass" });
+  assert.equal(artifactCalls(stages.calls).length, 4, "two lists, two downloads (of two calls each)");
+  const card = await report(w, { issue: 3 });
+  assert.deepEqual(artifactCalls(card.calls), [], "no usage artifact listed or downloaded");
+  assert.doesNotMatch(card.err, /usage artifact/, "none planned");
+  assert.equal(card.json.source.calls.made, card.json.source.calls.planned);
+  assert.equal(card.json.source.calls.planned, stages.json.source.calls.planned - 6);
+  // The same figures: its cost by kind, its runs of unknown cost, its stages by kind, its outcome and the totals.
+  const three = byIssue(card.json, 3);
+  const perStage = byIssue(stages.json, 3);
+  assert.deepEqual([three.cost, three.stages, three.outcome], [perStage.cost, perStage.stages, perStage.outcome]);
+  assert.deepEqual(usd(three), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 });
+  assert.deepEqual([card.json.totals.cost, card.json.totals.stages, card.json.unknown], [stages.json.totals.cost, stages.json.totals.stages, stages.json.unknown]);
+  for (const view of ["stage", "model"]) assert.deepEqual(card.json.breakdowns[view].map((x) => [x.key, x.stages, x.cost]), stages.json.breakdowns[view].map((x) => [x.key, x.stages, x.cost]), view);
+  // What the summary does not hold is said, never guessed: no tokens or per-pass ledger for it.
+  assert.deepEqual(card.json.source.missing.find((m) => m.code === "summary").issues, [3]);
+  assert.equal(three.passes, null);
+  assert.ok(!stages.json.source.missing.some((m) => m.code === "summary"));
+
+  // One comment: with every other comment of #3 gone, the card alone gives the same row.
+  const alone = world();
+  alone.comments = [...alone.comments.filter((c) => c.issue_url !== issueUrl(3)), await finishCard3(w)];
+  const one = await report(alone, { issue: 3 });
+  assert.equal(one.json.source.read.pendulumComments, 1);
+  assert.deepEqual([byIssue(one.json, 3).cost, byIssue(one.json, 3).stages], [three.cost, three.stages]);
+
+  // Over a period: the same totals as with no card at all, and no artifact of #3's read.
+  const period = await report(w, { since: "2026-11-17" });
+  const without = await report(world(), { since: "2026-11-17" });
+  assert.deepEqual([period.json.totals.cost, period.json.totals.stages], [without.json.totals.cost, without.json.totals.stages]);
+  assert.ok(!period.calls.some((c) => c.includes("pendulum-usage-3")), "#3 is read from its card");
+  assert.ok(period.calls.some((c) => c.includes("pendulum-usage-7")), "an Objective with no card is read by its stages");
+  // A period that starts inside the card's run cannot use it: its stages in the period are read.
+  const inside = await report(w, { since: "2026-11-17T02:26:00Z" });
+  assert.ok(inside.calls.some((c) => c.includes("pendulum-usage-3")));
+  // --by account needs each stage's own record: the stages are read.
+  const account = await report(w, { issue: 3, by: "account" });
+  assert.equal(artifactCalls(account.calls).length, 4);
+});
+
+test("report (#544): a forged summary counts nothing: only Pendulum's own card is read, anyone else's leaves the stages to be read", async () => {
+  const forge = (b) => b.replace(/"usd":0\.35637/g, '"usd":999').replace(/"api":0\.35637/g, '"api":999');
+  const plain = await report(world(), { issue: 3 });
+  for (const who of [{ user: { login: "stranger", type: "User" }, association: "NONE", app: null }, { user: { login: "github-actions[bot]", type: "Bot" }, association: "NONE", app: { id: 15368, slug: "github-actions" } }, { user: { login: "teammate", type: "User" }, association: "MEMBER", app: null }, { user: { login: "other-app[bot]", type: "Bot" }, association: "NONE", app: { id: 999, slug: "other-app" } }]) {
+    const w = world();
+    w.comments.push(await finishCard3(w, { ...who, edit: forge }));
+    const r = await report(w, { issue: 3 });
+    assert.deepEqual(byIssue(r.json, 3).cost, byIssue(plain.json, 3).cost, who.user.login);
+    assert.equal(artifactCalls(r.calls).length, 4, `${who.user.login}: the stages are read`);
+    assert.ok(!r.json.source.missing.some((m) => m.code === "summary"));
+  }
+  // Pendulum's own card, forged in place to a broken figure, is no summary either.
+  const w = world();
+  w.comments.push(await finishCard3(w, { edit: (b) => b.replace(/"usd":0\.35637/, '"usd":-1') }));
+  assert.deepEqual(byIssue((await report(w, { issue: 3 })).json, 3).cost, byIssue(plain.json, 3).cost);
+  // A forged card alone, on an issue with no stage of Pendulum's: no figure at all.
+  const bare = world();
+  const forged = await finishCard3(bare, { user: { login: "stranger", type: "User" }, association: "NONE", app: null, edit: forge });
+  bare.comments = bare.comments.filter((c) => c.issue_url !== issueUrl(3)).concat(forged);
+  const none = await report(bare, { since: "2026-11-17" });
+  assert.ok(!none.json.objectives.some((o) => o.issue === 3 && (o.cost.usd.api > 0 || o.stages.work + o.stages.review > 0)));
 });

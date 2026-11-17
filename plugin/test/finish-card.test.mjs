@@ -527,3 +527,52 @@ test("finish card: one route posts it, the local loop for pendulum:local Objecti
   assert.ok(!all.writes.some((w) => w.includes(finishMarker(3))));
   assert.deepEqual((await tickOver(fakeRepo())).finished, [3], "the Action posts it");
 });
+
+test("finish card (#544): the summary marker carries the card's own figures, from the same finishData, and reads back as written", async () => {
+  // Through the module's namespace, so the suite loads on a tree without the summary and this test alone fails there.
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const work = real.comments.find((c) => c.body.startsWith("<!-- pendulum:3:progress:work:"));
+  const key = /^<!-- pendulum:3:progress:(work:[A-Za-z0-9-]+) -->/.exec(work.body)[1];
+  // The plain run; and one with a conflict rebase (churn), a sandbox booked after the merge, a sandbox stage with no
+  // progress comment whose figures were not reported, and a review whose harness reported none.
+  const rebase = comment(911, "2026-11-17T02:26:12Z", `${work.body.replace(/progress:work:\d+/, "progress:work:911")}\n${spendLine({ usd: 0.07, usdByBilling: { api: 0.07 } })}\n<!-- pendulum:rebase-cost {"usd":0.07,"conflict":true} -->`, "2026-11-17T02:26:15Z");
+  const late = comment(901, "2026-11-17T03:00:00Z", `<!-- pendulum:3:vendor:${key} -->\nx\n${spendLine({ usd: 0.05, vendorUsd: 0.05 })}`);
+  const blind = comment(903, "2026-11-17T02:26:30Z", `<!-- pendulum:3:vendor:review:def -->\nx\n${spendLine({ usd: 0, vendorUsd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] })}`);
+  const runs = [withSelf(() => data()), withSelf(() => data({ comments: [...withSpend({ review: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["zeroed"] } }), rebase, late, blind], records: real.records.slice(0, 1) }))];
+  for (const d of runs) {
+    const body = card.finishCardBody(d);
+    const [head, line, ...rest] = body.split("\n");
+    assert.equal(head, finishMarker(3), "the card's own marker first, so one card per Objective still holds");
+    assert.match(line, /^<!-- pendulum:3:summary \{[^\n<>]*\} -->$/, "one hidden line, nothing in it that closes the comment");
+    assert.equal(rest.join("\n"), renderFinishCard(d), "the card itself is unchanged under it");
+    // It reads back exactly as written.
+    const s = card.readSummary(body, 3);
+    assert.deepEqual(s, card.finishSummary(d));
+    // Every figure is the card's own: its totals, rows and breakdown, never worked out another way.
+    const t = card.finishTotals(d);
+    assert.deepEqual([s.wallMs, s.cost.usd, s.cost.unknown, s.cost.byBilling, s.cost.why], [t.wall, t.usd, t.unknown, t.byBilling, t.why]);
+    assert.equal(s.cost.cents, Math.round(t.usd * 100));
+    assert.ok(body.includes(`**${card.costText(s.cost.usd, s.cost.unknown)}`), "the total the card's table shows");
+    assert.deepEqual(s.stages.map((x) => [x.kind, x.part, x.model, x.usd, x.unknown, x.byBilling, x.sandbox, x.churn]), d.stages.map((x) => [x.kind, x.part, x.model, x.usd, x.unknown, x.byBilling, x.sandbox, x.churn.map((c) => c.row)]));
+    const b = card.spendBreakdown(d);
+    assert.deepEqual(s.churn.map((r) => [r.row, r.stages, r.usd, r.cents, r.unknown]), b.churn.map((r) => [r.row, r.stages, r.usd, r.cents, r.unknown]));
+    assert.deepEqual(s.asked.map((r) => [r.usd, r.cents, r.unknown]), b.asked.map((r) => [r.usd, r.cents, r.unknown]));
+    assert.deepEqual([s.checks, s.commits, s.additions, s.deletions, s.files, s.prs, s.reviews], [d.checks, d.commits, d.additions, d.deletions, d.files, d.prs.map((p) => p.number), { count: d.reviews.count, findings: d.reviews.findings }]);
+    assert.equal(s.v, card.SUMMARY_VERSION);
+    assert.match(s.pendulum, /^\d+\.\d+\.\d+/);
+  }
+  // The richer run's figures: a churn row for the rebase, and every run of unknown cost with its reason.
+  const rich = card.readSummary(card.finishCardBody(runs[1]), 3);
+  assert.deepEqual(rich.churn.map((r) => [r.row, r.stages, r.usd]), [["rebase-conflict", 1, 0.07]]);
+  assert.deepEqual(rich.stages.map((x) => [x.kind, x.why]), [["build", []], ["rebase", []], ["review", ["zeroed"]], ["review", ["unreported"]]]);
+  assert.deepEqual([rich.sandbox.usd, rich.sandbox.unknown, rich.sandbox.why], [0.05, 1, ["sandbox"]]);
+  assert.deepEqual(rich.cost.why, ["sandbox", "unreported", "zeroed"]);
+  assert.deepEqual(rich.stageCounts, { work: 1, rebase: 1, review: 2 });
+
+  // Another issue's, another version's or a broken one reads as none.
+  const body = card.finishCardBody(runs[0]);
+  assert.equal(card.readSummary(body, 4), null);
+  assert.equal(card.readSummary(body.replace('"v":1', '"v":2'), 3), null);
+  assert.equal(card.readSummary(body.replace(/"usd":0\.35637/, '"usd":"0.35637"'), 3), null);
+  assert.equal(card.readSummary(body.replace(/"kind":"build"/, '"kind":"magic"'), 3), null);
+});

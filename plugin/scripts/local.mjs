@@ -250,7 +250,7 @@ export const COMMANDS = {
   },
   report: {
     args: [],
-    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
+    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account|pass" }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
     check: reportCheck,
     about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), every figure precomputed: --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },
@@ -4370,7 +4370,7 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
   const repoFull = cloneRepo(checkout ?? here, flags.repo);
   // Pendulum's App: --app, else the repository variable PENDULUM_APP_ID (readReport), else local mode's notice App.
   const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
-  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
+  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
   const report = buildReport(read, { by: flags.by ? [flags.by] : [], now: new Date(now).toISOString() });
   out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
   if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);

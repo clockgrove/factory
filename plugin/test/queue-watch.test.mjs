@@ -956,7 +956,7 @@ test("queue red: a job cancelled before its limit (by hand) is no flake and not 
     assert.equal(await merge({}), "queue-red");
     const step = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
     assert.equal(step.state, "blocked");
-    assert.equal(step.cause, "work");
+    assert.equal(step.cause, "pendulum", "a cause Pendulum cannot place");
     assert.equal(step.red, undefined, "no fix pass");
     assert.equal(step.reason, `the merge queue's run on its commit 8888888: the ${leg} job was cancelled after 3 min, before its 20-minute limit: not a flake and not known to be the PR's change; re-apply the label`);
     assert.deepEqual(records(fake).map((r) => [r.state, r.kind]), [["blocked", "cancelled"]]);

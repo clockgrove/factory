@@ -971,7 +971,7 @@ async function withHead({ runs, rerunRuns = runs, jobs = {}, logs = {}, workflow
       return json({}, rerun);
     }
     if (/\/actions\/runs\/\d+$/.test(p)) return json({ status: runStatus(), path: ".github/workflows/ci.yml" });
-    if (/\/contents\/\.github\/workflows\/ci\.yml$/.test(p)) return (seen.contents += 1), new Response(workflow, { status: 200 });
+    if (/\/contents\/\.github\/workflows\/ci\.yml$/.test(p)) return (seen.contents += 1), workflow === null ? json({ message: "Not Found" }, 404) : new Response(workflow, { status: 200 });
     if (/\/pulls\/\d+\/files$/.test(p)) return json(prFiles.map((filename) => ({ filename })));
     // `base`: the default branch and its newest commits, newest first (their runs are in `heads`).
     if (base && p === "/repos/acme/app") return json({ default_branch: base.branch });
@@ -2266,12 +2266,12 @@ test("#519 triage: a leg fail-fast cancelled after a sibling leg's flake is left
   await withHead({ runs: [], jobs, logs: { 811: flakeLog, 812: cancelledLog }, workflow: FAIL_FAST_YML }, async (seen) => {
     const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
     // Not a cancel a fix pass cannot answer: the validation loop goes on to triage.
-    assert.deepEqual((await redCancels(repo165, runs, { token: "t", sha: "d".repeat(40), cache: t.cache })).hand, []);
+    assert.deepEqual((await redCancels(repo165, runs, { token: "t", sha: "d".repeat(40), cache: t.cache })).unplaced, []);
     const r = await t.red({ sha: "d".repeat(40), failedRuns: runs, required: [UBUNTU, WIN] });
     assert.equal(r.rerun, true, lines.join("\n"));
     assert.equal(seen.reruns, 1, "the run's rerun-failed-jobs reruns the cancelled leg too");
     assert.equal(decider.asked.length, 1, "only the leg that failed is asked");
-    assert.match(lines.at(-1), /test \(windows-2025, 1\/1\): cancelled by fail-fast after test \(ubuntu-26\.04, 1\/1\) failed, not asked: that leg decides/);
+    assert.match(lines.at(-1), /test \(windows-2025, 1\/1\): cancelled by fail-fast after test \(ubuntu-26\.04, 1\/1\) failed, not asked: that job decides/);
     assert.match(lines.at(-1), /test \(ubuntu-26\.04, 1\/1\): flaky_or_infra 0\.95 \[.*→ failed jobs rerun$/);
   });
   // With the change's verdict on the failed leg, the red goes to the fix pass, and the cancelled leg says why it stopped.
@@ -2282,14 +2282,57 @@ test("#519 triage: a leg fail-fast cancelled after a sibling leg's flake is left
     assert.equal((await t.red({ sha: "d".repeat(40), failedRuns: failFast.runs, required: [UBUNTU, WIN] })).rerun, false);
     assert.equal(seen.reruns, 0);
   });
-  // fail-fast: false, or the cancel before the failure: no sibling, so the Windows leg is a cancel of its own.
-  for (const [workflow, at] of [[FAIL_FAST_YML.replace("    strategy:\n", "    strategy:\n      fail-fast: false\n"), "2026-11-16T20:55:04Z"], [FAIL_FAST_YML, "2026-11-16T20:54:59Z"]]) {
-    const own = failFastRed(815, 816);
-    own.jobs[816].completed_at = at;
-    own.runs[1].completed_at = at;
-    await withHead({ runs: [], jobs: own.jobs, logs: { 815: flakeLog, 816: cancelledLog }, workflow }, async () => {
-      const { hand } = await redCancels(repo165, own.runs, { token: "t", sha: "d".repeat(40) });
-      assert.deepEqual(hand.map((c) => c.text), [`the ${WIN} job was cancelled after 3 min, before its 20-minute limit`]);
+  // fail-fast: false: still cancelled after the ubuntu leg failed in the same run, so placed with it, the reason unread.
+  const off = failFastRed(815, 816);
+  await withHead({ runs: [], jobs: off.jobs, logs: { 815: flakeLog, 816: cancelledLog }, workflow: FAIL_FAST_YML.replace("    strategy:\n", "    strategy:\n      fail-fast: false\n") }, async () => {
+    const c = await redCancels(repo165, off.runs, { token: "t", sha: "d".repeat(40) });
+    assert.deepEqual([c.unplaced, c.onlyCancels, c.all.map((x) => x.text)], [[], false, [`the ${WIN} job was cancelled after ${UBUNTU} failed; why it was cancelled could not be read`]]);
+  });
+  // Cancelled before the ubuntu leg failed: a cancel Pendulum cannot place, but the red has a real failure too, so it
+  // does not Block on the cancel: triage and the fix pass answer it.
+  const early = failFastRed(817, 818);
+  early.jobs[818].completed_at = "2026-11-16T20:54:59Z";
+  early.runs[1].completed_at = "2026-11-16T20:54:59Z";
+  await withHead({ runs: [], jobs: early.jobs, logs: { 817: flakeLog, 818: cancelledLog }, workflow: FAIL_FAST_YML }, async () => {
+    const c = await redCancels(repo165, early.runs, { token: "t", sha: "d".repeat(40) });
+    assert.deepEqual([c.unplaced.map((x) => x.text), c.onlyCancels], [[`the ${WIN} job was cancelled after 3 min, before its 20-minute limit`], false]);
+  });
+});
+
+test("#519 a matrix inside a reusable workflow, or a run whose workflow file cannot be read: a leg cancelled after another leg failed is placed with that leg, never a Block; the flake is rerun", async () => {
+  const { redCancels } = await import("../scripts/lib/triage.mjs");
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const CALLER = "on: pull_request\njobs:\n  ci:\n    uses: ./.github/workflows/test.yml\n";
+  for (const [workflow, prefix, u, w] of [[CALLER, "ci / ", 831, 832], [null, "", 833, 834]]) {
+    const red = failFastRed(u, w);
+    const up = `${prefix}${UBUNTU}`;
+    const win = `${prefix}${WIN}`;
+    red.jobs[u].name = up;
+    red.jobs[w].name = win;
+    red.runs[0].name = up;
+    red.runs[1].name = win;
+    const decider = asking({ verdict: "flaky_or_infra", confidence: 0.95 });
+    const lines = [];
+    const checkRunsOf = (rs) => rs.map((r) => ({ ...r, status: "completed", check_suite: { id: r.suite } }));
+    // After the rerun both legs pass, as new check runs.
+    const passed = checkRunsOf(red.runs.map((r) => ({ ...r, id: r.id + 100, conclusion: "success", started_at: "2026-11-16T21:10:00Z", completed_at: "2026-11-16T21:15:00Z" })));
+    await withHead({ runs: checkRunsOf(red.runs), rerunRuns: passed, jobs: red.jobs, logs: { [u]: flakeLog, [w]: cancelledLog }, workflow }, async (seen) => {
+      const said = `the ${win} job was cancelled after ${up} failed; why it was cancelled could not be read`;
+      const c = await redCancels(repo165, red.runs, { token: "t", sha: "d".repeat(40) });
+      assert.deepEqual([c.unplaced, c.all.map((x) => x.text)], [[], [said]], workflow === null ? "unreadable file" : "reusable caller");
+      const t = openTriage({ inputs: {}, env: {}, repo: repo165, issue: 1, prNumber: 2, token: "t", decider, progress: async (l) => lines.push(l) });
+      // Through the real validation loop: no Block on the cancel; triage reruns the flake (and the cancelled leg with it).
+      const result = await validationLoop({
+        checkout: "/nonexistent", commands: [], harness: "codex", maxUsd: 0, session: {}, taskCard: "", env: process.env, deadlineAt: Date.now() + 30_000,
+        checks: { repo: repo165, issue: 1, prNumber: 2, names: [up, win], token: "t", pollMs: 1 },
+        outbox: { push: async () => true, expected: () => "d".repeat(40) },
+        triage: t,
+      });
+      assert.equal(result.stuck, undefined, JSON.stringify(result.stuck));
+      assert.equal(result.green, true, "green after the rerun");
+      assert.equal(seen.reruns, 1);
+      assert.equal(decider.asked.length, 1, "only the leg that failed is asked");
+      assert.ok(lines.some((l) => l.includes(`${win}: cancelled after ${up} failed; why it was cancelled could not be read, not asked: that job decides`) && /→ failed jobs rerun$/.test(l)), lines.join("\n"));
     });
   }
 });
@@ -2313,7 +2356,7 @@ test("#519 validation loop: a required job cancelled before its limit (by hand) 
     assert.equal(seen.reruns, 0);
     assert.equal(decider.asked.length, 0);
     const exit = decideExit({ harness: { ok: true }, pr: { exists: true, draft: false, body: "" }, commits: 1, validation: { passes: result.passes, green: false, stuck: result.stuck.reason, stuckCause: result.stuck.cause } });
-    assert.deepEqual(exit, { exit: "blocked", reason, cause: "work" });
+    assert.deepEqual(exit, { exit: "blocked", reason, cause: "pendulum" });
   });
 });
 

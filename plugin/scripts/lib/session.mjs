@@ -87,7 +87,7 @@ import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
-import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, handCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
@@ -1426,15 +1426,16 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       });
       if (stuck.length) return { green: false, notStarted: notStartedReason(stuck), command };
     }
-    // A job cancelled neither at its time limit nor by fail-fast after a sibling leg failed (a person's or the API's
-    // cancel, or one whose limit could not be read: triage.mjs redCancels) is no flake and not known to be the PR's
-    // change: no triage, no rerun and no fix pass; the stage Blocks saying so.
+    // A red that is only cancels, one of them not stopped at its time limit and cancelled before any other job of its
+    // run failed (a person's or the API's cancel, or one whose limit could not be read: triage.mjs redCancels `unplaced`),
+    // is no flake and not known to be the PR's change: no triage, no rerun and no fix pass; the stage Blocks saying so, as
+    // Pendulum's, since it cannot place the cause. A red with any other failure goes to triage and the fix pass.
     if (!r.green && !r.timedOut && r.failedRuns?.some((f) => CANCELLED.includes(f.conclusion))) {
-      const { hand } = await redCancels(checks.repo, r.failedRuns, { token: checks.token, actionsToken: checks.actionsToken || checks.token, sha, cache: cancelReads }).catch((e) => {
+      const { unplaced, onlyCancels } = await redCancels(checks.repo, r.failedRuns, { token: checks.token, actionsToken: checks.actionsToken || checks.token, sha, required: checks.names, cache: cancelReads }).catch((e) => {
         log(`cancelled-job check failed: ${String(e?.message || e).slice(0, 160)}; triage and the fix pass as before`);
-        return { hand: [] };
+        return { unplaced: [], onlyCancels: false };
       });
-      if (hand.length) return { green: false, stuck: { kind: "cancelled", reason: handCancelReason(hand), cause: "work" }, command, sha };
+      if (onlyCancels && unplaced.length) return { green: false, stuck: { kind: "cancelled", reason: unplacedCancelReason(unplaced), cause: "pendulum" }, command, sha };
     }
     // A red every failing job of which reads as a flake gets its failed jobs rerun once on this head (triage.mjs), and
     // the wait starts again; no fix pass is spent and no pass is counted. Any other red goes on to the fix pass.
@@ -3116,12 +3117,13 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken, cache: triage?.cache ?? new Map() }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
   if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
-  // Cancelled jobs (triage.mjs redCancels), read through triage's own reads: one cancelled neither at its time limit nor
-  // by fail-fast (a person's or the API's cancel) is no flake and not known to be the PR's change, so the stage Blocks
-  // (`cancelled`); one stopped at its limit gets the queue's fix pass, worded as that, never as the PR's own change.
+  // Cancelled jobs (triage.mjs redCancels), read through triage's own reads: a red that is only cancels, one of them one
+  // Pendulum cannot place (`unplaced`: a person's or the API's cancel), is no flake and not known to be the PR's change,
+  // so the stage Blocks (`cancelled`); one stopped at its limit gets the queue's fix pass, worded as that, never as the
+  // PR's own change.
   const cancelReads = triage?.cache ?? new Map();
-  const cancels = await redCancels(repo, failedRuns, { token, actionsToken, sha, cache: cancelReads }).catch(() => ({ all: [], hand: [] }));
-  if (cancels.hand.length) return { kind: "cancelled", sha, reason: handCancelReason(cancels.hand) };
+  const cancels = await redCancels(repo, failedRuns, { token, actionsToken, sha, required: names, cache: cancelReads }).catch(() => ({ all: [], unplaced: [], onlyCancels: false }));
+  if (cancels.onlyCancels && cancels.unplaced.length) return { kind: "cancelled", sha, reason: unplacedCancelReason(cancels.unplaced) };
   const past = cancels.all.filter((c) => c.atLimit);
   // Triage first: its verdicts on this commit say whether the decision model may judge the red the default branch's.
   const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
@@ -3191,7 +3193,7 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   // the stage Blocks saying so.
   if (q.kind === "cancelled") {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: q.kind }, { token });
-    return { state: "blocked", cause: "work", line: `merge queue run red${where}: ${q.reason}`, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)}: ${q.reason}` };
+    return { state: "blocked", cause: "pendulum", line: `merge queue run red${where}: ${q.reason}`, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)}: ${q.reason}` };
   }
   if (q.kind !== "own") {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "requeued", kind: q.kind }, { token });

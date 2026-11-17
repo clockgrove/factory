@@ -970,8 +970,12 @@ const cachedWorkflow = (repo, runId, { token, actionsToken, sha, cache }) => onc
  * the check run's own conclusion is one of CANCELLED: its job, then its workflow file at its run's head (runWorkflow),
  * and, for a matrix leg, the jobs of the other failing check runs of its check suite (`runs`, the red's) to tell a
  * fail-fast stop (failFastSibling). Each read goes through `cache` (the caller's, kept for the red), so a cancel read by
- * triage is not read again for its fix pass or its Block. Null otherwise, or when its job cannot be read. A fail-fast
- * stop is {name, failFast: <the failing leg>, atLimit: false, said, text}; anything else is jobCancel's.
+ * triage is not read again for its fix pass or its Block. Null otherwise, or when its job cannot be read. Read in order:
+ * a fail-fast stop the file confirms is {name, after: <the failing leg>, failFast: true, atLimit: false, said, text};
+ * a job stopped at its own time limit is jobCancel's; one cancelled at or after another job of its workflow run (`run_id`)
+ * concluded `failure` or stopped at its limit, which the file cannot place (a reusable workflow's caller, a file that
+ * cannot be read, a job it does not name), is {name, after: <that job>, atLimit: false, said, text} too, saying why it
+ * was cancelled could not be read; anything else is jobCancel's.
  */
 export async function checkCancel(repo, r, { token, actionsToken = token, sha = "", runs = [], cache = new Map() }) {
   if (!CANCELLED.includes(r?.conclusion)) return null;
@@ -983,26 +987,36 @@ export async function checkCancel(repo, r, { token, actionsToken = token, sha = 
   const others = [];
   for (const o of runs) if (o.id !== r.id && suite(o) !== null && suite(o) === suite(r) && ["failure", ...CANCELLED].includes(o.conclusion)) others.push({ name: o.name, job: await cachedJob(repo, o.id, reads) });
   const leg = failFastSibling(workflow, { name: r.name, job }, others);
-  if (leg) return { name: r.name, failFast: leg, limit: null, ranMs: null, atLimit: false, said: `cancelled by fail-fast after ${leg} failed`, text: `the ${r.name} job was cancelled by fail-fast after ${leg} failed` };
-  return jobCancel(job, workflow, r.name);
+  if (leg) return { name: r.name, after: leg, failFast: true, limit: null, ranMs: null, atLimit: false, said: `cancelled by fail-fast after ${leg} failed`, text: `the ${r.name} job was cancelled by fail-fast after ${leg} failed` };
+  const own = jobCancel(job, workflow, r.name);
+  if (own.atLimit) return own;
+  // Another job of the same workflow run that failed first: this red is that job's to answer, whatever stopped this one.
+  const at = Date.parse(job.completed_at);
+  const first = others.find(({ job: j }) => j && j.run_id === job.run_id && (j.conclusion === "failure" || jobCancel(j, workflow)?.atLimit) && Date.parse(j.completed_at) <= at);
+  if (first) return { ...own, after: first.name, said: `cancelled after ${first.name} failed; why it was cancelled could not be read`, text: `the ${r.name} job was cancelled after ${first.name} failed; why it was cancelled could not be read` };
+  return own;
 }
 
 /**
- * The cancelled jobs among a red's failing check runs (checkCancel, through `cache`), in order. `hand` are those a fix
- * pass cannot answer: neither stopped at their time limit nor by fail-fast (a person's or the API's cancel, or one whose
- * limit could not be read).
+ * The cancelled jobs among a red's failing check runs (checkCancel, through `cache`), in order. `unplaced` are those
+ * Pendulum cannot place: not stopped at their time limit, and cancelled before any other job of their workflow run failed
+ * (a person's or the API's cancel, or one whose limit could not be read). `onlyCancels`: every failing job is a cancel,
+ * leaving out a required roll-up of the others (isAggregate, on `required`); only then may a red Block on its cancels,
+ * since any other failure is triage's and the fix pass's to answer.
  */
-export async function redCancels(repo, failedRuns, { token, actionsToken = token, sha = "", cache = new Map() }) {
+export async function redCancels(repo, failedRuns, { token, actionsToken = token, sha = "", required = [], cache = new Map() }) {
   const all = [];
+  const ids = new Set();
   for (const r of failedRuns || []) {
     const c = await checkCancel(repo, r, { token, actionsToken, sha, runs: failedRuns, cache }).catch(() => null);
-    if (c) all.push(c);
+    if (c) (all.push(c), ids.add(r.id));
   }
-  return { all, hand: all.filter((c) => !c.atLimit && !c.failFast) };
+  const onlyCancels = all.length > 0 && (failedRuns || []).filter((r) => !isAggregate(r, failedRuns, required)).every((r) => ids.has(r.id));
+  return { all, unplaced: all.filter((c) => !c.atLimit && !c.after), onlyCancels };
 }
 
-/** What a Block says of cancels a fix pass cannot answer (redCancels `hand`). */
-export const handCancelReason = (hand) => `${hand.map((c) => c.text).join("; ")}: not a flake and not known to be the PR's change; re-apply the label`;
+/** What a Block says of cancels Pendulum cannot place (redCancels `unplaced`). */
+export const unplacedCancelReason = (unplaced) => `${unplaced.map((c) => c.text).join("; ")}: not a flake and not known to be the PR's change; re-apply the label`;
 
 /** Triggers that never start a workflow on a PR's head commit: they run on the queue's, the default branch's or a tag's. */
 const NOT_ON_HEAD = ["merge_group", "schedule", "workflow_call", "workflow_run", "release"];
@@ -1229,7 +1243,7 @@ export function triageLine({ sha, model, jobs, outcome, floor = confidenceFloor(
     const again = j.repeat ? `, ${typeof j.repeat === "string" ? j.repeat : "seen before"}` : "";
     const sig = j.sig.id ? `${j.sig.id}${again}${j.sig.line ? ` \`${j.sig.line.replace(/`/g, "'")}\`` : ""}` : `no failure line found${again}`;
     if (j.notAsked) return `${j.name}: not read nor asked, ${j.notAsked} already sends the red to the fix pass`;
-    if (j.failFast) return `${j.name}: cancelled by fail-fast after ${j.failFast} failed, not asked: that leg decides`;
+    if (j.after) return `${j.name}: ${j.cancel?.said ?? `cancelled after ${j.after} failed`}, not asked: that job decides`;
     if (j.cancel) return `${j.name}: ${j.cancel.said}, never a flake: no model asked, no rerun`;
     if (j.infra) return `${j.name}: failed in its ${j.infra} step (${j.step}), no model asked [${sig}]`;
     return `${j.name}: ${j.verdict ?? `no verdict (${j.error || "?"})`}${typeof j.confidence === "number" ? ` ${j.confidence.toFixed(2)}` : ""}${j.as ? ` (asked as ${j.as}: the same failure)` : ""} [${sig}]`;
@@ -1440,8 +1454,9 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     }
     asked.set(sha, jobs);
     const floor = floorNow();
-    // A leg fail-fast stopped is its failing sibling's consequence: that leg's verdict decides, and its rerun reruns both.
-    const counted = jobs.filter((j) => !j.failFast);
+    // A job cancelled after another job of its run failed (fail-fast, or a cancel the file cannot place: checkCancel `after`)
+    // is that job's consequence: its verdict decides, and its rerun reruns both.
+    const counted = jobs.filter((j) => !j.after);
     if (!rerunWanted(counted, floor.min)) {
       await record(triageLine({ sha, model, jobs, outcome: "fix pass", floor }), {});
       return no;
@@ -1490,8 +1505,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       // by a person or the API) has no verdict, so the red goes to the fix pass and is never rerun.
       const cancel = await cancelOf(sha, r, job, runs);
       if (cancel) {
-        jobs.push({ id: r.id, name: r.name, sig: { id: null, line: "", lines: [], context: [] }, repeat: "", step: "", verdict: null, confidence: null, cancel, ...(cancel.failFast ? { failFast: cancel.failFast } : { error: cancel.said }) });
-        if (!cancel.failFast) decided = `${r.name}'s cancellation`;
+        jobs.push({ id: r.id, name: r.name, sig: { id: null, line: "", lines: [], context: [] }, repeat: "", step: "", verdict: null, confidence: null, cancel, ...(cancel.after ? { after: cancel.after } : { error: cancel.said }) });
+        if (!cancel.after) decided = `${r.name}'s cancellation`;
         continue;
       }
       const { text, sig } = await readJob(r);
@@ -1538,8 +1553,8 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
     }
     asked.set(sha, jobs);
     const floor = floorNow();
-    const flaky = rerunWanted(jobs.filter((j) => !j.failFast), floor.min);
-    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : jobs.some((j) => j.cancel && !j.failFast) ? "a cancelled job is no flake: fix pass" : "the change's: fix pass", floor }), {});
+    const flaky = rerunWanted(jobs.filter((j) => !j.after), floor.min);
+    await record(triageLine({ sha, model, jobs, outcome: flaky ? "a flake: no fix pass" : jobs.some((j) => j.cancel && !j.after) ? "a cancelled job is no flake: fix pass" : "the change's: fix pass", floor }), {});
     return { flaky, jobs, off: false };
   };
   // Whether a failing job's failure names what the PR changes: a changed path (changedPathIn), or a changed file or added
@@ -1560,7 +1575,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
   // the change's at the floor, and no failure names a file or test the PR changes (namesChange). {ok, why}.
   const modelBase = async ({ sha, failedRuns = [] }) => {
     const floor = floorNow();
-    const read = (asked.get(sha) || []).filter((j) => !j.failFast);
+    const read = (asked.get(sha) || []).filter((j) => !j.after);
     if (!read.length || read.some((j) => !j.verdict)) return { ok: false, why: `triage gave ${read.length ? "not every failing job" : "no failing job"} on ${String(sha).slice(0, 7)} a verdict` };
     const caused = read.filter((j) => j.verdict === "change_caused" && typeof j.confidence === "number" && j.confidence >= floor.min);
     if (caused.length) return { ok: false, why: `triage read ${caused.map((j) => `${j.name} ${j.confidence.toFixed(2)}`).join(", ")} as caused by the change (${floor.text})` };
@@ -1593,7 +1608,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       if (!job) return { rerun: false, skipped: `${r.name} is not an Actions job, so it cannot be rerun` };
       // A cancelled job is never rerun as a flake (checkCancel); one fail-fast stopped goes with the leg that failed.
       const cancel = await cancelOf(sha, r, job, failedRuns);
-      if (cancel?.failFast) continue;
+      if (cancel?.after) continue;
       if (cancel) return { rerun: false, skipped: `${cancel.text}, which is no flake` };
       runIds.add(job.run_id);
       const { text, sig } = await readJob(r);
@@ -1626,7 +1641,7 @@ export function openTriage({ inputs, env = process.env, home = homedir(), repo, 
       const job = await actionsJobOf(r);
       if (!job) return false;
       // A leg fail-fast stopped goes with the leg that failed (checkCancel).
-      if ((await cancelOf(sha, r, job, failedRuns))?.failFast) continue;
+      if ((await cancelOf(sha, r, job, failedRuns))?.after) continue;
       const { text, sig } = await readJob(r);
       if (!(await githubSide(sha, job, text, sig, names))) return false;
       read += 1;

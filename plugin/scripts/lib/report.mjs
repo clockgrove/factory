@@ -4,10 +4,10 @@
 // (the pendulum-report skill). Three parts:
 //   readReport    the reads, within a call budget: the issue comments (the progress, harness, spend, ledger, vendor,
 //                 decision-spend and finish markers; one paged repository-wide read, or each named issue's own), the
-//                 Objectives' issues and PRs, and the usage artifacts of the stages whose dollars (no spend line) or
-//                 per-pass ledger (no ledger line beside the spend line) only their usage record holds, cached on disk
-//                 by artifact id; a merged Objective with Pendulum's own finish card is read from its summary alone (summaryFor,
-//                 #544);
+//                 Objectives' issues and PRs, and the usage artifacts of the stages whose dollars (no spend line),
+//                 per-pass ledger (no ledger line beside the spend line) or model (none on the harness or ledger line)
+//                 only their usage record holds, cached on disk by artifact id; a merged Objective with Pendulum's own
+//                 finish card is read from its summary alone (summaryFor, #544);
 //   buildReport   the figures (pure), through the scorer's own cost join (cost-join.mjs: withLines, costOf);
 //   renderReport  the Markdown.
 // Dollars are vendor-reported, or API-reported tokens at the published rate, or unknown (usage.mjs UNKNOWN_WHY): never
@@ -24,7 +24,7 @@ import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, s
 import { collaboratorPermission, downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
 import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
-import { finishMarker, labelTime, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
+import { finishMarker, labelTime, modellessStages, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, codexRow, longShare, sumLong } from "./usage.mjs";
 import { EXPERIMENT_NAME, EXPERIMENT_PREFIX, isExperimentLabel } from "./choice.mjs";
 import { labelsVouched } from "./objective-trust.mjs";
@@ -488,9 +488,13 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     // Dollars before ledgers: the Objectives with a stage that has no spend line are read first, so a budget that runs
     // out costs per-pass detail before it costs a dollar figure.
     const unlinedIn = (n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && !spendParts(c.body));
-    const wanted = [...issues.keys()].filter(needs).sort((a, b) => Number(unlinedIn(b)) - Number(unlinedIn(a)) || a - b);
+    // A stage whose harness line and ledger line name no model (Copilot at its default model) has it only in its usage
+    // record, read for it as the finish card reads it (finish-card.mjs modellessStages), unless local mode's own record of
+    // it on this machine names it.
+    const modelless = (n) => !summaries.has(n) && modellessStages(comments.filter((c) => markerIssue(c) === n && inWindow(c.created_at, scope)), n, mine).some((s) => !modelKey(localOf(n).get(s.key)?.model));
+    const wanted = [...issues.keys()].filter((n) => needs(n) || modelless(n)).sort((a, b) => Number(unlinedIn(b)) - Number(unlinedIn(a)) || a - b);
     source.artifactsWanted = new Set(wanted);
-    if (wanted.length) budget.plan(wanted.length * 2, `the usage artifact lists of ${wanted.length} Objective(s) with a stage whose dollars or per-pass ledger only its usage record holds`);
+    if (wanted.length) budget.plan(wanted.length * 2, `the usage artifact lists of ${wanted.length} Objective(s) with a stage whose dollars, per-pass ledger or model only its usage record holds`);
     for (const n of wanted) {
       const found = [];
       for (const name of [`pendulum-usage-${n}`, `pendulum-usage-${n}-review`]) {
@@ -740,7 +744,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
   const findingStages = [];
   const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
-  const missing = { noRecord: new Set(), stopped: new Set(), unattributed: new Set(), noLedger: new Set(), noVersion: new Set(), unreadIssue: new Set() };
+  const missing = { noRecord: new Set(), stopped: new Set(), unattributed: new Set(), noLedger: new Set(), noVersion: new Set(), noModel: new Set(), modelStopped: new Set(), unreadIssue: new Set() };
   // The merged Objectives read from their finish card's summary (readReport, summaryFor), unless `by` or `rates` needs
   // their stages.
   const summaries = rates || by.some((b) => STAGE_DETAIL.includes(b)) ? new Map() : read.summaries ?? new Map();
@@ -903,6 +907,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
           stagesSeen += 1;
           row.stages[kind] += 1;
           if (!s.version && !s.unattributed) missing.noVersion.add(n);
+          if (!modelKey(s.model) && !s.unattributed) missing.noModel.add(n);
         }
         if (c.unknownRuns) unknownItems.push({ issue: n, stage: kind, runs: c.unknownRuns, why: c.unknownWhy });
         // A review stage's dollars and model, by its run key, for the findings it raised (#546), as the stage path keeps them.
@@ -940,10 +945,11 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       // counted twice.
       const tokens = recordOf?.tokens && typeof recordOf.tokens === "object" ? recordOf.tokens : onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : part.tokens;
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
-      // A lined stage's model: its own harness line's, else its ledger line's, usage record's or local record's (Copilot's
-      // default model is known only from the run's record), else the one its line carries from an earlier stage. A
-      // record's, its own.
-      const model = rec.source === "decisions" ? "decisions" : rec.source === "spend" ? (modelKey(line?.model) ?? modelKey(onComment?.model) ?? modelKey(recordOf?.model) ?? modelKey(localRec?.model) ?? modelKey(rec.model)) : (modelKey(rec.model) ?? modelKey(line?.model));
+      // A stage's model from its own records alone, as the finish card names it (finish-card.mjs objectiveStages): its
+      // harness line's, else its ledger line's, else its usage record's (Copilot's default model is known only from the
+      // run's record) or local mode's own record of it; never another stage's. Null when none names one (`no-model`).
+      const model = rec.source === "decisions" ? "decisions" : (modelKey(line?.model) ?? modelKey(onComment?.model) ?? modelKey((rec.source === "spend" ? recordOf : rec)?.model) ?? modelKey(localRec?.model));
+      if (model === null && !rec.unattributed && !rec.notStage) missing[notReached && source.artifactsWanted?.has(n) ? "modelStopped" : "noModel"].add(n);
       // The Pendulum release from the first record that names one, or the ledger line's (a harness line names none).
       const version = [rec.ran?.pendulum, onComment?.version, recordOf?.ran?.pendulum, localRec?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;
@@ -962,11 +968,12 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       views.harness.add(harness, c, tokens, count);
       views.model.add(model, c, tokens, count);
       // The token mix `--rates` weighs: a stage's whole tokens from its record when one is at hand (with its long-context
-      // share and its sub-agent threads), else as the model breakdown counts them.
+      // share and its sub-agent threads), else as the model breakdown counts them. The Objective's sub-agent model (its
+      // harness line's or record's `ran`) is the worker's: only a work stage's unsplit tokens are marked as holding it.
       if (rates && rec.source !== "decisions" && !rec.notStage && !rec.unattributed) {
         const src = rec.source === "spend" ? recordOf ?? (localRec?.tokens ? localRec : null) : rec;
         const whole = src?.tokens && typeof src.tokens === "object" ? src.tokens : tokens;
-        const sub = modelKey(line?.ran?.subagent) ?? modelKey(src?.ran?.subagent);
+        const sub = stageKind === "review" ? null : (modelKey(line?.ran?.subagent) ?? modelKey(src?.ran?.subagent));
         mixes.stage(model, whole, harness === "codex" && whole === src?.tokens ? { subs: src.subAgents ?? [] } : { unsplit: sub && sub !== model ? sub : null });
       }
       views.version.add(rec.source === "decisions" ? "decisions" : version, c, tokens, count);
@@ -1241,6 +1248,8 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages with no per-pass ledger in their progress comment or usage record (an older stage, or a local stage whose ledger did not fit its comment and that has no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
   if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
+  add("no-model", missing.noModel, "stages whose harness line, ledger line and usage record name no model, or that have no usage record: under no model in the model breakdown");
+  add("model-stopped", missing.modelStopped, "stages whose model only their usage record names, which the call budget stopped the report before reading: under no model in the model breakdown");
   add("no-version", missing.noVersion, "stages whose record names no Pendulum version (an older record, or a spend line)");
   add("issue-unread", missing.unreadIssue, "issues with Pendulum's markers that could not be read: no outcome or title for them");
   // The vetted labels (#545): an issue whose label's last applier cannot push is not counted, nor one whose was not read.
@@ -1292,10 +1301,10 @@ const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
 /**
  * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the model breakdown counts
  * them, but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
- * stage's, as the cost join prices them (usage.mjs priceStage). A stage whose tokens no record splits (a progress comment's
- * ledger line, or another harness's record) while its harness line names a sub-agent model other than its own marks both
- * models `sub-agents`. `long` is the part of the mix from requests over `above` input tokens (usage.mjs longShare), summed
- * over the stages, null once any stage's is not known. A stage with no input or output tokens marks its model `no-tokens`.
+ * stage's, as the cost join prices them (usage.mjs priceStage). A work stage whose tokens no record splits (a progress
+ * comment's ledger line, or another harness's record) while its harness line names a sub-agent model other than its own
+ * marks both models `sub-agents`; a review stage, on its reviewer model, marks none. `long` is the part of the mix from
+ * requests over `above` input tokens (usage.mjs longShare), summed over the stages, null once any stage's is not known. A stage with no input or output tokens marks its model `no-tokens`.
  */
 function mixBook(above) {
   const rows = new Map();

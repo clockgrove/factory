@@ -250,6 +250,20 @@ test("report --rates: a stage whose sub-agents ran on another model and that no 
   assert.deepEqual(r.rates.items.map((x) => [x.model, x.candidate]), [["gpt-6-sol", "gpt-6-luna"]]);
 });
 
+test("report --rates: a review stage known only from its ledger line marks no model `sub-agents`: the Objective's sub-agent model is its work stages'", async () => {
+  const w = world();
+  // #46: a local Codex review stage, comment-only, on gpt-6.1-sol, its harness line naming the Objective's gpt-6-luna
+  // sub-agent model, known only from its ledger line.
+  w.issues.push({ number: 46, title: "Objective 46", state: "closed", labels: [{ name: "pendulum:objective" }], created_at: "2026-11-17T01:00:00Z", user: ME });
+  const ledger = [{ label: "review", model: "gpt-6.1-sol", effort: "medium", started: "2026-11-17T02:00:00Z", ended: "2026-11-17T02:10:00Z", usd: 0.1, usdUnknown: 0, usdUnknownWhy: [], billing: "api", usdByBilling: { api: 0.1 }, tokens: SOL }];
+  const ran = { worker: "gpt-6-sol", subagent: "gpt-6-luna", reviewer: "gpt-6.1-sol", labels: [] };
+  w.comments.push({ id: (nextId += 1), issue_url: issueUrl(46), user: ME, author_association: "OWNER", created_at: "2026-11-17T02:00:00Z", updated_at: "2026-11-17T02:10:00Z", body: ["<!-- pendulum:46:progress:review:local-46 -->", "Pendulum review: started.", harnessMarker("codex", "gpt-6.1-sol", ran), spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker(ledger, { model: "gpt-6.1-sol", version: PENDULUM_VERSION, published: ["gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] })].join("\n") });
+  w.pulls.push({ number: 1046, head: { ref: "pendulum/46", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: "2026-11-17T02:05:00Z", merged_at: "2026-11-17T02:20:00Z", state: "closed" });
+  const { json: r } = await report(w, ["--issue", "46", "--rates", "gpt-6-luna"]);
+  assert.deepEqual(r.rates.skipped, []);
+  assert.deepEqual(r.rates.items.map((x) => [x.model, x.candidate, x.ratio]), [["gpt-6.1-sol", "gpt-6-luna", priced("gpt-6-luna", "gpt-6.1-sol", SOL)]]);
+});
+
 test("report --rates: the command line takes model ids only", () => {
   assert.equal(reportCheck({ rates: ["gpt-6.1-terra,gpt-6-luna"] }), null);
   assert.match(reportCheck({ rates: ["gpt 6"] }), /^--rates takes model ids/);

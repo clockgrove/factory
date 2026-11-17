@@ -71,6 +71,8 @@ export const UNKNOWN_WHY = {
   // `pendulum report`'s: a stage of Pendulum's own with no spend line in its progress comment and no usage record read
   // for it (its artifact expired, was not readable, or was never uploaded).
   "no-record": "the stage's progress comment has no spend line and no usage record of it was read (expired, unreadable or never uploaded)",
+  // `pendulum report`'s: its call budget (--max-calls) ran out before the stage's usage record was read.
+  stopped: "the report's call budget ran out before the stage's usage record was read",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
@@ -212,7 +214,8 @@ export function usdByBilling(records, billing, { extraKeyUsd = 0 } = {}) {
  * `work-1`, `validation-fix-2`, `review`, `answer`, `decision`), `decision` for a decision record (with its `calls`),
  * `model`, `effort` (the reasoning effort Pendulum asked for; null for the model's own), `started` and `ended` (ISO),
  * `usd` (its known dollars, null when none was reported), `usdUnknown` and `usdUnknownWhy` (its runs of unknown cost,
- * UNKNOWN_WHY; 0 and [] for none), `billing` (passBilling; null when the pass and the credential name none), `tokens`,
+ * UNKNOWN_WHY; 0 and [] for none), `billing` (passBilling; null when the pass and the credential name none),
+ * `usdByBilling` (its known dollars by kind, a relayed key's share as `api`), `workerKeyUsd` (that share; null for none), `tokens`,
  * `resumed` (whether it resumed a session) and `firstCache` (its first request's cache split, null when the harness
  * reports none). A pass that never ran (`noRun`) has no entry. What the stage's merged figures are summed from, kept
  * so `pendulum report` can break a stage's cost down by pass.
@@ -233,6 +236,10 @@ export function passLedger(records, billing) {
       usdUnknown: u.usdUnknown ?? 0,
       usdUnknownWhy: u.usdUnknownWhy ?? [],
       billing: isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : null,
+      // Its known dollars by billing (usdByBilling's, for this pass alone): a relayed key's share (`workerKeyUsd`) is
+      // `api` whatever the pass's own kind.
+      usdByBilling: usdByBilling([r], billing),
+      workerKeyUsd: nonNeg(r.workerKeyUsd),
       tokens: { input: t.input ?? null, output: t.output ?? null, cached: t.cached ?? null, written: t.written ?? null },
       resumed: r.resumed === true,
       firstCache: r.cache?.first ?? null,

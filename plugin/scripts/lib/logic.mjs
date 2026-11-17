@@ -2384,7 +2384,7 @@ export const PUSH_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
  */
 let WRITERS = { repo: null, logins: new Set(), maintainers: new Set(), unpinned: [] };
 // GitHub logins are unique ignoring case, so they are compared lowercased; a leading @ is dropped.
-const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
+export const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
 const loginSet = (logins) => new Set((logins || []).map(loginKey).filter(Boolean));
 export const setWriters = (repoFull, logins) => {
   WRITERS = { repo: repoFull, logins: loginSet(logins), maintainers: WRITERS.repo === repoFull ? WRITERS.maintainers : new Set(), unpinned: WRITERS.repo === repoFull ? WRITERS.unpinned : [] };

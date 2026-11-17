@@ -458,9 +458,10 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
- * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
+ * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it. `onLink(link)` is
+ * given each page's Link header (null without one), for a caller that pages itself.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, onLink = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
@@ -507,6 +508,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
+    onLink?.(link ?? null);
     if (raw) return text;
     const data = text.trim() ? JSON.parse(text) : null;
     if (!paginate) return data;
@@ -1614,6 +1616,13 @@ export async function createProject(repo, opts) {
 
 // --------------------------------------------------------------- artifacts
 
+/**
+ * Whether an Actions artifact came from a run of this repository's own code, not a fork's: its workflow run's head
+ * repository is the run's repository (GitHub's `workflow_run.head_repository_id` and `repository_id` on the artifact). A
+ * fork's pull request run can upload an artifact of any name, so its usage records are never Pendulum's.
+ */
+export const ownRunArtifact = (a) => a?.workflow_run?.head_repository_id === a?.workflow_run?.repository_id;
+
 /** An artifact never changes once uploaded: a long-lived dispatcher (pendulum serve) reads each one once. */
 const usageCache = new Map();
 const USAGE_DOWNLOADS = 8;
@@ -1660,7 +1669,7 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
   // Names and run ids go to `gh` as arguments: only Pendulum's own artifact names and numeric ids.
-  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && !a.expired && String(a.created_at || "").startsWith(dateIso));
+  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && ownRunArtifact(a) && !a.expired && String(a.created_at || "").startsWith(dateIso));
   // One download is about a second and a busy day has a hundred artifacts, so eight at a time. With a cloud sandbox
   // the dispatcher reads none of them (dispatch.mjs todaysSpend): each stage's dollars are in its spend line.
   const one = async (a) => {

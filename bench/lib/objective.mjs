@@ -915,6 +915,8 @@ export function scoreObjective(collected, opts = {}) {
   const artifacts = collected.usage || [];
   const stages = withLines(artifacts, spendRecords(collected, { app, all: artifacts.length > 0 }));
   if (!stages.length) missing.push("usage artifact");
+  // A fork's run uploaded an artifact of this issue's usage names: never read as Pendulum's (collect.mjs listArtifacts).
+  if (collected.foreignArtifacts > 0) missing.push(`${collected.foreignArtifacts} usage artifact(s) from runs of forks, not read`);
   // The decision calls made outside any stage, on every route: in no stage's record or spend line, so never matched to a
   // stage's by withLines, and added once beside them.
   const usage = [...stages, ...decisionRecords(collected, { app })];

@@ -14,6 +14,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { findFile } from "./gh.mjs";
+import { ownRunArtifact } from "../../plugin/scripts/lib/github.mjs";
 import { parseUsageText, sessionsOf } from "./cost.mjs";
 import { OBJECTIVE_LABEL } from "./objective.mjs";
 import { bySelf, pendulumLogin } from "./phases.mjs";
@@ -68,8 +69,12 @@ export async function parkedSince(api, repoFull, { since, label = OBJECTIVE_LABE
   return out;
 }
 
-/** This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name their run. */
-async function listArtifacts(api, repoFull, issue) {
+/**
+ * This issue's usage artifacts by their exact names (the `name=` filter is exact), expired ones included: they still name
+ * their run. An artifact a fork's run uploaded (plugin github.mjs ownRunArtifact) is no record of Pendulum's: left out,
+ * its name pushed to `foreign`.
+ */
+async function listArtifacts(api, repoFull, issue, foreign = []) {
   const out = [];
   for (const name of [WORK_ARTIFACT(issue), REVIEW_ARTIFACT(issue)]) {
     let pages;
@@ -79,7 +84,10 @@ async function listArtifacts(api, repoFull, issue) {
       if (error.status === 404) continue;
       throw error;
     }
-    out.push(...pages.flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || [])));
+    for (const a of pages.flatMap((p) => (Array.isArray(p) ? p : p?.artifacts || []))) {
+      if (ownRunArtifact(a)) out.push(a);
+      else foreign.push(a.name);
+    }
   }
   return out.filter((a, i, arr) => arr.findIndex((b) => b.id === a.id) === i).map((a) => ({ id: a.id, name: a.name, created_at: a.created_at, expired: !!a.expired, workflow_run: a.workflow_run?.id ?? null }));
 }
@@ -286,8 +294,9 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
     }
   }
   let artifacts = [];
+  const foreign = [];
   try {
-    artifacts = await listArtifacts(api, repoFull, issue);
+    artifacts = await listArtifacts(api, repoFull, issue, foreign);
   } catch {
     artifacts = [];
   }
@@ -336,6 +345,8 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
     stageRuns,
     workflowRuns,
     usage: records,
+    // Usage artifacts of this issue's names that runs from forks uploaded, left out (ownRunArtifact).
+    foreignArtifacts: foreign.length,
     bodyEdits,
     harness: records.find((r) => r.harness)?.harness ?? null,
   };

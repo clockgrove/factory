@@ -10,7 +10,16 @@ import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
 import { BILLING_WORDS } from "../scripts/lib/usage.mjs";
-import { REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
+import { REPORT_SCHEMA, STOPPED_EXIT, buildReport, outcomeOf, readReport, renderReport, reportCheck, reportScope } from "../scripts/lib/report.mjs";
+import { passLedger } from "../scripts/lib/usage.mjs";
+import { keepDecision } from "../scripts/lib/harness.mjs";
+import { objectiveRecords } from "../scripts/lib/finish-card.mjs";
+import { todaysUsage } from "../scripts/lib/github.mjs";
+import { appIdVariableCheck } from "../scripts/doctor.mjs";
+import { variableSettings } from "../scripts/lib/inputs.mjs";
+import { collectObjective } from "../../bench/lib/collect.mjs";
+import { scoreObjective } from "../../bench/lib/objective.mjs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { parseArgs, reportCommand } from "../scripts/local.mjs";
 
 RETRY.sleep = async () => {};
@@ -96,23 +105,34 @@ function world() {
   const issues = [{ ...scratchIssue, created_at: "2026-11-17T02:23:41Z" }, issue(5, ["pendulum:objective", "pendulum:local", "pendulum:blocked"], "open", "Five"), issue(7, ["pendulum:objective"], "closed", "Seven"), issue(8, ["pendulum:objective"], "closed", "Eight"), issue(9, ["pendulum:objective"], "open", "Nine, not started")];
   const pulls = [scratchPr, { number: 70, head: { ref: "pendulum/7" }, created_at: "2026-11-17T04:20:00Z", updated_at: "2026-11-17T05:00:00Z", merged_at: "2026-11-17T05:00:00Z" }, { number: 80, head: { ref: "pendulum/8" }, created_at: "2026-11-17T05:10:00Z", updated_at: "2026-11-17T06:00:00Z", merged_at: null, state: "closed" }];
   const artifacts = {
-    "pendulum-usage-3": [{ id: 301, name: "pendulum-usage-3", expired: false, workflow_run: { id: 44002648279 }, record: recs.work }],
-    "pendulum-usage-3-review": [{ id: 302, name: "pendulum-usage-3-review", expired: false, workflow_run: { id: 44002920873 }, record: recs.review }],
+    "pendulum-usage-3": [{ id: 301, name: "pendulum-usage-3", expired: false, workflow_run: { id: 44002648279, repository_id: 1, head_repository_id: 1 }, record: recs.work }],
+    "pendulum-usage-3-review": [{ id: 302, name: "pendulum-usage-3-review", expired: false, workflow_run: { id: 44002920873, repository_id: 1, head_repository_id: 1 }, record: recs.review }],
     // #7's build on Actions: a record from before records named their comment, matched by its workflow run.
-    "pendulum-usage-7": [{ id: 701, name: "pendulum-usage-7", expired: false, workflow_run: { id: 51001 }, record: { harness: "claude", model: "claude-opus-5-5", usd: 0.9, runs: 1, exit: "delivered", tokens: { input: 1000, output: 100, cached: 0, written: 0 }, usdByBilling: { api: 0.9 }, billing: "api", started: "2026-11-17T04:00:10Z", ended: "2026-11-17T04:10:00Z" } }],
-    "pendulum-usage-8": [{ id: 801, name: "pendulum-usage-8", expired: true, workflow_run: { id: 61001 } }],
+    "pendulum-usage-7": [{ id: 701, name: "pendulum-usage-7", expired: false, workflow_run: { id: 51001, repository_id: 1, head_repository_id: 1 }, record: { harness: "claude", model: "claude-opus-5-5", usd: 0.9, runs: 1, exit: "delivered", tokens: { input: 1000, output: 100, cached: 0, written: 0 }, usdByBilling: { api: 0.9 }, billing: "api", started: "2026-11-17T04:00:10Z", ended: "2026-11-17T04:10:00Z" } }],
+    "pendulum-usage-8": [{ id: 801, name: "pendulum-usage-8", expired: true, workflow_run: { id: 61001, repository_id: 1, head_repository_id: 1 } }],
   };
   return { comments, issues, pulls, artifacts, recs };
 }
 
-/** A fake GitHub over `w`, answering the reads a report makes, page by page; `calls` lists every request. */
+/**
+ * A fake GitHub over `w`, answering the reads a report makes as GitHub does: page by page, with a Link header naming the
+ * next and last pages; `w.appVariable` the PENDULUM_APP_ID repository variable (404 without one). `calls` lists every request.
+ */
 function fakeGitHub(w) {
   const calls = [];
-  const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
-  const page = (list, u) => {
+  const json = (b, status = 200, headers = {}) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json", ...headers } });
+  const page = (list, u, wrap = null) => {
     const per = Number(u.searchParams.get("per_page") ?? 30);
-    const p = Number(u.searchParams.get("page") ?? 1);
-    return list.slice((p - 1) * per, p * per);
+    const n = Number(u.searchParams.get("page") ?? 1);
+    const last = Math.max(1, Math.ceil(list.length / per));
+    const at = (k) => {
+      const v = new URL(u);
+      v.searchParams.set("page", String(k));
+      return v.href;
+    };
+    const link = n < last ? { link: `<${at(n + 1)}>; rel="next", <${at(last)}>; rel="last"` } : {};
+    const items = list.slice((n - 1) * per, n * per);
+    return json(wrap ? wrap(items, list.length) : items, 200, link);
   };
   const fetch = async (url, init = {}) => {
     const u = new URL(url);
@@ -120,23 +140,29 @@ function fakeGitHub(w) {
     calls.push(`${init.method || "GET"} ${p}${u.search}`);
     if ((init.method || "GET") !== "GET") return json({ message: "a report writes nothing" }, 405);
     if (u.pathname === "/user") return json(ME);
+    if (p === "/actions/variables/PENDULUM_APP_ID") return w.appVariable ? json({ name: "PENDULUM_APP_ID", value: String(w.appVariable) }) : json({ message: "Not Found" }, 404);
     if (p === "/issues/comments") {
       const since = u.searchParams.get("since");
-      return json(page(w.comments.filter((c) => !since || Date.parse(c.updated_at) >= Date.parse(since)), u));
+      return page(w.comments.filter((c) => !since || Date.parse(c.updated_at) >= Date.parse(since)), u);
     }
+    let m = /^\/issues\/(\d+)\/comments$/.exec(p);
+    if (m) return page(w.comments.filter((c) => c.issue_url === issueUrl(Number(m[1]))), u);
     if (p === "/issues") {
       const label = u.searchParams.get("labels");
-      return json(page(w.issues.filter((i) => !label || i.labels.some((l) => l.name === label)), u));
+      return page(w.issues.filter((i) => !label || i.labels.some((l) => l.name === label)), u);
     }
-    let m = /^\/issues\/(\d+)$/.exec(p);
-    if (m) return w.issues.find((i) => i.number === Number(m[1])) ? json(w.issues.find((i) => i.number === Number(m[1]))) : json({ message: "Not Found" }, 404);
+    m = /^\/issues\/(\d+)$/.exec(p);
+    if (m) {
+      const i = w.issues.find((x) => x.number === Number(m[1]));
+      return i ? json({ ...i, comments: w.comments.filter((c) => c.issue_url === issueUrl(i.number)).length }) : json({ message: "Not Found" }, 404);
+    }
     m = /^\/issues\/(\d+)\/sub_issues$/.exec(p);
-    if (m) return json(page(w.issues.filter((i) => (w.parents?.[m[1]] || []).includes(i.number)), u));
-    if (p === "/pulls") return json(page(w.pulls, u));
-    if (p === "/actions/artifacts") {
-      const list = (w.artifacts[u.searchParams.get("name")] || []).map(({ record, ...a }) => a);
-      return json({ total_count: list.length, artifacts: list });
+    if (m) return page(w.issues.filter((i) => (w.parents?.[m[1]] || []).includes(i.number)), u);
+    if (p === "/pulls") {
+      const head = u.searchParams.get("head");
+      return page(w.pulls.filter((x) => !head || `${REPO.owner}:${x.head?.ref}` === head), u);
     }
+    if (p === "/actions/artifacts") return page((u.searchParams.has("name") ? w.artifacts[u.searchParams.get("name")] || [] : Object.values(w.artifacts).flat()).map(({ record, ...a }) => a), u, (artifacts, total) => ({ total_count: total, artifacts }));
     return json({ message: "Not Found" }, 404);
   };
   const download = async (_repo, a) => {
@@ -289,7 +315,7 @@ test("report: the call budget: the planned calls are printed before any read, an
     assert.equal(r.source.calls.made, max);
     assert.equal(calls.filter((c) => !c.startsWith("DOWNLOAD")).length + calls.filter((c) => c.startsWith("DOWNLOAD")).length * 2, max, "no call past the budget");
     assert.equal(r.source.missing[0].code, "stopped");
-    assert.match(err, /^pendulum report: planned \d+ call\(s\)/);
+    assert.match(err, /^pendulum report: planned at least \d+ call\(s\)/);
     assert.match(err, /stopped at --max-calls/);
   }
   // A downloaded artifact is cached by id under the user's cache directory: the next report downloads nothing.
@@ -300,7 +326,11 @@ test("report: the call budget: the planned calls are printed before any read, an
   assert.equal(again.calls.filter((c) => c.startsWith("DOWNLOAD")).length, 0);
   assert.deepEqual(again.json.objectives, first.json.objectives);
   assert.equal(again.json.source.read.artifacts.cached, 2);
-  assert.ok(readFileSync(join(cache, "pendulum", "artifacts", "acme", "app", "301.json"), "utf8").includes("44002648279"));
+  // Kept under the API's host, and only the fields the report reads: no reason, session or basis.
+  const kept = JSON.parse(readFileSync(join(cache, "pendulum", "artifacts", "github.test", "acme", "app", "301.json"), "utf8")).result;
+  assert.equal(kept.progressRun, "44002648279");
+  assert.deepEqual(kept.ran, { pendulum: PENDULUM_VERSION });
+  for (const k of ["reason", "session", "basis", "credential", "cache", "sessionTotal"]) assert.ok(!Object.hasOwn(kept, k), k);
   // The report reads no timelines, workflow runs or jobs (the scorer's walk-away reads), and writes nothing.
   assert.ok(!full.calls.some((c) => /timeline|\/actions\/runs|\/jobs|^(POST|PATCH|PUT|DELETE)/.test(c)));
 });
@@ -360,7 +390,7 @@ test("report: --json keeps its schema: every field the documented shape names, o
   const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
   assert.deepEqual(shape(r.objectives.find((o) => o.issue === 5).cost).map((s) => s.replace(/\[\]:string$/, "[]")), cost);
   assert.deepEqual(keys(r.unknown), ["items", "reasons", "runs"]);
-  assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "text"]);
+  assert.deepEqual(keys(r.unknown.reasons[0]), ["code", "runs", "stages", "text"]);
   assert.deepEqual(keys(r.unknown.items[0]), ["issue", "runs", "stage", "why"]);
   assert.deepEqual(keys(r.breakdowns), ["account", "harness", "model", "pass", "stage", "version"]);
   assert.deepEqual(keys(r.breakdowns.stage[0]), ["cost", "key", "stages", "tokens"]);
@@ -368,7 +398,9 @@ test("report: --json keeps its schema: every field the documented shape names, o
   assert.deepEqual(keys(r.objectives.find((o) => o.issue === 3)), ["cost", "issue", "modelMinutes", "outcome", "passes", "stages", "title", "tokens", "unpricedPasses", "url", "usdPerModelMinute"]);
   assert.deepEqual(keys(r.hotSpots), ["answerAndFixPasses", "blockedOrUnmergedSpend", "cacheWriteShare", "costPerModelMinute", "reviewLoops"]);
   for (const h of Object.values(r.hotSpots)) assert.ok(typeof h.rankBy === "string" && Array.isArray(h.items));
-  assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt"]);
+  assert.deepEqual(keys(r.source), ["calls", "complete", "maxCalls", "missing", "read", "stoppedAt", "trusted"]);
+  assert.deepEqual(keys(r.source.trusted), ["app", "appFrom", "logins"]);
+  assert.deepEqual(keys(r.source.calls), ["byKind", "made", "planned", "plannedAtLeast"]);
   assert.deepEqual(keys(r.source.read), ["artifacts", "comments", "ignoredComments", "issues", "localRecords", "pendulumComments", "pulls", "unattributedComments"]);
   assert.deepEqual(keys(r.source.missing[0]), ["code", "count", "issues", "text"]);
   // The documented schema names every top-level field and the version (docs/REPORT.md).
@@ -400,4 +432,185 @@ test("report: the command line: a period by default, one set at a time, dates an
   assert.equal(reportCheck({ since: "2026-11-01T10:00:00+02:00" }), null);
   assert.throws(() => parseArgs(["report", "--by", "model"]), /--by takes account/);
   assert.deepEqual(parseArgs(["report", "--issue", "3", "--issue", "7,8", "--json"]).flags.issue, ["3", "7,8"]);
+});
+
+// ------------------------------------------------------------------ the review's fixes (#525)
+
+/** A forged usage artifact a fork's pull request run uploaded under #3's name: $500 that is no one's. */
+const FORGED = { id: 999, name: "pendulum-usage-3", expired: false, workflow_run: { id: 77, repository_id: 1, head_repository_id: 2 }, record: { harness: "claude", model: "claude-opus-5-5", usd: 500, runs: 1, progressRun: "44002648279", usdByBilling: { api: 500 }, billing: "api", tokens: { input: 1, output: 1, cached: 0, written: 0 } } };
+
+test("report (B1): an artifact a fork's run uploaded is never read; it is counted under its own missing code", async () => {
+  const w = world();
+  w.artifacts["pendulum-usage-3"].push(FORGED);
+  const { json: r, calls } = await report(w, { issue: 3 });
+  assert.equal(usd(byIssue(r, 3)).api, 0.519812, "$0.52, not $500.52");
+  assert.ok(!calls.includes("DOWNLOAD 999"));
+  const foreign = r.source.missing.find((m) => m.code === "artifact-foreign");
+  assert.deepEqual([foreign.count, foreign.issues], [1, [3]]);
+  assert.equal(r.source.read.artifacts.foreign, 1);
+});
+
+test("the scorer, the finish card and the daily cap (B1): a fork's artifact of an Objective's name is no usage record", async () => {
+  // The scorer's collection: the fork's artifact is left out and said in the row.
+  const dir = mkdtempSync(join(tmpdir(), "own-"));
+  const issue = { number: 3, title: "t", state: "closed", labels: [{ name: "pendulum:objective" }], created_at: "2026-11-17T02:00:00Z", user: ME };
+  const own = { id: 1, name: "pendulum-usage-3", created_at: "2026-11-17T02:26:00Z", expired: false, workflow_run: { id: 44002648279, repository_id: 1, head_repository_id: 1 } };
+  const forged = { ...FORGED, created_at: "2026-11-17T02:27:00Z" };
+  const api = async (path) => (path === "repos/acme/app/issues/3" ? issue : /actions\/artifacts\?name=pendulum-usage-3&/.test(path) ? [{ artifacts: [own, forged] }] : []);
+  const download = async (_repo, a) => {
+    const d = join(dir, String(a.id));
+    mkdirSync(d);
+    writeFileSync(join(d, "result.json"), JSON.stringify(a.id === 999 ? FORGED.record : { harness: "claude", model: "claude-opus-5-5", usd: 0.35637, runs: 1, progressRun: "44002648279" }));
+    return d;
+  };
+  const collected = await collectObjective(api, "acme/app", 3, { download, jobs: false });
+  assert.deepEqual(collected.artifacts.map((a) => a.id), [1]);
+  assert.deepEqual(collected.usage.map((u) => u.usd), [0.35637]);
+  assert.equal(collected.foreignArtifacts, 1);
+  const row = scoreObjective(collected, { prices: loadPrices(), now: "2026-11-18T00:00:00Z" });
+  assert.equal(row.cost.usd, 0.3564);
+  assert.ok(row.missing.includes("1 usage artifact(s) from runs of forks, not read"));
+  // The finish card's records and the dispatcher's daily sum read none of it either.
+  const fake = fakeGitHub({ ...world(), artifacts: { "pendulum-usage-3": [FORGED, { id: 5, name: "pendulum-usage-3", expired: false, created_at: "2026-11-17T02:26:00Z", workflow_run: { id: 44002648279, repository_id: 1, head_repository_id: 1 } }] } });
+  await over(fake, async () => {
+    const recs = await objectiveRecords(REPO, 3, { token: "t", download: async (a) => ({ id: a.id }) });
+    assert.deepEqual(recs.map((x) => x.id), [5]);
+    const today = await todaysUsage(REPO, { token: "t", dateIso: "2026-11-17", download: async (_r, a) => ({ usd: a.id }) });
+    assert.deepEqual(today.map((x) => x.usd), [5]);
+  });
+});
+
+test("report (B2): with no App id, the App's stage comments are stages of unknown cost; its vendor comments add none, and its decision calls are decisions of unknown cost", async () => {
+  const w = world();
+  w.comments.push(comment(3, `<!-- pendulum:3:vendor:work:44002648279 -->\n- sandbox done`, { at: "2026-11-17T02:26:00Z" }));
+  w.comments.push(comment(3, `<!-- pendulum:3:vendor:work:5555-abcdef123456 -->\n- sandbox alone`, { at: "2026-11-17T02:26:10Z" }));
+  w.comments.push(comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 2, usd: 0.01 })}`, { at: "2026-11-17T02:27:00Z" }));
+  const fake = fakeGitHub(w);
+  const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  const r = buildReport(read, { now: new Date(NOW).toISOString() });
+  const three = byIssue(r, 3);
+  assert.deepEqual(three.stages, { work: 1, rebase: 0, review: 1 }, "the two progress comments only");
+  assert.equal(r.totals.stages, 2);
+  // Two stages, the lone sandbox booking, the decision calls: four runs of unknown cost, and no dollar.
+  assert.equal(three.cost.unknownRuns, 4);
+  assert.deepEqual(usd(three), { api: 0, subscription: 0, credits: 0, unknown: 0, sandbox: 0 });
+  assert.deepEqual(r.breakdowns.stage.map((x) => [x.key, x.stages, x.cost.unknownRuns]), [["work", 1, 2], ["review", 1, 1], ["decisions", 1, 1]]);
+  assert.deepEqual(r.unknown.reasons.map((x) => [x.code, x.stages, x.runs]), [["unattributed", 4, 4]]);
+  assert.ok(r.source.missing.some((m) => m.code === "app-not-given"));
+});
+
+test("report (S1): Pendulum's App id comes from the repository variable PENDULUM_APP_ID; --app overrides it; doctor checks it against app_id", async () => {
+  const w = world();
+  w.appVariable = APP.id;
+  const fake = fakeGitHub(w);
+  const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  const r = buildReport(read, { now: new Date(NOW).toISOString() });
+  assert.equal(usd(byIssue(r, 3)).api, 0.519812);
+  assert.deepEqual(r.source.trusted, { logins: ["kirkmarple-clockgrove"], app: APP.id, appFrom: "variable" });
+  assert.ok(fake.calls.includes("GET /actions/variables/PENDULUM_APP_ID"));
+  const flagged = await report(w, { issue: 3 });
+  assert.ok(!flagged.calls.some((c) => c.includes("/actions/variables/")), "--app: no variable read");
+  assert.equal(flagged.json.source.trusted.appFrom, "flag");
+  // Doctor, on Actions: missing, another App's, or the one the jobs run as.
+  const repo = { full: "acme/app" };
+  assert.equal(appIdVariableCheck({ variable: null, appId: "2271", repo }).status, "WARN");
+  assert.match(appIdVariableCheck({ variable: null, appId: "2271", repo }).fix, /^gh variable set PENDULUM_APP_ID --repo acme\/app --body /);
+  assert.match(appIdVariableCheck({ variable: "17", appId: "2271", repo }).detail, /names another App/);
+  assert.equal(appIdVariableCheck({ variable: "2271", appId: " 2271 ", repo }).status, "PASS");
+  assert.equal(appIdVariableCheck({ variable: "2271", appId: "", repo }), null);
+  // The variable is no setting: no run reads it, and it is not named as an unknown one.
+  assert.deepEqual(variableSettings({ PENDULUM_APP_ID: "2271" }).unknown, []);
+});
+
+test("report (S2): --self trusts an exact login only on a comment by someone who can push, and source lists the trusted logins", async () => {
+  const w = world();
+  const { json: r } = await report(w, { issue: 7, self: "teammate" });
+  assert.equal(usd(byIssue(r, 7)).api, 1.55);
+  assert.equal(usd(byIssue(r, 7)).unknown, 50, "the teammate's $50 spend line, billing not recorded");
+  assert.equal(byIssue(r, 7).cost.unknownRuns, 0);
+  assert.deepEqual(r.source.trusted.logins, ["kirkmarple-clockgrove", "teammate"]);
+  // The stranger named: still nothing, they cannot push.
+  const { json: s } = await report(world(), { issue: 3, self: "stranger" });
+  assert.equal(usd(byIssue(s, 3)).api, 0.519812);
+  assert.equal(s.source.read.ignoredComments, 2);
+});
+
+test("report (S3): only a PR from the repository itself counts, and an open issue is open whatever its PRs", () => {
+  const pr = (over) => ({ number: 70, head: { ref: "pendulum/7", repo: { id: 1 } }, base: { repo: { id: 1 } }, created_at: "2026-11-17T04:20:00Z", merged_at: "2026-11-17T05:00:00Z", ...over });
+  const closed = { number: 7, state: "closed", labels: [] };
+  assert.equal(outcomeOf(closed, [pr()]), "merged");
+  assert.equal(outcomeOf(closed, [pr({ head: { ref: "pendulum/7", repo: { id: 2 } } })]), "closed-unmerged", "a fork's PR on a branch of the same name");
+  assert.equal(outcomeOf({ ...closed, state: "open" }, [pr()]), "open");
+  assert.equal(outcomeOf({ ...closed, labels: [{ name: "pendulum:blocked" }] }, [pr()]), "blocked");
+  assert.equal(outcomeOf(closed, [], { pullsRead: false }), null, "PRs not read: no outcome a label does not decide");
+  assert.equal(outcomeOf({ ...closed, labels: [{ name: "pendulum:question" }] }, [], { pullsRead: false }), "question");
+});
+
+test("report (S4): stopped before the PRs and the artifacts: outcomes are null unless a label or an open issue decides them, and the stages not reached are `stopped`", async () => {
+  // The login, the comments and the labelled issues; then the budget ends before the PRs.
+  const { code, json: r } = await report(world(), { since: "2026-11-17", "max-calls": 3 });
+  assert.equal(code, STOPPED_EXIT);
+  assert.equal(byIssue(r, 3).outcome, null);
+  assert.equal(byIssue(r, 8).outcome, null);
+  assert.equal(byIssue(r, 5).outcome, "blocked");
+  assert.deepEqual(byIssue(r, 3).cost.unknownWhy, ["stopped"]);
+  assert.ok(!r.unknown.reasons.some((x) => x.code === "no-record"), "never `no-record` for a stage not reached");
+  assert.deepEqual(r.source.missing.find((m) => m.code === "stopped-before-records").issues, [3, 7, 8]);
+});
+
+test("report (S5, S6): the plan follows each read's last page; --issue reads that issue's comments alone; the default period starts at UTC midnight; a decision day counts when its start is in the period", async () => {
+  const w = world();
+  for (let k = 0; k < 150; k += 1) w.comments.push(comment(100 + k, "a comment of no Objective", { user: ME, at: "2026-11-17T06:00:00Z" }));
+  const { err, json: r } = await report(w, { since: "2026-11-17" });
+  assert.match(err, /planned 1 call\(s\) for the other 1 page\(s\) of comments/);
+  assert.equal(r.source.calls.byKind.comments, 2);
+  const one = await report(world(), { issue: 3 });
+  // Every call planned before it was made: the login, the App's variable is skipped (--app), the issue, its comments, its PRs, two artifact lists, two downloads of two calls.
+  assert.equal(one.json.source.calls.made, one.json.source.calls.planned);
+  assert.ok(one.calls.includes("GET /issues/3/comments?per_page=100&page=1"));
+  assert.ok(!one.calls.some((c) => c.startsWith("GET /issues/comments")), "no repository-wide read for named issues");
+  assert.ok(one.calls.some((c) => c.startsWith("GET /pulls?state=all&head=acme%3Apendulum%2F3")));
+  assert.deepEqual(reportScope({ until: "2026-11-10T08:00:00Z" }, NOW), { since: "2026-10-11T00:00:00Z", until: "2026-11-10T08:00:00Z", defaultPeriod: true, issues: [], label: null, parent: null });
+  assert.equal(reportScope({}, Date.parse("2026-11-18T15:30:00Z")).since, "2026-10-19T00:00:00Z");
+  // #5's decision calls are dated 2026-11-17: a period from noon that day leaves them out.
+  const { json: noon } = await report(world(), { since: "2026-11-17T03:00:00Z" });
+  assert.equal(usd(byIssue(noon, 5)).api, 0);
+  const { json: day } = await report(world(), { since: "2026-11-17" });
+  assert.equal(usd(byIssue(day, 5)).api, 0.02);
+});
+
+test("report (S7): each reason counts the stages naming it; its runs only where no stage gives it with another reason", async () => {
+  const w = world();
+  w.comments.push(progress(8, "work", "local-u2", { user: ME, at: "2026-11-17T05:40:00Z", spend: { usd: 0.1, parts: { usdUnknown: 2, usdUnknownWhy: ["unreported", "credits"] } } }));
+  const { json: r } = await report(w, { issue: 8 });
+  assert.deepEqual(r.unknown.reasons.map((x) => [x.code, x.stages, x.runs]), [["unreported", 2, null], ["credits", 1, null], ["no-record", 1, 1]]);
+  assert.equal(r.unknown.runs, 4);
+});
+
+test("report (S8): a pass's relayed key spend is `api` in its ledger entry and in the pass breakdown", async () => {
+  const [entry] = passLedger([{ harness: "codex", model: "gpt-6.1-sol", label: "work-1", usd: 0.5, workerKeyUsd: 0.2, tokens: { input: 1, output: 1, cached: 0 }, billing: "subscription" }], "subscription");
+  assert.deepEqual([entry.usdByBilling, entry.workerKeyUsd], [{ subscription: 0.3, api: 0.2 }, 0.2]);
+  const w = world();
+  const rec = w.artifacts["pendulum-usage-3"][0].record;
+  rec.ledger = [{ ...rec.ledger[0], billing: "subscription", usd: 0.2, usdByBilling: { subscription: 0.15, api: 0.05 }, workerKeyUsd: 0.05 }, ...rec.ledger.slice(1)];
+  const { json: r } = await report(w, { issue: 3 });
+  assert.deepEqual(usd(r.breakdowns.pass.find((x) => x.key === "work")), { api: 0.05, subscription: 0.15, credits: 0, unknown: 0, sandbox: 0 });
+  // Cost per model minute: each kind over the same priced minutes, never summed.
+  assert.deepEqual(Object.keys(byIssue(r, 3).usdPerModelMinute).sort(), ["api", "subscription"]);
+  assert.equal(byIssue(r, 3).usdPerModelMinute.subscription.modelMinutes, byIssue(r, 3).usdPerModelMinute.api.modelMinutes);
+});
+
+test("report (nits): a booking two records carry counts once, on the last, as the scorer counts it; an artifact with no run is unreadable; a kept decision keeps its effort", async () => {
+  const w = world();
+  const claim = "abcdef123456";
+  w.artifacts["pendulum-usage-7"][0].record.vendor = { claim, usd: 0.1 };
+  w.artifacts["pendulum-usage-7-review"] = [{ id: 702, name: "pendulum-usage-7-review", expired: false, workflow_run: { id: 52001, repository_id: 1, head_repository_id: 1 }, record: { harness: "claude", model: "m", usd: 0, runs: 0, exit: "skipped", ended: "2026-11-17T04:45:00Z", vendor: { claim, usd: 0.2 }, tokens: { input: null, output: null, cached: null, written: null } } }];
+  w.artifacts["pendulum-usage-8"].push({ id: 802, name: "pendulum-usage-8", expired: false });
+  const { json: r } = await report(w, { since: "2026-11-17" });
+  const scorer = costOf([{ ...w.artifacts["pendulum-usage-7"][0].record, artifact: "pendulum-usage-7" }, { ...w.artifacts["pendulum-usage-7-review"][0].record, artifact: "pendulum-usage-7-review" }], loadPrices());
+  assert.equal(scorer.vendor.usd, 0.2);
+  assert.equal(usd(byIssue(r, 7)).sandbox, 0.2);
+  assert.equal(r.source.read.artifacts.unreadable, 1);
+  assert.equal(r.source.read.artifacts.expired, 1);
+  assert.equal(keepDecision({ harness: "claude", model: "m", usd: 0.01, tokens: { input: 1, output: 1, cached: 0 }, effort: "low" }).effort, "low");
 });

@@ -1619,9 +1619,10 @@ export async function createProject(repo, opts) {
 /**
  * Whether an Actions artifact came from a run of this repository's own code, not a fork's: its workflow run's head
  * repository is the run's repository (GitHub's `workflow_run.head_repository_id` and `repository_id` on the artifact). A
- * fork's pull request run can upload an artifact of any name, so its usage records are never Pendulum's.
+ * fork's pull request run can upload an artifact of any name, so its usage records are never Pendulum's; an artifact that
+ * names no repository id is not read either.
  */
-export const ownRunArtifact = (a) => a?.workflow_run?.head_repository_id === a?.workflow_run?.repository_id;
+export const ownRunArtifact = (a) => Number.isSafeInteger(a?.workflow_run?.repository_id) && a.workflow_run.head_repository_id === a.workflow_run.repository_id;
 
 /** An artifact never changes once uploaded: a long-lived dispatcher (pendulum serve) reads each one once. */
 const usageCache = new Map();

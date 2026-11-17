@@ -481,8 +481,10 @@ function partCost(part, rec, books) {
   return c;
 }
 
-/** A pass label's kind: the label without its count (`work-2` is `work`, `validation-fix-3` is `validation-fix`). */
-export const passKind = (label) => (typeof label === "string" && PASS_LABEL.test(label) ? label.replace(/-\d+$/, "") : "other");
+/**
+ * A pass's label without its count (`work-2` is `work`, `validation-fix-3` is `validation-fix`): the pass breakdown's key.
+ */
+export const passLabel = (label) => (typeof label === "string" && PASS_LABEL.test(label) ? label.replace(/-\d+$/, "") : "other");
 const isFix = (kind) => /-(?:fix|fresh)$/.test(kind);
 const isAnswer = (kind) => kind === "answer" || kind.startsWith("answer-");
 
@@ -503,7 +505,7 @@ function ledgerPass(e) {
   c.unknownRuns = Number.isInteger(e.usdUnknown) && e.usdUnknown > 0 ? e.usdUnknown : usd === null ? 1 : 0;
   c.unknownWhy = c.unknownRuns ? (Array.isArray(e.usdUnknownWhy) && e.usdUnknownWhy.length ? e.usdUnknownWhy : ["unreported"]).filter((w) => Object.hasOwn(UNKNOWN_WHY, w)).sort() : [];
   const minutes = Number.isFinite(ms(e.started)) && Number.isFinite(ms(e.ended)) && ms(e.ended) >= ms(e.started) ? (ms(e.ended) - ms(e.started)) / 60_000 : null;
-  return { kind: e.decision ? "decision" : passKind(e.label), priced: usd !== null, cost: c, tokens: e.tokens || {}, minutes, decision: e.decision === true };
+  return { kind: e.decision ? "decision" : passLabel(e.label), priced: usd !== null, cost: c, tokens: e.tokens || {}, minutes, decision: e.decision === true };
 }
 
 /**
@@ -688,7 +690,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
         views.pass.add(p.kind, p.cost, p.tokens);
         const t = p.tokens;
         if (num(t.input) !== null && num(t.written) !== null) {
-          const k = cacheByKind.get(p.kind) ?? { passKind: p.kind, passes: 0, written: 0, input: 0 };
+          const k = cacheByKind.get(p.kind) ?? { passLabel: p.kind, passes: 0, written: 0, input: 0 };
           k.passes += 1;
           k.written += t.written;
           k.input += t.input;
@@ -715,7 +717,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     objectives.push(row);
   }
 
-  const rank = (items, field) => items.sort((a, b) => b[field] - a[field] || (a.issue ?? 0) - (b.issue ?? 0) || String(a.passKind ?? "").localeCompare(String(b.passKind ?? "")));
+  const rank = (items, field) => items.sort((a, b) => b[field] - a[field] || (a.issue ?? 0) - (b.issue ?? 0) || String(a.passLabel ?? "").localeCompare(String(b.passLabel ?? "")));
   const passRows = views.pass.rows().map((r) => ({ key: r.key, passes: r.stages, cost: r.cost, tokens: r.tokens, modelMinutes: passMinutes.has(r.key) ? round2(passMinutes.get(r.key)) : null }));
   const report = {
     schema: REPORT_SCHEMA,
@@ -785,7 +787,7 @@ function sourceOf(source, trust, missing, read) {
   add("unattributed", missing.unattributed, UNKNOWN_WHY.unattributed);
   add("no-record", missing.noRecord, UNKNOWN_WHY["no-record"]);
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
-  add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks (${source.artifacts.foreign}), never read as Pendulum's`);
+  add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages whose usage record has no per-pass ledger (an older record, or a local stage's spend line with no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
   add("no-version", missing.noVersion, "stages whose record names no Pendulum version (an older record, or a spend line)");
   add("issue-unread", missing.unreadIssue, "issues with Pendulum's markers that could not be read: no outcome or title for them");
@@ -842,7 +844,7 @@ export function renderReport(r) {
   const list = (title, items, line) => out.push("", `**${title}**: ${items.length ? items.map(line).join("; ") : "none"}`);
   list("Review stages", h.reviewLoops.items, (x) => `#${x.issue} ${x.reviews}`);
   list("Answer and fix passes", h.answerAndFixPasses.items, (x) => `#${x.issue} ${x.passes} (${x.answer} answer, ${x.fix} fix)`);
-  list("Cache-write share by pass kind", h.cacheWriteShare.items, (x) => `${x.passKind} ${(x.share * 100).toFixed(1)}% (${x.written} of ${x.input} input tokens)`);
+  list("Cache-write share by pass label", h.cacheWriteShare.items, (x) => `${x.passLabel} ${(x.share * 100).toFixed(1)}% (${x.written} of ${x.input} input tokens)`);
   list("Cost per model minute", h.costPerModelMinute.items, (x) => `#${x.issue} ${money(x.usdPerModelMinute)}/min ${x.billing} (${money(x.usd)} over ${x.modelMinutes} min)`);
   list("Spend in Objectives that ended Blocked or closed unmerged", h.blockedOrUnmergedSpend.items, (x) => `#${x.issue} ${x.outcome}, ${x.stages} stage(s): ${COST_KINDS.filter((k) => x.cost.usd[k]).map((k) => `${money(x.cost.usd[k])} ${k}`).join(", ") || "$0.00"}${x.cost.unknownRuns ? ` plus ${x.cost.unknownRuns} run(s) of unknown cost` : ""}`);
   const src = r.source;

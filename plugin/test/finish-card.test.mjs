@@ -345,7 +345,7 @@ test("finish card: an Actions stage's dollars come from its usage artifact; a to
     const u = new URL(url);
     asked.push(u.searchParams.get("name"));
     const name = u.searchParams.get("name");
-    return new Response(JSON.stringify(status === 200 ? { total_count: 1, artifacts: [{ id: name.length, name, expired: false, workflow_run: { id: 44 } }, { id: 9, name, expired: true, workflow_run: { id: 45 } }] } : { message: "Resource not accessible by integration" }), { status, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(status === 200 ? { total_count: 1, artifacts: [{ id: name.length, name, expired: false, workflow_run: { id: 44, repository_id: 1, head_repository_id: 1 } }, { id: 9, name, expired: true, workflow_run: { id: 45, repository_id: 1, head_repository_id: 1 } }] } : { message: "Resource not accessible by integration" }), { status, headers: { "content-type": "application/json" } });
   };
   const repo = { owner: "acme", name: "app", full: "acme/app" };
   try {

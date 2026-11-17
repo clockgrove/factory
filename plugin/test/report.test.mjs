@@ -359,7 +359,7 @@ test("report: writeUsage records each pass in result.json (the ledger), with the
   assert.deepEqual(three.passes, { total: 4, answer: 1, fix: 1 });
   assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [["work", 1, 0.2], ["validation-fix", 1, 0.1], ["answer", 1, 0.05637], ["review", 1, 0.163442]]);
   assert.deepEqual(r.hotSpots.answerAndFixPasses.items, [{ issue: 3, answer: 1, fix: 1, passes: 2 }]);
-  assert.deepEqual(r.hotSpots.cacheWriteShare.items.map((x) => [x.passKind, x.written, x.input, x.share]), [["answer", 15000, 100000, 0.15], ["review", 15000, 100000, 0.15], ["validation-fix", 15000, 100000, 0.15], ["work", 15000, 100000, 0.15]]);
+  assert.deepEqual(r.hotSpots.cacheWriteShare.items.map((x) => [x.passLabel, x.written, x.input, x.share]), [["answer", 15000, 100000, 0.15], ["review", 15000, 100000, 0.15], ["validation-fix", 15000, 100000, 0.15], ["work", 15000, 100000, 0.15]]);
   // 0.519812 over 30 + 20 + 5 + 11 seconds of passes, billed per use.
   assert.deepEqual(three.usdPerModelMinute, { api: { usd: 0.519812, modelMinutes: 1.1, passes: 4, usdPerModelMinute: Math.round((0.519812 / (66 / 60)) * 1e6) / 1e6 } });
   assert.deepEqual(r.breakdowns.version.map((x) => [x.key, x.stages]), [[PENDULUM_VERSION, 2]]);
@@ -442,12 +442,14 @@ const FORGED = { id: 999, name: "pendulum-usage-3", expired: false, workflow_run
 test("report (B1): an artifact a fork's run uploaded is never read; it is counted under its own missing code", async () => {
   const w = world();
   w.artifacts["pendulum-usage-3"].push(FORGED);
+  // One that names no repository id is not read either: the check fails closed.
+  w.artifacts["pendulum-usage-3"].push({ ...FORGED, id: 998, workflow_run: { id: 78 } });
   const { json: r, calls } = await report(w, { issue: 3 });
   assert.equal(usd(byIssue(r, 3)).api, 0.519812, "$0.52, not $500.52");
-  assert.ok(!calls.includes("DOWNLOAD 999"));
+  assert.ok(!calls.includes("DOWNLOAD 999") && !calls.includes("DOWNLOAD 998"));
   const foreign = r.source.missing.find((m) => m.code === "artifact-foreign");
   assert.deepEqual([foreign.count, foreign.issues], [1, [3]]);
-  assert.equal(r.source.read.artifacts.foreign, 1);
+  assert.equal(r.source.read.artifacts.foreign, 2);
 });
 
 test("the scorer, the finish card and the daily cap (B1): a fork's artifact of an Objective's name is no usage record", async () => {
@@ -605,7 +607,7 @@ test("report (nits): a booking two records carry counts once, on the last, as th
   const claim = "abcdef123456";
   w.artifacts["pendulum-usage-7"][0].record.vendor = { claim, usd: 0.1 };
   w.artifacts["pendulum-usage-7-review"] = [{ id: 702, name: "pendulum-usage-7-review", expired: false, workflow_run: { id: 52001, repository_id: 1, head_repository_id: 1 }, record: { harness: "claude", model: "m", usd: 0, runs: 0, exit: "skipped", ended: "2026-11-17T04:45:00Z", vendor: { claim, usd: 0.2 }, tokens: { input: null, output: null, cached: null, written: null } } }];
-  w.artifacts["pendulum-usage-8"].push({ id: 802, name: "pendulum-usage-8", expired: false });
+  w.artifacts["pendulum-usage-8"].push({ id: 802, name: "pendulum-usage-8", expired: false, workflow_run: { repository_id: 1, head_repository_id: 1 } });
   const { json: r } = await report(w, { since: "2026-11-17" });
   const scorer = costOf([{ ...w.artifacts["pendulum-usage-7"][0].record, artifact: "pendulum-usage-7" }, { ...w.artifacts["pendulum-usage-7-review"][0].record, artifact: "pendulum-usage-7-review" }], loadPrices());
   assert.equal(scorer.vendor.usd, 0.2);

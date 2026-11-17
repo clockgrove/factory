@@ -249,7 +249,7 @@ console.log(JSON.stringify({ type: "result", sessionId: "s" + n, exitCode: 0, us
 test("an Actions stage killed before it wrote result.json counts toward daily_usd as a run of unknown cost, never dropped", async () => {
   const { todaysUsage } = await import("../scripts/lib/github.mjs");
   const today = new Date().toISOString();
-  const artifact = (id, name) => ({ id, name, expired: false, created_at: today, workflow_run: { id: 1000 + id } });
+  const artifact = (id, name) => ({ id, name, expired: false, created_at: today, workflow_run: { id: 1000 + id, repository_id: 1, head_repository_id: 1 } });
   const server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ total_count: 2, artifacts: [artifact(1, "pendulum-usage-7"), artifact(2, "pendulum-usage-8")] }));

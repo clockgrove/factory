@@ -526,6 +526,17 @@ test("a stage that ends its child still counts its spend; a token request names 
   const ask = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "token", ask: 1794175200 } });
   assert.equal(ask.ask, 1794175200);
   assert.equal(launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "ended", ask: 5 } }).ask, null);
+  // #538: a cross-OS ask names its head, and only a running work stage's is answered (cross-os.test.mjs runs it whole).
+  const sha = "b".repeat(40);
+  const cross = launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "cross-os", ask: 7, sha, workflow: "ci.yml", ref: "pendulum/9" } });
+  assert.deepEqual([cross.want, cross.ask, cross.sha, cross.workflow, cross.ref], ["cross-os", 7, sha, "ci.yml", "pendulum/9"]);
+  assert.match(launchEvent("repository_dispatch", { action: "pendulum-stage", client_payload: { issue: 9, claim: "abc", want: "cross-os", ask: 7 } }).skip, /without its ask or head/);
+  const rec = (stage, state = "running", leaseUntil = new Date(Date.now() + 60_000).toISOString()) => ({ claim: "abc", stage, state, leaseUntil });
+  assert.deepEqual(launchDecision({ ev: cross, state: "Running", record: rec("work"), fromSelf: true }), { crossOs: true });
+  assert.match(launchDecision({ ev: cross, state: "In review", record: rec("review"), fromSelf: true }).skip, /no work stage runs/);
+  assert.match(launchDecision({ ev: cross, state: "Running", record: rec("work", "ended"), fromSelf: true }).skip, /no work stage runs/);
+  assert.match(launchDecision({ ev: cross, state: "Running", record: rec("work", "running", new Date(Date.now() - 1000).toISOString()), fromSelf: true }).skip, /its lease ran out/);
+  assert.match(launchDecision({ ev: cross, state: "Running", record: rec("work"), fromSelf: false }).skip, /did not send/);
 });
 
 test("vendor session cap: a stage the session cut Blocks naming the vendor's cap; doctor does not guess the plan's cap", async () => {

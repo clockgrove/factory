@@ -5,9 +5,13 @@
 // validationLoop). A red leg goes to the fix pass like any validation red. The same mechanism serves every route: CI on
 // the pushed branch, since neither a local machine nor a cloud sandbox runs macOS or Windows itself. Pendulum never infers
 // a leg from a job's name: only the names the repository lists count. Off by default, since macOS and Windows runner
-// minutes bill at a higher rate than Linux ones.
+// minutes bill at a higher rate than Linux ones. A cloud sandbox stage holds only the App's token, which has no Actions
+// write: it asks its launcher job to dispatch the run (launcherRelay, stage.mjs, launch.mjs relayCrossOs), as it asks
+// for fresh tokens, and the launcher dispatches exactly the configured workflow on the stage's own branch and head with
+// its job token (launcherDispatch), then hands the run's id back.
 import { backend } from "./backend.mjs";
 import { githubNow, rest } from "./github.mjs";
+import { BLOCK_CAUSES } from "./logic.mjs";
 import { parseYaml, workflowEvents, writeGrants } from "./yaml.mjs";
 
 /** A workflow file in .github/workflows, by its file name: what GitHub's workflow dispatch takes. */
@@ -29,21 +33,24 @@ export function crossOs(inputs = {}) {
   return { setting: { workflow, checks, waitMs: inputs.crossOsWaitMs }, problem: null };
 }
 
-/** Where this stage runs, for a refused dispatch's fix: `local`, `sandbox` (a cloud sandbox stage) or `actions`. */
+/**
+ * Where this stage runs: `local`, `sandbox` (a cloud sandbox stage, whose launcher dispatches the run) or `actions`;
+ * it also names a refused dispatch's fix.
+ */
 export const crossOsRoute = (env = process.env) => (backend(env).name === "local" ? "local" : env.PENDULUM_STAGE_SANDBOX === "1" ? "sandbox" : "actions");
 
 /**
  * A refused workflow dispatch (`e`, rest's error) as the stage's Block: {reason, cause}. A 403 is the token's missing
- * Actions write (the cloud sandbox's App token has none, and Pendulum's App does not ask for it); a 404 no such workflow
- * file on the default branch; a 422 GitHub's refusal of the dispatch itself (a workflow with no `workflow_dispatch`
- * trigger); any of them a setup gap. A throttled call is the provider's quota; anything else (5xx, the network) an outage.
+ * Actions write (on the sandbox route the launcher's job token: launcherDispatch); a 404 no such workflow file on the
+ * default branch; a 422 GitHub's refusal of the dispatch itself (a workflow with no `workflow_dispatch` trigger); any of
+ * them a setup gap. A throttled call is the provider's quota; anything else (5xx, the network) an outage.
  */
 export function dispatchRefusal(e, { workflow, branch, route = "actions" }) {
   const status = e?.status ?? null;
   const head = `cross-OS CI: GitHub refused to run ${workflow} on ${branch}${status ? ` (${status})` : ""}`;
   if (e?.rateLimited) return { reason: `${head}: rate limited; re-apply the label once the limit resets`, cause: "provider-quota" };
   if (status === 403) {
-    const fix = route === "sandbox" ? "a cloud sandbox stage holds the App's token, which has no Actions write, and Pendulum's App does not ask for one: run this repository's Objectives on Actions or locally, or turn cross-OS CI off (empty cross_os_workflow)" : route === "local" ? "give the repository token Actions read and write" : "give the workflow's work job `actions: write`";
+    const fix = route === "sandbox" ? "the launcher dispatches it for a cloud sandbox stage with its job token: give the workflow's launch-event job `actions: write`" : route === "local" ? "give the repository token Actions read and write" : "give the workflow's work job `actions: write`";
     return { reason: `${head}: the token cannot dispatch a workflow (Actions write); ${fix}, then re-apply the label`, cause: "setup" };
   }
   if (status === 404) return { reason: `${head}: no workflow .github/workflows/${workflow} on the default branch; fix cross_os_workflow, then re-apply the label`, cause: "setup" };
@@ -93,10 +100,12 @@ const NOT_RUN = ["skipped", "neutral"];
 /**
  * The checks the cross-OS loop waits for (session.mjs validationLoop's `checks`): the legs, read with `token` (the
  * check runs) and `actionsToken` (the workflow file, its runs, the jobs, a rerun, the dispatch), and these hooks:
- * - `request(sha)`, before the wait on a head: the named workflow as `sha` has it must pass workflowProblem; a dispatched,
- *   not cancelled run of it on `sha` is reused; else the workflow is dispatched on `branch`, asking for the run's details
+ * - `request(sha, {remainingMs})`, before the wait on a head (`remainingMs`: what is left of the stage's wall clock):
+ *   the named workflow as `sha` has it must pass workflowProblem; a dispatched, not cancelled run of it on `sha` is reused; else the workflow is dispatched on `branch`, asking for the run's details
  *   (`return_run_details`: GitHub then answers 200 with the run's id, which must be on `sha`; an answer without one, 204,
- *   leaves the run to be found on `sha`, created at or after the dispatch). {ok},
+ *   leaves the run to be found on `sha`, created at or after the dispatch). On the sandbox route `relay` (launcherRelay)
+ *   asks the launcher for all of that (launcherDispatch), within RELAY_WAIT_MS and the wall clock, and takes the run's
+ *   id and check suite from its answer. {ok},
  *   or {refused: {reason, cause}}.
  * - `select(sha, checkRuns)`: only the check runs of that workflow run's check suites count (a rerun's suite included),
  *   so a check of the same name from another workflow or event on the head never stands for a leg.
@@ -106,7 +115,7 @@ const NOT_RUN = ["skipped", "neutral"];
  *   failure skips a leg; else setup), or null.
  * - `resultLine(sha, runs)` (legsLine), `boundMs` (the wait on one head) and `boundText`.
  */
-export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, actionsToken = token, stall, route = crossOsRoute(), now = githubNow }) {
+export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, actionsToken = token, stall, route = crossOsRoute(), relay = route === "sandbox" ? launcherRelay() : null, now = githubNow }) {
   const { workflow } = setting;
   const actions = { token: actionsToken };
   // Per head: the run ({id, suites, since, run}), once requested.
@@ -152,7 +161,7 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
     workflow,
     boundMs: setting.waitMs,
     boundText: `the cross-OS wait on this head reached its bound, ${Math.round(setting.waitMs / 60_000)} min (cross_os_wait_minutes)`,
-    request: async (sha) => {
+    request: async (sha, { remainingMs: left = Infinity } = {}) => {
       if (heads.has(sha)) return { ok: true, again: true };
       // The copy of the workflow a dispatched run on this head runs.
       let doc;
@@ -164,6 +173,24 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
       const problem = workflowProblem(doc, workflow);
       if (problem) return refused(`${problem}; fix the workflow, then re-apply the label`);
       const h = { id: null, run: null, suites: new Set(), since: 0 };
+      // A cloud sandbox stage: its launcher dispatches the run (or reuses one on the head) and names it.
+      if (route === "sandbox") {
+        h.since = Math.floor(now() / 1000) * 1000;
+        // The relay's own bound, within what is left of the stage's wall clock.
+        const boundMs = Math.min(RELAY_WAIT_MS, Number.isFinite(left) ? left : Infinity);
+        const a = relay ? await relay({ workflow, ref: branch, sha, boundMs }) : null;
+        if (!a) return refused(`the stage has no channel to its launcher, which dispatches the run for a cloud sandbox stage; re-apply the label`, "pendulum");
+        if (a.timedOut) return refused(`the launcher gave no run for the stage's request to run ${workflow} on ${sha.slice(0, 7)} within ${Math.round(boundMs / 60_000)} min; check the workflow's launch-event job runs, then re-apply the label`, "outage");
+        if (a.refused) return { refused: a.refused };
+        heads.set(sha, h);
+        if (a.run) {
+          h.id = a.run;
+          // The run as the launcher read it: its id, head and check suite, so its legs count without an Actions read here.
+          h.run = { id: a.run, head_sha: sha, check_suite_id: a.suite };
+          if (a.suite) h.suites.add(a.suite);
+        }
+        return { ok: true, [a.reused ? "reused" : "dispatched"]: h.id, via: "launcher" };
+      }
       // A run dispatched on this head already (a stage that ended while it waited, a second loop on the head), reused.
       const before = newest((await listRuns(sha).catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha)));
       if (before) {
@@ -209,4 +236,176 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
     },
     resultLine: (sha, runs) => legsLine({ workflow, names: setting.checks, sha, runs }),
   };
+}
+
+// ------------------------------------------------------------------ the sandbox route: the launcher dispatches
+// The stage (worker.mjs, a child of stage.mjs) asks over its IPC channel; stage.mjs sends the ask as a repository
+// dispatch (`pendulum-stage`, `want: cross-os`); the launcher (launch.mjs relayCrossOs) runs launcherDispatch with its
+// job token and hands the answer to stage.mjs over its socket (stage.mjs --deliver), which passes it on to the child.
+
+const SHA = /^[0-9a-f]{40}$/;
+const id = (v) => (Number.isSafeInteger(v) && v > 0 ? v : null);
+/** How long the stage waits for its launcher's answer before it asks again: a pending launch can be replaced (ADAPTERS.md). */
+export const RELAY_RETRY_MS = 5 * 60_000;
+/** How soon the stage asks again after an answer that names no run it can wait on (`again`, or a run with no check suite). */
+export const RELAY_AGAIN_MS = 30_000;
+/** The longest the stage waits for a usable answer on one head, within its wall clock: the relay's own bound. */
+export const RELAY_WAIT_MS = 20 * 60_000;
+
+/**
+ * What the stage asks its launcher for, from the child's IPC message `m` ({type: "pendulum-cross-os-ask", workflow,
+ * ref, sha, ask}): the dispatch's extra client-payload fields, or null when `m` is not one. Only plain shapes pass; the
+ * launcher decides whether the workflow and the ref are the ones it may dispatch.
+ */
+export function crossOsAsk(m) {
+  if (m?.type !== "pendulum-cross-os-ask" || !SHA.test(String(m.sha)) || !id(m.ask)) return null;
+  const plain = (v, n) => (typeof v === "string" && v.length <= n ? v : "");
+  return { ask: m.ask, sha: m.sha, workflow: plain(m.workflow, 200), ref: plain(m.ref, 255) };
+}
+
+/**
+ * The launcher's answer as the stage takes it (`a`, from the socket): {sha, run, suite, reused} with the run's id and
+ * check suite (either null when the launcher could not name them), {sha, again: true} (GitHub's reads or the dispatch
+ * failed for now: ask again), or {sha, refused: {reason, cause}}; null when `a` is not one.
+ */
+export function crossOsAnswer(a) {
+  if (!a || typeof a !== "object" || !SHA.test(String(a.sha))) return null;
+  if (a.refused) {
+    const reason = typeof a.refused.reason === "string" && a.refused.reason ? a.refused.reason.slice(0, 600) : "cross-OS CI: the launcher refused the dispatch";
+    return { sha: a.sha, refused: { reason, cause: Object.hasOwn(BLOCK_CAUSES, a.refused.cause) ? a.refused.cause : "pendulum" } };
+  }
+  if (a.again === true) return { sha: a.sha, again: true };
+  return { sha: a.sha, run: id(a.run), suite: id(a.suite), reused: a.reused === true };
+}
+
+/**
+ * The stage's side of the relay: `relay({workflow, ref, sha, boundMs})` sends the ask to stage.mjs over `send` (the
+ * IPC channel) and resolves with the launcher's answer for `sha` (crossOsAnswer) once it is final: a refusal, or a run
+ * with its check suite, which is what the stage waits on with no Actions read of its own. An answer that names neither
+ * (`again`, a run with no suite, no run) is asked again after `againMs`, when the launcher reuses the run it made; an
+ * ask with no answer, after `retryMs`. Past `boundMs`, {timedOut: true}. Each ask names itself (`ask`, ms), so the
+ * launcher answers each once. Null without a channel.
+ */
+export function launcherRelay({ send = typeof process.send === "function" ? process.send.bind(process) : null, on = process, retryMs = RELAY_RETRY_MS, againMs = RELAY_AGAIN_MS, clock = Date.now } = {}) {
+  if (!send) return null;
+  return ({ workflow, ref, sha, boundMs }) =>
+    new Promise((resolve) => {
+      const started = clock();
+      let timer = null;
+      let last = 0;
+      const done = (v) => {
+        clearTimeout(timer);
+        on.removeListener("message", listen);
+        resolve(v);
+      };
+      const later = (ms) => {
+        clearTimeout(timer);
+        timer = setTimeout(ask, Math.min(ms, Math.max(1, started + boundMs - clock())));
+      };
+      function listen(m) {
+        if (m?.type !== "pendulum-cross-os") return;
+        const a = crossOsAnswer(m);
+        if (a?.sha !== sha) return;
+        if (a.refused || (a.run && a.suite)) done(a);
+        else later(againMs);
+      }
+      function ask() {
+        if (clock() - started >= boundMs) return done({ timedOut: true });
+        last = Math.max(clock(), last + 1);
+        try {
+          send({ type: "pendulum-cross-os-ask", workflow, ref, sha, ask: last });
+        } catch {
+          // The channel closed: the next ask, or the bound, ends the wait.
+        }
+        later(retryMs);
+      }
+      on.on("message", listen);
+      ask();
+    });
+}
+
+/**
+ * The launcher's dispatch for a sandbox stage of Objective `issue` that asked (`ask`: {workflow, ref, sha}): the answer
+ * crossOsAnswer reads. Only the configured workflow (crossOs(inputs)) on the stage's own branch `pendulum/<issue>`, and
+ * only while that branch is at `sha`: anything else is refused, and what is dispatched is the launcher's own setting and
+ * branch name, never the ask's. The workflow as `sha` has it must pass workflowProblem. A dispatched, not cancelled run
+ * of it on `sha` is reused; else it is dispatched with `actionsToken` (the launch job's token, Actions write), the run
+ * GitHub names checked to be on `sha` and read (`tries` reads, `pauseMs` apart) until it names its check suite, or found
+ * on `sha` when GitHub names none. `token` (the App's) reads the branch and the workflow file. A read or a dispatch that
+ * failed for now (no status, 5xx, rate limited: every call here throws at once, `noRateWait`) is no answer of its own:
+ * {again}, and the stage asks again, when a run the failed dispatch made anyway is reused.
+ */
+export async function launcherDispatch({ inputs, repo, issue, ask = {}, token, actionsToken, now = githubNow, tries = 3, pauseMs = 5000 }) {
+  const sha = SHA.test(String(ask.sha)) ? ask.sha : null;
+  const branch = `pendulum/${issue}`;
+  const no = (reason, cause = "pendulum") => ({ sha: sha ?? "0".repeat(40), refused: { reason: `cross-OS CI: ${reason}`, cause } });
+  const again = { sha, again: true };
+  const passing = (e) => !e?.status || e.status >= 500 || !!e.rateLimited;
+  const pause = () => new Promise((r) => setTimeout(r, pauseMs));
+  const { setting } = crossOs(inputs);
+  if (!setting) return no("the launcher's settings have cross-OS CI off (cross_os_workflow, cross_os_checks), so it dispatches nothing; set both in the workflow's env block, then re-apply the label", "setup");
+  const { workflow } = setting;
+  // A stage that read another setting than the launcher's (cross_os_workflow changed while it ran) asks for another file.
+  if (ask.workflow !== workflow) return no(`the stage asked the launcher for another workflow than ${workflow}, the one cross_os_workflow names in the launcher's settings and the only one it dispatches; when that setting changed while the stage ran, re-apply the label`, "setup");
+  if (ask.ref !== branch) return no(`the stage asked the launcher for another ref than its branch ${branch}, the only one it dispatches on; re-apply the label`);
+  if (!sha) return no(`the stage asked the launcher with no head; re-apply the label`);
+  if (!actionsToken) return no(`the launch job has no token of its own (github_token) to dispatch ${workflow} with; give the workflow's launch-event job \`actions: write\`, then re-apply the label`, "setup");
+  const app = { token, noRateWait: true };
+  const actions = { token: actionsToken, noRateWait: true };
+  let head;
+  try {
+    head = (await rest(`repos/${repo.full}/git/ref/heads/${branch}`, app))?.object?.sha ?? null;
+  } catch (e) {
+    if (passing(e)) return again;
+    if (e.status !== 404) return no(`${branch} could not be read (${e.status}); re-apply the label`, "setup");
+    head = null;
+  }
+  if (head !== sha) return no(`${branch} is ${head ? `at ${head.slice(0, 7)}` : "gone"}, not at ${sha.slice(0, 7)}, the head the stage asked for: the branch moved; re-apply the label`);
+  let doc;
+  try {
+    doc = parseYaml(String(await rest(`repos/${repo.full}/contents/.github/workflows/${encodeURIComponent(workflow)}?ref=${sha}`, { ...app, raw: "Accept: application/vnd.github.raw+json" })));
+  } catch (e) {
+    if (passing(e)) return again;
+    return e.status === 404 ? no(`no workflow .github/workflows/${workflow} on ${sha.slice(0, 7)}; fix cross_os_workflow, then re-apply the label`, "setup") : no(`.github/workflows/${workflow} could not be read on ${sha.slice(0, 7)} (${e.status})`, "setup");
+  }
+  const problem = workflowProblem(doc, workflow);
+  if (problem) return no(`${problem}; fix the workflow, then re-apply the label`, "setup");
+  const listRuns = async () => ((await rest(`repos/${repo.full}/actions/runs?head_sha=${sha}&event=workflow_dispatch&per_page=100`, actions)) || {}).workflow_runs || [];
+  const newest = (runs) => runs.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || b.id - a.id)[0] || null;
+  // A run dispatched on this head already (an earlier ask whose answer was lost or named no suite, a second launcher):
+  // reused. A list that cannot be read dispatches nothing, so no second run is made beside one it did not see.
+  let runs;
+  try {
+    runs = await listRuns();
+  } catch (e) {
+    return passing(e) ? again : no(`the launch job's token could not list ${workflow}'s runs (${e.status}); give the workflow's launch-event job \`actions: write\`, then re-apply the label`, "setup");
+  }
+  const before = newest(runs.filter((w) => dispatchedRun(w, workflow, sha)));
+  if (before) return { sha, run: before.id, suite: id(before.check_suite_id), reused: true };
+  const since = Math.floor(now() / 1000) * 1000;
+  let made;
+  try {
+    made = await rest(`repos/${repo.full}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, { ...actions, method: "POST", body: { ref: branch, return_run_details: true } });
+  } catch (e) {
+    return passing(e) ? again : { sha, refused: dispatchRefusal(e, { workflow, branch, route: "sandbox" }) };
+  }
+  const runId = id(Number(made?.workflow_run_id));
+  if (runId) {
+    // The run as GitHub has it: on the head, and with its check suite once GitHub made it.
+    let run = null;
+    for (let i = 0; i < tries && !id(run?.check_suite_id); i += 1) {
+      if (i) await pause();
+      run = (await rest(`repos/${repo.full}/actions/runs/${runId}`, actions).catch(() => null)) ?? run;
+      // GitHub made it on another head (the branch moved after the read above): refused, and left to finish.
+      if (run?.head_sha && run.head_sha !== sha) return no(`the run GitHub made (${runId}) is on ${String(run.head_sha).slice(0, 7)}, not on ${sha.slice(0, 7)}: ${branch} moved; re-apply the label`);
+    }
+    return { sha, run: runId, suite: id(run?.check_suite_id) };
+  }
+  // GitHub named no run (204): the head's dispatched run made since the dispatch, read a few times while GitHub makes it.
+  for (let i = 0; i < tries; i += 1) {
+    if (i) await pause();
+    const run = newest((await listRuns().catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha) && Date.parse(w.created_at) >= since));
+    if (run) return { sha, run: run.id, suite: id(run.check_suite_id) };
+  }
+  return { sha, run: null, suite: null };
 }

@@ -1,14 +1,19 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import net from "node:net";
+import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { decideExit } from "../scripts/lib/logic.mjs";
+import { decideExit, sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
+import { launchOne } from "../scripts/launch.mjs";
+import { readHandOver, stageDispatchBody } from "../scripts/stage.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { WORKFLOW_ONLY_SETTINGS, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { crossOs, crossOsChecks, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
+import { crossOs, crossOsAsk, crossOsChecks, launcherDispatch, launcherRelay, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { workValidation } from "../scripts/lib/session.mjs";
@@ -44,13 +49,15 @@ const CI = "name: CI\non:\n  pull_request:\n  workflow_dispatch:\npermissions:\n
  *   `legs(sha, 2)`), as a re-dispatch or the workflow's concurrency group would.
  * The head a dispatch runs on is the checkout's HEAD then.
  */
-async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, replaced = false, log }, fn) {
+async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, replaced = false, appActions = true, record = null, branchAt = null, log }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
-  const seen = { dispatches: [], heads: new Map() };
+  // `tokens`: the token of each workflow dispatch; `stageAsks`: the stage's repository dispatches to its launcher.
+  const seen = { dispatches: [], tokens: [], heads: new Map(), stageAsks: [], locks: new Set() };
   let ids = 100;
   const json = (b, status = 200) => new Response(status === 204 ? null : JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+  const headOf = () => execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const runOf = (sha, h) => {
     const checks = Object.entries(legs(sha, h.n)).map(([name, s], i) => ({ id: h.id * 10 + i, name, status: s.status, conclusion: s.conclusion ?? null, check_suite: { id: h.id }, app: { slug: "github-actions", id: 15368 }, started_at: new Date(h.at).toISOString(), completed_at: s.status === "completed" ? new Date().toISOString() : null }));
     const done = checks.every((c) => c.status === "completed");
@@ -60,9 +67,32 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     const p = u.pathname;
+    const token = String(init.headers?.Authorization || "").replace(/^Bearer /, "");
+    // The cloud sandbox's App token (`t`) with no Actions permission: GitHub refuses its every Actions call.
+    if (!appActions && token === "t" && p.startsWith(`/repos/${REPO.full}/actions/`)) return json({ message: "Resource not accessible by integration" }, 403);
+    if (record && p === "/graphql") return json({ data: /defaultBranchRef/.test(JSON.parse(String(init.body)).query) ? { repository: { id: "R_1", defaultBranchRef: { target: { tree: { oid: "e".repeat(40) } } } } } : {} });
+    if (record) {
+      // The launcher's reads and its lock: the Objective, its sandbox record, its branch.
+      if (p === `/repos/${REPO.full}/issues/4`) return json({ number: 4, state: "open", user: { login: "maintainer", type: "User" }, labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }] });
+      if (p === `/repos/${REPO.full}/issues/4/comments`) return json([{ id: 9, user: { login: "pendulum-app[bot]", type: "Bot" }, body: `<!-- pendulum:4:sandbox -->\n${sandboxMarkerLine(record)}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]);
+      if (p === `/repos/${REPO.full}/issues/4/timeline` || p === `/repos/${REPO.full}/pulls`) return json([]);
+      if (p === `/repos/${REPO.full}/git/commits` && init.method === "POST") return json({ sha: (ids += 1).toString(16).padStart(40, "c") }, 201);
+      if (p === `/repos/${REPO.full}/git/refs` && init.method === "POST") {
+        const { ref } = JSON.parse(String(init.body));
+        if (seen.locks.has(ref)) return json({ message: "Reference already exists" }, 422);
+        seen.locks.add(ref);
+        return json({ ref }, 201);
+      }
+      if (p === `/repos/${REPO.full}/git/ref/heads/pendulum/4`) return json({ ref: "refs/heads/pendulum/4", object: { sha: branchAt ?? headOf(), type: "commit" } });
+      if (p === `/repos/${REPO.full}/dispatches` && init.method === "POST") {
+        seen.stageAsks.push(JSON.parse(String(init.body)));
+        return json(null, 204);
+      }
+    }
     if (p === `/repos/${REPO.full}/actions/workflows/ci.yml/dispatches` && init.method === "POST") {
       const body = JSON.parse(String(init.body));
       seen.dispatches.push(body);
+      seen.tokens.push(token);
       const status = dispatch === "auto" ? (body.return_run_details === true ? 200 : 204) : dispatch;
       if (![200, 204].includes(status)) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
       const sha = execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -121,7 +151,7 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
  * milliseconds. `progress`: the stage's progress check (decision route off), shared by the loops as worker.mjs's is.
  * Returns the result, the phases and GitHub's events in one log (`log`), the prompts, the dispatches and the final head.
  */
-async function stage({ settings = {}, commands = [], github = {}, checks = {}, route = "actions", progress = false }) {
+async function stage({ settings = {}, commands = [], github = {}, checks = {}, route = "actions", relay = undefined, progress = false }) {
   const root = mkdtempSync(join(tmpdir(), "cross-os-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -158,14 +188,14 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, 
   try {
     const inputs = resolveInputs({ env: { ...settings, PENDULUM_DECISION_ROUTE: "off" } });
     const set = crossOs(inputs);
-    const cross = set.setting || set.problem ? { problem: set.problem, checks: set.setting ? { ...crossOsChecks({ setting: set.setting, repo: REPO, issue: 4, prNumber: 5, branch: "pendulum/4", token: "t", route }), appearMs: 60_000, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks } : null } : null;
+    const cross = set.setting || set.problem ? { problem: set.problem, checks: set.setting ? { ...crossOsChecks({ setting: set.setting, repo: REPO, issue: 4, prNumber: 5, branch: "pendulum/4", token: "t", route, ...(relay !== undefined ? { relay } : {}) }), appearMs: 60_000, pollMs: 1, maxPollMs: 4, stuckWaitMs: 40, guardMs: 0, ...checks } : null } : null;
     return await withGitHub({ work, legs: () => ({}), ...github, log }, async (seen) => {
       const result = await workValidation({ checkout: work, commands, checks: null, harness: "codex", model: "gpt-6.1-sol", maxUsd: 0, spentUsd: 0, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl"), onPhase: async (l) => log.push(l), handOff: false, ...(progress ? { progressCheck: openProgressCheck({ inputs, stage: null }) } : {}) }, cross);
       let made = [];
       try {
         made = readFileSync(prompts, "utf8").trim().split("\n").map((l) => JSON.parse(l));
       } catch {}
-      return { result, log, phases: log, prompts: made, dispatches: seen.dispatches, head: g("rev-parse", "HEAD").trim() };
+      return { result, log, phases: log, prompts: made, dispatches: seen.dispatches, tokens: seen.tokens, head: g("rev-parse", "HEAD").trim() };
     });
   } finally {
     process.env.PATH = path;
@@ -308,9 +338,9 @@ test("#518 S3: the bound is the head's, from its first wait: a leg still running
 });
 
 test("#518: a refused dispatch, or a workflow that grants write, Blocks as a setup gap naming the fix", async () => {
-  const r = await stage({ settings: ON, github: { dispatch: 403 }, route: "sandbox" });
+  const r = await stage({ settings: ON, github: { dispatch: 403 }, route: "actions" });
   assert.equal(r.result.stuck.cause, "setup");
-  assert.match(r.result.stuck.reason, /^cross-OS CI: GitHub refused to run ci\.yml on pendulum\/4 \(403\): the token cannot dispatch a workflow \(Actions write\); a cloud sandbox stage holds the App's token, which has no Actions write, and Pendulum's App does not ask for one/);
+  assert.match(r.result.stuck.reason, /^cross-OS CI: GitHub refused to run ci\.yml on pendulum\/4 \(403\): the token cannot dispatch a workflow \(Actions write\); give the workflow's work job `actions: write`, then re-apply the label$/);
   const no = await stage({ settings: ON, github: { workflow: "on: [pull_request]\njobs: {}\n" } });
   assert.match(no.result.stuck.reason, /^cross-OS CI: \.github\/workflows\/ci\.yml has no workflow_dispatch trigger/);
   assert.deepEqual(no.dispatches, []);
@@ -331,7 +361,7 @@ test("#518: half a setting Blocks once the other validation is green; the legs a
   assert.equal(legsLine({ workflow: "ci.yml", names: [MAC, WIN], sha: "a".repeat(40), runs: [] }), `cross-OS CI (ci.yml) on aaaaaaa: ${MAC}: not reported; ${WIN}: not reported`);
 });
 
-test("#518 S1: doctor's row: the cost while on; no dispatch trigger, write permissions at the top or on a job, or a cloud sandbox FAIL", () => {
+test("#518 S1: doctor's row: the cost while on; no dispatch trigger or write permissions at the top or on a job FAIL", () => {
   const inputs = resolveInputs({ env: ON });
   const on = crossOsRow(inputs, { doc: parseYaml(CI), route: "actions" });
   assert.equal(on.status, "PASS");
@@ -341,7 +371,12 @@ test("#518 S1: doctor's row: the cost while on; no dispatch trigger, write permi
   assert.equal(crossOsRow(inputs, { doc: parseYaml("on: [workflow_dispatch]\npermissions: write-all\njobs: {}\n") }).status, "FAIL");
   assert.match(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      actions: write\n`) }).detail, /grants write \(job test\)/);
   assert.equal(workflowProblem(parseYaml("on: workflow_dispatch\njobs:\n  t:\n    permissions:\n      contents: read\n"), "ci.yml"), null);
-  assert.equal(crossOsRow(inputs, { doc: parseYaml(CI), route: "sandbox" }).status, "FAIL");
+  // #538: the cloud sandbox route dispatches through its launcher: a PASS naming the launch-event job's token, and the
+  // write-grant check on the dispatched workflow holds there too.
+  const sandbox = crossOsRow(inputs, { doc: parseYaml(CI), route: "sandbox" });
+  assert.equal(sandbox.status, "PASS");
+  assert.match(sandbox.detail, /with the launch-event job's `actions: write`: the launcher dispatches it for the sandbox stage/);
+  assert.equal(crossOsRow(inputs, { doc: parseYaml(`${CI}    permissions:\n      contents: write\n`), route: "sandbox" }).status, "FAIL");
   assert.equal(crossOsRow(resolveInputs({ env: { PENDULUM_CROSS_OS_CHECKS: LEGS } }), {}).status, "FAIL");
 });
 
@@ -354,5 +389,170 @@ test("#518 with #517: the cross-OS loop's fix and fresh passes are fix passes on
   for (const l of ["cross-os-validation-scope-1", "cross-os-validation-fresh-scope-1"]) {
     assert.equal(passKind(l), null, l);
     assert.doesNotMatch(passLabel(l), /-(?:fix|fresh)$/, "no fix pass in the report either");
+  }
+});
+
+// #538: the cloud sandbox route. The stage holds only the App's token, which has no Actions write: it asks its launcher
+// job, as it asks for fresh tokens, and the launcher dispatches exactly the configured workflow on the stage's own branch
+// and head with its job token, then hands the run's id back over the stage's socket.
+
+const STAGE = join(import.meta.dirname, "..", "scripts", "stage.mjs");
+const CLAIM = "0123456789ab";
+const VM_HOME = "/home/vercel-sandbox";
+const BOT = { login: "pendulum-app[bot]", type: "Bot" };
+const RECORD = { vendor: "vercel", stage: "work", state: "running", claim: CLAIM, id: "pendulum-x1", home: VM_HOME, at: new Date().toISOString(), leaseUntil: new Date(Date.now() + 3_600_000).toISOString(), launches: [] };
+
+/**
+ * The relay as a sandbox stage runs it: the worker's ask (launcherRelay, `on` standing for its IPC channel) passes
+ * stage.mjs's own check (crossOsAsk) and becomes its repository dispatch (stageDispatchBody), which `rewrite` may change
+ * as a sandbox that holds the App's token could; the real launcher (launchOne) answers it with a fake vendor whose `run`
+ * starts the real `stage.mjs --deliver` in a home whose socket reads each hand-over as the stage does (readHandOver) and
+ * passes its messages back over `on`. `out`: the launches, the vendor runs and the hand-overs.
+ */
+async function sandboxRelay({ settings = ON, rewrite = (b) => b, retryMs } = {}) {
+  const home = mkdtempSync(join(tmpdir(), "vm-"));
+  mkdirSync(join(home, "pendulum"), { mode: 0o700 });
+  const on = new EventEmitter();
+  const out = { launches: [], runs: [], handed: [] };
+  const server = net.createServer((c) => {
+    let buf = "";
+    c.on("data", (d) => (buf += d));
+    c.on("end", () => {
+      const h = readHandOver(buf, CLAIM);
+      out.handed.push(h);
+      for (const m of h?.messages || []) on.emit("message", m);
+    });
+  });
+  await new Promise((r) => server.listen(join(home, "pendulum", "stage.sock"), r));
+  const adapter = {
+    run: async (id, spec) => {
+      out.runs.push({ id, argv: spec.argv, env: spec.env });
+      assert.deepEqual(spec.argv.slice(0, 2), ["node", `${VM_HOME}/pendulum/plugin/scripts/stage.mjs`]);
+      await promisify(execFile)(process.execPath, [STAGE, ...spec.argv.slice(2)], { env: { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR, ...spec.env } });
+      return { exitCode: 0, timedOut: false, durationMs: 1 };
+    },
+  };
+  const inputs = { ...resolveInputs({ env: { ...settings, PENDULUM_SANDBOX: "vercel" } }), repo: REPO.full, appToken: "t", githubToken: "job" };
+  const launch = async (body) => {
+    setSelf(BOT.login);
+    try {
+      return await launchOne({ inputs, eventName: "repository_dispatch", payload: { action: body.event_type, client_payload: body.client_payload, sender: BOT }, repoId: "1", adapter });
+    } finally {
+      setSelf(null);
+    }
+  };
+  const send = (m) => {
+    const ask = crossOsAsk(m);
+    if (!ask) return;
+    const { ask: at, ...more } = ask;
+    const body = rewrite(stageDispatchBody({ issue: 4, claim: CLAIM, want: "cross-os", ask: at, more }));
+    pending.push(new Promise((r) => setImmediate(r)).then(() => launch(body)).then((x) => out.launches.push(x), (e) => out.launches.push({ error: e.message })));
+  };
+  const pending = [];
+  // `settled()`: every launch the stage's asks started, finished (a launch ends after its hand-over reached the stage).
+  return { relay: launcherRelay({ send, on, ...(retryMs ? { retryMs } : {}) }), launch, out, settled: () => Promise.all(pending), close: () => (server.close(), rmSync(home, { recursive: true, force: true })) };
+}
+
+const bothGreen = () => ({ [MAC]: green, [WIN]: green });
+// A same-name check of a pull_request run in another check suite, failed: it never stands for the dispatched run's leg.
+const prRed = () => [{ id: 1, name: WIN, status: "completed", conclusion: "failure", check_suite: { id: 7 }, app: { slug: "github-actions", id: 15368 }, started_at: new Date(Date.now() + 60_000).toISOString(), completed_at: new Date().toISOString() }];
+
+test("#538: a cloud sandbox stage asks its launcher, which dispatches the configured workflow on the stage's branch with its own token; the stage gets the run's id and waits on that run's legs, with no Actions read of its own", async () => {
+  const s = await sandboxRelay();
+  try {
+    const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, legs: bothGreen, pr: prRed } });
+    assert.equal(r.result.green, true, `${r.log.join("\n")}\n${JSON.stringify(s.out)}`);
+    assert.deepEqual(r.dispatches, [{ ref: "pendulum/4", return_run_details: true }]);
+    assert.deepEqual(r.tokens, ["job"], "the launch job's token, never the App's");
+    await s.settled();
+    assert.deepEqual(s.out.launches.map((l) => l.exit), ["cross-os"]);
+    assert.equal(s.out.runs[0].id, RECORD.id);
+    const answer = JSON.parse(s.out.runs[0].env.PENDULUM_STAGE_CROSS_OS);
+    assert.equal(answer.sha, r.head);
+    assert.ok(Number.isSafeInteger(answer.run) && answer.run > 0, JSON.stringify(answer));
+    assert.equal(answer.suite, answer.run, "the run's check suite, as the launcher read it");
+    assert.deepEqual(s.out.handed[0], { tokens: null, messages: [{ type: "pendulum-cross-os", sha: r.head, run: answer.run, suite: answer.suite, reused: false }] });
+    assert.ok(r.log.includes(legLine(r.head, "success", "success")), r.log.join("\n"));
+  } finally {
+    s.close();
+  }
+});
+
+test("#538: the launcher dispatches only the configured workflow, on the stage's own branch, at the head it asked for; anything else is refused and the stage Blocks on it", async () => {
+  const swap = (k, v) => (b) => ({ ...b, client_payload: { ...b.client_payload, [k]: v } });
+  for (const [rewrite, branchAt, why] of [
+    [swap("workflow", "release.yml"), null, /^cross-OS CI: the stage asked the launcher for another workflow than ci\.yml \(cross_os_workflow\), the only one it dispatches/],
+    [swap("ref", "main"), null, /^cross-OS CI: the stage asked the launcher for another ref than its branch pendulum\/4, the only one it dispatches on/],
+    [swap("ref", "pendulum/5"), null, /another ref than its branch pendulum\/4/],
+    [(b) => b, "a".repeat(40), /^cross-OS CI: pendulum\/4 is at aaaaaaa, not at [0-9a-f]{7}, the head the stage asked for: the branch moved/],
+  ]) {
+    const s = await sandboxRelay({ rewrite });
+    try {
+      const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, branchAt, legs: bothGreen } });
+      assert.equal(r.result.green, false);
+      assert.match(r.result.stuck?.reason || "", why, JSON.stringify(s.out));
+      assert.equal(r.result.stuck.cause, "pendulum");
+      assert.deepEqual(r.dispatches, [], "nothing dispatched");
+      await s.settled();
+      assert.deepEqual(s.out.launches.map((l) => l.exit), ["cross-os"], "answered with the refusal");
+    } finally {
+      s.close();
+    }
+  }
+  // A sandbox that skips the stage's own check of the workflow: the launcher checks it at the head too.
+  const root = mkdtempSync(join(tmpdir(), "cross-os-"));
+  try {
+    execFileSync("git", ["init", "-q", "-b", "pendulum/4", root]);
+    execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"]);
+    const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const inputs = resolveInputs({ env: ON });
+    await withGitHub({ work: root, legs: bothGreen, record: RECORD, workflow: `${CI}    permissions:\n      contents: write\n`, log: [] }, async (seen) => {
+      const a = await launcherDispatch({ inputs, repo: REPO, issue: 4, ask: { workflow: "ci.yml", ref: "pendulum/4", sha }, token: "t", actionsToken: "job" });
+      assert.match(a.refused?.reason || "", /grants write \(job test\)/);
+      assert.equal(a.refused.cause, "setup");
+      const off = await launcherDispatch({ inputs: resolveInputs({ env: {} }), repo: REPO, issue: 4, ask: { workflow: "ci.yml", ref: "pendulum/4", sha }, token: "t", actionsToken: "job" });
+      assert.equal(off.refused?.cause, "setup", "cross-OS CI off in the launcher's settings dispatches nothing");
+      assert.deepEqual(seen.dispatches, []);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#538: on Actions and in local mode the stage dispatches with its own token and asks no launcher; the sandbox's token hand-over is unchanged", async () => {
+  for (const route of ["actions", "local"]) {
+    const asked = [];
+    const r = await stage({ settings: ON, route, relay: async (a) => (asked.push(a), { timedOut: true }), github: { legs: bothGreen } });
+    assert.equal(r.result.green, true, `${route}: ${r.log.join("\n")}`);
+    assert.deepEqual(r.tokens, ["t"], route);
+    assert.deepEqual(asked, [], route);
+  }
+  const local = await stage({ settings: ON, route: "local", github: { dispatch: 403 } });
+  assert.match(local.result.stuck.reason, /\(403\): the token cannot dispatch a workflow \(Actions write\); give the repository token Actions read and write, then re-apply the label$/);
+  // A sandbox stage never dispatches with its App token: with no channel to a launcher it Blocks, and with a launcher
+  // that never answers it asks again, then Blocks at the bound.
+  const none = await stage({ settings: ON, route: "sandbox", relay: null, github: { legs: bothGreen } });
+  assert.equal(none.result.stuck?.cause, "pendulum");
+  assert.deepEqual(none.dispatches, []);
+  const asks = [];
+  // Its clock runs ten minutes a reading, so the 60-minute bound passes after two asks.
+  let t = 0;
+  const quiet = await stage({ settings: ON, route: "sandbox", relay: launcherRelay({ send: (m) => asks.push(m), on: new EventEmitter(), retryMs: 20, clock: () => (t += 10 * 60_000) }), github: { legs: bothGreen } });
+  assert.equal(quiet.result.stuck?.cause, "outage", JSON.stringify(quiet.result));
+  assert.match(quiet.result.stuck.reason, /^cross-OS CI: the launcher did not answer the stage's request to run ci\.yml on [0-9a-f]{7} within 60 min \(cross_os_wait_minutes\)/);
+  assert.equal(asks.length, 2, "asked again before the bound");
+  assert.equal(new Set(asks.map((a) => a.ask)).size, asks.length, "each ask names itself");
+  assert.deepEqual(quiet.dispatches, []);
+  // Fresh tokens: the launcher's hand-over through the real --deliver, as before.
+  const s = await sandboxRelay();
+  try {
+    await withGitHub({ work: mkdtempSync(join(tmpdir(), "w-")), legs: bothGreen, record: RECORD, log: [] }, async () => {
+      const r = await s.launch(stageDispatchBody({ issue: 4, claim: CLAIM, want: "token", ask: 1794175200 }));
+      assert.equal(r.exit, "token", JSON.stringify(r));
+    });
+    assert.deepEqual(s.out.handed, [{ tokens: { write: "t", read: null }, messages: [{ type: "pendulum-tokens", write: "t", read: null }] }]);
+    assert.equal(readHandOver(JSON.stringify({ claim: "another", write: "x" }), CLAIM), null, "another claim's is refused");
+  } finally {
+    s.close();
   }
 });

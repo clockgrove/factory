@@ -2,7 +2,8 @@
 // Pendulum's stage inside a cloud sandbox VM. The launcher (launch.mjs) starts it detached, as the VM's default user,
 // and exits; this process outlives it.
 //   node stage.mjs            run the stage the launcher's start command describes (its environment)
-//   node stage.mjs --deliver  hand fresh tokens (this command's environment) to the running stage over its socket
+//   node stage.mjs --deliver  hand fresh tokens, or the launcher's cross-OS answer (this command's environment), to the
+//                             running stage over its socket
 // The stage is the same worker (worker.mjs) or reviewer (review.mjs) the Actions jobs run, with the same split: this
 // user holds the App's write token in memory; the harness and the repository's commands run as `pendulum-agent`
 // (agent.mjs) with only a read-only token in its own home. The tokens come in this process's start environment and are
@@ -10,8 +11,10 @@
 // channel. None is written to a file.
 // It runs on what the sandbox started from: the adopter's image (lib/image.mjs) or the vendor's base, and the worker or
 // reviewer re-runs the adopter's setup either way. While it runs the stage extends its claim's lease in the sandbox record (logic.mjs stageHolds), asks for fresh
-// tokens before the hour is out, and at the end packs the usage directory and asks for the next step (a review after
-// the work, or a stop): the launcher does both, holding the vendor's credentials this VM never sees.
+// tokens before the hour is out, passes on the worker's asks for a cross-OS CI run (its App token cannot dispatch one:
+// lib/cross-os.mjs launcherRelay), and at the end packs the usage directory and asks for the next step (a review after
+// the work, or a stop): the launcher does all of them, holding the vendor's credentials and the job token this VM never
+// sees.
 import { execFileSync, fork } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
@@ -26,6 +29,7 @@ import { reapNamespace } from "./lib/proc.mjs";
 import { SESSION_TOTALS_FILE } from "./lib/harness.mjs";
 import { applyExit, maskFile, stageProgressRun, writeUsage } from "./lib/session.mjs";
 import { UNKNOWN_WHY, markUnknown } from "./lib/usage.mjs";
+import { crossOsAnswer, crossOsAsk } from "./lib/cross-os.mjs";
 import { optedValues } from "./lib/worker-secrets.mjs";
 
 /** How long a lease lasts, and how often the stage renews it: a stage that dies frees the Objective within the lease. */
@@ -40,17 +44,48 @@ const SECRETS = ["PENDULUM_APP_TOKEN", "PENDULUM_READ_TOKEN", "PENDULUM_INPUT_AN
 const dirOf = (env = process.env) => join(env.HOME || "/tmp", "pendulum");
 const socketOf = (env = process.env) => join(dirOf(env), "stage.sock");
 
-/** `--deliver`: one JSON line to the running stage's socket; the stage checks the claim. */
+/**
+ * `--deliver`: one JSON line to the running stage's socket; the stage checks the claim. It carries fresh tokens
+ * (PENDULUM_APP_TOKEN, PENDULUM_READ_TOKEN), the launcher's cross-OS answer (PENDULUM_STAGE_CROSS_OS, JSON), or both.
+ */
 async function deliver() {
-  const msg = { claim: process.env.PENDULUM_STAGE_CLAIM, write: process.env.PENDULUM_APP_TOKEN, read: process.env.PENDULUM_READ_TOKEN };
+  let crossOs;
+  try {
+    crossOs = process.env.PENDULUM_STAGE_CROSS_OS ? JSON.parse(process.env.PENDULUM_STAGE_CROSS_OS) : undefined;
+  } catch {
+    crossOs = undefined;
+  }
+  const msg = { claim: process.env.PENDULUM_STAGE_CLAIM, write: process.env.PENDULUM_APP_TOKEN, read: process.env.PENDULUM_READ_TOKEN, ...(crossOs ? { crossOs } : {}) };
   for (const k of ["PENDULUM_APP_TOKEN", "PENDULUM_READ_TOKEN"]) delete process.env[k];
   await new Promise((resolve, reject) => {
     const c = net.createConnection(socketOf(), () => c.end(`${JSON.stringify(msg)}\n`));
     c.on("close", resolve);
     c.on("error", reject);
   });
-  log("tokens handed to the stage");
+  log(`${[msg.write ? "tokens" : "", msg.crossOs ? "the cross-OS answer" : ""].filter(Boolean).join(" and ") || "nothing"} handed to the stage`);
 }
+
+/**
+ * What a hand-over (`text`, one JSON line from --deliver) gives the stage of claim `claim`: {tokens: {write, read} or
+ * null, messages}, the IPC messages for its child (fresh tokens, the cross-OS answer: cross-os.mjs crossOsAnswer); null
+ * when it is for another claim, unreadable or carries neither.
+ */
+export function readHandOver(text, claim) {
+  let m;
+  try {
+    m = JSON.parse(String(text).trim());
+  } catch {
+    return null;
+  }
+  if (!m || m.claim !== claim) return null;
+  const tokens = typeof m.write === "string" && m.write ? { write: m.write, read: typeof m.read === "string" && m.read ? m.read : null } : null;
+  const answer = m.crossOs === undefined ? null : crossOsAnswer(m.crossOs);
+  if (!tokens && !answer) return null;
+  return { tokens, messages: [...(tokens ? [{ type: "pendulum-tokens", write: tokens.write, read: tokens.read }] : []), ...(answer ? [{ type: "pendulum-cross-os", ...answer }] : [])] };
+}
+
+/** The stage's repository dispatch to its launcher (`pendulum-stage`): what it wants, the request's name and its fields. */
+export const stageDispatchBody = ({ issue, claim, want, ask = null, more = {} }) => ({ event_type: "pendulum-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}), ...more } });
 
 async function run() {
   const env = process.env;
@@ -88,8 +123,9 @@ async function run() {
     list: () => listComments(repo, issue, opts),
     put: (id, body) => (id ? rest(`repos/${repo.full}/issues/comments/${id}`, { ...opts, method: "PATCH", body: { body } }) : rest(`repos/${repo.full}/issues/${issue}/comments`, { ...opts, method: "POST", body: { body } })),
   });
-  // `ask` names one token request (its time, in seconds), so the launcher answers each request once (lib/lock.mjs).
-  const dispatch = (want, ask = null) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: { event_type: "pendulum-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}) } } });
+  // `ask` names one request (a token request's time in seconds, a cross-OS request's in ms), so the launcher answers
+  // each request once (lib/lock.mjs); `more`, a cross-OS request's head, workflow and ref (cross-os.mjs crossOsAsk).
+  const dispatch = (want, ask = null, more = {}) => rest(`repos/${repo.full}/dispatches`, { ...opts, method: "POST", body: stageDispatchBody({ issue, claim, want, ask, more }) });
 
   let code = 1;
   // Why the stage ended its child, when it did: "wall clock" (the watchdog), "claim lost" (another launcher holds it) or
@@ -188,16 +224,21 @@ async function run() {
         if (buf.length > 65536) conn.destroy();
       });
       conn.on("end", () => {
-        try {
-          const m = JSON.parse(buf.trim());
-          if (m.claim !== claim || typeof m.write !== "string" || !m.write) return log("a token hand-over for another claim was refused");
-          Object.assign(tokens, { write: m.write, read: m.read || tokens.read, at: Date.now() });
-          for (const t of [m.write, m.read]) if (typeof t === "string" && t) given.add(t);
-          child?.send({ type: "pendulum-tokens", write: m.write, read: m.read || null });
+        const h = readHandOver(buf, claim);
+        if (!h) return log("a hand-over for another claim, or an unreadable one, was refused");
+        if (h.tokens) {
+          Object.assign(tokens, { write: h.tokens.write, read: h.tokens.read || tokens.read, at: Date.now() });
+          for (const t of [h.tokens.write, h.tokens.read]) if (t) given.add(t);
           log("fresh tokens received");
-        } catch {
-          log("an unreadable token hand-over was refused");
         }
+        for (const msg of h.messages) {
+          try {
+            child?.send(msg);
+          } catch (e) {
+            log(`hand-over to the ${stage}: ${String(e.message).slice(0, 120)}`);
+          }
+        }
+        if (h.messages.some((x) => x.type === "pendulum-cross-os")) log("the launcher's cross-OS answer received");
       });
     });
     await new Promise((resolve) => server.listen(sock, resolve));
@@ -234,6 +275,17 @@ async function run() {
     child = fork(script, ["--repo", repo.full, ...target, "--checkout", workspace, "--usage-dir", usageDir], {
       env: { ...env, ...secrets, PENDULUM_APP_TOKEN: tokens.write, ...(tokens.read ? { PENDULUM_READ_TOKEN: tokens.read } : {}), GITHUB_ACTIONS: "true", ...files, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: tmp, PENDULUM_STAGE_SANDBOX: "1", PENDULUM_USAGE_DIR: usageDir, PENDULUM_TIMEOUT_MINUTES: String(minutes) },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
+    });
+    // The worker's asks for a cross-OS CI run, sent on to the launcher (cross-os.mjs launcherRelay, which asks again
+    // until it is answered).
+    child.on("message", (m) => {
+      const ask = crossOsAsk(m);
+      if (!ask || stopping) return;
+      const { ask: at, ...more } = ask;
+      dispatch("cross-os", at, more).then(
+        () => log(`a cross-OS run on ${ask.sha.slice(0, 7)} asked of the launcher`),
+        (e) => log(`cross-OS ask not sent (${String(e.message).slice(0, 120)}); the worker asks again`),
+      );
     });
     code = await new Promise((resolve) =>
       child.on("exit", (c, sig) => {

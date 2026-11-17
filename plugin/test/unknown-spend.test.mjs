@@ -193,3 +193,48 @@ test("no estimate, bound or fallback price is read anywhere in the plugin or the
   assert.deepEqual(Object.keys(CODEX_PRICES).filter((k) => /upper|bound|fallback|dearest/i.test(k)), []);
   assert.deepEqual(readdirSync(join(ROOT, "plugin", "scripts", "lib")).filter((f) => /prices\.json$/.test(f)), ["codex-prices.json"], "no other price table");
 });
+
+test("a Copilot run that reports no AI credits is a run of unknown cost, and the stage goes on to its next pass", async () => {
+  const { validationLoop } = await import("../scripts/lib/session.mjs");
+  const { execFileSync } = await import("node:child_process");
+  const root = mkdtempSync(join(tmpdir(), "unknown-copilot-"));
+  const work = join(root, "work");
+  mkdirSync(work);
+  const git = (...a) => execFileSync("git", ["-C", work, "-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { encoding: "utf8" });
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(work, "README"), "x\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "base");
+  // A fake Copilot: each pass fixes the next file and commits it, and reports its tokens with its AI credits pending:
+  // its cost is unknown.
+  mkdirSync(join(root, "bin"));
+  const calls = join(root, "calls");
+  writeFileSync(join(root, "bin", "copilot"), `#!${process.execPath}
+const fs = require("node:fs");
+const { execFileSync } = require("node:child_process");
+fs.appendFileSync(${JSON.stringify(calls)}, "x");
+const n = fs.readFileSync(${JSON.stringify(calls)}, "utf8").length;
+fs.writeFileSync(["a", "b"][n - 1] || "c", "ok\\n");
+execFileSync("git", ["add", "-A"]);
+execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "fix " + n]);
+const at = process.argv.findIndex((a) => a.startsWith("--usage-output-file"));
+const file = at < 0 ? null : process.argv[at].includes("=") ? process.argv[at].split("=")[1] : process.argv[at + 1];
+if (file) fs.writeFileSync(file, JSON.stringify({ totalPremiumRequestCost: 1, aiCreditsStatus: "pending", modelMetrics: { "claude-sonnet-5": { usage: { inputTokens: 900, outputTokens: 40 } } } }));
+console.log(JSON.stringify({ type: "assistant.turn_end", data: {} }));
+console.log(JSON.stringify({ type: "result", sessionId: "s" + n, exitCode: 0, usage: { premiumRequests: 1 } }));
+`, { mode: 0o755 });
+  const env = { HOME: process.env.HOME, PATH: `${join(root, "bin")}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR };
+  const path = process.env.PATH;
+  process.env.PATH = env.PATH;
+  try {
+    const needs = (f) => `test -f ${f} || { echo "not ok 1 - ${f} is missing"; exit 1; }`;
+    const result = await validationLoop({ checkout: work, commands: [needs("a"), needs("b")], harness: "copilot", model: "claude-sonnet-5", maxUsd: 25, session: { id: null, canResume: false }, taskCard: "card", env, deadlineAt: Date.now() + 120_000, eventsFile: join(root, "events.jsonl") });
+    assert.equal(readFileSync(calls, "utf8").length, 2, "a second fix pass ran after the first reported no credits");
+    assert.equal(result.green, true, JSON.stringify({ ...result, usage: undefined }));
+    assert.equal(result.harness?.budgetExceeded, undefined, "never stopped at the cap for unknown spend");
+    for (const rec of result.usage) assert.deepEqual([rec.usd, rec.usdUnknown, rec.usdUnknownWhy, !!rec.budgetExceeded], [null, 1, ["credits"], false]);
+    assert.deepEqual(sumSpend(result.usage), { usd: 0, unknown: 2 });
+  } finally {
+    process.env.PATH = path;
+  }
+});

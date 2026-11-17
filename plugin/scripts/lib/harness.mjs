@@ -21,16 +21,32 @@ import { backend } from "./backend.mjs";
 import { accountSecretText, chatgptLogin, routeCredentialEnv, routeInputs, routeStageAccount } from "./accounts.mjs";
 import { CODEX_GATEWAY_ENV, PENDULUM_CONTROL_KEYS, PENDULUM_SECRET_KEYS, GITHUB_TOKEN_KEYS, MODEL_SECRET_KEYS, RUNNER_SECRET_KEYS, SECRET_INPUTS, input, localLimits, log, maskable } from "./inputs.mjs";
 import { SHELL_SECRETS_ENV, harnessShell } from "./worker-secrets.mjs";
-import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText, relayShutText } from "./gateway-relay.mjs";
+import { RELAYED_NAME, RELAY_URL_ENV, STATE_DIR_ENV, activeRelay, addKeySpend, gatewayRefusalText } from "./gateway-relay.mjs";
 import { relayProbeCommand } from "./relay-shim.mjs";
 import { parked, stageStopSignal, stageStopped, stopping } from "./stop.mjs";
 import { harnessActivity } from "./logic.mjs";
-import { GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
+import { AGENT_SHELL_TELEMETRY_OFF, GitRefusal, HARNESS_GIT_ENV, claudeLocalSettings, claudeRunnerSettings, clearHarnessConfig, codexLocalConfig, codexShellExclude, copilotCacheHome, copilotHomeFiles, copilotTmpdir, harnessGitEnv, isLocal, openedStageHosts, pinnedInode, runnerDomains, sandboxedVersion, stageTemp } from "./local.mjs";
 
 export const CLI = {
   claude: { bin: "claude", pkg: "@anthropic-ai/claude-code" },
   codex: { bin: "codex", pkg: "@openai/codex" },
   copilot: { bin: "copilot", pkg: "@github/copilot" },
+};
+
+/**
+ * Each harness CLI's own documented switches that keep its usage reporting to its vendor off, given to every pass and
+ * every decision call on every route (harnessCommand, decisionCommand): `env` for the CLI's process, `args` on its
+ * command line. Claude Code: non-essential traffic (telemetry, error reporting, feature flags, auto-update, feedback),
+ * with metrics and error reports each named as well (code.claude.com/docs/en/data-usage, Telemetry services). Codex:
+ * analytics, its built-in Statsig metrics exporter included (config `analytics.enabled`, Codex's advanced configuration,
+ * Metrics). Copilot CLI: its client telemetry (`--disable-client-telemetry`, Copilot CLI command reference, 1.0.100 on);
+ * its auto-update is off by its sandbox flags already. None of them turns off what the vendor's server records of the
+ * model calls themselves.
+ */
+export const VENDOR_TELEMETRY_OFF = {
+  claude: { env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_TELEMETRY: "1", DISABLE_ERROR_REPORTING: "1" }, args: [] },
+  codex: { env: {}, args: ["-c", "analytics.enabled=false"] },
+  copilot: { env: {}, args: ["--disable-client-telemetry"] },
 };
 
 /**
@@ -357,7 +373,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (agent) args.push("--agent", agent);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
       if (resume) args.push("--resume", resume);
-      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}), ...(local?.claudeEnv ? { CLAUDE_ENV_FILE: local.claudeEnv } : {}) } };
+      return { cmd: "claude", args, stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...VENDOR_TELEMETRY_OFF.claude.env, ...(compaction ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compaction) } : {}), ...(cacheTtl ? { CLAUDE_CODE_PROMPT_CACHE_TTL: cacheTtl } : {}), ...(own ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1", ...HARNESS_GIT_ENV } : {}), ...(runner ? runnerEnv(runner) : {}), ...(local?.claudeEnv ? { CLAUDE_ENV_FILE: local.claudeEnv } : {}) } };
     }
     case "codex": {
       // `codex exec resume <id>` continues a thread; the prompt comes on stdin (`-`) either way.
@@ -367,7 +383,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // Every route: the model's commands never see the credentials (SHELL_SECRET_KEYS), CODEX_API_KEY included. Only
       // where there is no agent uid and no local sandbox (a developer's /pendulum:pendulum-run --here) are permissions skipped.
       const perms = local ? ["--ignore-user-config", ...codexLocalConfig({ domains: local.domains, clone: local.clone, addDirs: local.addDirs, credentials: local.credentials, readOnly: local.readOnly, secretEnv: hidden })] : runner ? ["--ignore-user-config", ...codexRunnerConfig({ runner, secretEnv: hidden })] : ["--dangerously-bypass-approvals-and-sandbox", "-c", codexShellExclude(hidden)];
-      args.push("--json", ...perms, "--skip-git-repo-check");
+      args.push("--json", ...perms, ...VENDOR_TELEMETRY_OFF.codex.args, "--skip-git-repo-check");
       // Through the Vercel AI Gateway (`gateway`, codexGatewayOf): its provider, and the model as `openai/<id>` on a
       // resume too, which otherwise falls back to the configured default (a bare id) and changes the thread's model
       // (codex-cli 0.167.0 warns "recorded with model openai/... but is resuming with ...").
@@ -377,7 +393,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       if (compaction) args.push("-c", `model_auto_compact_token_limit=${Number(compaction)}`);
       // The session id travels as an extra variable, so a runner's agent uid gets it with the key (runHarness agentExtra).
       const gw = gateway?.session ? { PENDULUM_GATEWAY_SESSION: gateway.session } : {};
-      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV, ...gw } : runner ? { ...HARNESS_GIT_ENV, ...codexRunnerEnv(runner), ...gw } : gw };
+      return { cmd: "codex", args: [...args, "-"], stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...(local ? { ...HARNESS_GIT_ENV, ...gw } : runner ? { ...HARNESS_GIT_ENV, ...codexRunnerEnv(runner), ...gw } : gw) } };
     }
     case "copilot": {
       // --allow-all = tools, paths and URLs; required for non-interactive runs. JSONL on stdout; usage to a file.
@@ -398,7 +414,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // and MCP environments, and their values masked in its JSON output. One `=` argument: the flag takes several values.
       // --stream on: the model's answer shows on stdout as it arrives (`assistant.*_delta` events), as Claude Code's above.
       // Copilot streams by default; the flag overrides a user config with `stream: false`.
-      const args = [...perms, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json", "--stream", "on"];
+      const args = [...perms, ...VENDOR_TELEMETRY_OFF.copilot.args, `--secret-env-vars=${hidden.join(",")}`, "--disable-builtin-mcps", "--output-format", "json", "--stream", "on"];
       if (model) args.push("--model", model);
       if (effort) args.push("--reasoning-effort", effort);
       // Copilot has no compaction setting: it manages its own context, so `compaction` does not apply.
@@ -409,7 +425,7 @@ export function harnessCommand({ harness, model, prompt, maxUsd, resume, agent, 
       // it (1.0.107, checked live), so it is what is left, never plus the session's past. Copilot takes no less than 30
       // credits; with less than that left runHarness starts no Copilot run at all.
       if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
-      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: local ? { ...HARNESS_GIT_ENV } : runner ? { ...HARNESS_GIT_ENV, ...copilotRunnerEnv(runner) } : {} };
+      return { cmd: "copilot", args, stdin: prompt, canResume: true, env: { ...AGENT_SHELL_TELEMETRY_OFF, ...(local ? { ...HARNESS_GIT_ENV } : runner ? { ...HARNESS_GIT_ENV, ...copilotRunnerEnv(runner) } : {}) } };
     }
     default:
       throw new Error(`unknown harness ${harness}`);
@@ -669,7 +685,7 @@ export async function copilotSandboxCheck(runner, env, { run = exec, model = pro
     await resetProbe(runner, env);
     const marker = probeMarker();
     const mock = await model();
-    const flags = [...copilotRunnerFlags(runner), `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+    const flags = [...copilotRunnerFlags(runner), ...VENDOR_TELEMETRY_OFF.copilot.args, `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
     const [cmd, args] = copilotLaunch(runner, "/bin/sh", ["-c", COPILOT_DECOY_LAUNCH, "sh", ...flags], env.PATH);
     // With the gateway relay: Copilot's shim hands its calls to the relay's, as the run's does, and the probe checks a
     // command reaches the relay.
@@ -812,7 +828,7 @@ export async function copilotLocalCheck(local, outer, runEnv, { drop = [], run =
   // Under the usage directory's `harness` folder: Copilot (in its outer sandbox) writes it, its commands cannot.
   // `home`: Copilot's HOME locally is the developer's, as is the probe's agent home.
   const probe = { clone: local.clone, probeHome: join(env.PENDULUM_USAGE_DIR, "harness", "copilot-probe"), cacheHome: copilotCacheHome(env, home), agentTmp: env.TMPDIR, agentHome: home, home, copilotTmp: local.copilotTmp };
-  const flags = [...copilotLocalFlags(local), `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
+  const flags = [...copilotLocalFlags(local), ...VENDOR_TELEMETRY_OFF.copilot.args, `--secret-env-vars=${[...SHELL_SECRET_KEYS, PROBE_MARKER].join(",")}`, "--disable-builtin-mcps", "--output-format", "json"];
   let last = null;
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -1201,6 +1217,14 @@ export function joinLost(lost, rec, { limit = false, busy = false, jobs = false 
   };
 }
 
+/** The usage record of a pass that never ran (refused before its start): a known $0, never a run of unknown cost. */
+function noRunUsage(harness, model, extra = {}) {
+  const rec = parseUsage(harness, "", model || null, 0, extra);
+  delete rec.usdUnknown;
+  delete rec.usdUnknownWhy;
+  return rec;
+}
+
 /**
  * runHarness's single pass: runOnce, and a fresh session once after a refused resume: a Codex thread written through
  * another credential (usage.mjs rotatedPin), or a refusal of the request the session sends alone (usage.mjs
@@ -1247,7 +1271,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (stageStopped()) {
     const now = new Date().toISOString();
     log(`${label}: the Objective was stopped; not starting the run`);
-    return { ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, stopped: true, error: "stopped: the Objective was stopped", basis: "no run: the Objective was stopped", started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
+    return { ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, stopped: true, error: "stopped: the Objective was stopped", basis: "no run: the Objective was stopped", started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
   const signal = own ? AbortSignal.any([own, stageStopSignal()]) : stageStopSignal();
   // The worker's shell secrets (lib/worker-secrets.mjs): out of every env here but the harness child's own, and out of a
@@ -1284,7 +1308,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (harness === "copilot" && maxUsd > 0 && maxUsd < COPILOT_MIN_CREDITS * creditUsd) {
     const now = new Date().toISOString();
     log(`${label}: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap; not starting the run`);
-    return { ...parseUsage(harness, "", model || null, 0, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
+    return { ...noRunUsage(harness, model, { creditUsd }), label, usd: 0, ok: false, budgetExceeded: true, error: "dollar cap reached", basis: `no run: $${maxUsd} left is under Copilot's ${COPILOT_MIN_CREDITS}-credit minimum cap`, started: now, ended: now, finalText: "", timedOut: false, exitCode: null, signal: null, idle: false, stdoutTail: "", stderrTail: "" };
   }
   const { cmd, args, stdin, env: extraEnv } = harnessCommand({ harness, model, prompt, maxUsd, resume, agent, usageFile, effort, compaction, cacheTtl, creditUsd, local: backend(env).sandbox.harness(env), runner, shellSecrets, gateway: codexGatewayOf(harness, env) });
   if (cleared?.submodules?.length) Object.assign(extraEnv, harnessGitEnv(cleared.submodules));
@@ -1443,7 +1467,7 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     const pass = await relay.endPass();
     addKeySpend(rec, pass);
     metered.more(rec);
-    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unpriced) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.unpriced ? `; ${pass.shut ? relayShutText(pass.shut) : "a call's cost could not be determined"}, so the relay refused every later call` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
+    if (pass.calls || pass.usd || pass.gatewayRefused || pass.unknown) log(`${label}: $${pass.usd.toFixed(4)} through the relayed gateway key (${pass.calls} call${pass.calls === 1 ? "" : "s"})${pass.capped ? "; the relay refused calls at max_usd" : ""}${pass.unknown ? `; ${pass.unknown} call${pass.unknown === 1 ? "" : "s"} of unknown cost, not counted` : ""}${pass.gatewayRefused ? `; ${gatewayRefusalText(pass.gatewayRefused)}, so later calls get that refusal` : ""}`);
     // Commands ran but none reached the relay's forwarder: the harness's sandbox no longer starts them through the shim.
     if (!pass.pings && commandsRan(harness, r.stdout)) {
       rec.workerKeyUnreached = true;
@@ -1677,17 +1701,17 @@ export function decisionCommand({ harness, model, prompt, maxUsd = DECISION_RUN.
       if (effort) args.push("--effort", effort);
       if (model) args.push("--model", model);
       if (maxUsd > 0) args.push("--max-budget-usd", String(maxUsd));
-      return { cmd: "claude", args, stdin: prompt, env: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } };
+      return { cmd: "claude", args, stdin: prompt, env: { ...VENDOR_TELEMETRY_OFF.claude.env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" } };
     }
     case "codex": {
-      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", ...(ephemeral ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0"];
+      const args = ["exec", "--json", "--ignore-user-config", "--ignore-rules", ...(ephemeral ? ["--ephemeral"] : []), "--skip-git-repo-check", "--sandbox", "read-only", "--disable", "shell_tool", "--disable", "multi_agent", "-c", 'web_search="disabled"', "-c", "project_doc_max_bytes=0", ...VENDOR_TELEMETRY_OFF.codex.args];
       if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
       if (gateway) args.push(...codexGatewayArgs(gateway));
       if (model) args.push("-m", gateway ? gatewayModel(model) : model);
       return { cmd: "codex", args: [...args, "-"], stdin: prompt, env: gateway?.session ? { PENDULUM_GATEWAY_SESSION: gateway.session } : {} };
     }
     case "copilot": {
-      const args = ["--available-tools=", `--excluded-tools=${COPILOT_TOOLS.join(",")}`, "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disallow-temp-dir", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
+      const args = ["--available-tools=", `--excluded-tools=${COPILOT_TOOLS.join(",")}`, "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url", "--disallow-temp-dir", "--disable-builtin-mcps", "--no-custom-instructions", "--no-ask-user", "--no-auto-update", ...VENDOR_TELEMETRY_OFF.copilot.args, `--secret-env-vars=${hidden.join(",")}`, "--output-format", "json", "--log-level", "none"];
       if (model) args.push("--model", model);
       if (maxUsd > 0) args.push("--max-ai-credits", String(Math.max(COPILOT_MIN_CREDITS, Math.floor(maxUsd / creditUsd))));
       return { cmd: "copilot", args, stdin: prompt, env: {} };
@@ -1762,7 +1786,7 @@ export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reas
  */
 export async function runDecision({ harness, model = null, prompt, env: given = process.env, timeoutMs = DECISION_RUN.timeoutMs, maxUsd = DECISION_RUN.maxUsd, label = "decision", effort = "low", signal = null }) {
   const at = () => new Date().toISOString();
-  const none = (error) => ({ ...parseUsage(harness, "", model || null, 0, {}), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
+  const none = (error) => ({ ...noRunUsage(harness, model), label, usd: 0, ok: false, noRun: true, error, started: at(), ended: at(), timedOut: false, answer: "" });
   if (stageStopped()) return { ...none("stopped: the Objective was stopped"), stopped: true };
   const creditUsd = copilotCreditUsd();
   const agent = agentUser();

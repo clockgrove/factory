@@ -16,6 +16,7 @@ A first setup asks only the harness and its credential, the caps and auto-merge 
 | `--max-concurrent` | `3` | `PENDULUM_MAX_CONCURRENT` | Worker jobs at once. |
 | `--timeout-minutes` | `240` | `PENDULUM_TIMEOUT_MINUTES` | Each job's wall clock; under 360 on hosted runners; on Actions a variable can lower it, not raise it. |
 | `--auto-merge` | `true` | no | `true`: Pendulum merges the reviewed head once its required checks pass, gated by CI, the reviewer and the merge queue, unread. `false`: its PRs wait for a person's merge. |
+| `--publish-transcripts` | `false` | no | `false`: on a public repository the usage artifacts carry the agent's event stream and saved sessions sealed, so only the workflow's jobs open them (to resume a session). `true`: readable to anyone signed in to GitHub for 90 days (the files it read, the commands it ran, their output), and doctor warns. A private repository's carry them readable either way. |
 | `--notify` | none | no | The GitHub handle Blocked and Question reach; setup pins it as `login#id`. |
 | `--setup` | none | no | The toolchain command run before the worker. |
 | `--install` | `auto` | no | `auto` installs from the lockfiles, `none`, or a command. |

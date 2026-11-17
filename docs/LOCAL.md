@@ -109,8 +109,9 @@ Flags and exits:
 
 Label an Objective `factory:local` and the local loop takes it, while the Action leaves it alone.
 Where no Action runs, `serve` takes the Objectives without the label too, and adds `factory:local` to each just before it marks it Running, so every later pass, and the Action if it is enabled later, treats it as this machine's; `factory run` labels the Objective it runs the same way.
-Each such label gets one Factory comment whose marker names that label event, read from the issue's timeline, so the scorer counts the label as Factory's, not yours; if the timeline does not show the event yet, no mark is written and the label counts as a person's action.
-Whether an Action runs is GitHub's answer for the repository (`--repo`'s, when given): its `factory.yml` workflow missing or disabled means none, active means one, and a read that fails changes nothing.
+Each such label gets one Factory comment whose marker names that label event, read from the issue's timeline, so the scorer counts the label as Factory's, not yours.
+When the timeline does not show the event yet, or the comment cannot be posted, the Objective starts all the same, and the loop that holds its claim writes the mark at the claim's start or a later heartbeat.
+Whether an Action runs is GitHub's answer for the repository (`--repo`'s, when given), from its list of workflows: `.github/workflows/factory.yml` active means one, disabled or not in the list means none, and anything else (a failed read, a token without Actions read) changes nothing.
 It is read at the start and then every few minutes (with the settings), and said when it is first known and when it changes.
 With the Action active, `serve` says once per start how many queued Objectives it leaves to it for want of `factory:local`; add the label to run one here.
 `--all` (or `FACTORY_LOCAL_ALL=1`) takes every Objective even with the Action active: use it only where the Action should not run Objectives, since then both routes race for each unlabelled one.

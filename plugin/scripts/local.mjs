@@ -40,7 +40,7 @@ import { RELAY_SOCKET_DIR_ENV, dropSocketDir, handSocketDir, localRelayDir, read
 import { RELAYED_NAME } from "./lib/gateway-relay.mjs";
 import { localCopilotRelayShim } from "./lib/relay-shim.mjs";
 import { GROUP_RECORD, STOP_SIGNALS, bootId, exec, processRecord, reapRecorded, sameProcess, whichSync } from "./lib/proc.mjs";
-import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
+import { HEARTBEAT_MS, parseClaim, LOCAL_DOMAINS, LOCAL_LABEL, adoptLocal, hasLocalLabel, markLocalRoute, isSandboxHost, claudeProjectLink, codexLocalConfig, credentialPaths, harnessLogins, ownLoginProblems, stageLogin, copilotHomeFiles, copilotLocalSettings, copilotPrivateTmp, dropClaim, dropClaudeProjectLink, ensureHarnessHomes, gitDirChanged, gitIdentityKey, gitIdentityReason, gitPinFile, pinGitDir, readGitPin, harnessInstall, writeNestedGitScan, gitGuardScript, harnessOuterSettings, outerProbe, sandboxDroppedHosts, gatewayKeyProblem, localApp, localBaseEnv, localClaim, LOCAL_TOKEN_PERMISSIONS, localToken, prepareClone, tokenFile, variablesRefusedLine, committedWorkflowEnv, committedWorkflowNow, readWorkflowEnv, staleGitLocks, stageTemp, sandboxStartProblems, srtSettings, stopHold, workflowEnv, writeBwrapTun, writeClaim, beatClaim } from "./lib/local.mjs";
 import { REVIEW_LABEL, SETUP_QUEUE_TIMEOUT_MIN, queueHungMs, acceptanceEntries, clip, decideExit, parseReview, planAskedOf, protectedPaths, questionCheckPrompt, reviewOfValue, selfLogin, staleDecision, marker } from "./lib/logic.mjs";
 import { HANDOVER_WRITERS, currentPlan, exitFromOut, handoverChecker, handoverOnIssue, inFiles, isSplitPart, nextPart, partsRecord, planSync, postNote, postReplies, publishPr, readOut, recordPart, reviewMissed, reviewPost } from "./lib/handoff.mjs";
 import { applyExit, servedSilent, commitAuthor, gitIdentity, mergeBlockCause, mergeBlockReason, mergeReadyOne, queueState, queueTimeoutMin, mirrorDiff, objectiveDecisions, progressReporter, rebaseMarkers, rebaseNotice, rebaseBlock, unaddressedReviewComments } from "./lib/session.mjs";
@@ -144,6 +144,8 @@ const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
 /** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
 export const START_VARIABLES_MS = 15_000;
+/** How many reads of a claimed Objective's timeline backfillMark makes while it shows no factory:local label event. */
+const MARK_TRIES = 5;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
 export const SETTINGS_EVERY_MS = 3 * 60_000;
 
@@ -647,15 +649,17 @@ export function unroutedLine(numbers, action) {
 }
 
 /**
- * Whether GitHub's Action runs Objectives in `repo` (#455), from its factory.yml workflow as GitHub lists it: "live" when
- * it is active, "none" when there is no such workflow (404) or it is disabled or deleted, null for anything else (a
- * failed read, an answer with no known state): unknown, which changes nothing.
+ * Whether GitHub's Action runs Objectives in `repo` (#455), from the repository's workflow list (one read): "live" when
+ * it lists .github/workflows/factory.yml as active, "none" when it lists it disabled or deleted, or answers with the
+ * whole list and no such workflow; null for anything else (a failed read, a 404 or 403 a token without Actions read
+ * gets, a list cut short, an unknown state): unknown, which changes nothing.
  */
 export async function readActionState(repo, opts) {
-  return rest(`repos/${repo.full}/actions/workflows/factory.yml`, { ...opts, noRateWait: true }).then(
-    (w) => (w?.state === "active" ? "live" : /^(disabled_\w+|deleted)$/.test(w?.state ?? "") ? "none" : null),
-    (e) => (e?.status === 404 ? "none" : null),
-  );
+  const list = await rest(`repos/${repo.full}/actions/workflows?per_page=100`, { ...opts, noRateWait: true }).catch(() => null);
+  if (!list || !Array.isArray(list.workflows)) return null;
+  const w = list.workflows.find((x) => x?.path === ".github/workflows/factory.yml");
+  if (!w) return Number(list.total_count) === list.workflows.length ? "none" : null;
+  return w.state === "active" ? "live" : /^(disabled_\w+|deleted)$/.test(w.state ?? "") ? "none" : null;
 }
 
 /** The start's line when this plugin, which runs every stage here, is older than the release the committed workflow pins; else null. */
@@ -718,11 +722,28 @@ export class Local {
     return now;
   }
 
+  /**
+   * Factory's mark of the factory:local label this login put on `issue` (lib/local.mjs markLocalRoute), written by a later
+   * tick when the pick's own write could not be (a failed post, a timeline that did not show the event yet), so the
+   * scorer counts the label as Factory's. Checked once per Objective this loop claims, in this process (its claim's
+   * start, then its heartbeats until settled): a conditional timeline read, and the comments only when the label is this
+   * login's. Settled when the mark is there or a person put the label on; a timeline that shows no label event is read
+   * at most MARK_TRIES times (an Objective taken with --all has none); a failed read or write is tried at the next beat.
+   */
+  async backfillMark(issue) {
+    const tries = (this.markTries ??= new Map());
+    if ((tries.get(issue) ?? 0) < 0 || (tries.get(issue) ?? 0) >= MARK_TRIES) return;
+    const r = await markLocalRoute(this.repo, issue, this.opts ?? { token: this.token }, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
+    if (r.marked || r.person) return void tries.set(issue, -1);
+    if (r.id === null) return void tries.set(issue, (tries.get(issue) ?? 0) + 1);
+    log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat`);
+  }
+
   /** Labels `issue` factory:local, said once, when no Action runs here: `factory run` on it, as serve's pick does (#455). */
   async adoptForRun(issue, data) {
     if (hasLocalLabel(data) || (await this.actionState()) !== "none") return;
     await adoptLocal(this.repo, issue, this.opts ?? { token: this.token }).then(
-      () => log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it`),
+      (m) => log(`#${issue}: labelled ${LOCAL_LABEL}, since no Action runs Objectives here: this machine's loop tends it${m.marked ? "" : `; Factory's mark of that label is not written yet (${m.why}), so a later tick of the loop that holds it writes it`}`),
       (e) => log(`#${issue}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); add it, or no loop tends this Objective's merge while none runs here`),
     );
   }
@@ -1807,6 +1828,8 @@ export class Local {
       return { exit: "skipped" };
     }
     this.ceded?.delete(issue);
+    // Factory's mark of the factory:local label this loop put on it, when the pick could not write it (backfillMark).
+    await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
     // cannot read is written as before (no answer is no other holder).
@@ -1831,6 +1854,7 @@ export class Local {
       // This loop's own claim read: rewritten in place, with no second read.
       if (now?.holder === this.holder && now.commentId) await beatClaim(this.repo, issue, now.commentId, this.holder, this.opts);
       else await writeClaim(this.repo, issue, this.holder, this.opts);
+      await this.backfillMark(issue);
     };
     const beat = setInterval(() => {
       if (beating || lost) return;

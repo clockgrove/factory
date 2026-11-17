@@ -175,7 +175,7 @@ export function localFactoryActions(collected, { label = OBJECTIVE_LABEL } = {})
   const { records: done, closedAt } = doneRecords(collected);
   const routes = localRouteMarks(collected);
   const tidied = (at, actor, kind, id = null) => {
-    if (kind === "labeled factory:local" && id !== null && id !== undefined && routes.get(String(id)) === (actor?.login ?? actor?.name)) return true;
+    if (kind === "labeled factory:local" && id !== null && id !== undefined && routes.has(`${id} ${actor?.login ?? actor?.name}`)) return true;
     const name = /^unlabeled (\S+)$/.exec(kind)?.[1];
     return !!name && closedAt(at) && done.some((r) => r.login === (actor?.login ?? actor?.name) && r.labels.has(name) && ms(at) >= r.at);
   };
@@ -228,13 +228,13 @@ function doneRecords(collected) {
   return { records, closedAt };
 }
 
-/** Factory's local-route marks (localFactoryActions): the labeled event id each names, to the login that posted it. */
+/** Factory's local-route marks (localFactoryActions): each `<labeled event id> <login that posted it>` pair. */
 function localRouteMarks(collected) {
   const head = new RegExp(`^<!-- factory:${collected.issue?.number}:local-route:(\\d+) -->`);
-  const out = new Map();
+  const out = new Set();
   for (const c of collected.issueComments || []) {
     const id = head.exec(c.body || "")?.[1];
-    if (id && c.user?.login) out.set(id, c.user.login);
+    if (id && c.user?.login) out.add(`${id} ${c.user.login}`);
   }
   return out;
 }
@@ -531,13 +531,13 @@ export function splitInterventions(actions, requests) {
 export function factoryActivity(collected, { app = null } = {}) {
   const self = factoryLogin(collected.issueTimeline, app);
   const local = localFactoryActions(collected);
-  const mine = (at, actor, kind) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind);
+  const mine = (at, actor, kind, id = null) => (!!self && String(actor?.login ?? "").toLowerCase() === self) || local(at, actor, kind, id);
   const spans = [];
-  const point = (at, actor, kind) => {
-    if (Number.isFinite(ms(at)) && mine(at, actor, kind)) spans.push([ms(at), ms(at)]);
+  const point = (at, actor, kind, id = null) => {
+    if (Number.isFinite(ms(at)) && mine(at, actor, kind, id)) spans.push([ms(at), ms(at)]);
   };
   const n = collected.issue.number;
-  for (const e of collected.issueTimeline || []) point(e.created_at, e.actor ?? e.user, e.label ? `${e.event} ${e.label.name}` : e.event);
+  for (const e of collected.issueTimeline || []) point(e.created_at, e.actor ?? e.user, e.label ? `${e.event} ${e.label.name}` : e.event, e.id ?? null);
   for (const c of collected.issueComments || []) {
     if ((c.body || "").startsWith(`<!-- factory:${n}:vendor:`)) continue;
     if ((c.body || "").startsWith(`<!-- factory:${n}:progress`) && mine(c.created_at, c.user, "progress")) {

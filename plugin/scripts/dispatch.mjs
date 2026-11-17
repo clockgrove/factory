@@ -1591,13 +1591,24 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       // A pick without factory:local where no Action runs gets the label first: one that cannot be labelled is not started.
       const issue = issues.find((x) => x.number === n);
       if (issue && adoptable(issue)) {
-        // Factory's mark names the exact label event, so the scorer counts it as Factory's (adoptLocal).
-        const adopted = await adoptLocal(repo, n, opts).then((id) => ({ id }), (e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
-        if (!adopted) {
+        // Read again just before: one that left Queued or the Objectives meanwhile (the Action, turned on mid-tick, took
+        // it) is not started; one a person labelled factory:local meanwhile is this loop's without a label of its own.
+        const fresh = await getIssue(repo, n, opts).catch(() => null);
+        const still = !!fresh && !stopCause(fresh, inputs.objectiveLabel) && stateOf(fresh, null) === "Queued";
+        if (!still) {
+          log(`#${n}: ${fresh ? "no longer a Queued Objective" : "could not be read again"} just before it was labelled ${LOCAL_LABEL}; not started this tick`);
           unlabelled.add(n);
           continue;
         }
-        log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.id ? "" : " (its label event was not found on the timeline, so no mark records it as Factory's)"}`);
+        if (!hasLocalLabel(fresh)) {
+          // Factory's mark names the exact label event, so the scorer counts it as Factory's (adoptLocal).
+          const adopted = await adoptLocal(repo, n, opts).catch((e) => log(`#${n}: ${LOCAL_LABEL} could not be added (${String(e?.message || e).slice(0, 120)}); not started, next tick`));
+          if (!adopted) {
+            unlabelled.add(n);
+            continue;
+          }
+          log(`#${n}: no Action runs Objectives here, so this loop takes it and labels it ${LOCAL_LABEL}${adopted.marked ? "" : `; Factory's mark of that label is not written yet (${adopted.why}), so a later tick of the loop that holds it writes it`}`);
+        }
       }
       // Named before the write: a write whose answer is lost may still have landed.
       localMarked?.(n);

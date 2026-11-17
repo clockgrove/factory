@@ -1039,7 +1039,9 @@ test("local loop where no Action runs (adopt): a pick without factory:local is l
     { id: 4242, event: "labeled", label: { name: "factory:local" }, actor: { login: "maintainer", type: "User" }, created_at: fresh },
   ];
   // A writer (who started it), and today's spend read as none (the usage artifacts and the local spend comments).
-  const tick = (opts) => localTick({ open: [queued], timeline, writers: [{ login: "maintainer", permissions: { push: true } }], env: { FACTORY_LOCAL: "1" }, inputs: { dailyUsd: 50 }, opts, extra: (u, method) => (method !== "GET" ? null : u.pathname.endsWith("/actions/artifacts") ? { artifacts: [] } : u.pathname.endsWith("/issues/comments") ? [] : u.pathname.endsWith("/collaborators/maintainer/permission") ? { permission: "write" } : null) });
+  // `now`: the issue as GitHub has it when read again just before the label.
+  let now = queued;
+  const tick = (opts) => localTick({ open: [queued], timeline, writers: [{ login: "maintainer", permissions: { push: true } }], env: { FACTORY_LOCAL: "1" }, inputs: { dailyUsd: 50 }, opts, extra: (u, method) => (method !== "GET" ? null : u.pathname.endsWith("/actions/artifacts") ? { artifacts: [] } : u.pathname.endsWith("/issues/comments") ? [] : u.pathname.endsWith("/collaborators/maintainer/permission") ? { permission: "write" } : u.pathname === "/repos/acme/app/issues/9" ? now : null) });
   const t = await tick({ adopt: true, localSlots: 2 });
   assert.deepEqual(t.r.ready, [9]);
   const on9 = t.writes.filter((w) => w.startsWith("POST /issues/9/"));
@@ -1052,4 +1054,9 @@ test("local loop where no Action runs (adopt): a pick without factory:local is l
   assert.deepEqual(live.r.ready, []);
   assert.deepEqual(live.writes.filter((w) => w.startsWith("POST /issues/9/")), []);
   assert.deepEqual(live.r.unrouted, [9]);
+  // The Action, turned on mid-tick, took it before the label: read again, it is Running, so it is neither labelled nor started.
+  now = { ...queued, labels: [...queued.labels, { name: "factory:running" }] };
+  const raced = await tick({ adopt: true, localSlots: 2 });
+  assert.deepEqual(raced.r.ready, []);
+  assert.deepEqual(raced.writes.filter((w) => w.startsWith("POST /issues/9/")), []);
 });

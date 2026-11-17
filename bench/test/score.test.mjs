@@ -1123,7 +1123,7 @@ test("Done pass under a person's login (#2668): its removal of a closed Objectiv
   assert.equal(localFactoryActions(reopened)("2031-03-02T04:20:06Z", op, "unlabeled factory:in-review"), true, "re-closed, the Done pass's removal is Factory's again");
 });
 
-test("local mode where no Action runs: the factory:local label a loop applied is Factory's when its local-route mark names that exact event; a person's own factory:local label stays a person's (#455)", () => {
+test("local mode where no Action runs: the factory:local label a loop applied is Factory's when its local-route mark names that exact event; a person's own factory:local label stays a person's (#455)", async () => {
   const picked = { id: 9001, event: "labeled", label: { name: "factory:local" }, actor: OPERATOR, created_at: "2031-03-02T01:00:40Z" };
   const mark = (id, user = OPERATOR) => ({ id: 8000 + id, user, created_at: "2031-03-02T01:00:42Z", updated_at: "2031-03-02T01:00:42Z", body: `<!-- factory:60:local-route:${id} -->\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`factory:local\`; it stays that machine's.` });
   // The loop's pick: the label event and Factory's mark naming it. No human action.
@@ -1152,4 +1152,12 @@ test("local mode where no Action runs: the factory:local label a loop applied is
   assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
   assert.equal(check("2031-03-02T01:30:00Z", OPERATOR, "labeled factory:local", 9002), false, "a mark by another login");
   assert.equal(check("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", null), false, "no event id, no mark");
+  // Two marks naming one event, by two logins: each pair counts on its own, never the last one only.
+  const both = localFactoryActions({ ...serve, issueComments: [...serve.issueComments, mark(9001, { login: "someone", type: "User" })] });
+  assert.equal(both("2031-03-02T01:00:40Z", OPERATOR, "labeled factory:local", 9001), true);
+  // Factory's activity spans count the marked label as its act too.
+  const { factoryActivity } = await import("../lib/objective.mjs");
+  const at = Date.parse("2031-03-02T01:00:40Z");
+  assert.ok(factoryActivity(serve).some(([a, b]) => a === at && b === at));
+  assert.ok(!factoryActivity(unmarked).some(([a, b]) => a === at && b === at));
 });

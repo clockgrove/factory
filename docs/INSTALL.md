@@ -193,12 +193,13 @@ env:
   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"], "codex": ["codex-2"]}'
 ```
 
-To add a second Claude account, ask the pendulum-setup skill, or re-render the workflow yourself, then merge it through a pull request:
+To add an account:
 
-```sh
-node <pendulum clone>/plugin/scripts/setup.mjs --repo OWNER/NAME --apply workflow --add-account claude-2 --auto-account on   # preview; add --yes to write
-gh secret set ANTHROPIC_API_KEY_CLAUDE_2   # paste the key at the prompt
-```
+1. **Render it into the workflow** with setup, which names each account's secret in the jobs, and merge it through a pull request: `/pendulum:pendulum-setup` ("add a second Claude account"), or `setup.mjs --repo OWNER/NAME --apply workflow --add-account claude-2 --auto-account on` (a preview; add `--yes` to write). Until the re-render lands, stages Block asking for it.
+2. **Save its credential** as its own secret, named as below and in setup's note: `gh secret set ANTHROPIC_API_KEY_CLAUDE_2`, pasting the key at the prompt.
+3. **Check it:** doctor names any account whose secret is missing.
+
+To run one Objective on it, apply `pendulum:account:<name>` to its issue. Setup's options:
 
 - `--add-account NAME` adds an account of the workflow's harness, `--add-account HARNESS:NAME` one of another (`codex:codex-2`). Adding to a harness that declares none puts its usual account, named after it, first, so that one stays the default on the usual secrets.
 - `--remove-account NAME` removes one. When each harness is left with only its usual account, the line goes, as with none declared.

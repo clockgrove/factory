@@ -2802,6 +2802,8 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * (Copilot at its default), null when the record has no `ran` to say.
  */
 const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, ran.subagent, ran.reviewer].filter((m) => typeof m === "string" && m) : null);
+/** A stage's exit as its usage record names it (`delivered`, `blocked`, `question`, ...): a code, never words; null for none. */
+const exitCode = (v) => (typeof v === "string" && /^[a-z][a-z-]{0,30}$/.test(v) ? v : null);
 /**
  * The spend line a stage writes at its end, from its usage record (session.mjs writeUsage): `{usd, parts}` for
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
@@ -2812,14 +2814,15 @@ const publishedModels = (ran) => (ran && typeof ran === "object" ? [ran.worker, 
  * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `noPass`: it ran
  * no pass of a kind (writeUsage's), so no round. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
- * the scorecard counts per account (#266). `ledger`: the per-pass ledger line written beside it (ledgerMarker), from
- * the record's `ledger`; absent for a record with none.
+ * the scorecard counts per account (#266). `exit`: how the stage ended (its record's exit code), which the report's
+ * Blocked stages read. `ledger`: the per-pass ledger line written beside it (ledgerMarker), from the record's `ledger`;
+ * absent for a record with none.
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum, published: publishedModels(usage.ran) }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...(usage?.noPass === true ? { noPass: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}), ...(exitCode(usage?.exit) ? { exit: usage.exit } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2852,8 +2855,9 @@ export function spendOf(body) {
  * started only to judge answers already made). `running`: the line was written while its stage ran (not its final
  * figure), with `usdRunning` of its unknown runs still open then (in flight, not unreported). Both are as of that write,
  * never "running now": a stage killed after it (SIGKILL, a machine restart) leaves the line as it was. `noPass`: the stage ran no pass of
- * a kind (usage.mjs PASS_KINDS): no work, review, answer, fix or conflict pass, so it is no round of any. Null when the
- * body has no spend line.
+ * a kind (usage.mjs PASS_KINDS): no work, review, answer, fix or conflict pass, so it is no round of any. `exit`: how
+ * the stage ended (`blocked`, ...), a code, absent on a line written before Pendulum recorded it. Null when the body has
+ * no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2865,7 +2869,7 @@ export function spendParts(body) {
     const rerun = rerunRead(r?.rerun);
     const unknown = unknownRead(r);
     const open = unknown.usdUnknown && Number.isInteger(r?.usdRunning) && r.usdRunning > 0 ? Math.min(r.usdRunning, unknown.usdUnknown) : 0;
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknown, ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}), ...(r?.running === true ? { running: true, ...(open ? { usdRunning: open } : {}) } : {}), ...(r?.noPass === true ? { noPass: true } : {}) };
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknown, ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}), ...(r?.running === true ? { running: true, ...(open ? { usdRunning: open } : {}) } : {}), ...(r?.noPass === true ? { noPass: true } : {}), ...(exitCode(r?.exit) ? { exit: r.exit } : {}) };
   } catch {
     return null;
   }

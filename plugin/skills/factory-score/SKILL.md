@@ -1,6 +1,6 @@
 ---
 name: factory-score
-description: "/factory:factory-score [issue...]. Build or print the Clockgrove Factory scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean."
+description: "Build or print the Clockgrove Factory scorecard: one row per Objective with the four job-one numbers, read from the issue, the PR, the job log and the uploaded usage artifact. Use when the user asks for the scorecard, the cost of an Objective, or whether an Objective walked away clean. Not for what the numbers mean and how each is measured (factory-scoring)."
 ---
 
 # /factory:factory-score
@@ -20,7 +20,7 @@ For a run made with `/factory:factory-run <issue> --here` there is no job log or
 
 ## Write the row
 
-With a clone, run `node <factory clone>/bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` when the issue carries label events from an earlier Factory). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (the factory-scoring skill), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: the factory-scoring skill), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
+With a clone, run `node <factory clone>/bench/score.mjs --repo <owner/name> --issue <issue> --usage <artifact dir> --print` and show its output (`--clock-after <date>` starts each clock at the first label event on or after that date, for an issue whose earlier label events belong to no run being scored). Without it, print the row yourself as a table with these columns: issue, walk-away (yes/no, first human action), walk-away counting only asked-for actions, asked / unprompted counts (the factory-scoring skill), quality (judge pick / read / unread, escapes), operator minutes (and what on), owner step minutes (a workflow hand-over, scored as normal work: the factory-scoring skill), dollars (unit, basis), runner minutes, wall time, exit (delivered / question / blocked with reason). A missing input shows as `missing: <which>`, never as a guess.
 
 With no issue given, score every issue that carries `factory:objective` and closed since the date the user names, plus the open ones that are Blocked, Question, In review or Running (`--since <date>`); the table is oldest first.
 

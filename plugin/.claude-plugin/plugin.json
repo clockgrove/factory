@@ -18,6 +18,7 @@
   "skills": "./skills/",
   "agents": [
     "./agents/claude/implementer.md",
-    "./agents/claude/reviewer.md"
+    "./agents/claude/reviewer.md",
+    "./agents/claude/foundation-reviewer.md"
   ]
 }

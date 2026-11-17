@@ -1,6 +1,6 @@
 ---
 name: factory-stop
-description: "/factory:factory-stop <issue>. Stop one Clockgrove Factory Objective on the user's yes: removes the issue's factory:objective label, which ends its running stage and keeps every tick and loop from picking it up. Use when the user asks to stop, halt or cancel one Clockgrove Factory Objective, or says one should not run."
+description: "Stop one Clockgrove Factory Objective on the user's yes: removes the issue's factory:objective label, which ends its running stage and keeps every tick and loop from picking it up; its branch and pull request stay. Use when the user asks to stop, halt or cancel one Clockgrove Factory Objective, or says one should not run. Not for starting one over from its issue's current text (factory-restart)."
 ---
 
 # /factory:factory-stop <issue>

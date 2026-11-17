@@ -1,6 +1,6 @@
 ---
 name: factory-draft
-description: "/factory:factory-draft <issue>. Keep working on a draft Clockgrove Factory Objective: load the issue from GitHub, refine its goal and acceptance with the user, and save the changes back to the issue only on the user's yes. Use when the user asks to keep working on, refine, revise or continue a Clockgrove Factory Objective draft by number."
+description: "Keep working on a draft Clockgrove Factory Objective by issue number: load the issue from GitHub, refine its goal and acceptance with the user, and save the changes back to the issue only on the user's yes. Use when the user asks to keep working on, refine, revise or continue a Clockgrove Factory Objective draft. Not for filing a new Objective (factory-file) or starting a draft (factory-start)."
 ---
 
 # /factory:factory-draft <issue>

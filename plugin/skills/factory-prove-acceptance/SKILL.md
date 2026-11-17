@@ -1,6 +1,7 @@
 ---
 name: factory-prove-acceptance
-description: Third step of working a Clockgrove Factory Objective, after factory-implement-split and before factory-deliver-pr. Use to prove every acceptance entry through the repository's real path per its testing guide, run the validation and test-budget commands, apply the base-failure rule and iterate locally before you hand off. Load when a task card says to use factory-prove-acceptance.
+description: "Internal: the third stage of a Clockgrove Factory worker run, after factory-implement-split and before factory-deliver-pr, loaded only when a Factory task card names it. Proves every acceptance entry through the repository's real path per its testing guide, runs the validation and test-budget commands, applies the base-failure rule and iterates locally before the hand-off."
+user-invocable: false
 ---
 
 # Prove the acceptance

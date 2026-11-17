@@ -22,7 +22,7 @@ When the user picks Claude and has no Anthropic API key, offer `--credential pla
 
 ## Skills in the repository
 
-Offer to commit the Factory skills and agent definitions, which only vendors' cloud sessions need: copy this plugin's `skills/*` to `.agents/skills/` and `.claude/skills/`, and `agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say plainly: committed copies override the plugin's and never update; copy again on every upgrade.
+Offer to commit the skills Factory's workers load and the agent definitions, which only vendors' cloud sessions need: copy the five worker and reviewer skill directories, whole, from `<plugin root>/skills/` (`factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr` and `factory-review-pr`; no other skill runs in a worker) to `.agents/skills/` and `.claude/skills/`, and `<plugin root>/agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say plainly: committed copies override the plugin's and never update; copy again on every upgrade.
 
 ## Several accounts
 
@@ -41,3 +41,7 @@ Several subscriptions or keys of one harness can share the work as accounts. Eac
 - The user declares each account in `~/.config/factory/accounts.json`, on this machine only: a name and a Claude Code config folder or Codex home (`home`), or a Copilot `token_file` inside `~/.config/factory`. Show the example from [local.md](local.md); never open the file or a login in it.
 - For automatic choice, the user starts `factory serve` with `FACTORY_LOCAL_AUTO_ACCOUNT=1` in its shell. Only that shell sets it.
 - Doctor with `--local` (the factory-doctor skill) checks each account by name: declared validly, owner-only, hidden from every sandbox, and logged in.
+
+## Cloud sandbox
+
+`--sandbox vercel` writes the cloud-sandbox jobs instead ([Cloud sandbox](https://github.com/clockgrove/factory/blob/v0.9.37/docs/ADAPTERS.md#cloud-sandbox)). The user saves `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID` with `gh secret set`; only the launcher reads them. A stage's session is `timeout_minutes` plus about 16 minutes, up to the plan's cap (24 hours on Pro). Vercel bills the team for active CPU, provisioned memory, creations and snapshot storage; Factory books each stage's cost on the issue toward `daily_usd` and `max_usd`.

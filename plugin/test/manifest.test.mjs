@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -17,4 +17,10 @@ test("the plugin's manifests: the Agent Plugins 1.0 root plugin.json is valid, a
   assert.deepEqual(Object.keys(root.author).filter((k) => !["name", "email", "url"].includes(k)), []);
   const versions = Object.fromEntries(["plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"].map((p) => [p, read(p)]).map(([p, m]) => [p, `${m.name}@${m.version}`]));
   assert.equal(new Set(Object.values(versions)).size, 1, JSON.stringify(versions));
+});
+
+test("the Claude Code manifest registers every Claude agent definition the plugin ships, so a skill that spawns one finds it", () => {
+  const listed = read(".claude-plugin/plugin.json").agents.map((a) => a.replace(/^\.\//, ""));
+  const shipped = readdirSync(join(plugin, "agents", "claude")).map((f) => `agents/claude/${f}`);
+  assert.deepEqual([...listed].sort(), [...shipped].sort());
 });

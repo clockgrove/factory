@@ -1,47 +1,49 @@
 ---
 name: factory-run
-description: "/factory:factory-run <issue> [--here]. Run one Clockgrove Factory Objective of the current repository on this machine: by default in local mode (`factory run <issue>`, sandboxed, the Action's worker and reviewer); with --here, in this session itself. Use when the user asks to run, work or build a Clockgrove Factory Objective by issue number on their machine."
+description: "Run one Clockgrove Factory Objective of the current repository on this machine by issue number, on the user's yes: by default in local mode (`factory run <issue> --wait`: sandboxed, the Action's worker, reviewer and merge), or with --here in this session itself, handing the branch to Factory to push only on a second yes. Use when the user asks to run, work or build one Clockgrove Factory Objective on their machine. Not for working the whole queue (factory-serve) or starting the Action's scheduler (factory-queue)."
 ---
 
 # /factory:factory-run <issue> [--here]
 
+`<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.
+
 ## Local mode (the default)
 
-Run `factory run <issue> --wait` from the repository's clone (the plugin's `bin/` is on PATH; else `node <plugin root>/scripts/local.mjs run <issue> --wait`). It is the Action's worker, reviewer and merge, on this machine's harness login, every command in a sandbox. It needs local mode set up (the token file, `srt`: the factory-setup skill); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Stopping it pauses the Objective; running it again, or `/factory:factory-serve`, resumes it.
+### Ask
 
-## In this session (--here)
+Show the issue's number, title and state (`gh issue view <issue> --json number,title,state,labels`) and what `factory run <issue> --wait` does; wait for a yes:
 
-Work the Objective here, unsandboxed, when the user wants to watch or steer: the Action's worker otherwise.
-
-### Preconditions
-
-- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`, `FACTORY_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts.
-- The issue carries `factory:objective` and is open; else stop and say so.
-- Never on Factory's own repository (`clockgrove/factory`); stop and say so.
-
-### Render the task card
-
-Read `templates/task-card.md` in this plugin's root (two directories above this file) and fill the placeholders:
-
-| Placeholder | Value |
-| --- | --- |
-| `{{issue}}` | the issue number |
-| `{{usd}}`, `{{hours}}` | the budget: `FACTORY_MAX_USD` and `FACTORY_TIMEOUT_MINUTES / 60`, else what the user said |
-| `{{validation}}` | the repository's validation commands, separated by `; ` |
-| `{{validation_note}}` | the `validation_note` sentence in this plugin's `scripts/lib/logic.mjs`, chosen by `FACTORY_CI_CHECKS` |
-| `{{budget_command}}` | the test-budget command, or `none` |
-| `{{protected_paths}}` | `.github/`, CODEOWNERS, `.agents/skills/`, `.claude/`, `.codex/`, plus `FACTORY_PROTECTED_PATHS` |
-| `{{branch}}` | `factory/<issue>` |
-
-Then fetch and check out the default branch, create `factory/<issue>` from it, and set up the hand-off directories in the clone's git directory, so nothing in them is ever committed: `FACTORY_IN=$(git rev-parse --absolute-git-dir)/factory-in` and `FACTORY_OUT=$(git rev-parse --absolute-git-dir)/factory-out`, both empty. Write `$FACTORY_IN/issue.md` and `plan.md` only with `factory issue <issue>` (or `local.mjs issue`), never `gh`: it refuses, as every stage does, an issue whose author, last editor or latest title renamer cannot push: then stop and relay it. No `plan.md` (none yet, or the issue changed): plan anew. Then, with read-only `gh` calls, `decisions.md` (the comments of people with write access) and `base.txt` (`git rev-parse origin/<default branch>`). Write the agent definitions from this plugin's `agents/` into the checkout for your harness (`.claude/agents/`, `.codex/agents/` or `.github/agents/`) unless the repository has its own, and add every path you wrote to `.git/info/exclude`: they are protected paths. On Claude Code, also copy the repository's `.agents/skills/*` into `.claude/skills/` (the only one it reads) the same way.
+- It is the Action's worker, reviewer and merge on this machine, every command in a sandbox, on this machine's harness login: it works the Objective from the stage its state calls for, reviews the PR, answers the review, and with `auto_merge` on merges the PR once green.
+- It pushes `factory/<issue>`, opens the PR and posts on the issue as the user (local mode's token).
+- Each stage stops at `max_usd` (doctor's `settings` row) and books its spend on the issue toward `daily_usd`.
 
 ### Run
 
-The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Load and follow, in order: `factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when factory-deliver-pr says to. Write nothing to GitHub.
+On a yes, run `factory run <issue> --wait` from the repository's clone. It needs local mode set up (the token file, `srt`: the factory-setup skill); if it refuses, relay its message, which names the fix. Run it in the background and report its `[#<issue> …]` lines as they come, then the exit and the PR link. Where this harness cannot run a command in the background, give the user the command to run in a terminal of their own, and read its output once they say it has ended. Stopping it pauses the Objective; running it again, or the factory-serve skill, resumes it.
+
+## In this session (--here)
+
+Work the Objective here, unsandboxed, when the user wants to watch or steer.
+
+### Preconditions
+
+- The current directory is a clone of the target repository with its toolchain installed, and either local mode's token or a `gh` login for `factory deliver`. When `.github/workflows/factory.yml` exists, read its `env:` block: `FACTORY_VALIDATION`, `FACTORY_BUDGET_COMMAND`, `FACTORY_PROTECTED_PATHS`, `FACTORY_MAX_USD`, `FACTORY_TIMEOUT_MINUTES`, `FACTORY_CI_CHECKS`. Otherwise ask once for whatever is missing, before the run starts. Say the budget (`FACTORY_MAX_USD`, else the user's): this session keeps to it itself.
+- The issue carries `factory:objective` and is open; else stop and say so.
+- Never on Factory's own repository (`clockgrove/factory`); stop and say so.
+
+### Set up
+
+Render the task card and set up the branch and the hand-off directories: [reference.md](reference.md).
+
+### Run
+
+The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Read and follow, in order, the worker's stage skills, each `<plugin root>/skills/<name>/SKILL.md` here, not the card's checkout paths: `factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when factory-deliver-pr says to. Write nothing to GitHub.
 
 ### Hand off to Factory
 
-Run `factory deliver <issue>` from the clone (else `node <plugin root>/scripts/local.mjs deliver <issue>`). Factory runs that trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, posts the plan, the PR, the replies and the note, and applies the exit record: a delivered PR is marked ready and labelled `factory:review`, which fires the Action's review job when `.github/workflows/factory.yml` exists. Without the workflow, say that the PR waits for `/factory:factory-review <pr>` and a human merge.
+Show the user the branch's commits (`git log --oneline origin/<default branch>..HEAD`), the PR title (the first line of `$FACTORY_OUT/pr.md`) and the exit record, and say what `factory deliver <issue>` does: it runs the trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, posts the plan, the PR, the replies and the note as the user, and applies the exit record: a delivered PR is marked ready and labelled `factory:review`, which, when `.github/workflows/factory.yml` exists, fires the Action's review job (with `auto_merge` on, the Action merges it once green). Ask for a yes.
+
+On a yes, run `factory deliver <issue>` from the clone. Without the workflow, say that the PR waits for the factory-review skill and a human merge.
 
 ### After
 

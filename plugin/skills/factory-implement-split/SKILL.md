@@ -1,6 +1,7 @@
 ---
 name: factory-implement-split
-description: Second step of working a Clockgrove Factory Objective, after factory-objective-plan. Use to implement the plan's checklist with implementer sub-agents on the pinned model, run disjoint-file items concurrently, integrate once, and split an Objective too large for one session into sequential PRs. Load when a task card says to use factory-implement-split.
+description: "Internal: the second stage of a Clockgrove Factory worker run, loaded only when a Factory task card names it. Implements the plan's checklist with implementer sub-agents on the pinned model, runs disjoint-file items concurrently, integrates once, and splits an Objective too large for one session into sequential PRs."
+user-invocable: false
 ---
 
 # Implement the checklist

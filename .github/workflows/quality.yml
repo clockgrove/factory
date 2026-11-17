@@ -27,13 +27,15 @@ jobs:
         run: npm run lint --prefix tools/deps
       # Every skill follows the Agent Skills standard (agentskills.io): its name matches its folder, its description and
       # frontmatter are what Claude Code, Codex and Copilot accept. A skill they would drop silently fails here instead.
+      # skills-ref's own rules, through tools/deps/skills-validate.py, which also lets a skill carry the one harness field
+      # Factory sets (Claude Code's user-invocable: false, on the internal stage skills) that the standard does not define.
       - name: Every skill follows the Agent Skills standard
         run: |
           python3 -m venv "$RUNNER_TEMP/skills-ref"
           "$RUNNER_TEMP/skills-ref/bin/pip" install --quiet --require-hashes --only-binary :all: -r tools/deps/requirements-skills.txt
-          for d in plugin/skills/*/; do "$RUNNER_TEMP/skills-ref/bin/agentskills" validate "$d"; done
+          "$RUNNER_TEMP/skills-ref/bin/python" -I tools/deps/skills-validate.py plugin/skills/*/
           # The check bites: a skill that breaks the rules must fail it.
-          if "$RUNNER_TEMP/skills-ref/bin/agentskills" validate bench/test/fixtures/skills/bad-name/; then echo "::error::skills-ref accepted a skill that breaks the rules"; exit 1; fi
+          if "$RUNNER_TEMP/skills-ref/bin/python" -I tools/deps/skills-validate.py bench/test/fixtures/skills/bad-name/; then echo "::error::skills-ref accepted a skill that breaks the rules"; exit 1; fi
       # The tests run with an empty temp folder of their own, and must leave it empty: a developer's box runs them many
       # times a day, and what they left behind once filled /tmp's inodes (#2565).
       # Local mode needs ripgrep (the sandboxes' scan for protected paths), so tests of its real stage setup do too.

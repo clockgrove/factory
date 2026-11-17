@@ -1135,7 +1135,9 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * checks (session.mjs hangsOn) end the wait unfinished, returned as `hung`, and so does `idleMs` with no required check
  * running. `timeoutMs` is the caller's bound (the stage's wall clock); the reads back off only past `backoffAfterMs`.
  * A required check red only by a `cancelled` run whose workflow run a newer run of its workflow on this head replaced
- * (supersededRun, its reads through `cache`, the caller's: triage's) is read as not finished. `onRead(state, runs)` (optional) gets
+ * (supersededRun, its reads through `cache`, the caller's: triage's) is read as not finished. `select(checkRuns)` (async,
+ * optional) keeps only the check runs that count, as GitHub returns them (the cross-OS legs' own workflow run's:
+ * cross-os.mjs), with no commit status read; the cancel rule above reads what it kept. `onRead(state, runs)` (optional) gets
  * each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an AbortSignal,
  * optional) ends the wait, unfinished, at its next pause.
  */
@@ -1171,7 +1173,7 @@ export async function supersededRun(repo, r, { actionsToken, cache = new Map() }
 /** A check run as awaitChecks returns it (and checksNotStarted reads it). */
 const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
 
-export async function awaitChecks(repo, sha, names, { token, actionsToken = token, cache = new Map(), timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, actionsToken = token, cache = new Map(), timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, select = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
   const started = Date.now();
   // When a required check was last seen running (progress), from the wait's start.
   let ranAt = started;
@@ -1194,11 +1196,12 @@ export async function awaitChecks(repo, sha, names, { token, actionsToken = toke
   for (;;) {
     // A failed read is no reading: once one has succeeded, the last good one stands and the wait goes on to its own
     // deadline; with none yet, the wait ends at `appearMs` as for nothing ran.
-    const read = await checkRuns(repo, sha, { token, cache: etags }).catch(() => null);
+    // `select` (cross-os.mjs): only the check runs of one workflow run count, and commit statuses never do.
+    const read = await checkRuns(repo, sha, { token, cache: etags }).then((rs) => (select ? select(rs) : rs)).catch(() => null);
     if (read) {
       runs = read.filter((r) => !ignoreIds?.has(r.id));
       readOnce = true;
-      if (names.some((n) => !runs.some((r) => r.name === n))) statuses = await rest(`repos/${repo.full}/commits/${sha}/status`, { token, cache: etags }).then((st) => (st?.statuses || []).map(statusRun), () => statuses);
+      if (!select && names.some((n) => !runs.some((r) => r.name === n))) statuses = await rest(`repos/${repo.full}/commits/${sha}/status`, { token, cache: etags }).then((st) => (st?.statuses || []).map(statusRun), () => statuses);
       runs = [...runs, ...statuses.filter((x) => !runs.some((r) => r.name === x.name))];
     }
     state = evaluateChecks(names, view(runs));

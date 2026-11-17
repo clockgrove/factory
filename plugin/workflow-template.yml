@@ -194,7 +194,7 @@ jobs:
     runs-on: {{runs_on}}
     timeout-minutes: {{timeout_minutes}}
     strategy: { fail-fast: false, matrix: { issue: "${{ fromJSON(needs.dispatch.outputs.issues) }}" } } # the dispatcher picks at most max_concurrent less the ones running, a repository variable's included
-    permissions: { contents: read, issues: write, actions: write } # actions: write for the tick at the end and triage's rerun of failed CI jobs
+    permissions: { contents: read, issues: write, actions: write } # actions: write for the tick at the end, triage's rerun of failed CI jobs and cross-OS CI's dispatch
     concurrency: { group: "pendulum-${{ matrix.issue }}", cancel-in-progress: false } # one job per issue; a repeat waits, siblings keep running
     steps:
       - uses: {{action}}

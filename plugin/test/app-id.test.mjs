@@ -19,8 +19,8 @@ const dropCopies = () => rmSync(join(home(), ".config", "pendulum", "repos"), { 
 
 /**
  * A fake GitHub answering the variables list and the one variable per token (the Authorization header's, without
- * "Bearer "): `list(token)` and `one(token)` give a value ({vars} for the list), {status} or null (404). `asked`: each
- * request as "<path> <token>".
+ * "Bearer "): `list(token)` and `one(token)` give a value ({vars} for the list), {status, headers} or null (404), or
+ * {hang: true} (no answer). `asked`: each request as "<path> <token>".
  */
 async function host({ list = () => ({ status: 403 }), one = () => null } = {}) {
   const asked = [];
@@ -31,12 +31,13 @@ async function host({ list = () => ({ status: 403 }), one = () => null } = {}) {
     const send = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     const a = path === "/repos/o/r/actions/variables" ? list(token) : path === "/repos/o/r/actions/variables/PENDULUM_APP_ID" ? one(token) : null;
     if (a === null || a === undefined) return send(404, { message: "Not Found" });
-    if (a.status) return send(a.status, { message: "Resource not accessible by personal access token" });
+    if (a.hang) return;
+    if (a.status) return res.writeHead(a.status, { "content-type": "application/json", ...(a.headers ?? {}) }).end(JSON.stringify({ message: a.status === 403 && !a.headers ? "Resource not accessible by personal access token" : "API rate limit exceeded" }));
     if (a.vars) return send(200, { total_count: Object.keys(a.vars).length, variables: Object.entries(a.vars).map(([name, value]) => ({ name, value })) });
     return send(200, { name: "PENDULUM_APP_ID", value: String(a) });
   });
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
-  return { url: `http://127.0.0.1:${server.address().port}`, asked, close: () => new Promise((ok) => server.close(ok)) };
+  return { url: `http://127.0.0.1:${server.address().port}`, asked, close: () => new Promise((ok) => (server.closeAllConnections(), server.close(ok))) };
 }
 
 /** Run `fn` against `url` with a fake `gh` first on PATH (`gh auth token` prints `token`; null: no login); its stdout lines. */
@@ -204,5 +205,32 @@ test("doctor in local mode: the App id variable not set is a WARN naming its gh 
   } finally {
     dropCopies();
     await gh.close();
+  }
+});
+
+test("serve's start (#571 review): the gh login's read of the App id takes no rate-limit wait and ends at its deadline, so it never holds serve's start", async () => {
+  const start = () => Object.assign(Object.create(Local.prototype), { repo: REPO, repoFull: "o/r", token: "local", appIdReadMs: 300 });
+  // The gh login's quota is spent until an hour from now: said, and serve goes on at once.
+  const reset = String(Math.floor(Date.now() / 1000) + 3600);
+  for (const [name, one] of [
+    ["rate limited", () => ({ status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset, "x-ratelimit-resource": "core" } })],
+    ["no answer", () => ({ hang: true })],
+  ]) {
+    const gh = await host({ list: () => ({ status: 403 }), one });
+    try {
+      const loop = start();
+      const began = Date.now();
+      const { value, said } = await around(gh.url, "gho_login", async () => {
+        await loop.readVariables();
+        return loop.keepAppId();
+      });
+      assert.equal(value, null, name);
+      assert.ok(Date.now() - began < 5_000, `${name}: ${Date.now() - began} ms`);
+      assert.match(said, /Pendulum's App id was not read \(.*\); `pendulum report` reads it itself/, name);
+      assert.ok(gh.asked.includes("/repos/o/r/actions/variables/PENDULUM_APP_ID gho_login"), name);
+    } finally {
+      dropCopies();
+      await gh.close();
+    }
   }
 });

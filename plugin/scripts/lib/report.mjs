@@ -967,14 +967,18 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
       views.stage.add(stageKind, c, tokens, count);
       views.harness.add(harness, c, tokens, count);
       views.model.add(model, c, tokens, count);
-      // The token mix `--rates` weighs: a stage's whole tokens from its record when one is at hand (with its long-context
-      // share and its sub-agent threads), else as the model breakdown counts them. The Objective's sub-agent model (its
-      // harness line's or record's `ran`) is the worker's: only a work stage's unsplit tokens are marked as holding it.
+      // The stage's per-pass ledger: its usage record's or local mode's own record of it when one is at hand (their times
+      // to the millisecond), else its progress comment's ledger line (times to the second).
+      const ledger = [rec, recordOf, localRec, onComment].map((x) => x?.ledger).find(Array.isArray) ?? null;
+      // The token mix `--rates` weighs (mixBook): a stage's whole tokens from its record when one is at hand (with its
+      // long-context share and its sub-agent threads), else as the model breakdown counts them; split by its ledger's
+      // passes when they ran on more than one model. The Objective's worker and sub-agent models from its harness line's
+      // or record's `ran`.
       if (rates && rec.source !== "decisions" && !rec.notStage && !rec.unattributed) {
         const src = rec.source === "spend" ? recordOf ?? (localRec?.tokens ? localRec : null) : rec;
         const whole = src?.tokens && typeof src.tokens === "object" ? src.tokens : tokens;
-        const sub = stageKind === "review" ? null : (modelKey(line?.ran?.subagent) ?? modelKey(src?.ran?.subagent));
-        mixes.stage(model, whole, harness === "codex" && whole === src?.tokens ? { subs: src.subAgents ?? [] } : { unsplit: sub && sub !== model ? sub : null });
+        const ran = (k) => modelKey(line?.ran?.[k]) ?? modelKey(src?.ran?.[k]);
+        mixes.stage(model, whole, { subs: harness === "codex" && whole === src?.tokens ? src.subAgents ?? [] : null, ledger, worker: ran("worker"), subagent: ran("subagent") });
       }
       views.version.add(rec.source === "decisions" ? "decisions" : version, c, tokens, count);
       if (by.includes("account")) views.account.add(rec.source === "decisions" ? "decisions" : account, c, tokens, count);
@@ -984,9 +988,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], rates = null
         if (!version && !rec.unattributed) missing.noVersion.add(n);
       }
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
-      // The stage's passes, from its per-pass ledger: its usage record's or local mode's own record of it when one is at
-      // hand (their times to the millisecond), else its progress comment's ledger line (times to the second).
-      const ledger = [rec, recordOf, localRec, onComment].map((x) => x?.ledger).find(Array.isArray) ?? null;
+      // The stage's passes, from its per-pass ledger.
       if (rec.unattributed && !rec.notStage) unattributedStages += 1;
       if (rec.source === "decisions" || rec.unattributed) return;
       if (!ledger) {
@@ -1286,6 +1288,7 @@ export const RATIO_WHY = Object.freeze({
   "same-model": "the candidate is the recorded model itself",
   "no-tokens": "a stage of this model has no input or output tokens recorded",
   "sub-agents": "a stage's tokens include sub-agents on another model that no record splits out",
+  "pass-models": "a stage's passes may have run on another model than its own, and no ledger says which",
   "long-context": "its tokens from requests over the long-context threshold are not known, or are not zero and one of the two models has no long-context rate",
 });
 
@@ -1301,10 +1304,17 @@ const noLong = () => ({ input: 0, cached: 0, written: 0, output: 0 });
 /**
  * The recorded token mix of each model, for `--rates`: each stage's tokens under its model, as the model breakdown counts
  * them, but a Codex stage's sub-agent threads (its record's `subAgents`) under each thread's own model, the rest under the
- * stage's, as the cost join prices them (usage.mjs priceStage). A work stage whose tokens no record splits (a progress
- * comment's ledger line, or another harness's record) while its harness line names a sub-agent model other than its own
- * marks both models `sub-agents`; a review stage, on its reviewer model, marks none. `long` is the part of the mix from
- * requests over `above` input tokens (usage.mjs longShare), summed over the stages, null once any stage's is not known. A stage with no input or output tokens marks its model `no-tokens`.
+ * stage's, as the cost join prices them (usage.mjs priceStage). A stage whose ledger's harness passes (its decision
+ * records left out) name more than one model (a review stage's review pass on the reviewer's model, its answer and fix
+ * passes on the worker's) is split by them: each model gets its own passes' tokens, a thread's taken from the passes it
+ * ran in (its `run`, their label) and put under the thread's model. A stage whose passes may have run on another model
+ * than its own that no ledger names (no ledger, or a pass on a model the ledger line does not name, on a stage not on the
+ * worker's model) marks its model and the worker's `pass-models`. Where no record splits the threads out (a progress
+ * comment's ledger line, or another harness's record), the tokens of passes on the worker's model mark that model and
+ * the sub-agent model, when it is another, `sub-agents`, as does a thread no pass's label places. `long` is the part of
+ * the mix from requests over `above` input tokens (usage.mjs longShare), summed over the stages, null once any stage's
+ * is not known (a pass's, from a ledger, is known only when its whole input is under `above`). A stage with no input or
+ * output tokens marks its model `no-tokens`.
  */
 function mixBook(above) {
   const rows = new Map();
@@ -1318,16 +1328,52 @@ function mixBook(above) {
     addTokens(r.tokens, tokens);
     r.long = r.long && long ? sumLong([r.long, long]) : null;
   };
+  const mark = (models, why) => {
+    for (const m of models) if (m) row(m).why.add(why);
+  };
+  // `threads` taken out of `tokens` (and their long-context share out of `long`), each count kept null where it is null.
+  const less = (tokens, long, threads) => {
+    const sum = (k) => threads.reduce((n, t) => n + (num(t.tokens[k]) ?? 0), 0);
+    return [Object.fromEntries(TOKEN_KEYS.map((k) => [k, num(tokens?.[k]) === null ? null : Math.max(0, tokens[k] - sum(k))])), sumLong([long, ...threads.map((t) => longShare(t.tokens, above))], -1)];
+  };
   return {
-    /** One stage: `subs` the sub-agent threads its record lists (an exact split), or `unsplit` a sub-agent model it may hold. */
-    stage(model, tokens, { subs = null, unsplit = null } = {}) {
+    /**
+     * One stage on `model` with `tokens`: `subs` the sub-agent threads its record lists (an exact split; null when no
+     * record splits them), `ledger` its per-pass ledger, `worker` and `subagent` the Objective's models.
+     */
+    stage(model, tokens, { subs = null, ledger = null, worker = null, subagent = null } = {}) {
       if (!model) return;
-      if (unsplit) for (const m of [model, unsplit]) row(m).why.add("sub-agents");
       const threads = (Array.isArray(subs) ? subs : []).filter((t) => t?.tokens && typeof t.tokens === "object");
+      // Passes on the worker's model may hold sub-agent threads no record splits out.
+      const unsplit = (m) => !Array.isArray(subs) && !!subagent && subagent !== m && (worker === null || m === worker);
+      const passes = Array.isArray(ledger) ? ledger.filter((e) => e && typeof e === "object" && e.decision !== true) : null;
+      const models = passes?.length && passes.every((e) => modelKey(e.model)) ? [...new Set(passes.map((e) => e.model))] : null;
+      if (models && models.length > 1) {
+        const by = new Map(models.map((m) => [m, { tokens: zeroTokens(), long: noLong(), whole: true, threads: [] }]));
+        for (const e of passes) {
+          const r = by.get(e.model);
+          if (num(e.tokens?.input) === null || num(e.tokens?.output) === null) r.whole = false;
+          addTokens(r.tokens, e.tokens);
+          r.long = r.long && sumLong([r.long, longShare(e.tokens, above)]);
+        }
+        for (const t of threads) {
+          const on = [...new Set(passes.filter((e) => typeof t.run === "string" && e.label === t.run).map((e) => e.model))];
+          if (on.length === 1) by.get(on[0]).threads.push(t);
+          else mark([...models, modelKey(t.model)], "sub-agents");
+        }
+        for (const [m, r] of by) {
+          if (unsplit(m)) mark([m, subagent], "sub-agents");
+          const [own, long] = less(r.tokens, r.long, r.threads);
+          add(m, r.whole ? own : { ...own, input: null }, long);
+          for (const t of r.threads) add(modelKey(t.model) ?? m, t.tokens, longShare(t.tokens, above));
+        }
+        return;
+      }
+      if (!models && worker && worker !== model) mark([model, worker], "pass-models");
+      if (unsplit(model)) mark([model, subagent], "sub-agents");
       if (!threads.length) return add(model, tokens, longShare(tokens, above));
-      const sum = (k) => threads.reduce((n, t) => n + (num(t.tokens[k]) ?? 0), 0);
-      const unthreaded = Object.fromEntries(TOKEN_KEYS.map((k) => [k, num(tokens?.[k]) === null ? null : Math.max(0, tokens[k] - sum(k))]));
-      add(model, unthreaded, sumLong([longShare(tokens, above), ...threads.map((t) => longShare(t.tokens, above))], -1));
+      const [own, long] = less(tokens, longShare(tokens, above), threads);
+      add(model, own, long);
       for (const t of threads) add(modelKey(t.model) ?? model, t.tokens, longShare(t.tokens, above));
     },
     rows: () => [...rows.values()].map((r) => ({ key: r.key, tokens: r.tokens, long: r.long, why: [...r.why].sort() })),
@@ -1361,9 +1407,9 @@ const weighTiers = (tokens, long, r) => weigh(partsOf(Object.fromEntries(TOKEN_K
  * to the model's own on that mix, weighed as the cost join prices tokens (codexPrice): with a long-context share, the
  * share at each model's `long` rates. Only within one vendor's table. No ratio, and a `skipped` entry with its code
  * (RATIO_WHY), for: a model or candidate no table lists or whose promotional rate ended, a pair of two vendors, a candidate
- * that is the model itself, a model whose mix is not known whole (`no-tokens`, `sub-agents`), and a long-context share
- * not known, or not zero where either model has no `long` rates (two models with none price every token at the standard
- * rates, the share aside). Candidates are taken once each, an alias with the model it names. No dollar figure: a ratio
+ * that is the model itself, a model whose mix is not known whole (`no-tokens`, `sub-agents`, `pass-models`), and a
+ * long-context share not known, or not zero where either model has no `long` rates (two models with none price every
+ * token at the standard rates, the share aside). Candidates are taken once each, an alias with the model it names. No dollar figure: a ratio
  * has no unit, and the mix is token counts. `at`: when the rates are read (a promotional rate counts only before its end).
  */
 export function rateRatios(mixes, candidates, tables, { at }) {

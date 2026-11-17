@@ -15,8 +15,8 @@ const root = ownedTemp(base, "pendulum-test-");
 process.env.TMPDIR = root;
 process.on("exit", () => dropOwned(root, { unlock: true }));
 
-// The harness logins' variables, the credentials Pendulum reads from the shell, the SSH agent, and the base directories
-// that would lead a tool outside the fake home; and local mode itself with all its settings (DEVELOPER_ENV_PREFIX: its
+// The harness logins' variables, the credentials Pendulum reads from the shell, the SSH agent, the base directories
+// that would lead a tool outside the fake home, and the CI job's own workflow run; and local mode itself with all its settings (DEVELOPER_ENV_PREFIX: its
 // token, App, sandbox, limits). Every module's homedir() and every child process then sees the fake home alone, and a
 // test that wants local mode or one of its settings sets it.
 export const DEVELOPER_ENV = [
@@ -44,6 +44,10 @@ export const DEVELOPER_ENV = [
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
   "XDG_STATE_HOME",
+  // The workflow run a CI job runs in: a test that wants a run id or attempt sets its own, so a re-run of the CI job
+  // (GITHUB_RUN_ATTEMPT 2) keys no progress comment or usage record differently from the first run.
+  "GITHUB_RUN_ID",
+  "GITHUB_RUN_ATTEMPT",
 ];
 /** PENDULUM_LOCAL and every PENDULUM_LOCAL_* variable. */
 export const DEVELOPER_ENV_PREFIX = /^PENDULUM_LOCAL(_|$)/;

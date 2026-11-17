@@ -121,6 +121,13 @@ export function crossOsChecks({ setting, repo, issue, prNumber, branch, token, a
     if (h.id) {
       const run = await rest(`repos/${repo.full}/actions/runs/${h.id}`, { ...actions, cache: etags }).catch(() => null);
       if (run?.id === h.id) track(h, run);
+      // Cancelled, and a newer dispatched run of the workflow on this head replaced it (a re-dispatch, the workflow's own
+      // concurrency group): that run's legs count from then on, beside the cancelled one's (the wait reads a cancel a newer
+      // run replaced as not finished: github.mjs supersededRun).
+      if (run?.status === "completed" && run.conclusion === "cancelled") {
+        const next = newest((await listRuns(sha).catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha) && w.id !== run.id && String(w.created_at || "") >= String(run.created_at || "")));
+        if (next) track(h, next);
+      }
     } else {
       const run = newest((await listRuns(sha).catch(() => [])).filter((w) => dispatchedRun(w, workflow, sha) && Date.parse(w.created_at) >= h.since));
       if (run) track(h, run);

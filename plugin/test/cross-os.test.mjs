@@ -38,9 +38,11 @@ const CI = "name: CI\non:\n  pull_request:\n  workflow_dispatch:\npermissions:\n
  * - `dispatch`: the dispatch's answer, a status code: 200 with the run's id, 204 with none, or another refusal; `auto`
  *   (the default) as GitHub answers, 200 when the body asks for `return_run_details`, else 204.
  * - `workflow`: the workflow file's text at any ref; `noRunner`: every job has no runner yet (GitHub has not started it).
+ * - `replaced`: the first dispatch's run is cancelled and a newer dispatched run on its head replaces it (its legs by
+ *   `legs(sha, 2)`), as a re-dispatch or the workflow's concurrency group would.
  * The head a dispatch runs on is the checkout's HEAD then.
  */
-async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, log }, fn) {
+async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, replaced = false, log }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
@@ -65,6 +67,10 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
       log.push(`dispatch ${sha.slice(0, 7)}`);
       const h = { n: seen.dispatches.length, id: (ids += 10), at: Date.now() + 1000, cr: 0, lr: 0 };
       seen.heads.set(sha, [...(seen.heads.get(sha) || []), h]);
+      if (replaced && h.n === 1) {
+        h.cancelled = true;
+        seen.heads.get(sha).push({ n: 2, id: (ids += 10), at: Date.now() + 2000, cr: 0, lr: 0 });
+      }
       return status === 200 ? json({ workflow_run_id: h.id, run_url: `https://github.test/runs/${h.id}`, html_url: "x" }) : json(null, 204);
     }
     let m = /^\/repos\/acme\/app\/contents\/\.github\/workflows\/ci\.yml$/.exec(p);
@@ -88,8 +94,13 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
     }
     m = /^\/repos\/acme\/app\/actions\/jobs\/(\d+)\/logs$/.exec(p);
     if (m) return new Response("##[group]Run npm test\nnot ok 1 - paths join with a backslash on Windows\n##[error]Process completed with exit code 1.\n", { status: 200 });
+    if (/^\/repos\/acme\/app\/actions\/workflows\/5\/runs$/.test(p)) {
+      const sha = u.searchParams.get("head_sha");
+      const runs = headsOf(sha).map((h) => runOf(sha, h).run);
+      return json({ total_count: runs.length, workflow_runs: runs });
+    }
     m = /^\/repos\/acme\/app\/actions\/jobs\/(\d+)$/.exec(p);
-    if (m) return json({ id: Number(m[1]), run_id: 1, name: WIN, status: "completed", conclusion: "failure", runner_id: noRunner ? 0 : 7, runner_name: noRunner ? "" : "w7", steps: [{ name: "Run npm test", number: 4, status: "completed", conclusion: "failure" }] });
+    if (m) return json({ id: Number(m[1]), run_id: Math.floor(Number(m[1]) / 10), name: WIN, status: "completed", conclusion: "failure", runner_id: noRunner ? 0 : 7, runner_name: noRunner ? "" : "w7", steps: [{ name: "Run npm test", number: 4, status: "completed", conclusion: "failure" }] });
     return json({ message: "Not Found" }, 404);
   };
   try {
@@ -229,6 +240,14 @@ test("#518 B1: a needs: failure that skips a leg is no green: the stage Blocks n
   const alone = await stage({ settings: ON, github: { legs: () => ({ [MAC]: green, [WIN]: { status: "completed", conclusion: "neutral" } }) } });
   assert.equal(alone.result.stuck.cause, "setup");
   assert.match(alone.result.stuck.reason, /test \(windows-2025, 1\/1\) neutral on [0-9a-f]{7}, so it did not run; run the leg on workflow_dispatch in ci\.yml/);
+});
+
+test("#518 with #519: a dispatched run cancelled and replaced by a newer one on its head: the cancel is no red, and the newer run's legs decide", async () => {
+  const r = await stage({ settings: ON, github: { replaced: true, legs: (sha, n) => (n === 1 ? { [MAC]: green, [WIN]: { status: "completed", conclusion: "cancelled" } } : { [MAC]: green, [WIN]: green }) } });
+  assert.equal(r.result.green, true, r.log.join("\n"));
+  assert.equal(r.prompts.length, 0, "no fix pass for the replaced run's cancel");
+  assert.equal(r.dispatches.length, 1);
+  assert.ok(r.log.includes(legLine(r.head, "success", "success")), r.log.join("\n"));
 });
 
 test("#518 S5: a dispatched run already on the head is waited for, not dispatched again; a cancelled one is not reused", async () => {

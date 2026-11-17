@@ -1379,5 +1379,5 @@ test("#277: a sandbox rebase's vendor cost: a reported one adds its dollars, one
   assert.deepEqual(rebases, { sentBack: 0, stages: 2, usd: 0.68, unknown: 1, conflicts: 0 });
   assert.match(rebaseCell(rebases), /^0, \$0\.68 plus 1 run of unknown cost/);
   // The row's cost reads the same vendor comments: the reported one priced, the unreported one unknown.
-  assert.deepEqual(spendRecords(collected).map((r) => r.vendor), [{ usd: 0.08 }, { usd: null }]);
+  assert.deepEqual(spendRecords(collected).map((r) => r.vendor), [{ usd: 0.08 }, { usd: null, usdUnknown: 1 }]);
 });

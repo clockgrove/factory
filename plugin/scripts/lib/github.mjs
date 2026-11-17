@@ -1637,7 +1637,11 @@ export async function localSpendToday(repo, { dateIso = new Date().toISOString()
   return { usd, unknown };
 }
 
-/** Usage artifacts uploaded today (UTC), as parsed result.json records. */
+/**
+ * Usage artifacts uploaded today (UTC), as parsed result.json records. An artifact with no result.json (a stage killed
+ * before it wrote one; the upload runs whatever happened) is one run of unknown cost (usage.mjs UNKNOWN_WHY), never
+ * dropped and never priced from its raw stream.
+ */
 export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dateIso = new Date().toISOString().slice(0, 10), download } = {}) {
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
@@ -1649,15 +1653,18 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
     try {
       const rec = usageCache.has(a.id) ? usageCache.get(a.id) : await (download ?? downloadArtifactResult)(repo, a, token);
       if (!download) usageCache.set(a.id, rec);
-      return rec ? { artifact: a.name, ...rec } : null;
+      return rec ? { artifact: a.name, ...rec } : { artifact: a.name, ...NO_RESULT };
     } catch (e) {
-      return { artifact: a.name, usd: null, basis: `unreadable: ${e.message.slice(0, 120)}` };
+      return { artifact: a.name, ...NO_RESULT, basis: `unknown: the artifact could not be read (${e.message.slice(0, 120)})` };
     }
   };
   return (await pooled(today, USAGE_DOWNLOADS, one)).filter(Boolean);
 }
 
-/** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */
+/** An artifact with no result.json read from it: one run of unknown cost. */
+const NO_RESULT = Object.freeze({ usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], basis: "unknown: the artifact has no result.json (its stage ended before it wrote one)" });
+
+/** One artifact's result.json, or null when it has none; `gh run download` unpacks it, so nothing beyond gh is needed. */
 async function downloadArtifactResult(repo, artifact, token) {
   const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   try {

@@ -395,9 +395,9 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       const root = sessionRoot(harness);
       if (s.files.every((rel) => existsSync(join(root, rel)))) {
         let later = laterSessionTotal(workDir, { harness, id: s.id, after: src.at });
-        // Claude's own running total is its live transcript's last cost-state, priced by Claude Code; Pendulum's reading was
-        // priced from its table. The lower of the two: a seed above the session's own total would make the next pass's
-        // total read as no running total at all (usage.mjs sinceSession), and count the whole session again.
+        // Claude's own running total is its live transcript's last cost-state, as Claude Code reported it. The lower of the
+        // two: a seed above the session's own total would make the next pass's total read as no running total (usage.mjs
+        // sinceSession), a run of unknown cost where Claude Code reported its share.
         if (later && harness === "claude") {
           const main = s.files.find((rel) => rel.split("/").at(-1) === `${s.id}.jsonl`);
           const own = main && lstatSync(join(root, main)).isFile() ? transcriptTotal(readFileSync(join(root, main), "utf8")) : null;

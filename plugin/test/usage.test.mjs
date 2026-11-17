@@ -503,7 +503,7 @@ process.stdout.write(resume ? text.replaceAll("01a1c6ba-16b2-7a13-b2da-47bf51b4e
 
 test("a session total is only subtracted when it is a running total", async () => {
   const rec = (usd) => ({ usd, tokens: { input: 1, output: 1, cached: 1, written: 1 }, models: null, turns: 3 });
-  assert.equal(sinceSession(rec(2), rec(5)).usd, 2, "below the prior total: not cumulative, counted as reported");
+  assert.deepEqual([sinceSession(rec(2), rec(5)).usd, sinceSession(rec(2), rec(5)).usdUnknownWhy], [null, ["resumed-total"]], "below the prior total: no running total, so unknown");
   assert.equal(sinceSession(rec(7), rec(null)).usd, 7, "a prior pass with no total subtracts nothing");
   assert.equal(sinceSession(rec(7), rec(5)).usd, 2);
 });
@@ -628,7 +628,7 @@ test("copilot metering cannot be talked down: negative or forged-low credits, un
   assert.match(parseCopilot(turn, null, 0, { usageFile: write("s.json", { aiCreditsStatus: "nope" }) }).basis, /AI credits unknown/);
   const partial = parseCopilot(turn, null, 0, { usageFile: write("p.json", { aiCreditsStatus: "partial" }) });
   assert.equal(partial.usd, 0.0612);
-  assert.deepEqual([partial.usdUnknown, partial.usdUnknownWhy], [1, ["credits"]]);
+  assert.deepEqual([partial.usdUnknown, partial.usdUnknownWhy], [1, ["credits", "unreported"]], "partial credits, and no result line after them");
   assert.match(partial.basis, /AI credits partial: the rest unknown/);
   assert.equal(parseCopilot(turn, null, 0, { usageFile: write("z.json", { totalNanoAiu: 0 }) }).usd, null);
   // A model name from the file is cleaned before it reaches a log line or the step summary.

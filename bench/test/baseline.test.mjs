@@ -30,3 +30,12 @@ test("baselineOf: medians, spread and walk-away over the picked rows; the line f
   assert.equal(baselineOf([], { label: "empty" }).rows, 0);
   assert.equal(baselineOf([{ issue: 9, exit: "merged", mergedAt: "2026-11-05T00:00:00Z" }], { label: "bare" }).measures.modelMinutes.median, null);
 });
+
+test("baselineOf: a row with runs of unknown cost is left out of the dollar medians and counted beside them (#483)", () => {
+  const unknown = { ...row(6, "2026-11-05T00:00:00Z", 90, 180, 0.5, true), cost: { usd: 0.5, usdUnknown: 1, totalUsd: 0.5, totalUnknown: 1, tokens: { cached: 1000, written: 100 } } };
+  const line = baselineOf([...rows, unknown], { repo: "o/r" });
+  assert.deepEqual(line.measures.usd, { median: 4, p25: 2.5, p75: 5.5, n: 4, leftOut: 1 }, "its known $0.50 is no cost to take a median of");
+  assert.equal(line.measures.totalUsd.leftOut, 1);
+  assert.deepEqual(line.measures.turns, { median: 100, p25: 60, p75: 140, n: 5 }, "other measures keep it");
+  assert.match(formatBaseline(line), /\$ {12}4 \(2\.5\.\.5\.5, n=4; 1 left out: runs of unknown cost\)/);
+});

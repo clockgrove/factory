@@ -616,3 +616,52 @@ test("report (nits): a booking two records carry counts once, on the last, as th
   assert.equal(r.source.read.artifacts.expired, 1);
   assert.equal(keepDecision({ harness: "claude", model: "m", usd: 0.01, tokens: { input: 1, output: 1, cached: 0 }, effort: "low" }).effort, "low");
 });
+
+// ------------------------------------------------------------------ #533: spend lines on every route
+
+/** #3 as GitHub Actions stages write it since spend lines are on every route: each progress comment carries its spend line. */
+function linedWorld() {
+  const w = world();
+  const lines = { "44002648279": { usd: 0.35637, parts: { usdByBilling: { api: 0.35637 }, billing: "api" } }, "44002920873": { usd: 0.163442, parts: { usdByBilling: { api: 0.163442 }, billing: "api" } } };
+  w.comments = w.comments.map((c) => {
+    const key = /^<!-- pendulum:3:progress:(?:work|review):(\d+) -->/.exec(c.body || "")?.[1];
+    return key && lines[key] && c.user === BOT ? { ...c, body: `${c.body}\n${spendMarker(lines[key].usd, lines[key].parts)}` } : c;
+  });
+  return w;
+}
+
+test("report (#533): an Actions stage with a spend line gets its per-pass ledger from its usage record, its dollars counted once, from the line", async () => {
+  const { json: r, calls } = await report(linedWorld(), { issue: 3 });
+  const three = byIssue(r, 3);
+  assert.deepEqual(usd(three), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "once, not twice");
+  assert.deepEqual(three.passes, { total: 4, answer: 1, fix: 1 });
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [["work", 1, 0.2], ["validation-fix", 1, 0.1], ["answer", 1, 0.05637], ["review", 1, 0.163442]]);
+  assert.deepEqual(r.breakdowns.version.map((x) => [x.key, x.stages]), [[PENDULUM_VERSION, 2]]);
+  assert.ok(!r.source.missing.some((m) => m.code === "no-ledger"));
+  assert.equal(calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2);
+  // Every call planned before it was made, the downloads included.
+  assert.equal(r.source.calls.made, r.source.calls.planned);
+  // A local record in the clone that holds a stage's ledger: no artifact is read for it.
+  const clone = mkdtempSync(join(tmpdir(), "clone-"));
+  const w = linedWorld();
+  for (const [name, a] of [["usage-work-1", w.artifacts["pendulum-usage-3"][0]], ["usage-review-1", w.artifacts["pendulum-usage-3-review"][0]]]) {
+    mkdirSync(join(clone, ".pendulum", "3", name), { recursive: true });
+    writeFileSync(join(clone, ".pendulum", "3", name, "result.json"), JSON.stringify(a.record));
+  }
+  const fake = fakeGitHub(w);
+  const read = await over(fake, () => readReport(REPO, reportScope({ issue: ["3"] }, NOW), { token: "t", appId: APP.id, checkout: clone, download: fake.download, cacheDir: mkdtempSync(join(tmpdir(), "c-")) }));
+  const local = buildReport(read, { now: new Date(NOW).toISOString() });
+  assert.deepEqual(byIssue(local, 3).passes, { total: 4, answer: 1, fix: 1 });
+  assert.ok(!fake.calls.some((c) => c.includes("/actions/artifacts")), "the local records hold every ledger: no artifact list read");
+});
+
+test("report (#533): the call budget stopped before the usage records: the stages whose ledger is unread are named, their dollars still the spend lines'", async () => {
+  // The login, the issue, its comments and its PRs; then the budget ends before the artifact lists.
+  const { code, json: r } = await report(linedWorld(), { issue: 3, "max-calls": 4 });
+  assert.equal(code, STOPPED_EXIT);
+  assert.equal(usd(byIssue(r, 3)).api, 0.519812);
+  assert.equal(byIssue(r, 3).cost.unknownRuns, 0, "a lined stage is never of unknown cost for an unread record");
+  const stopped = r.source.missing.find((m) => m.code === "ledger-stopped");
+  assert.deepEqual([stopped.count, stopped.issues, stopped.stages], [2, [3], [{ issue: 3, stage: "work", key: "44002648279" }, { issue: 3, stage: "review", key: "44002920873" }]]);
+  assert.ok(!r.source.missing.some((m) => m.code === "no-ledger"));
+});

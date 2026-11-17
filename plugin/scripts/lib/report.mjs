@@ -4,7 +4,8 @@
 // (the pendulum-report skill). Three parts:
 //   readReport    the reads, within a call budget: the issue comments (the progress, harness, spend, vendor, decision-spend
 //                 and finish markers; one paged repository-wide read, or each named issue's own), the Objectives' issues
-//                 and PRs, and the usage artifacts of the stages that have no spend line, cached on disk by artifact id;
+//                 and PRs, and the usage artifacts of the stages whose dollars (no spend line) or per-pass ledger (no
+//                 spend line carries one) only their usage record holds, cached on disk by artifact id;
 //   buildReport   the figures (pure), through the scorer's own cost join (cost-join.mjs: withLines, costOf);
 //   renderReport  the Markdown.
 // Dollars are vendor-reported, or API-reported tokens at the published rate, or unknown (usage.mjs UNKNOWN_WHY): never
@@ -277,6 +278,11 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
   let comments = [];
   const artifacts = new Map();
   const local = new Map();
+  // Local mode's own records of an Objective in this clone, read once (no call).
+  const localOf = (n) => {
+    if (!local.has(n)) local.set(n, localRecords(checkout, n));
+    return local.get(n);
+  };
   const base = `repos/${repo.full}`;
   const objectiveLabel = DEFAULTS.objective_label;
   const named = scope.issues.length > 0;
@@ -359,10 +365,16 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
       source.pullsRead = true;
     }
     source.comments = comments.length;
-    // The usage artifacts of the Objectives with a stage of Pendulum's own that has no spend line (an Actions stage).
-    const unlined = [...issues.keys()].filter((n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && !spendParts(c.body) && inWindow(c.created_at, scope)));
-    if (unlined.length) budget.plan(unlined.length * 2, `the usage artifact lists of ${unlined.length} Objective(s) whose stages have no spend line (each download not yet cached adds 2)`);
-    for (const n of unlined) {
+    // The usage artifacts of the Objectives with a stage of Pendulum's own in the period whose record the report needs: one
+    // with no spend line (its dollars), or one whose spend line carries no per-pass detail (every spend line does not: its
+    // ledger is in the usage record alone) and that no local record on this machine gives the ledger of. A spend line's
+    // dollars stay the stage's (buildReport); the record gives its ledger.
+    const stageKey = (c) => /^<!-- pendulum:\d+:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->/.exec(c.body || "")?.[1] ?? null;
+    const needs = (n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && (!spendParts(c.body) || !Array.isArray(localOf(n).get(stageKey(c))?.ledger)));
+    const wanted = [...issues.keys()].filter(needs);
+    source.artifactsWanted = new Set(wanted);
+    if (wanted.length) budget.plan(wanted.length * 2, `the usage artifact lists of ${wanted.length} Objective(s) with a stage whose dollars or per-pass ledger only its usage record holds`);
+    for (const n of wanted) {
       const found = [];
       for (const name of [`pendulum-usage-${n}`, `pendulum-usage-${n}-review`]) {
         try {
@@ -372,6 +384,10 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
           source.artifacts.unreadable += 1;
         }
       }
+      // An artifact uploaded before the period began is of no stage in it (a stage's artifact follows its start).
+      const own = found.filter((a) => Number.isSafeInteger(a?.id) && typeof a.name === "string" && /^[A-Za-z0-9._-]+$/.test(a.name) && ownRunArtifact(a) && (!scope.since || !(ms(a.created_at) < ms(scope.since))));
+      const downloads = own.filter((a) => !cachedRecord(cacheDir, a.id) && Number.isSafeInteger(a.workflow_run?.id) && !a.expired).length;
+      if (downloads) budget.plan(downloads * 2, `downloading #${n}'s ${downloads} usage artifact(s) not yet cached`);
       const recs = [];
       for (const a of found) {
         if (!Number.isSafeInteger(a?.id) || typeof a.name !== "string" || !/^[A-Za-z0-9._-]+$/.test(a.name)) continue;
@@ -381,6 +397,7 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
           source.foreignIssues.add(n);
           continue;
         }
+        if (scope.since && ms(a.created_at) < ms(scope.since)) continue;
         source.artifacts.listed += 1;
         const run = Number.isSafeInteger(a.workflow_run?.id) ? a.workflow_run.id : null;
         const kept = cachedRecord(cacheDir, a.id);
@@ -395,7 +412,6 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
           source.artifacts.expired += 1;
           continue;
         } else {
-          budget.plan(2, `downloading ${a.name} (artifact ${a.id})`);
           budget.take("artifact downloads");
           budget.take("artifact downloads");
           try {
@@ -420,11 +436,8 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     if (e instanceof BudgetStop) source.stopped = e.what;
     else if (!(e instanceof NothingToRead)) throw e;
   }
-  for (const n of issues.keys()) {
-    const recs = localRecords(checkout, n);
-    if (recs.size) local.set(n, recs);
-    source.localRecords += recs.size;
-  }
+  for (const n of issues.keys()) localOf(n);
+  source.localRecords = [...local.values()].reduce((s, m) => s + m.size, 0);
   return { repo, scope, appId: app, self: [...new Set((self || []).map(loginKey))], issues, pulls, comments, artifacts, local, source: { ...source, calls: budget } };
 }
 
@@ -600,17 +613,25 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     if (!stages.length && !vendors.length && !theirStages.length && !theirVendors.length && !theirDecisions.length && !decisions.length && !setMode) continue;
     if (!issue) missing.unreadIssue.add(n);
 
-    // Every stage once (cost-join.mjs withLines): its usage record when one was read for it, else its spend line. A
-    // record of a stage outside the period is left out; one that names no stage counts when it ended in the period.
+    // Every stage once (cost-join.mjs withLines): a stage with no spend line by its usage record when one was read, else
+    // as unknown; a stage with a spend line by its line, its usage record giving only its per-pass ledger and version
+    // (`ledgerOf`), so no dollar is counted twice. A record of a stage outside the period is left out; one that names no
+    // stage counts when it ended in the period.
     const allLines = stageSpendRecords(n, allStages, allVendors, { all: true });
     const lines = stageSpendRecords(n, stages, vendors, { all: true });
     const lineKeys = new Set(lines.map((l) => l.progressRun));
+    const unlined = new Set(stages.filter((c) => !spendParts(c.body)).map((c) => runOf(c.body)));
+    const ledgerOf = new Map();
     const records = (artifacts?.get(n) || []).filter((r) => {
       const covered = allLines.filter(coversLine(r));
-      return covered.length ? covered.some((l) => lineKeys.has(l.progressRun)) : inWindow(r.ended ?? r.started, scope);
+      if (!covered.length) return inWindow(r.ended ?? r.started, scope);
+      const inPeriod = covered.filter((l) => lineKeys.has(l.progressRun));
+      if (!inPeriod.length) return false;
+      if (inPeriod.some((l) => unlined.has(l.progressRun))) return true;
+      for (const l of inPeriod) if (!ledgerOf.has(l.progressRun) || r.standIn !== true) ledgerOf.set(l.progressRun, r);
+      return false;
     });
     const joined = withLines(records, lines);
-    const unlined = new Set(stages.filter((c) => !spendParts(c.body)).map((c) => runOf(c.body)));
     // Whether this Objective's usage records were read: when the call budget stopped first, its stages are `stopped`.
     const notReached = !!source.stopped && !source.artifactsRead?.has(n);
     for (const r of joined) {
@@ -650,10 +671,12 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       const line = at ? stageHarnessOf(at.body) : null;
       const key = at ? runOf(at.body) : typeof rec.progressRun === "string" ? rec.progressRun : null;
       const localRec = key ? localRecs.get(key) : null;
+      // A lined stage's usage record, read for its ledger and version alone.
+      const recordOf = rec.source === "spend" && key ? ledgerOf.get(key) ?? null : null;
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
       const model = rec.source === "decisions" ? "decisions" : modelKey(rec.model) ?? modelKey(line?.model);
-      const ran = rec.ran ?? localRec?.ran ?? null;
-      const version = typeof ran?.pendulum === "string" && VERSION.test(ran.pendulum) ? ran.pendulum : null;
+      // The Pendulum release from the first record that names one (a spend line's harness line names none).
+      const version = [rec.ran, recordOf?.ran, localRec?.ran].map((x) => x?.pendulum).find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;
       addCost(row.cost, c);
       addCost(totals, c);
@@ -673,11 +696,14 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       }
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
       // The stage's passes, from its per-pass ledger (its usage record's, or local mode's own record of it).
-      const ledger = Array.isArray(rec.ledger) ? rec.ledger : Array.isArray(localRec?.ledger) ? localRec.ledger : null;
+      const ledger = [rec, recordOf, localRec].map((x) => x?.ledger).find(Array.isArray) ?? null;
       if (rec.source === "decisions" || rec.unattributed) return;
       if (!ledger) {
         unledgered += 1;
-        missing.noLedger.add(n);
+        // The call budget stopped before this Objective's usage records were read: said by stage, apart from a record
+        // that holds no ledger.
+        if (notReached && source.artifactsWanted?.has(n)) (missing.ledgerStopped ??= []).push({ issue: n, stage: stageKind, key });
+        else missing.noLedger.add(n);
         return;
       }
       ledgered += 1;
@@ -789,6 +815,7 @@ function sourceOf(source, trust, missing, read) {
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
   add("no-ledger", missing.noLedger, "stages whose usage record has no per-pass ledger (an older record, or a local stage's spend line with no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
+  if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
   add("no-version", missing.noVersion, "stages whose record names no Pendulum version (an older record, or a spend line)");
   add("issue-unread", missing.unreadIssue, "issues with Pendulum's markers that could not be read: no outcome or title for them");
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });

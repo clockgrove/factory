@@ -230,6 +230,20 @@ export async function stintWorkJob(repo, n, since, opts, { run = null, maxRuns =
   return null;
 }
 
+/**
+ * How long a Running stint on the runners waits for its `work (N)` job to show up before the dispatcher judges it with
+ * no live job: the grace is for a job GitHub has not started yet, so a job that already ended is judged within it
+ * (jobEndedInStint), and the dispatcher's wake (logic.mjs `job-grace`) ticks at its end.
+ */
+export const JOB_GRACE_MS = 15 * 60_000;
+
+/**
+ * Whether the stint's work job (stintWorkJob) has ended, on GitHub's jobs API: `completed`, at a time after the stint
+ * began (`since`). A job still queued or running never has; nor one that completed before the stint began, which is an
+ * earlier stint's (a relaunch's new stint starts after the job it relaunched from ended).
+ */
+export const jobEndedInStint = (job, since) => job?.status === "completed" && Date.parse(job.completed_at) > Date.parse(since);
+
 /** The Actions run that made the latest relaunch the record holds, or null. */
 export const relaunchRun = (record) => record?.tries?.at(-1)?.run ?? null;
 

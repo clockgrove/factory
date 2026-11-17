@@ -5,10 +5,10 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { blockCauseOf, marker, sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
+import { blockCauseOf, marker, nextWake, sandboxMarkerLine, setSelf, wakeKinds } from "../scripts/lib/logic.mjs";
 import { applyExit } from "../scripts/lib/session.mjs";
 import { setStateLabel } from "../scripts/lib/github.mjs";
-import { RELAUNCH_MAX, relaunchDecision, relaunchRecordOf } from "../scripts/lib/relaunch.mjs";
+import { JOB_GRACE_MS, RELAUNCH_MAX, relaunchDecision, relaunchRecordOf } from "../scripts/lib/relaunch.mjs";
 
 RETRY.sleep = async () => {};
 
@@ -542,4 +542,65 @@ test("a held vanished stage costs no Actions reads and one timeline read per tic
   const r = await tick(gh, { dailyUsd: 1 });
   assert.deepEqual([r.relaunched, r.vanished], [[], []]);
   assert.deepEqual(gh.reads.filter((p) => /^\/actions\/runs\/|created=|^\/issues\/7\/timeline/.test(p)).map((p) => p.replace(/\?.*/, "")), ["/issues/7/timeline"]);
+});
+
+// #528: on the runners, a Running stint's 15-minute grace is for a job GitHub has not started yet. A work job that already
+// ended (a person's `gh run cancel` mid-harness) is judged on the tick its own last step fires, so its slot is not held
+// until a cron tick; a stint with no ended job waits, and the dispatcher's wake ticks at the grace's end.
+const stintStart = (gh, n) => gh.issue(n).timeline.filter((e) => e.label?.name === "pendulum:running").at(-1).created_at;
+const graceEnd = (gh, n) => new Date(Date.parse(stintStart(gh, n)) + JOB_GRACE_MS + 1000).toISOString();
+
+test("a work job cancelled inside its grace is Blocked on the next tick, and its slot starts the next Objective (#528)", async () => {
+  const since = MIN;
+  // Its job, made just after the label and cancelled a minute in, as the release check's was.
+  const cancelled = { name: "work (7)", status: "completed", conclusion: "cancelled", created_at: ago(since - 6_000), completed_at: ago(10_000) };
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since }, { number: 8, labels: [OBJ] }], { runs: [{ id: 55, created_at: ago(since + 10_000) }], jobs: { 55: [cancelled] } });
+  const r = await tick(gh, { maxConcurrent: 1 });
+  assert.deepEqual([r.vanished, r.relaunched, r.ready], [[7], [], [8]], "#7 Blocked at once; #8 takes the one slot");
+  assert.deepEqual(gh.labels(7), [OBJ, "pendulum:blocked"].sort());
+  assert.match(gh.blocks(7)[0].body, /worker job vanished: its work job was cancelled \(a person, or its timeout\); a stop, so it was not relaunched/);
+  assert.equal(gh.reads.filter((p) => /^\/actions\/runs\/\d+\/jobs/.test(p)).length, 1, "one jobs read for #7: the grace's, reused by the relaunch decision");
+});
+
+test("inside its grace, a work job still queued or running, or only an earlier stint's, is left alone; an ended one is judged (#528)", async () => {
+  const since = 2 * MIN;
+  const job = (n, rest) => ({ name: `work (${n})`, created_at: ago(since - 6_000), ...rest });
+  const gh = fakeGitHub(
+    [7, 9, 11, 13].map((number) => ({ number, labels: [OBJ, "pendulum:running"], since })),
+    {
+      runs: [{ id: 55, created_at: ago(since + 10_000) }],
+      jobs: {
+        55: [
+          job(7, { status: "queued", conclusion: null }),
+          job(9, { status: "in_progress", conclusion: null }),
+          // Created inside the clock-skew window of the stint's start, but it completed before the stint began: the job
+          // an earlier stint was relaunched from, never this stint's.
+          job(11, { status: "completed", conclusion: "failure", created_at: ago(since + 20_000), completed_at: ago(since + 5_000) }),
+          job(13, { status: "completed", conclusion: "cancelled", completed_at: ago(30_000) }),
+        ],
+      },
+    },
+  );
+  const r = await tick(gh, { maxConcurrent: 5 });
+  assert.deepEqual([r.vanished, r.relaunched], [[13], []], "only #13's job ended in its stint");
+  for (const n of [7, 9, 11]) {
+    assert.deepEqual(gh.labels(n), [OBJ, "pendulum:running"].sort(), `#${n} stays Running`);
+    assert.deepEqual(gh.blocks(n), [], `#${n} gets no Block`);
+  }
+});
+
+test("on the runners, a Running stint with no job alive arms a wake at its grace's end, and that wake's tick judges a job that ended with no tick of its own (#528)", async () => {
+  const cfg = { runs: [], jobs: {} };
+  const gh = fakeGitHub([{ number: 7, labels: [OBJ, "pendulum:running"], since: 2 * MIN }, { number: 9, labels: [OBJ, "pendulum:running", "pendulum:local"], since: 2 * MIN }], cfg);
+  const r = await tick(gh);
+  assert.deepEqual([r.vanished, r.relaunched], [[], []]);
+  assert.deepEqual(r.deadlines.filter((d) => d.kind === "job-grace"), [{ issue: 7, kind: "job-grace", at: graceEnd(gh, 7) }], "the runner stint's grace end; the local one keeps its local pause");
+  // A private repository arms it too: a wait of minutes.
+  assert.deepEqual(nextWake(r.deadlines, { kinds: wakeKinds(false) }), { kind: "job-grace", at: graceEnd(gh, 7), issue: 7 });
+  // The grace passes; its job was cancelled and its last step's tick never came. The wake's tick Blocks it.
+  gh.age(15 * MIN);
+  cfg.runs = [{ id: 55, created_at: new Date(Date.parse(stintStart(gh, 7)) - 10_000).toISOString() }];
+  cfg.jobs = { 55: [{ name: "work (7)", status: "completed", conclusion: "cancelled", created_at: new Date(Date.parse(stintStart(gh, 7)) + 6_000).toISOString(), completed_at: ago(10 * MIN) }] };
+  const woke = await tick(gh);
+  assert.deepEqual(woke.vanished, [7]);
 });

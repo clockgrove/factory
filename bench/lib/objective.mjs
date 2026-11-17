@@ -924,7 +924,10 @@ export function scoreObjective(collected, opts = {}) {
   const parked = issue.state === "open" && !missing.includes("label event") && Array.isArray(issue.labels) && !issue.labels.some((l) => (typeof l === "string" ? l : l?.name) === label);
 
   const pendulumLocal = localPendulumActions(collected);
-  const bodyEdit = collected.bodyEdits?.find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !pendulumLocal(e.at, e.by, "body edit")) ?? null;
+  // Every body edit after the clock by a person, oldest first: never Pendulum's own login (its App's finish block on the
+  // merged PR's body, plugin finish-card.mjs), nor, in local mode, what localPendulumActions says is Pendulum's.
+  const self = pendulumLogin(collected.issueTimeline, app);
+  const bodyEdit = [...(collected.bodyEdits || [])].sort((a, b) => ms(a.at) - ms(b.at)).find((e) => ms(e.at) > ms(since) && isHuman(e.by, bots) && !(self && e.by?.login === self) && !pendulumLocal(e.at, e.by, "body edit")) ?? null;
   if (bodyEdit) actions.unshift({ at: bodyEdit.at, where: bodyEdit.where, kind: "body edit", by: bodyEdit.by.login, detail: "" });
   if (collected.bodyEdits === null) missing.push("body edits (GraphQL unavailable)"); // undefined: not attempted (a fixture or a snapshot)
   actions.push(...unattributedAnswers(collected, since, actions, merged?.merged_at ?? null, { bots }));

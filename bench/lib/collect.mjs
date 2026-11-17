@@ -258,22 +258,20 @@ export async function collectObjective(api, repoFull, issue, { download = null, 
     ]);
     pullDetails[pr.number] = { commits, timeline, comments, reviews, reviewComments };
   }
-  // Human edits of the issue or PR body are not on the REST timeline; GraphQL has lastEditedAt/editor.
+  // Human edits of the issue or PR body are not on the REST timeline; GraphQL lists every edit (userContentEdits), each
+  // with its editor, so a later edit (Pendulum's finish block on the merged PR's body) never hides an earlier one.
   // Claude's cloud blocks GraphQL, so a failure leaves bodyEdits null and the row says so.
   let bodyEdits = null;
   if (graphql) {
     try {
       const [owner, name] = repoFull.split("/");
-      const q = `query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ issue(number:$i){ lastEditedAt editor { login __typename } } } }`;
-      const data = await graphql(q, { o: owner, n: name, i: issue });
-      bodyEdits = [];
-      const ed = data?.repository?.issue;
-      if (ed?.lastEditedAt) bodyEdits.push({ at: ed.lastEditedAt, where: `#${issue}`, by: { login: ed.editor?.login, type: ed.editor?.__typename === "Bot" ? "Bot" : "User" } });
+      const edits = "userContentEdits(first: 100) { nodes { editedAt editor { login __typename } } }";
+      const listOf = (node, where) => (node?.userContentEdits?.nodes || []).filter((e) => e?.editedAt).map((e) => ({ at: e.editedAt, where, by: { login: e.editor?.login, type: e.editor?.__typename === "Bot" ? "Bot" : "User" } }));
+      const data = await graphql(`query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ issue(number:$i){ ${edits} } } }`, { o: owner, n: name, i: issue });
+      bodyEdits = listOf(data?.repository?.issue, `#${issue}`);
       for (const pr of pulls) {
-        const pq = `query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ pullRequest(number:$i){ lastEditedAt editor { login __typename } } } }`;
-        const pd = await graphql(pq, { o: owner, n: name, i: pr.number });
-        const pe = pd?.repository?.pullRequest;
-        if (pe?.lastEditedAt) bodyEdits.push({ at: pe.lastEditedAt, where: `PR #${pr.number}`, by: { login: pe.editor?.login, type: pe.editor?.__typename === "Bot" ? "Bot" : "User" } });
+        const pd = await graphql(`query($o:String!,$n:String!,$i:Int!){ repository(owner:$o,name:$n){ pullRequest(number:$i){ ${edits} } } }`, { o: owner, n: name, i: pr.number });
+        bodyEdits.push(...listOf(pd?.repository?.pullRequest, `PR #${pr.number}`));
       }
     } catch {
       bodyEdits = null;

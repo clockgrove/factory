@@ -12,6 +12,20 @@
         "path": "plugin",
         "ref": "main"
       },
+      "description": "Label a GitHub issue and walk away: a coding agent (Claude Code, Codex or Copilot CLI) plans, builds and opens the pull request, a second agent reviews it, and your CI and merge queue land it.",
+      "homepage": "https://github.com/clockgrove/pendulum#readme",
+      "keywords": [
+        "claude-code",
+        "codex",
+        "copilot",
+        "github",
+        "github-actions",
+        "issue-to-pr",
+        "coding-agent",
+        "autonomous",
+        "code-review",
+        "merge-queue"
+      ],
       "policy": {
         "installation": "AVAILABLE"
       },

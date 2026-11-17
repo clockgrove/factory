@@ -6,9 +6,12 @@
 # minted into a short-lived installation token here and kept in memory); the harness runs as
 # its own uid with a read-only token and writes nothing (plugin/scripts/lib/agent.mjs). The job's own GITHUB_TOKEN
 # reads usage artifacts and never reaches the harness. This Action never creates an App.
-name: Pendulum
+name: Clockgrove Pendulum
 description: Build a labelled GitHub issue unattended, review it, and hand it to the merge queue.
 author: Clockgrove
+branding:
+  icon: clock
+  color: green
 
 inputs:
   mode:

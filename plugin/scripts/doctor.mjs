@@ -27,7 +27,7 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, cloneRepo, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, TOKEN_LINK_FIX, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -2282,9 +2282,20 @@ async function main() {
     }
   }
   // The variables are listed as serve lists them: with local mode's token in local mode.
-  const varsToken = (local && localToken(repo.full)) || token;
+  // A token file reached through a symbolic link is not read (lib/local.mjs tokenPlaceProblem): a FAIL row with its fix.
+  let linked = null;
+  let ownToken = "";
+  if (local) {
+    try {
+      ownToken = localToken(repo.full);
+    } catch (e) {
+      if (!e.link) throw e;
+      linked = FAIL("local token", tokenLinkDetail(e.link), TOKEN_LINK_FIX);
+    }
+  }
+  const varsToken = ownToken || token;
   const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
+  const results = [defaultsCheck(inputs), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

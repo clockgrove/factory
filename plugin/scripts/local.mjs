@@ -785,7 +785,10 @@ export class Local {
    */
   tokenNow() {
     try {
-      return localToken(this.repoFull);
+      const token = localToken(this.repoFull);
+      // Read cleanly: a link that comes back later is said again.
+      this.tokenPlaceSaid = null;
+      return token;
     } catch (e) {
       if (this.tokenPlaceSaid !== e.message) log(`the local token is not read again: ${e.message}`);
       this.tokenPlaceSaid = e.message;

@@ -1,12 +1,12 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, existsSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { repoFromRemote, tokenFile } from "../scripts/lib/local.mjs";
+import { TOKEN_LINK_FIX, repoFromRemote, tokenFile } from "../scripts/lib/local.mjs";
 import { whichSync } from "../scripts/lib/proc.mjs";
 
 // The `factory` command's first use (#457), as a newcomer meets it: the real front (plugin/bin/factory) in its own
@@ -185,30 +185,74 @@ test("#457: factory token set saves the token where local mode reads it, owner-o
   assert.equal(statSync(join(fx.home, ".config", "factory", "tokens")).mode & 0o777, 0o700);
 });
 
-test("#457: no token is saved or read through a symbolic link in ~/.config/factory, which the sandboxes hide by its path alone", async () => {
+test("#457: no token is saved through a symbolic link in ~/.config/factory, which the sandboxes hide by its path alone, nor read where one is behind it", async () => {
   const fx = fixture();
-  const elsewhere = join(fx.root, "elsewhere");
-  mkdirSync(elsewhere);
   const base = join(fx.home, ".config", "factory");
   mkdirSync(join(fx.home, ".config"));
-  const links = [
-    [base, () => symlinkSync(elsewhere, base)],
-    [join(base, "tokens"), () => (mkdirSync(base), symlinkSync(elsewhere, join(base, "tokens")))],
-    [join(base, "tokens", "acme"), () => (mkdirSync(join(base, "tokens"), { recursive: true }), symlinkSync(elsewhere, join(base, "tokens", "acme")))],
+  // Each level a link to a folder of its own, and where the token file lands behind it.
+  const levels = [
+    [base, () => base, ["tokens", "acme", "widget"]],
+    [join(base, "tokens"), () => mkdirSync(base, { recursive: true }), ["acme", "widget"]],
+    [join(base, "tokens", "acme"), () => mkdirSync(join(base, "tokens"), { recursive: true }), ["widget"]],
   ];
-  for (const [at, make] of links) {
-    make();
+  for (const [at, parent, behind] of levels) {
+    parent();
+    const elsewhere = realpathSync(mkdtempSync(join(fx.root, "elsewhere-")));
+    symlinkSync(elsewhere, at);
     const r = await factory(["token", "set"], { cwd: fx.clone, env: fx.env, input: "github_pat_linked" });
     assert.equal(r.status, 1, at);
     assert.ok(r.stderr.includes(`${at} is a symbolic link`) && /Nothing saved/.test(r.stderr), r.stderr);
     assert.equal(r.stderr.trim().split("\n").length, 1, r.stderr);
-    // A token already behind that link is not read either: serve stops with the same line.
-    writeFileSync(join(elsewhere, "widget"), "github_pat_planted");
-    const s = await factory(["serve", "--once"], { cwd: fx.clone, env: fx.env, path: gitOnly(mkdtempSync(join(fx.root, "p-"))) });
+    // No token behind the link: nothing to refuse, it reads as no token.
+    const path = gitOnly(mkdtempSync(join(fx.root, "p-")));
+    const empty = await factory(["serve", "--once"], { cwd: fx.clone, env: fx.env, path });
+    assert.ok(empty.stderr.includes(`- no token for ${REPO}:`) && !empty.stderr.includes("symbolic link"), empty.stderr);
+    // A token behind it is not read: serve stops with the link's line, the token never shown.
+    mkdirSync(join(elsewhere, ...behind.slice(0, -1)), { recursive: true });
+    writeFileSync(join(elsewhere, ...behind), "github_pat_planted");
+    const s = await factory(["serve", "--once"], { cwd: fx.clone, env: fx.env, path });
     assert.equal(s.status, 1);
     assert.ok(s.stderr.includes(`${at} is a symbolic link`), s.stderr);
     assert.ok(!s.stderr.includes("github_pat_planted"));
     renameSync(at, `${at}.gone`);
+  }
+});
+
+test("#457: a linked ~/.config/factory with no token behind it leaves the session commands their gh login; doctor makes a token behind one a FAIL row", async () => {
+  const fx = fixture();
+  const elsewhere = realpathSync(mkdtempSync(join(fx.root, "dotfiles-")));
+  mkdirSync(join(fx.home, ".config"));
+  symlinkSync(elsewhere, join(fx.home, ".config", "factory"));
+  const auth = [];
+  // GitHub as far as doctor's rows need it: the repository, and nothing else found.
+  const gh = await fakeGithub((path) => (path === `/repos/${REPO}` ? [200, { id: 1, full_name: REPO, default_branch: "main", private: false, permissions: { admin: true, push: true } }] : path.endsWith("/rulesets") ? [200, []] : [404, { message: "Not Found" }]));
+  const seen = createServer((req, res) => {
+    auth.push(req.headers.authorization || "");
+    res.writeHead(404, { "content-type": "application/json" }).end('{"message":"Not Found"}');
+  });
+  await new Promise((r) => seen.listen(0, "127.0.0.1", r));
+  // git, and a gh whose login is a stand-in token.
+  const bin = gitOnly(fx.root);
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\n[ \"$1 $2\" = \"auth token\" ] && echo gho_standin\n", { mode: 0o755 });
+  try {
+    const r = await factory(["issue", "5"], { cwd: fx.clone, env: { ...fx.env, PATH: bin, GITHUB_API_URL: `http://127.0.0.1:${seen.address().port}` } });
+    assert.ok(!r.stderr.includes("symbolic link"), r.stderr);
+    assert.ok(auth.length && auth.every((a) => a.includes("gho_standin")), `${auth.join(", ")}\n${r.stderr}`);
+
+    // A token behind the link: doctor goes on, with a FAIL row naming the link and the fix.
+    mkdirSync(join(elsewhere, "tokens", "acme"), { recursive: true });
+    writeFileSync(join(elsewhere, "tokens", "acme", "widget"), "github_pat_planted");
+    const d = await factory(["doctor", "--json"], { cwd: fx.clone, env: { ...fx.env, PATH: bin, GITHUB_API_URL: gh.url, GITHUB_GRAPHQL_URL: `${gh.url}/graphql` } });
+    assert.ok(!d.stderr.includes("doctor failed: "), d.stderr);
+    const report = JSON.parse(d.stdout.slice(d.stdout.indexOf("{\n")));
+    const row = report.checks.find((c) => c.name === "local token");
+    assert.deepEqual([row?.status, row?.fix], ["FAIL", TOKEN_LINK_FIX], JSON.stringify(row));
+    assert.ok(row.detail.startsWith(`${join(fx.home, ".config", "factory")} is a symbolic link`), row.detail);
+    assert.ok(report.checks.length > 5, "the other rows still print");
+    assert.ok(!(d.stdout + d.stderr).includes("github_pat_planted"));
+  } finally {
+    await gh.close();
+    await new Promise((r) => seen.close(r));
   }
 });
 
@@ -283,5 +327,43 @@ test("#457: serve with no token, or missing tools, says each in one line with it
     assert.ok(!text.includes("github_pat_x"));
   } finally {
     await gh.close();
+  }
+});
+
+test("#457: a running serve keeps its token while the file sits behind a link, says so once, and again when a link comes back after a clean read", async () => {
+  const { Local } = await import("../scripts/local.mjs");
+  const fx = fixture();
+  const before = process.env.HOME;
+  const said = [];
+  const write = process.stdout.write;
+  process.env.HOME = fx.home;
+  process.stdout.write = (chunk, ...rest) => (said.push(String(chunk)), write.call(process.stdout, chunk, ...rest));
+  try {
+    const base = join(fx.home, ".config", "factory");
+    const elsewhere = realpathSync(mkdtempSync(join(fx.root, "elsewhere-")));
+    mkdirSync(join(elsewhere, "tokens", "acme"), { recursive: true });
+    writeFileSync(join(elsewhere, "tokens", "acme", "widget"), "github_pat_behind");
+    mkdirSync(join(fx.home, ".config"));
+    const loop = Object.assign(Object.create(Local.prototype), { repoFull: REPO });
+    const linked = () => said.filter((l) => l.includes("the local token is not read again") && l.includes(`${base} is a symbolic link`)).length;
+    symlinkSync(elsewhere, base);
+    assert.equal(loop.tokenNow(), "");
+    assert.equal(loop.tokenNow(), "");
+    assert.equal(linked(), 1, "said once");
+    renameSync(base, `${base}.gone`);
+    renameSync(join(`${base}.gone`, "tokens"), join(fx.root, "moved-tokens"));
+    mkdirSync(join(base, "tokens", "acme"), { recursive: true });
+    writeFileSync(join(base, "tokens", "acme", "widget"), "github_pat_real");
+    assert.equal(loop.tokenNow(), "github_pat_real");
+    rmSync(base, { recursive: true });
+    symlinkSync(elsewhere, base);
+    mkdirSync(join(elsewhere, "tokens", "acme"), { recursive: true });
+    writeFileSync(join(elsewhere, "tokens", "acme", "widget"), "github_pat_behind");
+    assert.equal(loop.tokenNow(), "");
+    assert.equal(linked(), 2, "said again once the link is back");
+    assert.ok(!said.join("").includes("github_pat_behind"));
+  } finally {
+    process.stdout.write = write;
+    process.env.HOME = before;
   }
 });

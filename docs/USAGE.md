@@ -180,7 +180,7 @@ To have Pendulum build on a workflow change instead, land that change yourself f
 
 ## Commands
 
-Pendulum is a plugin of [Agent Skills](https://agentskills.io): one folder per skill under [`plugin/skills/`](../plugin/skills/), each a `SKILL.md` that Claude Code, Codex and GitHub Copilot CLI load the same way. With the plugin installed, ask in plain words: each request below loads the Pendulum skill that does it. If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, say "Clockgrove Pendulum" instead or use the command. In Claude Code each skill is also a slash command, `/pendulum:<skill>`; Codex and Copilot list them among their own skills. Each command below links to its skill.
+Pendulum is a plugin of [Agent Skills](https://agentskills.io): one folder per skill under [`plugin/skills/`](../plugin/skills/), each a `SKILL.md` that Claude Code, Codex and GitHub Copilot CLI load the same way. With the plugin installed, ask in plain words: each request below loads the Pendulum skill that does it. If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, use the command instead. In Claude Code each skill is also a slash command, `/pendulum:<skill>`; Codex and Copilot list them among their own skills. Each command below links to its skill.
 
 | Say | Command | What it does |
 | --- | --- | --- |

@@ -97,7 +97,7 @@ Open a session of your coding agent in a local clone of **the repository you wan
 
 > Set up Pendulum for this repository.
 
-If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, say "Clockgrove Pendulum" instead, or run the skill's slash command (here `/pendulum:pendulum-setup`).
+If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, run the skill's slash command instead (here `/pendulum:pendulum-setup`).
 
 Setup asks three questions: which coding agent and credential, the spending limits, and whether Pendulum merges its own PRs. Choose its recommended **first-run preset**:
 

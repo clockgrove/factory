@@ -293,19 +293,36 @@ test("#565 W6: a build records the Pendulum it really is: its release at its tag
   writeFileSync(join(fx.work, "plugin", "scripts", "local.mjs"), "// a change of my own\n");
   assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: at("9.9.8") }), `9.9.8+${head.slice(0, 12)}.dirty`);
   assert.equal(pendulumBuild({ env: {}, version: "9.9.8", running: { commit: null, release: false } }), "9.9.8", "an installed copy with no checkout of its own: its manifest's");
-  // On Actions: the ref the workflow's uses: names.
-  const actions = (ref, path = null) => pendulumBuild({ env: { GITHUB_ACTIONS: "true", ...(ref ? { PENDULUM_ACTION_REF: ref } : {}), ...(path ? { GITHUB_ACTION_PATH: path } : {}) }, version: "0.10.2" });
+  // On Actions: the ref the workflow's uses: names, taken only where the runner's checkout of the action ends with it.
+  const base = "/home/runner/work/_actions/clockgrove/pendulum";
+  const actions = (ref, path = `${base}/${ref}`) => pendulumBuild({ env: { GITHUB_ACTIONS: "true", PENDULUM_ACTION_REF: ref, GITHUB_ACTION_PATH: path }, version: "0.10.2" });
   assert.equal(actions("v0.10.2"), "0.10.2");
   assert.equal(actions("v0.10"), "0.10.2", "a moving tag of its line is the release");
   assert.equal(actions("v0"), "0.10.2");
   assert.equal(actions("8a783bda3cca1d2e3f4a5b6c7d8e9f0a1b2c3d4e"), "0.10.2+8a783bda3cca", "a commit pin");
   assert.equal(actions("main"), "0.10.2+main", "a branch pin: the candidate build");
   assert.equal(actions("fix/565"), "0.10.2+fix-565", "a branch with a slash: its whole name");
-  // No ref passed: unknown, never guessed from the runner's checkout path.
-  assert.equal(actions(null, "/home/runner/work/_actions/clockgrove/pendulum/fix/565"), "0.10.2+unknown");
-  assert.equal(actions(null, "/home/runner/work/_actions/clockgrove/pendulum/v0.10.2"), "0.10.2+unknown");
-  // action.yml passes the ref to the step that runs every mode.
-  assert.match(readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8"), /^ {8}PENDULUM_ACTION_REF: \$\{\{ github\.action_ref \}\}$/m);
+  // A ref the action's path does not end with (a nested action's, actions/runner#2473) is unknown, never taken.
+  assert.equal(actions("949feb2413d6458794dcd2491c4babbbce0c15c1", `${base}/v0.10.2`), "0.10.2+unknown", "the nested setup-node's SHA");
+  assert.equal(actions("v0.10.2", `${base}/main`), "0.10.2+unknown");
+  // Set but empty (the runner gave no ref): unknown, never guessed from the path.
+  assert.equal(actions("", `${base}/v0.10.2`), "0.10.2+unknown");
+  // Not set at all (a command run from a person's own workflow, local mode): this checkout's own build.
+  assert.equal(pendulumBuild({ env: { GITHUB_ACTIONS: "true", GITHUB_ACTION_PATH: `${base}/main` }, version: "9.9.8", running: at("9.9.8") }), `9.9.8+${head.slice(0, 12)}.dirty`);
+  assert.equal(pendulumBuild({ env: { GITHUB_ACTIONS: "true" }, version: "9.9.8", running: { commit: null, release: false } }), "9.9.8");
+  // A cloud-sandbox stage: the launcher's build, handed over (the sandbox's plugin has no checkout); only one of this version.
+  const { stageEnvironment } = await import("../scripts/launch.mjs");
+  const handed = stageEnvironment({ inputs: { harness: "claude" }, env: { GITHUB_ACTIONS: "true", PENDULUM_ACTION_REF: "main", GITHUB_ACTION_PATH: `${base}/main` }, stage: "work", issue: 3, pr: null, claim: "c", tokens: { write: "w" } }).PENDULUM_STAGE_BUILD;
+  assert.equal(handed, pendulumBuild({ env: { PENDULUM_ACTION_REF: "main", GITHUB_ACTION_PATH: `${base}/main` } }));
+  assert.match(handed, /\+main$/);
+  assert.equal(pendulumBuild({ env: { GITHUB_ACTIONS: "true", PENDULUM_STAGE_BUILD: "0.10.2+main" }, version: "0.10.2" }), "0.10.2+main");
+  assert.equal(pendulumBuild({ env: { GITHUB_ACTIONS: "true", PENDULUM_STAGE_BUILD: "0.9.0+main" }, version: "0.10.2", running: { commit: null } }), "0.10.2", "another version's build is not this one's");
+  // action.yml reads the ref in its first step, before any nested uses:, and passes that step's output to the run step.
+  const yml = readFileSync(join(import.meta.dirname, "..", "..", "action.yml"), "utf8");
+  const steps = yml.slice(yml.indexOf("\n  steps:\n"));
+  assert.ok(steps.indexOf("github.action_ref") < steps.search(/^ {6}uses: /m), "read before any nested action runs");
+  assert.match(steps, /^ {4}- name: Pendulum's ref\n {6}id: pendulum-ref\n/m);
+  assert.match(yml, /^ {8}PENDULUM_ACTION_REF: \$\{\{ steps\.pendulum-ref\.outputs\.ref \}\}$/m);
   for (const v of [actions("main"), `9.9.8+${head.slice(0, 12)}.dirty`]) assert.match(v, /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/, "a version the report and the card read");
 });
 

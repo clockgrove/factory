@@ -92,7 +92,7 @@ import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, fa
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, ledgerCut, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -941,9 +941,12 @@ export const progressRunId = (env = process.env) =>
  * its comment on its start time, which only its reporter knows).
  */
 export const stageProgressRun = (env = process.env) => (/^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") || env.GITHUB_RUN_ID ? progressRunId(env) : null);
-/** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/**
+ * The progress comment's structured tail: the stage's harness, then its spend with its per-pass ledger line (`ledger`,
+ * logic.mjs ledgerMarker: written only beside a spend line), rebase, decisions read, triage and plan-time asks.
+ */
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, ledger = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}${ledger ? `\n${ledger}` : ""}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`pendulum:host:\` labels).` : "");
 /**
@@ -972,6 +975,11 @@ export function stoppedRebase(progress, conflict, recs = []) {
 
 /** How long a stage stopped by a signal waits on its last spend line (progressReporter `soFarNow`) before it exits. */
 export const STOP_WRITE_MS = 5_000;
+/**
+ * The size, in characters, a progress comment with its ledger line stays under (GitHub refuses a comment body over
+ * 65,536): past it the stage writes the ledger line's cut form (logic.mjs ledgerCut), so its spend line still lands.
+ */
+export const PROGRESS_LEDGER_ROOM = 60_000;
 
 /**
  * `soFar`: the stage's spend so far (harness.mjs stageSpendSoFar), written as a spend line with every write until
@@ -991,6 +999,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let status = "";
   let spend = null;
   let spendParts = null;
+  // The per-pass ledger line written beside the final spend line (progress.spend; logic.mjs ledgerMarker), never beside a figure so far.
+  let ledger = null;
   let read = null;
   let triage = null;
   let asked = null;
@@ -1023,10 +1033,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}${carried}`;
+    const withLedger = (l) => `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked })}${carried}`;
+    const own = spend === null ? null : ledger;
+    const body = withLedger(own);
+    // A body the ledger line would take past PROGRESS_LEDGER_ROOM gets its cut form (logic.mjs ledgerCut): GitHub refuses
+    // a comment over its size limit, and the final spend line is never lost to the ledger beside it.
+    return own && key.length + 1 + body.length > PROGRESS_LEDGER_ROOM ? withLedger(ledgerCut(own, `left out to keep this comment under ${PROGRESS_LEDGER_ROOM} characters`)) : body;
   };
   /**
    * Stopped by a signal, the harness already killed: the spend so far once more, if it differs from what the line shows.
@@ -1141,10 +1155,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /** Whether the rebase line is set (progress.rebase). */
   progress.rebased = () => rebase !== null;
-  progress.spend = (usd, parts = null) => {
+  /** The stage's final spend line (logic.mjs stageSpendLine) and, beside it, its per-pass ledger line (`ledgerLine`). */
+  progress.spend = (usd, parts = null, ledgerLine = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
       spendParts = parts;
+      ledger = typeof ledgerLine === "string" && ledgerLine ? ledgerLine : null;
     }
   };
   /**
@@ -2284,7 +2300,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...unknown,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
     // Each pass's own figures (usage.mjs passLedger), which the merged ones above are summed from: `pendulum report` breaks
-    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder), never on GitHub.
+    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder); the progress comment carries it too, as numbers and labels beside the spend line (logic.mjs ledgerMarker).
     ledger: passLedger(records || [], billing),
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),

@@ -47,7 +47,7 @@ Pendulum needs:
 - **CI that runs on pull requests, with at least one required check on your default branch.** Pendulum merges on those checks; a repository with no CI needs that first.
 - **A public repository, or a private one on GitHub Pro, Team or Enterprise Cloud.** GitHub Free offers branch rules, and so required checks, on public repositories only. Pendulum uses a merge queue where GitHub offers one (repositories an organization owns: public ones, and private ones on Enterprise Cloud) and strict required checks elsewhere.
 - **Admin rights on the repository**, and, where you run setup, your coding agent's CLI, the [`gh` CLI](https://cli.github.com) logged in, and Node 22 or newer.
-- **A model credential GitHub Actions can use:**
+- **A model credential GitHub Actions can use** ([Coding agent accounts](#coding-agent-accounts)):
   - Claude Code: an Anthropic API key, billed per use. For your own individual work, within your Claude plan's terms, your subscription works instead ([Claude on your subscription](docs/INSTALL.md#claude-on-your-subscription)).
   - Codex: an OpenAI API key or a Vercel AI Gateway key, billed per use. Your ChatGPT plan works only in [local mode](#where-it-runs).
   - Copilot CLI: a token from an account with a Copilot seat; runs are billed to that seat as AI credits.
@@ -100,7 +100,7 @@ Open a session of your coding agent in a local clone of **the repository you wan
 
 If your agent takes "Pendulum" for something else of that name, such as the Python date-time library, run the skill's slash command instead (here `/pendulum:pendulum-setup`).
 
-Setup asks three questions: which coding agent and credential, the spending limits, and whether Pendulum merges its own PRs. Choose its recommended **first-run preset**:
+Setup asks three questions: which coding agent and credential ([Coding agent accounts](#coding-agent-accounts)), the spending limits, and whether Pendulum merges its own PRs. Choose its recommended **first-run preset**:
 
 | Setting | Default | First-run preset |
 | --- | --- | --- |
@@ -262,7 +262,33 @@ Pendulum has no paid tier or hosted service, and no bill comes from Clockgrove. 
 
 Some spend cannot be counted: a run that crashed before its coding agent reported a cost, for example, or a Codex model Pendulum has no price for. Pendulum shows it as unknown ("$3.10 plus 1 run of unknown cost"), never as $0 or an estimate, and does not count it against the limits. Each dollar figure also says how it is billed: per use on an API key, "API-equivalent at list prices" on a Claude or ChatGPT subscription, or Copilot AI credits billed to the seat. A run inside your own agent session (`/pendulum:pendulum-run --here`) is neither limited nor counted. [Inputs that tune cost](docs/INSTALL.md#inputs-that-tune-cost) gives every case, and [Spend](docs/LOCAL.md#spend) covers local mode.
 
-Several subscriptions or keys for one coding agent can work as one pool ([Several accounts](docs/INSTALL.md#several-accounts)).
+## Coding agent accounts
+
+Every run uses an account of your coding agent: an API key, a subscription token or a login. Setup asks which one and has you save it, and doctor checks that it is there.
+
+| Coding agent | On GitHub Actions, a repository secret | In local mode |
+| --- | --- | --- |
+| Claude Code | `ANTHROPIC_API_KEY`, an Anthropic API key billed per use. Or, for your own individual work on your Claude plan, `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, with setup's `--credential plan` ([Claude on your subscription](docs/INSTALL.md#claude-on-your-subscription)) | The Claude Code login you already use |
+| Codex | `CODEX_API_KEY`, an OpenAI API key, or `PENDULUM_CODEX_GATEWAY_KEY`, a Vercel AI Gateway key. A ChatGPT sign-in is refused on Actions | The Codex login you already use, a ChatGPT sign-in included |
+| Copilot CLI | `COPILOT_GITHUB_TOKEN`: a fine-grained token with only the Copilot Requests permission, from a user with a Copilot seat | The same kind of token, saved to `~/.config/pendulum/copilot-token` |
+
+Save a secret with `gh secret set <NAME>` and paste the value at its prompt; `--body` would leave it in your shell history.
+
+**Several accounts** of one coding agent, such as two subscriptions or a subscription and an API key, can share the work:
+
+- **Each run uses one account.** By default that is the agent's first account. A `pendulum:account:<name>` label on an issue pins that Objective to another account.
+- **Automatic choice, off by default,** starts each run that has no pin on a free account, preferring the one with the most quota left where the agent reports it. A usage limit then sets aside only the account that hit it, and work goes on on the others.
+- **On GitHub Actions,** list the accounts in your workflow's `env` block, the first being the default, and save each extra account's credential under its own secret name:
+
+  ```yaml
+  PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'
+  PENDULUM_AUTO_ACCOUNT: "1"  # optional: automatic choice
+  ```
+
+  The account `claude-2` reads `ANTHROPIC_API_KEY_CLAUDE_2` (`CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` on a plan), while `claude` keeps the usual secret. Then run setup again and merge the workflow it writes, which names each account's secret in its jobs ([Several accounts](docs/INSTALL.md#several-accounts)).
+- **In local mode,** list each account's login folder or token file in `~/.config/pendulum/accounts.json` on that machine, and start `pendulum serve` with `PENDULUM_LOCAL_AUTO_ACCOUNT=1` for automatic choice ([Accounts](docs/LOCAL.md#accounts)).
+
+The progress comment, the usage record and the scorecard name the account each run used.
 
 ## What it can touch
 

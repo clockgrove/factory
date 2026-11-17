@@ -2,11 +2,12 @@
 // of Objectives and emits every figure precomputed, in one versioned JSON schema (REPORT_SCHEMA; docs/REPORT.md) or as
 // plain Markdown for a terminal or CI. The harness presents the figures and never adds, averages or derives dollars
 // (the pendulum-report skill). Three parts:
-//   readReport    the reads, within a call budget: the issue comments (the progress, harness, spend, vendor, decision-spend
-//                 and finish markers; one paged repository-wide read, or each named issue's own), the Objectives' issues
-//                 and PRs, and the usage artifacts of the stages whose dollars (no spend line) or per-pass ledger (no
-//                 spend line carries one) only their usage record holds, cached on disk by artifact id; a merged
-//                 Objective with Pendulum's own finish card is read from its summary alone (summaryFor, #544);
+//   readReport    the reads, within a call budget: the issue comments (the progress, harness, spend, ledger, vendor,
+//                 decision-spend and finish markers; one paged repository-wide read, or each named issue's own), the
+//                 Objectives' issues and PRs, and the usage artifacts of the stages whose dollars (no spend line) or
+//                 per-pass ledger (no ledger line beside the spend line) only their usage record holds, cached on disk
+//                 by artifact id; a merged Objective with Pendulum's own finish card is read from its summary alone (summaryFor,
+//                 #544);
 //   buildReport   the figures (pure), through the scorer's own cost join (cost-join.mjs: withLines, costOf);
 //   renderReport  the Markdown.
 // Dollars are vendor-reported, or API-reported tokens at the published rate, or unknown (usage.mjs UNKNOWN_WHY): never
@@ -22,7 +23,7 @@ import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
 import { downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
-import { STATE_LABELS, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
+import { STATE_LABELS, ledgerOfComment, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { finishMarker, pendulumOwn, readSummary, reportStageKind, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead } from "./usage.mjs";
 
@@ -412,11 +413,11 @@ export async function readReport(repo, scope, { token, maxCalls = DEFAULT_MAX_CA
     // The merged Objectives read from their finish card's summary: none of their stages' usage artifacts is read.
     readSummaries();
     // The usage artifacts of the Objectives with a stage of Pendulum's own in the period whose record the report needs: one
-    // with no spend line (its dollars), or one whose spend line carries no per-pass detail (every spend line does not: its
-    // ledger is in the usage record alone) and that no local record on this machine gives the ledger of. A spend line's
-    // dollars stay the stage's (buildReport); the record gives its ledger.
+    // with no spend line (its dollars), or one whose comment has no per-pass ledger line beside its spend line (logic.mjs
+    // ledgerOfComment: an older stage, or one whose ledger did not fit) and that no local record on this machine gives the
+    // ledger of. A spend line's dollars stay the stage's (buildReport); the ledger gives its passes alone.
     const stageKey = (c) => /^<!-- pendulum:\d+:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->/.exec(c.body || "")?.[1] ?? null;
-    const needs = (n) => !summaries.has(n) && comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && (!spendParts(c.body) || !Array.isArray(localOf(n).get(stageKey(c))?.ledger)));
+    const needs = (n) => !summaries.has(n) && comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && (!spendParts(c.body) || (!Array.isArray(ledgerOfComment(c.body)?.ledger) && !Array.isArray(localOf(n).get(stageKey(c))?.ledger))));
     // Dollars before ledgers: the Objectives with a stage that has no spend line are read first, so a budget that runs
     // out costs per-pass detail before it costs a dollar figure.
     const unlinedIn = (n) => comments.some((c) => markerIssue(c) === n && mine(c) && /^<!-- pendulum:\d+:progress:(?:work|review):/.test(c.body || "") && inWindow(c.created_at, scope) && !spendParts(c.body));
@@ -761,14 +762,20 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       const localRec = key ? localRecs.get(key) : null;
       // A lined stage's usage record, read for its ledger and version alone.
       const recordOf = rec.source === "spend" && key ? ledgerOf.get(key) ?? null : null;
-      // A lined stage's tokens are its record's: a spend line carries none, so none is counted twice.
-      const tokens = recordOf?.tokens && typeof recordOf.tokens === "object" ? recordOf.tokens : part.tokens;
+      // A lined stage's per-pass ledger line, beside the spend line in its own progress comment (logic.mjs ledgerOfComment):
+      // its passes, model, release and tokens with no artifact read. Never its dollars: those are the spend line's.
+      const written = rec.source === "spend" && !rec.unattributed && at && spendParts(at.body) ? ledgerOfComment(at.body) : null;
+      const onComment = Array.isArray(written?.ledger) ? written : null;
+      // A lined stage's tokens are its record's, else its ledger line's passes': a spend line carries none, so none is
+      // counted twice.
+      const tokens = recordOf?.tokens && typeof recordOf.tokens === "object" ? recordOf.tokens : onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : part.tokens;
       const harness = rec.source === "decisions" ? "decisions" : HARNESSES.has(rec.harness) ? rec.harness : HARNESSES.has(line?.harness) ? line.harness : null;
-      // A lined stage's model: its own harness line's, else its usage record's or local record's (Copilot's default model
-      // is known only from the run's record), else the one its line carries from an earlier stage. A record's, its own.
-      const model = rec.source === "decisions" ? "decisions" : rec.source === "spend" ? (modelKey(line?.model) ?? modelKey(recordOf?.model) ?? modelKey(localRec?.model) ?? modelKey(rec.model)) : (modelKey(rec.model) ?? modelKey(line?.model));
-      // The Pendulum release from the first record that names one (a spend line's harness line names none).
-      const version = [rec.ran, recordOf?.ran, localRec?.ran].map((x) => x?.pendulum).find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
+      // A lined stage's model: its own harness line's, else its ledger line's, usage record's or local record's (Copilot's
+      // default model is known only from the run's record), else the one its line carries from an earlier stage. A
+      // record's, its own.
+      const model = rec.source === "decisions" ? "decisions" : rec.source === "spend" ? (modelKey(line?.model) ?? modelKey(onComment?.model) ?? modelKey(recordOf?.model) ?? modelKey(localRec?.model) ?? modelKey(rec.model)) : (modelKey(rec.model) ?? modelKey(line?.model));
+      // The Pendulum release from the first record that names one, or the ledger line's (a harness line names none).
+      const version = [rec.ran?.pendulum, onComment?.version, recordOf?.ran?.pendulum, localRec?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;
       addCost(row.cost, c);
       addCost(totals, c);
@@ -787,8 +794,9 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
         if (!version && !rec.unattributed) missing.noVersion.add(n);
       }
       if (c.unknownRuns) unknownItems.push({ issue: n, stage: stageKind, runs: c.unknownRuns, why: c.unknownWhy });
-      // The stage's passes, from its per-pass ledger (its usage record's, or local mode's own record of it).
-      const ledger = [rec, recordOf, localRec].map((x) => x?.ledger).find(Array.isArray) ?? null;
+      // The stage's passes, from its per-pass ledger: its usage record's or local mode's own record of it when one is at
+      // hand (their times to the millisecond), else its progress comment's ledger line (times to the second).
+      const ledger = [rec, recordOf, localRec, onComment].map((x) => x?.ledger).find(Array.isArray) ?? null;
       if (rec.source === "decisions" || rec.unattributed) return;
       if (!ledger) {
         unledgered += 1;
@@ -932,7 +940,7 @@ function sourceOf(source, trust, missing, read) {
   add("no-record", missing.noRecord, UNKNOWN_WHY["no-record"]);
   add("stopped-before-records", missing.stopped, UNKNOWN_WHY.stopped);
   add("artifact-foreign", source.foreignIssues ?? new Set(), `usage artifacts uploaded by runs from forks, or naming no repository (${source.artifacts.foreign}), never read as Pendulum's`);
-  add("no-ledger", missing.noLedger, "stages whose usage record has no per-pass ledger (an older record, or a local stage's spend line with no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
+  add("no-ledger", missing.noLedger, "stages with no per-pass ledger in their progress comment or usage record (an older stage, or a local stage whose ledger did not fit its comment and that has no local record on this machine): no pass breakdown, answer and fix passes or cost per model minute for them");
   if (missing.ledgerStopped?.length) out.push({ code: "ledger-stopped", count: missing.ledgerStopped.length, issues: issuesOf(new Set(missing.ledgerStopped.map((x) => x.issue))), stages: missing.ledgerStopped, text: "stages whose per-pass ledger is in a usage record the call budget stopped the report before reading: no pass breakdown for them" });
   add("summary", missing.summary, "merged Objectives read from their finish card's summary, one comment each (--by pass reads their stages): their figures are the card's, with no tokens, per-pass ledger or Pendulum release by stage");
   add("no-version", missing.noVersion, "stages whose record names no Pendulum version (an older record, or a spend line)");

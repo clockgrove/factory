@@ -83,7 +83,9 @@ async function endToEnd(rec, why, { harness, model }) {
   assert.deepEqual([stored.usd ?? 0, stored.usdUnknown, stored.usdUnknownWhy], [knownUsd, 1, [why]], `${why}: result.json`);
   for (const k of ["usdLowerBound", "usdUpperBound"]) assert.equal(stored[k], undefined, `${why}: ${k}`);
   // The spend line, and the exit line's dollars.
-  const line = stageSpendLine(usage);
+  const { ledger, ...line } = stageSpendLine(usage);
+  // Its per-pass ledger line beside it (#543) names the pass's run of unknown cost and why, never a figure for it.
+  assert.match(ledger, new RegExp(`"q":1,"w":\\["${why}"\\]`), `${why}: ledger line`);
   assert.deepEqual(line, { usd: knownUsd, parts: { usdUnknown: 1, usdUnknownWhy: [why], usdByPass: { work: { usd: knownUsd, usdUnknown: 1 } } } }, `${why}: spend line`);
   assert.match(usdText(usage), knownUsd ? /^2 plus 1 run of unknown cost \(/ : /^unknown \(/, `${why}: exit line`);
   assert.ok(usdText(usage).includes(UNKNOWN_WHY[why]), `${why}: the exit line says why`);

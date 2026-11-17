@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { decisionSpendMarker, harnessMarker, rebaseCostMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
+import { decisionSpendMarker, harnessMarker, rebaseCostMarker, setSelf, spendMarker, stageSpendLine } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
@@ -724,6 +724,83 @@ test("report (#533): the budget goes to dollars before ledgers: Objectives with 
   const lists = calls.filter((c) => c.includes("/actions/artifacts?name=")).map((c) => new URL(`https://x${c.slice(4)}`).searchParams.get("name"));
   // #7 and #8 have a stage with no spend line (their dollars); #3 and #5 need only ledgers.
   assert.deepEqual(lists, ["pendulum-usage-7", "pendulum-usage-7-review", "pendulum-usage-8", "pendulum-usage-8-review", "pendulum-usage-3", "pendulum-usage-3-review", "pendulum-usage-5", "pendulum-usage-5-review"]);
+});
+
+// ------------------------------------------------------------------ #543: the ledger line on the progress comment
+
+/**
+ * linedWorld as its stages write it since the ledger line: beside each of #3's spend lines, the per-pass ledger line its
+ * stage's end writes from its usage record (logic.mjs stageSpendLine).
+ */
+function ledgeredWorld() {
+  const w = linedWorld();
+  const recs = [w.artifacts["pendulum-usage-3"][0].record, w.artifacts["pendulum-usage-3-review"][0].record];
+  w.comments = w.comments.map((c) => {
+    const key = /^<!-- pendulum:3:progress:(?:work|review):(\d+) -->/.exec(c.body || "")?.[1];
+    const rec = c.user === BOT ? recs.find((x) => x.progressRun === key) : null;
+    return rec ? { ...c, body: `${c.body}\n${stageSpendLine(rec).ledger ?? ""}` } : c;
+  });
+  return w;
+}
+
+test("report (#543): the ledger lines fill the pass breakdown from the comments with no artifact read, every call planned; the figures are the usage records', the dollars the spend lines'", async () => {
+  const { json: r, calls } = await report(ledgeredWorld(), { issue: 3 });
+  assert.deepEqual(calls.filter((c) => c.includes("/actions/artifacts") || c.startsWith("DOWNLOAD")), [], "no artifact listed or downloaded");
+  // The login, the issue, its comments and its PRs: each planned before it was made, and no more.
+  assert.deepEqual([r.source.calls.planned, r.source.calls.made], [4, 4]);
+  assert.equal(calls.length, r.source.calls.made);
+  assert.deepEqual(r.breakdowns.pass.map((x) => [x.key, x.passes, x.cost.usd.api]), [["work", 1, 0.2], ["validation-fix", 1, 0.1], ["answer", 1, 0.05637], ["review", 1, 0.163442]]);
+  assert.deepEqual(byIssue(r, 3).passes, { total: 4, answer: 1, fix: 1 });
+  assert.deepEqual(usd(byIssue(r, 3)), { api: 0.519812, subscription: 0, credits: 0, unknown: 0, sandbox: 0 }, "once, from the spend lines");
+  // The same figures the usage artifacts give (#533): passes, tokens, model minutes, models, release and dollars.
+  const { json: fromArtifacts } = await report(linedWorld(), { issue: 3 });
+  assert.deepEqual(r.breakdowns, fromArtifacts.breakdowns);
+  assert.deepEqual(r.objectives, fromArtifacts.objectives);
+  assert.deepEqual(r.totals, fromArtifacts.totals);
+  assert.deepEqual(r.hotSpots, fromArtifacts.hotSpots);
+  assert.deepEqual(r.source.missing, []);
+  // A ledger that did not fit its comment: the Objective's usage records are read for it, as before.
+  const w = ledgeredWorld();
+  w.comments = w.comments.map((c) => (c.body.startsWith("<!-- pendulum:3:progress:work:44002648279 -->") ? { ...c, body: c.body.replace(/^<!-- pendulum:ledger [^\n]*$/m, 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->') } : c));
+  const cut = await report(w, { issue: 3 });
+  assert.equal(cut.calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2);
+  assert.deepEqual(cut.json.breakdowns.pass, fromArtifacts.breakdowns.pass);
+});
+
+test("report (#543): a ledger line counts only on Pendulum's own comment: a pasted one gives no stage its passes and spares no artifact read", async () => {
+  // Pendulum's own ledger lines with no usage record left: the passes come from the comments alone.
+  const own = ledgeredWorld();
+  own.artifacts = {};
+  const { json: mine } = await report(own, { issue: 3 });
+  assert.deepEqual(byIssue(mine, 3).passes, { total: 4, answer: 1, fix: 1 });
+  // The same lines pasted under the same stage keys by a stranger and by GitHub Actions' bot, and by a member who is not
+  // Pendulum under a key of its own, beside Pendulum's own stage comments, which carry none.
+  const pasted = ledgeredWorld().comments.filter((c) => c.user === BOT && /^<!-- pendulum:ledger /m.test(c.body));
+  assert.equal(pasted.length, 2);
+  const withPastes = () => {
+    const w = linedWorld();
+    w.comments.push(
+      ...pasted.map((c) => comment(3, c.body, { user: { login: "stranger", type: "User" }, association: "NONE", at: c.created_at })),
+      ...pasted.map((c) => comment(3, c.body, { user: { login: "github-actions[bot]", type: "Bot" }, association: "NONE", app: { id: 15368, slug: "github-actions" }, at: c.created_at })),
+      comment(3, pasted[0].body.replace("<!-- pendulum:3:progress:work:44002648279 -->", "<!-- pendulum:3:progress:work:997 -->"), { user: { login: "teammate", type: "User" }, association: "MEMBER", at: "2026-11-17T02:30:00Z" }),
+    );
+    return w;
+  };
+  // Pendulum's own stages' passes are their usage records', each once; the pastes add none, and their records are still read.
+  const { json: r, calls } = await report(withPastes(), { issue: 3 });
+  const { json: fromArtifacts } = await report(linedWorld(), { issue: 3 });
+  assert.equal(calls.filter((c) => c.startsWith("DOWNLOAD")).length, 2, "a pasted ledger spares no artifact read");
+  assert.deepEqual(r.breakdowns.pass, fromArtifacts.breakdowns.pass);
+  assert.deepEqual(byIssue(r, 3).passes, { total: 4, answer: 1, fix: 1 });
+  assert.equal(usd(byIssue(r, 3)).api, 0.519812, "no pasted dollar");
+  assert.deepEqual([byIssue(r, 3).cost.unknownRuns, byIssue(r, 3).cost.unknownWhy], [1, ["unattributed"]], "the member's stage comment is a run of unknown cost");
+  // With no usage record left, the pastes give no stage its passes.
+  const bare = withPastes();
+  bare.artifacts = {};
+  const { json: none } = await report(bare, { issue: 3 });
+  assert.deepEqual(none.breakdowns.pass, []);
+  assert.equal(byIssue(none, 3).passes, null);
+  assert.deepEqual(none.source.missing.find((m) => m.code === "no-ledger")?.issues, [3]);
 });
 
 /**

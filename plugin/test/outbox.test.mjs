@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { POINTER_HEAD, lfsVersion } from "../scripts/lib/lfs.mjs";
-import { JUDGE_MAX_BYTES, JUDGE_PATH_MAX_BYTES, openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
+import { JUDGE_AT_ONCE, JUDGE_PATH_MAX_BYTES, openOutbox, parsePointer } from "../scripts/lib/outbox.mjs";
 import { KEPT_QUESTION, keptInput, openKeptCheck } from "../scripts/lib/kept.mjs";
 import { gitError } from "../scripts/lib/inputs.mjs";
 import { setupPaths } from "../scripts/lib/logic.mjs";
@@ -2197,24 +2197,71 @@ async function tableConflict(resolved) {
   return t;
 }
 
-test("#515: a long doc table both sides edited, over 32 KiB of the branch's diff, is judged hunk by hunk and kept when every added line survives", async () => {
-  const both = (i) => (i === 600 ? "branch note 600, checked against the vendor page; main note 600" : branchNote(i));
-  const t = await tableConflict(table(both, intro));
+const bothNotes = (i) => (i === 600 ? "branch note 600, checked against the vendor page; main note 600" : branchNote(i));
+
+test("#515: a long doc table both sides edited, over 32 KiB of the branch's diff, is judged in groups of hunks and kept when every added line survives", async () => {
+  const t = await tableConflict(table(bothNotes, intro));
   const branchDiff = t.r.run(t.r.work, "diff", `${t.onto}~1`, t.from, "--", "docs/models.md");
   assert.ok(Buffer.byteLength(branchDiff) > JUDGE_PATH_MAX_BYTES, `the branch's diff is ${Buffer.byteLength(branchDiff)} bytes`);
   const { asked, judge } = hunkReader();
   assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), "");
-  // Too large for one question: each of the 120 hunks asked alone, with the lines around it, each under the bound.
-  assert.deepEqual(asked.map((a) => a.hunks), Array.from({ length: 120 }, (_, i) => [i + 1]));
-  for (const a of asked) assert.ok(Buffer.byteLength(a.input) <= JUDGE_PATH_MAX_BYTES, `a question of ${Buffer.byteLength(a.input)} bytes`);
-  assert.match(asked[59].input, /\+\| model-600 \|[^\n]*branch note 600, checked against the vendor page \|\n[\s\S]*around where hunk 60 applies:\n[\s\S]*\| model-600 \|[^\n]*branch note 600, checked against the vendor page; main note 600 \|/);
-  // The worker's join drops one of the branch's rows: Blocked, naming that hunk.
-  const dropped = await tableConflict(table((i) => (i === 900 ? null : both(i)), intro));
+  // Too large for one question: groups of hunks in order, each with the lines around its hunks and under the bound,
+  // every one of the 120 hunks asked once; kept, so no hunk is asked alone.
+  assert.ok(asked.length > 1 && asked.length < 120, `${asked.length} question(s)`);
+  assert.deepEqual(asked.flatMap((a) => a.hunks).sort((x, y) => x - y), Array.from({ length: 120 }, (_, i) => i + 1));
+  for (const a of asked) {
+    assert.ok(Buffer.byteLength(a.input) <= JUDGE_PATH_MAX_BYTES, `a question of ${Buffer.byteLength(a.input)} bytes`);
+    assert.deepEqual(a.hunks, Array.from({ length: a.hunks.length }, (_, i) => a.hunks[0] + i), "a group is a run of hunks");
+  }
+  const at600 = asked.find((a) => a.hunks.includes(60));
+  assert.match(at600.input, /\+\| model-600 \|[^\n]*branch note 600, checked against the vendor page \|\n[\s\S]*around where hunk 60 applies:\n[\s\S]*\| model-600 \|[^\n]*branch note 600, checked against the vendor page; main note 600 \|/);
+  // The worker's join drops one of the branch's rows: Blocked, naming that hunk; only the group holding it is asked
+  // hunk by hunk, up to that hunk.
+  const dropped = await tableConflict(table((i) => (i === 900 ? null : bothNotes(i)), intro));
   const d = hunkReader();
   assert.match(await dropped.box.rebaseLeft({ from: dropped.from, onto: dropped.onto, judge: d.judge }), /: docs\/models\.md \([0-9a-f]{7}\): hunk 90 of 120 \(@@ -89[0-9],7 \+89[0-9],7 @@\): the decision model \(fake\/model\) judged it lost at 0\.95$/);
+  const group = d.asked.find((a) => a.hunks.length > 1 && a.hunks.includes(90)).hunks;
+  const alone = d.asked.filter((a) => a.hunks.length === 1).map((a) => a.hunks[0]);
+  assert.deepEqual(alone, group.filter((h) => h <= 90));
 });
 
-test("#515: a hunk of the branch's change over 32 KiB is not judged, naming that hunk; the path's other hunks are not asked", async () => {
+test("#515: at a realistic time per question, the 120-hunk table is judged well inside the check's time", async () => {
+  // 10 s a question against the check's 3 minutes, scaled down 100 times: 100 ms a question, 1.8 s in all. Asked hunk by
+  // hunk, one after another, it would need 12 s.
+  const t = await tableConflict(table(bothNotes, intro));
+  const { asked, judge } = hunkReader();
+  let now = 0;
+  let most = 0;
+  const slow = async (item) => {
+    most = Math.max(most, ++now);
+    await new Promise((done) => setTimeout(done, 100));
+    now--;
+    return judge(item);
+  };
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge: slow, maxMs: 1800 }), "");
+  assert.ok(most <= JUDGE_AT_ONCE && most > 1, `${most} at once`);
+  assert.deepEqual(asked.flatMap((a) => a.hunks).sort((x, y) => x - y), Array.from({ length: 120 }, (_, i) => i + 1));
+});
+
+test("#515: a hunk over 32 KiB whose question with the file fits 64 KiB is judged (the #364 shape: a long rewrite of a file under 32 KiB)", async () => {
+  const rows = (n, word, from = 1) => Array.from({ length: n }, (_, i) => `| ${word} row ${String(i + from).padStart(4, "0")} | column |`);
+  const baseText = [...rows(600, "old"), ...rows(200, "kept", 601)].join("\n") + "\n";
+  const branchRows = rows(600, "branch");
+  const t = await sentBack({ base: { "docs/models.md": baseText }, commits: [{ "docs/models.md": [...branchRows, ...rows(200, "kept", 601)].join("\n") + "\n" }], main: { "docs/models.md": ["| main row 0001 | column |", ...rows(599, "old", 2), ...rows(200, "kept", 601)].join("\n") + "\n" } });
+  assert.throws(() => t.go("rebase", "-q", "origin/main"));
+  const resolved = [`${branchRows[0]} main row 0001 |`, ...branchRows.slice(1), ...rows(200, "kept", 601)].join("\n") + "\n";
+  writeFileSync(join(t.r.work, "docs/models.md"), resolved);
+  t.go("add", "docs/models.md");
+  t.go("-c", "core.editor=true", "rebase", "--continue");
+  const { asked, judge } = hunkReader();
+  assert.equal(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), "");
+  assert.equal(asked.length, 1);
+  const hunk = /\nHunk 1 of 1 [^\n]*:\n<<<BEGIN [0-9a-f]{16}>>>\n([\s\S]*?)\n<<<END/.exec(asked[0].input)[1];
+  assert.ok(Buffer.byteLength(hunk) > 32 * 1024 && Buffer.byteLength(resolved) < 32 * 1024, `a hunk of ${Buffer.byteLength(hunk)} bytes, a file of ${Buffer.byteLength(resolved)}`);
+  assert.ok(Buffer.byteLength(asked[0].input) <= JUDGE_PATH_MAX_BYTES);
+});
+
+test("#515: a hunk whose own question is over 64 KiB is not judged, naming that hunk; the path's other hunks are not asked", async () => {
   // The branch rewrites 600 rows in a row (one hunk over 32 KiB) and row 1100 alone (a small hunk).
   const rewrite = (i) => (i <= 600 ? `rewritten row ${i}, with a much longer note than the table had before it` : i === 1100 ? "branch note 1100" : null);
   const t = await sentBack({ base: { "docs/models.md": table() }, commits: [{ "docs/models.md": table(rewrite) }], main: { "docs/models.md": table((i) => (i === 1100 ? "main note 1100" : null), intro) } });
@@ -2223,7 +2270,7 @@ test("#515: a hunk of the branch's change over 32 KiB is not judged, naming that
   t.go("add", "docs/models.md");
   t.go("-c", "core.editor=true", "rebase", "--continue");
   const { asked, judge } = hunkReader();
-  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), new RegExp(`: docs/models\\.md \\([0-9a-f]{7}\\): hunk 1 of 2 \\(@@ -1,605 \\+1,605 @@\\): not judged: the hunk is over ${JUDGE_MAX_BYTES / 1024} KiB$`));
+  assert.match(await t.box.rebaseLeft({ from: t.from, onto: t.onto, judge }), new RegExp(`: docs/models\\.md \\([0-9a-f]{7}\\): hunk 1 of 2 \\(@@ -1,605 \\+1,605 @@\\): not judged: the hunk with the lines around it is over ${JUDGE_PATH_MAX_BYTES / 1024} KiB$`));
   assert.deepEqual(asked, []);
 });
 

@@ -522,6 +522,32 @@ export function answerDecider({ inputs, env = process.env, home = homedir(), sta
 /** Up to `n` names joined, and how many more. */
 const listed = (xs, n = 5) => `${xs.slice(0, n).join(", ")}${xs.length > n ? ` and ${xs.length - n} more` : ""}`;
 
+/** A path as git prints it: as is, or in double quotes with C-style escapes (`\t`, `\"`, `\303\251`: octal UTF-8 bytes). */
+export function gitUnquote(text) {
+  const t = String(text ?? "");
+  if (!/^".*"$/s.test(t)) return t;
+  const named = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+  const bytes = [];
+  const body = t.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c !== "\\") {
+      bytes.push(...Buffer.from(c, "utf8"));
+      continue;
+    }
+    const oct = /^[0-7]{3}/.exec(body.slice(i + 1));
+    if (oct) {
+      bytes.push(parseInt(oct[0], 8) & 0xff);
+      i += 3;
+      continue;
+    }
+    const n = body[i + 1] ?? "";
+    bytes.push(...(n in named ? [named[n]] : Buffer.from(n, "utf8")));
+    i += 1;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
 /**
  * Git's unified diff `text` as its files, in order: each `diff --git` section's `path` (its new name, else its old; null
  * for text before any section), its `head` (the lines before its first hunk), its `hunks` (kept.mjs hunksOf) and its
@@ -533,16 +559,15 @@ export function diffFiles(text) {
     if (line.startsWith("diff --git ") || !sections.length) sections.push([]);
     sections.at(-1).push(line);
   }
-  const unquote = (p) => (/^".*"$/.test(p) ? p.slice(1, -1) : p);
   const pathOf = (lines) => {
     const side = (prefix, ab) => {
       const l = lines.find((x) => x.startsWith(prefix));
-      const p = l ? unquote(l.slice(prefix.length).replace(/\t.*$/, "")) : "";
+      const p = l ? gitUnquote(l.slice(prefix.length).replace(/\t$/, "")) : "";
       return p && p !== "/dev/null" ? p.replace(new RegExp(`^${ab}/`), "") : "";
     };
     const renamed = lines.find((l) => l.startsWith("rename to "));
-    const git = /^diff --git (?:a\/.* b\/(.+)|(.+))$/.exec(lines[0] || "");
-    return side("+++ ", "b") || side("--- ", "a") || (renamed ? unquote(renamed.slice("rename to ".length)) : "") || (git ? git[1] ?? git[2] : null);
+    const git = /^diff --git .*? ("b\/(?:[^"\\]|\\.)*"|b\/.*)$/.exec(lines[0] || "");
+    return side("+++ ", "b") || side("--- ", "a") || (renamed ? gitUnquote(renamed.slice("rename to ".length)) : "") || (git ? gitUnquote(git[1]).replace(/^b\//, "") : lines[0]?.startsWith("diff --git ") ? lines[0].slice("diff --git ".length) : null);
   };
   return sections
     .map((lines) => {
@@ -613,12 +638,15 @@ export function answerParts(diff, fits) {
  * failures they were given (`checks`), and answers `only_asked` at triage's confidence floor (`ask.floor`) or more. A diff
  * whose question would be over ANSWER_INPUT_BYTES is asked about in parts (answerParts, ANSWER_AT_ONCE at a time), each
  * with the findings and failures, and is covered only when every part is; the first part not covered (in order) is named.
- * Any other answer, a lower or missing confidence, a failed, timed-out or unreadable call, no decision model, a diff git
- * prints as binary (its content unseen), a single hunk too large to ask about with the findings and failures (not judged,
- * each named, the model not asked) or a diff that cannot be told (`diff` null, `why` says why) gives `review` true: those
- * commits get a review pass. `{review, why, verdict, confidence, error, off?, parts?, notJudged?}`.
+ * Before each question, the first included, the stage's own bounds are read: `spent()` (the stage's max_usd reached in
+ * known dollars: truthy, a string saying how much) or `deadlineAt` (the stage's wall clock, ms) passed leaves that part
+ * and every later one not asked: not judged, each named. Any other answer, a lower or missing confidence, a failed,
+ * timed-out or unreadable call, no decision model, a diff git prints as binary (its content unseen), a single hunk too
+ * large to ask about with the findings and failures (not judged, each named, the model not asked) or a diff that cannot
+ * be told (`diff` null, `why` says why) gives `review` true: those commits get a review pass.
+ * `{review, why, verdict, confidence, error, off?, parts?, notJudged?}`.
  */
-export async function answerGate({ diff, why = "", comments = [], checks = [], ask = null }) {
+export async function answerGate({ diff, why = "", comments = [], checks = [], ask = null, spent = null, deadlineAt = Infinity, now = Date.now }) {
   const reviewed = (reason, more = {}) => ({ review: true, why: reason, verdict: null, confidence: null, error: null, ...more });
   if (typeof diff !== "string") return reviewed(`what the answer and fix passes wrote could not be told from the default branch's changes${why ? ` (${why})` : ""}`);
   if (BINARY_DIFF.test(diff)) return reviewed("the answer and fix passes changed a file git diffs as binary, whose content no model reads");
@@ -645,21 +673,38 @@ export async function answerGate({ diff, why = "", comments = [], checks = [], a
     if (verdict) return reviewed(`the decision model (${ask.model}) read ${what} as more than the findings and failing checks asked`, { verdict, confidence });
     return reviewed(`the decision model (${ask.model}) gave no answer on ${what} (${a?.error || "no_answer"})`, { error: a?.error || "no_answer" });
   };
-  // Every part asked, ANSWER_AT_ONCE at a time, none started once one is not covered: the verdict is all of them.
+  // Why no further part may be asked: the stage's wall clock, or its max_usd spent in known dollars; "" while neither.
+  const bound = () => {
+    if (now() >= deadlineAt) return "the stage's wall clock ran out";
+    const s = spent?.();
+    return s ? `the stage's max_usd is spent${typeof s === "string" ? ` (${s})` : ""}` : "";
+  };
+  // Every part asked, ANSWER_AT_ONCE at a time, none started once one is not covered or a bound is met: the verdict is
+  // all of them.
   const got = new Array(parts.length).fill(null);
   let next = 0;
   let held = false;
+  let stopped = "";
   const lane = async () => {
-    while (!held && next < parts.length) {
+    while (!held && !stopped && next < parts.length) {
+      const reason = bound();
+      if (reason) {
+        stopped = reason;
+        break;
+      }
       const i = next++;
       got[i] = await judge(parts[i], i);
       if (got[i].review) held = true;
     }
   };
   await Promise.all(Array.from({ length: Math.min(ANSWER_AT_ONCE, parts.length) }, lane));
+  const label = (p, i) => (many ? `part ${i + 1} of ${parts.length} (${p.name})` : "the whole diff");
+  const unasked = stopped ? parts.map((p, i) => (got[i] ? null : label(p, i))).filter(Boolean) : [];
+  const counted = many ? { parts: parts.length } : {};
   const first = got.find((g) => g?.review);
-  if (first) return many ? { ...first, parts: parts.length } : first;
-  return { review: false, why: "", verdict: "only_asked", confidence: Math.min(...got.map((g) => g.confidence)), error: null, ...(many ? { parts: parts.length } : {}) };
+  if (first) return { ...first, ...counted, ...(unasked.length ? { notJudged: unasked } : {}) };
+  if (unasked.length) return reviewed(`not judged: ${listed(unasked)} of what the answer and fix passes wrote: ${stopped}`, { notJudged: unasked, ...counted });
+  return { review: false, why: "", verdict: "only_asked", confidence: Math.min(...got.map((g) => g.confidence)), error: null, ...counted };
 }
 
 /**
@@ -683,7 +728,7 @@ export function answerGateLine(gate, ask) {
  * Nothing written but a rebase is no review and no question. A file git counts as binary (session.mjs writtenSince, its
  * numstat `-`), or a count that cannot be had, is a review pass with no question: the model would not see its content.
  */
-export async function answerCovered(mgit, { base, from, head, comments = [], checks = [], ask = null, maxBytes = ANSWER_READ_BYTES }) {
+export async function answerCovered(mgit, { base, from, head, comments = [], checks = [], ask = null, maxBytes = ANSWER_READ_BYTES, spent = null, deadlineAt = Infinity }) {
   const s = await sinceReview(mgit, { base, covered: from, head, maxBytes });
   if (s.rebase) return { review: false, why: "", verdict: null, confidence: null, error: null };
   if (typeof s.diff === "string") {
@@ -691,7 +736,7 @@ export async function answerCovered(mgit, { base, from, head, comments = [], che
     const binary = (w?.files || []).filter((f) => f.binary).map((f) => f.path);
     if (!w || binary.length) return { review: true, why: w ? `the answer and fix passes changed ${binary.slice(0, 5).join(", ")}${binary.length > 5 ? ` and ${binary.length - 5} more` : ""}, which git diffs as binary, whose content no model reads` : "what the answer and fix passes wrote could not be counted from the default branch's changes", verdict: null, confidence: null, error: null };
   }
-  return answerGate({ diff: s.diff, why: s.why, comments, checks, ask });
+  return answerGate({ diff: s.diff, why: s.why, comments, checks, ask, spent, deadlineAt });
 }
 
 /**
@@ -700,10 +745,10 @@ export async function answerCovered(mgit, { base, from, head, comments = [], che
  * (answerCovered), and what the stage covers (coverAfter). `answering`: this stage's review read commits an earlier gate
  * held; its own answer is gated too, and held a second time it is a person's (coverAfter `block`). `{gate, cover}`.
  */
-export async function answerSettle(mgit, { base, reviewedAt, head, answerQuestion = false, answerFrom, answerTo, answering = false, comments = [], checks = [], ask = null }) {
+export async function answerSettle(mgit, { base, reviewedAt, head, answerQuestion = false, answerFrom, answerTo, answering = false, comments = [], checks = [], ask = null, spent = null, deadlineAt = Infinity }) {
   // An answer that applied decisions is reviewed anyway: the gate is on what this stage wrote before it.
   const upTo = answerQuestion && answerTo && answerTo !== answerFrom ? answerFrom : head;
-  const gate = upTo && upTo !== reviewedAt ? await answerCovered(mgit, { base, from: reviewedAt, head: upTo, comments, checks, ask }) : null;
+  const gate = upTo && upTo !== reviewedAt ? await answerCovered(mgit, { base, from: reviewedAt, head: upTo, comments, checks, ask, spent, deadlineAt }) : null;
   return { gate, cover: coverAfter({ answerQuestion, answerFrom, answerTo, head, reviewedAt, gate, answering }) };
 }
 
@@ -827,6 +872,9 @@ async function main() {
   // that ends at or past it (Codex and Copilot have no in-run cap) is marked and ends the job Blocked.
   let overBudget = false;
   const over = (...pending) => capReached(passCap(), [...records, ...pending]);
+  // The answer gate's bound (answerGate `spent`): max_usd reached in known dollars, saying how much; a price still
+  // settling counts nothing.
+  const answerSpent = () => (over() ? `known $${sumSpend(records).usd.toFixed(2)} of $${Number(passCap()).toFixed(2)}` : "");
   // A run of unknown cost (a Copilot run with no priced credits among them, usage.mjs UNKNOWN_WHY) adds nothing to the
   // known dollars the cap compares: the stage goes on.
   const capReason = () => "dollar cap reached";
@@ -1710,7 +1758,7 @@ async function main() {
   const settleCover = async ({ answerQuestion = false, answerFrom, answerTo, comments: answered }) => {
     const head = outbox.failed ? null : outbox.expected();
     const answering = !!scope.answer && !alreadyReviewed;
-    const { gate, cover: c } = await answerSettle(outbox.git, { base: outbox.base, reviewedAt, head, answerQuestion, answerFrom, answerTo, answering, comments: answered, checks: [...fixTexts, ...(heldRed ? [heldRed.tail] : [])], ask: answerAsk });
+    const { gate, cover: c } = await answerSettle(outbox.git, { base: outbox.base, reviewedAt, head, answerQuestion, answerFrom, answerTo, answering, comments: answered, checks: [...fixTexts, ...(heldRed ? [heldRed.tail] : [])], ask: answerAsk, spent: answerSpent, deadlineAt });
     const said = answerGateLine(gate, answerAsk);
     if (said) log(said);
     if (c.record) await recordCovered(repo, pr.number, issue, c.record, token, { answer: c.answer }).catch((e) => log(`covered record: ${String(e?.message || e).slice(0, 120)}`));

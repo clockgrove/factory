@@ -52,13 +52,15 @@ const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // cannot be read, so every script the commands run counts as changed.
 const PACKAGE_JSON_MAX = 1024 * 1024;
 /**
- * The most of one hunk of the branch's change, and of the file it is judged against, the rebase check's decision model is
- * given (box.rebaseLeft): a larger hunk is not judged, and names the path with that hunk; a larger file is shown as the
+ * The most of the file the rebase check's decision model is given whole (box.rebaseLeft); a larger file is shown as the
  * lines around each hunk, JUDGE_VIEW_LINES either side.
  */
 export const JUDGE_MAX_BYTES = 32 * 1024;
 export const JUDGE_VIEW_LINES = 60;
-/** The most of a path's hunks and its file (or their views) asked about in one question; more is asked hunk by hunk. */
+/**
+ * The most of a path's hunks and its file (or their views) asked about in one question: more goes in groups of hunks
+ * packed in order up to it, and a hunk whose own question (the hunk with the file or its view) is over it is not judged.
+ */
 export const JUDGE_PATH_MAX_BYTES = 64 * 1024;
 /** The most of one file's diff the fence check is given (box.outside): a larger change is not judged, and stays refused. */
 export const FENCE_DIFF_MAX = 32 * 1024;
@@ -489,7 +491,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * `box.rebaseNote`: a path the branch's commits changed and undid, which the head changes anyway (unsettled `undone`),
    * said for the progress comment, never a Block; "" when none.
    */
-  box.rebaseLeft = async ({ from, onto, judge = null }) => {
+  box.rebaseLeft = async ({ from, onto, judge = null, maxMs = JUDGE_MAX_MS }) => {
     box.rebaseNote = "";
     box.rebaseHead = "";
     const busy = await box.inProgress();
@@ -516,7 +518,7 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     box.rebaseNote = open.undone?.length ? `the branch's commits changed ${listed(open.undone)} and undid it, yet the head changes ${open.undone.length > 1 ? "them" : "it"}: an extra change for the review, not a loss` : "";
     if (!open.paths.length) return "";
     try {
-      const left = await keptLeft({ ...open, from, judge });
+      const left = await keptLeft({ ...open, from, judge, maxMs });
       // No decision model (no AI Gateway key) and a path not exactly the branch's: the commits are matched as before,
       // so no stage without a decider Blocks a rebase the commit match passes.
       return left ?? (await commitsLeft({ from, onto, head }));
@@ -583,17 +585,18 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
    * Each open path (unsettled) decided: kept when the head has exactly the branch's entry, blob and mode (a path the
    * replay conflicted on: as the branch left it; any other: as replayed). Exactly not kept: the same blob with another
    * mode, a binary or Git LFS file, or a path the head moved or removed where git cannot merge the branch's change into
-   * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE paths at a time, at most JUDGE_MAX_PATHS paths and
-   * JUDGE_MAX_MS in all; past either it is not judged, and a hunk over JUDGE_MAX_BYTES (or the lines around it) is not
-   * judged, naming the path with that hunk, the other hunks unasked. The branch's change is, for
-   * a replay conflict, its side from their base; for a path where merging the branch's change into the head conflicts,
-   * its side of that merge; for any other path, what that merge would still change there. Its hunks are judged against
-   * the head's file, whole or around each hunk (kept.mjs hunkView): all in one question, then, unless kept, each alone,
-   * and a path is kept when all are. A change with no hunk is decided exactly. Returns "" or why, naming each path not
+   * it. Any other text file goes to `judge` (kept.mjs), JUDGE_AT_ONCE questions at a time, at most JUDGE_MAX_PATHS paths
+   * and `maxMs` (JUDGE_MAX_MS) in all; past either it is not judged, and a hunk whose own question is over
+   * JUDGE_PATH_MAX_BYTES is not judged, naming the path with that hunk, the other hunks unasked. The branch's change is,
+   * for a replay conflict, its side from their base; for a path where merging the branch's change into the head
+   * conflicts, its side of that merge; for any other path, what that merge would still change there. Its hunks are judged
+   * against the head's file, whole or around each hunk (kept.mjs hunkView): all in one question, or in groups packed in
+   * order up to JUDGE_PATH_MAX_BYTES; a group not kept asks each of its hunks alone; a path is kept when every group is.
+   * A change with no hunk is decided exactly. Returns "" or why, naming each path not
    * kept, the branch's commits that changed it, the first hunk not kept and why; null, with no `judge`, when a path is
    * not exactly the branch's.
    */
-  const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge }) => {
+  const keptLeft = async ({ paths, old, head, onto, replayed, merged, stages, mergeConflicts, from, judge, maxMs = JUDGE_MAX_MS }) => {
     const empty = await git(["hash-object", "-t", "blob", "-w", "--stdin"], { input: "" });
     if (empty.code !== 0) throw new Error(`git hash-object exited ${empty.code}`);
     const none = empty.stdout.trim();
@@ -674,10 +677,11 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
     }
     const queued = paths.filter((p) => verdicts.get(p) === null);
     queued.slice(JUDGE_MAX_PATHS).forEach((p) => verdicts.set(p, `not judged: the decision model is asked about ${JUDGE_MAX_PATHS} paths at most`));
-    const out = `not judged: the check's ${JUDGE_MAX_MS / 60_000} minutes ran out`;
+    const out = `not judged: the check's ${maxMs / 60_000} minutes ran out`;
     // A judged path's hunks (kept.mjs hunksOf), each with the lines around it (kept.mjs hunkView) when the head's file is
-    // over JUDGE_MAX_BYTES, else the file whole; a hunk over JUDGE_MAX_BYTES, or whose lines around it are, carries
-    // `over` (why it is not judged); or why the path is decided without the model.
+    // over JUDGE_MAX_BYTES, else the file whole; a hunk whose own question (the hunk with the file, or with the lines
+    // around it) is over JUDGE_PATH_MAX_BYTES carries `over` (why it is not judged); or why the path is decided without
+    // the model.
     const ready = async (p) => {
       const { now, change } = prepare.get(p);
       const branchDiff = await diff(change.before, change.after, p, { max: readMaxBytes });
@@ -702,8 +706,12 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (r.truncated) return `not judged: the file is over ${readMaxBytes} bytes`;
         file = r.stdout;
       }
-      const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h, over: Buffer.byteLength(h.text) > JUDGE_MAX_BYTES ? `not judged: the hunk is over ${JUDGE_MAX_BYTES / 1024} KiB` : "" }));
-      if (Buffer.byteLength(file ?? "") <= JUDGE_MAX_BYTES) return { file, hunks };
+      const limit = `${JUDGE_PATH_MAX_BYTES / 1024} KiB`;
+      const hunks = list.map((h, i) => ({ at: i + 1, text: h.text, header: h.header, raw: h, over: "" }));
+      if (Buffer.byteLength(file ?? "") <= JUDGE_MAX_BYTES) {
+        for (const h of hunks) if (Buffer.byteLength(h.text) + Buffer.byteLength(file ?? "") > JUDGE_PATH_MAX_BYTES) h.over = `not judged: the hunk with the file is over ${limit}`;
+        return { file, hunks };
+      }
       // Where the change's lines are in the head's file: from its base side, or (what the merge would still change) the
       // head's own lines.
       let moves = [];
@@ -712,18 +720,37 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
         if (d === null) return `not judged: the file is over ${readMaxBytes} bytes`;
         moves = hunksOf(d);
       }
+      // Each hunk's view gets what its own question has left after the hunk.
       for (const h of hunks) {
-        if (h.over) continue;
-        h.view = hunkView({ file, hunk: h.raw, moves, max: JUDGE_MAX_BYTES, context: JUDGE_VIEW_LINES });
-        if (!h.view) h.over = `not judged: the lines around it are over ${JUDGE_MAX_BYTES / 1024} KiB`;
+        const room = JUDGE_PATH_MAX_BYTES - Buffer.byteLength(h.text);
+        h.view = room > 0 ? hunkView({ file, hunk: h.raw, moves, max: room, context: JUDGE_VIEW_LINES, whole: false }) : null;
+        if (!h.view) h.over = `not judged: the hunk with the lines around it is over ${limit}`;
       }
       return { file: null, hunks };
     };
     let over = false;
-    // One path: all its hunks in one question when they fit JUDGE_PATH_MAX_BYTES with the file or their views; unless
-    // that is kept, each hunk alone, in order, up to the first not kept. Every hunk kept alone keeps the path only when
-    // the whole's answer was unsure (kept under the floor, lost under it, no answer) or not asked. null when the time
-    // ran out first.
+    // Every question to the decision model, at most JUDGE_AT_ONCE at a time across all paths: `skip()` true, or the time
+    // run out, when its turn comes leaves it unasked (`{skipped}`; null for the time).
+    let active = 0;
+    const waiting = [];
+    const ask = async (it, skip = () => false) => {
+      while (active >= JUDGE_AT_ONCE) await new Promise((go) => waiting.push(go));
+      if (over || skip()) {
+        waiting.shift()?.();
+        return over ? null : { skipped: true };
+      }
+      active++;
+      try {
+        return await judge(it);
+      } finally {
+        active--;
+        waiting.shift()?.();
+      }
+    };
+    // One path: all its hunks in one question when they fit JUDGE_PATH_MAX_BYTES with the file or their views, else in
+    // groups packed in order up to it, asked at once; a group not kept asks each of its hunks alone, in order, up to the
+    // first not kept, and no further group starts. Every hunk of a group kept alone keeps the group only when the group's
+    // answer was unsure (kept under the floor, lost under it, no answer). null when the time ran out first.
     const judgePath = async (p) => {
       const got = await ready(p);
       if (typeof got === "string") return got;
@@ -731,29 +758,50 @@ async function outboxIn({ branch, defaultBranch, checkout, remote, token = () =>
       const { file, hunks } = got;
       const of = hunks.length;
       const item = (hs) => ({ path: p, of, merged: !!change.merged, file: oid(now) ? file : null, hunks: hs.map(({ at, text, view }) => ({ at, text, view })) });
-      const size = hunks.reduce((n, h) => n + Buffer.byteLength(h.text) + Buffer.byteLength(h.view?.file ?? ""), Buffer.byteLength(file ?? ""));
       const named = (h, why) => `hunk ${h.at} of ${of} (${h.header}): ${why}`;
       // A hunk no question can hold leaves the path not kept, each such hunk named; the others are not asked.
       const unjudged = hunks.filter((h) => h.over);
       if (unjudged.length) return unjudged.map((h) => named(h, h.over)).join(", ");
-      let all = null;
-      if (size <= JUDGE_PATH_MAX_BYTES) {
-        if (over) return null;
-        all = await judge(item(hunks));
-        if (all.kept) return "";
-        if (of === 1) return named(hunks[0], all.why);
-      }
-      // Each hunk alone: to name the one not kept, and, after an unsure answer for the whole (or none asked), to decide.
-      // A sure `lost` for the whole stands even when every hunk alone reads kept.
+      // The groups: the file whole counts once in each question, each view with its hunk.
+      const base = Buffer.byteLength(file ?? "");
+      const cost = (h) => Buffer.byteLength(h.text) + Buffer.byteLength(h.view?.file ?? "");
+      const groups = [];
+      let size = base;
       for (const h of hunks) {
-        if (over) return null;
-        const one = await judge(item([h]));
-        if (!one.kept) return named(h, one.why);
+        if (groups.length && size + cost(h) <= JUDGE_PATH_MAX_BYTES) groups.at(-1).push(h);
+        else {
+          groups.push([h]);
+          size = base;
+        }
+        size += cost(h);
       }
-      return all?.lost ? `${all.why} for the file as a whole, though no hunk asked alone was` : "";
+      let failed = false;
+      const stop = () => failed;
+      const judgeGroup = async (g) => {
+        const all = await ask(item(g), stop);
+        if (!all || all.skipped) return all ? undefined : null;
+        if (all.kept) return "";
+        if (g.length === 1) return named(g[0], all.why);
+        // Each hunk alone: to name the one not kept, and, after an unsure answer for the group, to decide. A sure `lost`
+        // for the group stands even when every hunk alone reads kept.
+        for (const h of g) {
+          const one = await ask(item([h]));
+          if (!one) return null;
+          if (!one.kept) return named(h, one.why);
+        }
+        return all.lost ? `${all.why} for ${groups.length === 1 ? "the file" : `hunks ${g[0].at} to ${g.at(-1).at}`} as a whole, though no hunk asked alone was` : "";
+      };
+      const res = await Promise.all(
+        groups.map(async (g) => {
+          const r = await judgeGroup(g);
+          if (r) failed = true;
+          return r;
+        }),
+      );
+      return res.find((r) => r) ?? (res.includes(null) ? null : "");
     };
     let timer;
-    const deadline = new Promise((done) => (timer = setTimeout(done, JUDGE_MAX_MS)));
+    const deadline = new Promise((done) => (timer = setTimeout(done, maxMs)));
     const work = queued.slice(0, JUDGE_MAX_PATHS);
     let next = 0;
     const lane = async () => {

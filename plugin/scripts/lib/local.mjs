@@ -1577,11 +1577,14 @@ fi
 exec ${JSON.stringify(realGit)} "$@"
 `;
 
-/** The hosts each harness CLI itself reaches for its model, sign-in and token refresh, beside the commands' LOCAL_DOMAINS. */
+/**
+ * The hosts each harness CLI itself reaches for its model, sign-in and token refresh, beside the commands' LOCAL_DOMAINS.
+ * No reporting host: every harness runs with its vendor's reporting off (harness.mjs VENDOR_TELEMETRY_OFF).
+ */
 export const HARNESS_API_DOMAINS = {
-  claude: ["api.anthropic.com", "statsig.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"],
+  claude: ["api.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai"],
   codex: ["api.openai.com", "chatgpt.com", "auth.openai.com", "ai-gateway.vercel.sh"],
-  copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com", "telemetry.individual.githubcopilot.com"],
+  copilot: ["api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com", "copilot-proxy.githubusercontent.com"],
 };
 
 /** A harness CLI's own state (its login, settings, sessions), which it reads and writes; Copilot's home is Pendulum's. */

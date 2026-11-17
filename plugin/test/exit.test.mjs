@@ -1443,8 +1443,8 @@ test("hostile member globs are decided in bounded time (pendulum#2618 review)", 
 test("Block causes: each Block carries a code from the one closed list; refusals, the cap and GitHub's unstarted job are external, the rest not", async () => {
   const { BLOCK_CAUSES, blockCauseOf, blockMarker, refusalCause } = await import("../scripts/lib/logic.mjs");
   const { stageBlockCause } = await import("../scripts/lib/gateway-relay.mjs");
-  assert.deepEqual(Object.keys(BLOCK_CAUSES), ["max-usd", "gateway-budget", "provider-quota", "outage", "setup", "work", "pendulum"]);
-  assert.deepEqual(Object.entries(BLOCK_CAUSES).filter(([, c]) => c.external).map(([k]) => k), ["max-usd", "gateway-budget", "provider-quota", "outage"]);
+  assert.deepEqual(Object.keys(BLOCK_CAUSES), ["max-usd", "max-objective-usd", "gateway-budget", "provider-quota", "outage", "setup", "work", "pendulum"]);
+  assert.deepEqual(Object.entries(BLOCK_CAUSES).filter(([, c]) => c.external).map(([k]) => k), ["max-usd", "max-objective-usd", "gateway-budget", "provider-quota", "outage"]);
   const ok = { ok: true };
   const cause = (args) => decideExit({ harness: ok, pr: { exists: true }, commits: 1, ...args }).cause;
   assert.equal(cause({ harness: { budgetExceeded: true } }), "max-usd");

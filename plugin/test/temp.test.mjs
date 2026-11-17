@@ -21,7 +21,7 @@ test("the test files run in a temp root of their own, held by their process", ()
 
 test("#305: the test files run on a home of their own in that root, with no harness login or credential of the shell", () => {
   assert.equal(homedir(), realpathSync(join(tmpdir(), "home")), "os.homedir(), and so ~/.config/pendulum, is the fake home's");
-  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "XDG_CONFIG_HOME"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
+  for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN", "XDG_CONFIG_HOME", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) assert.ok(DEVELOPER_ENV.includes(k) && !(k in process.env), k);
   // What the code under test starts sees the same.
   const child = spawnSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify([require('os').homedir(), process.env.CLAUDE_CONFIG_DIR ?? null]))"], { encoding: "utf8" });
   assert.deepEqual(JSON.parse(child.stdout), [homedir(), null]);

@@ -35,6 +35,7 @@ Every Blocked notice Pendulum posts ends with `<!-- pendulum:block {"cause":"<co
 | Code | External | Meaning |
 | --- | --- | --- |
 | `max-usd` | yes | Pendulum's `max_usd` cap reached |
+| `max-objective-usd` | yes | Pendulum's `max_objective_usd` cap reached: the Objective's known spend across its stages |
 | `gateway-budget` | yes | the AI Gateway refused for its own budget or credits |
 | `provider-quota` | yes | a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit with no reset reported, or off the local route with its reset past the stage's deadline, after the pass's two waits for it, or with under five minutes of the pass's wall clock left after the reset), GitHub's Git LFS storage (the upload refused for quota or storage), GitHub's API rate limit (spent until a reset past the stage's deadline, off the local route), or the sandbox vendor's plan (still used up after the bounded wait) |
 | `outage` | yes | a provider or GitHub outage handled by Pendulum's rules: a required job GitHub never started, waited for in place and then Blocked as infrastructure, in validation or in the merge queue; a red head whose failed jobs failed in their set-up or checkout on a server or network failure (an HTTP 5xx, a timeout, a connection error) naming nothing the PR changes, before and after its one rerun; a stage whose machine could not reach GitHub or the model provider past the outage's bound (twelve hours paused under `serve`, the stage's wall clock on the Action and a cloud sandbox) |

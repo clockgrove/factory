@@ -57,6 +57,7 @@ export const DEFAULTS = {
   daily_usd: "100",
   copilot_credit_usd: "", // empty: GitHub's published $0.01 per AI credit (usage.mjs COPILOT_CREDIT_USD)
   max_usd: "25",
+  max_objective_usd: "", // empty or 0: no cap on an Objective's known spend across its stages (objective-cap.mjs capGate)
   timeout_minutes: "240",
   auto_merge: "true",
   notify: "",
@@ -339,6 +340,7 @@ const VALUE_RULES = (() => {
     PENDULUM_COMPACTION_WINDOW: whole,
     PENDULUM_DAILY_USD: atLeast0,
     PENDULUM_MAX_USD: atLeast0,
+    PENDULUM_MAX_OBJECTIVE_USD: atLeast0,
     PENDULUM_IMAGE_DAILY_MINUTES: atLeast0,
     PENDULUM_IMAGE_MAX_AGE_DAYS: [(v) => /^\s*\d+\s*$/.test(v) && Number(v) >= 1 && Number(v) <= IMAGE_MAX_AGE_MAX, `a whole number of days, 1 to ${IMAGE_MAX_AGE_MAX}`],
     PENDULUM_SANDBOX_IDLE_DAYS: atLeast0,
@@ -656,6 +658,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     decisionRoute: ((v) => (["auto", "gateway", "off"].includes(v) ? v : "auto"))((get("decision_route") || "auto").trim().toLowerCase()),
     dailyUsd: num(get("daily_usd"), 100),
     maxUsd: num(get("max_usd"), 25),
+    // The Objective-wide dollar cap (objective-cap.mjs capGate): a number above 0, else none.
+    maxObjectiveUsd: ((n) => (n > 0 ? n : null))(num(String(get("max_objective_usd")).trim() || "x", 0)),
     timeoutMinutes: num(get("timeout_minutes"), 240),
     autoMerge: bool(get("auto_merge")),
     // The handle Blocked comments @mention; `login#id` pins it (below), and the mention uses the login.

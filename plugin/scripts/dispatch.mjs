@@ -69,8 +69,8 @@ const UNCLAIMED_SAID = new Map();
 const SERVE_FIX = "start `pendulum serve` on the machine that runs it, then re-apply the label";
 
 /**
- * Today's spend (UTC day) against daily_usd: the usage artifacts of Actions runs plus the spend lines local runs and
- * cloud sandbox stages write in their progress comments. `spentToday` is the known dollars, which daily_usd compares;
+ * Today's spend (UTC day) against daily_usd: the spend lines every stage writes in its progress comment (backend.mjs
+ * spendInProgress), plus the usage artifacts of Actions runs whose record is not marked as counted there. `spentToday` is the known dollars, which daily_usd compares;
  * `unknownToday` the runs of unknown cost among them (usage.mjs UNKNOWN_WHY), shown beside it and never counted as
  * dollars, so the day can pass daily_usd by spend that was never reported. Reading artifacts needs `actions: read`, which the job token
  * has (workflow-template.yml) and the App does not; the App stays at its four permissions. A failed read counts as the
@@ -1575,7 +1575,7 @@ export async function dispatch(inputs, { token, decisionRole = "dispatcher", not
       const closed = recent.find((i) => i.number === number);
       if (labels.length && closed && hasLocalLabel(closed) === (backend().name === "local")) {
         const usageToken = inputs.githubToken || token;
-        const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n) => objectiveRecords(repo, n, { token: usageToken, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
+        const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n, want) => objectiveRecords(repo, n, { token: usageToken, want, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
         if (card === "posted") {
           finished.push(number);
           log(`  #${number}: merged; its finish card is posted`);

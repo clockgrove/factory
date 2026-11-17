@@ -479,6 +479,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     max_concurrent: String(inputs.maxConcurrent),
     daily_usd: String(inputs.dailyUsd),
     max_usd: String(inputs.maxUsd),
+    max_objective_usd: inputs.maxObjectiveUsd ? String(inputs.maxObjectiveUsd) : "",
     timeout_minutes: String(inputs.timeoutMinutes),
     auto_merge: String(inputs.autoMerge),
     publish_transcripts: String(inputs.publishTranscripts),

@@ -475,7 +475,7 @@ test("the scorer, the finish card and the daily cap (B1): a fork's artifact of a
   // The finish card's records and the dispatcher's daily sum read none of it either.
   const fake = fakeGitHub({ ...world(), artifacts: { "pendulum-usage-3": [FORGED, { id: 5, name: "pendulum-usage-3", expired: false, created_at: "2026-11-17T02:26:00Z", workflow_run: { id: 44002648279, repository_id: 1, head_repository_id: 1 } }] } });
   await over(fake, async () => {
-    const recs = await objectiveRecords(REPO, 3, { token: "t", download: async (a) => ({ id: a.id }) });
+    const recs = await objectiveRecords(REPO, 3, { token: "t", want: [{ stage: "work", key: "44002648279" }, { stage: "work", key: "77" }], download: async (a) => ({ id: a.id }) });
     assert.deepEqual(recs.map((x) => x.id), [5]);
     const today = await todaysUsage(REPO, { token: "t", dateIso: "2026-11-17", download: async (_r, a) => ({ usd: a.id }) });
     assert.deepEqual(today.map((x) => x.usd), [5]);

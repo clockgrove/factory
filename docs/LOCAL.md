@@ -309,7 +309,7 @@ A `--here` run writes no spend line; it is not counted.
 - Copilot's are "Copilot AI credits, billed to the seat".
 - Anything else is "billing not recorded": an `ANTHROPIC_BASE_URL` of your own with no key, a key source Pendulum does not know, a Claude pass on paid extra usage past the plan's limit (`isUsingOverage`), or a login with no sign either way.
 
-The spend line keeps the parts (`billing`, `usdByBilling`), the day's total and the scorecard say each, and `max_usd` and `daily_usd` count the figure whatever its billing.
+The spend line keeps the parts (`billing`, `usdByBilling`, and `usdByPass`, the dollars by pass kind the finish card breaks the stage down by), the day's total and the scorecard say each, and `max_usd`, `daily_usd` and `max_objective_usd` count the figure whatever its billing.
 
 **While a stage runs,** each write of its comment carries the dollars its harness passes have reported so far (`usd`) and, as runs of unknown cost (`usdUnknown`, with why in `usdUnknownWhy`), each pass that ended without reporting and each pass still running, so a stage that is killed or loses its machine leaves what it knew: never $0 and never a reading of a pass's stream.
 - A stage stopped by a signal (Ctrl-C, SIGTERM or SIGHUP, or its loop stopping) writes its line once more as it stops, after its harness is killed, when it differs from what the line shows, waiting at most 5 s for GitHub.

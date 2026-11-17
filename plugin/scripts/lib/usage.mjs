@@ -265,6 +265,75 @@ export function addBilling(...maps) {
 }
 
 /**
+ * The kinds of harness pass a stage's spend is broken down by (#517), each from the label the pass ran under, never
+ * from its words: `work` (the worker's prompt, `work-<n>`), `review` (the reviewer, its retry, fallback and foundation
+ * pass), `answer` (the answer pass and its scope hold), `fix` (a validation loop's fix and fresh passes, `<loop>-fix-<n>`
+ * and `<loop>-fresh-<n>`) and `conflict` (the work stage's catch-up pass after the default branch changed a workflow).
+ * They are the pendulum report's answer and fix passes too (report.mjs passLabel, isAnswer, isFix), so the card and the
+ * report never name one pass two ways. Any other pass (a fix pass's scope hold, the exit record, a decision call) has no
+ * kind here: its dollars stay in its stage.
+ */
+export const PASS_KINDS = Object.freeze(["work", "review", "answer", "fix", "conflict"]);
+export function passKind(label) {
+  const l = typeof label === "string" ? label : "";
+  if (/^work-\d+$/.test(l)) return "work";
+  if (l === "conflict") return "conflict";
+  if (/^review(?:-foundation)?(?:-retry|-fallback)?$/.test(l)) return "review";
+  if (l === "answer" || l === "answer-scope") return "answer";
+  if (/^(?:validation|pre-review-validation|review-validation)-(?:fix|fresh)-\d+$/.test(l)) return "fix";
+  return null;
+}
+
+/**
+ * A stage's dollars by pass kind (PASS_KINDS), from its pass `records` on a credential of `billing`: per kind that ran,
+ * `{usd, usdUnknown?, usdByBilling?}`, the known dollars of its passes (a relayed key's share in them), their runs of
+ * unknown cost and the known dollars by billing (usdByBilling). A pass that never ran, a decision record and a pass with
+ * no kind are in none: their dollars are the stage's own. {} when no pass of a kind ran.
+ */
+export function usdByPass(records, billing) {
+  const out = {};
+  for (const r of records || []) {
+    const kind = r && !r.noRun && !r.decision ? passKind(r.label) : null;
+    if (kind) (out[kind] ??= []).push(r);
+  }
+  return Object.fromEntries(
+    Object.entries(out).map(([kind, recs]) => {
+      const usd = round6(recs.reduce((s, r) => s + (nonNeg(r.usd) ?? 0), 0));
+      const unknown = recs.reduce((s, r) => s + unknownRuns(r), 0);
+      const by = usdByBilling(recs, billing);
+      return [kind, { usd, ...(unknown ? { usdUnknown: unknown } : {}), ...(Object.keys(by).length ? { usdByBilling: by } : {}) }];
+    }),
+  );
+}
+
+/**
+ * A stage's own record of what it ran again after a Block (#517), as result.json and the spend line carry it (`rerun`):
+ * `afterBlock`, the time of the Pendulum Blocked notice it is the first stage after (no other stage of the Objective
+ * started between), and `repeated`, the pass kinds (PASS_KINDS) it ran again of what had run before that notice: the
+ * work stage's own prompt (`work`) when it ran in a fresh session over the PR an earlier stage made. Read back: null for
+ * none or a broken one.
+ */
+export function rerunRead(v) {
+  if (!v || typeof v !== "object" || typeof v.afterBlock !== "string" || !Number.isFinite(Date.parse(v.afterBlock))) return null;
+  return { afterBlock: v.afterBlock, repeated: Array.isArray(v.repeated) ? [...new Set(v.repeated.filter((k) => PASS_KINDS.includes(k)))] : [] };
+}
+
+/** A `usdByPass` read back from a stored record or line: its PASS_KINDS at finite non-negative dollars; {} for none or a broken one. */
+export function passRead(v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+  const out = {};
+  for (const kind of PASS_KINDS) {
+    const p = v[kind];
+    const usd = nonNeg(p?.usd);
+    if (usd === null || p.usd < 0) continue;
+    const unknown = Number.isInteger(p.usdUnknown) && p.usdUnknown > 0 ? p.usdUnknown : 0;
+    const by = billingRead(p.usdByBilling);
+    out[kind] = { usd, ...(unknown ? { usdUnknown: unknown } : {}), ...(Object.keys(by).length ? { usdByBilling: by } : {}) };
+  }
+  return out;
+}
+
+/**
  * The words after a dollar figure `usd` that say what it is, from its `byBilling` (usdByBilling); `fmt` writes a part's
  * dollars and `unit` is the smallest amount it shows (a part, or a remainder no kind names, under half of it is not shown):
  * - "" for billed API spend alone, or when nothing names a billing;

@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -926,6 +926,7 @@ export function clip(text, max = REASON_MAX) {
  */
 export const BLOCK_CAUSES = Object.freeze({
   "max-usd": Object.freeze({ external: true, what: "Pendulum's max_usd cap reached" }),
+  "max-objective-usd": Object.freeze({ external: true, what: "Pendulum's max_objective_usd cap reached: the Objective's known spend across its stages" }),
   "gateway-budget": Object.freeze({ external: true, what: "the AI Gateway refused for its own budget or credits" }),
   "provider-quota": Object.freeze({ external: true, what: "a provider's quota, usage limit, plan limit or billing refusal: the model provider (a subscription's usage limit included), GitHub's Git LFS storage, GitHub's API rate limit spent until a reset past the stage's deadline, or the sandbox vendor's plan" }),
   outage: Object.freeze({ external: true, what: "a provider or GitHub outage Pendulum waited or retried through by its rules, this machine's own network included (lib/network.mjs)" }),
@@ -2800,13 +2801,17 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * progress.spend. Every stage gets one: `usd` its known dollars (0 when no harness pass ran, or none reported), and its
  * runs of unknown cost (`usdUnknown`, `usdUnknownWhy`: usage.mjs UNKNOWN_WHY), never a figure for them.
  * `workerKeyUsd`: the relayed key's share, already in `usd`. `usdByBilling`: the known dollars by what they are (usage.mjs
- * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed. `limitPaused`: the stage ended paused on its harness's
+ * BILLING), and `billing`, the kind its harness passes share, so the daily sum and the scorecard say how they are billed.
+ * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by;
+ * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
  * the scorecard counts per account (#266).
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  const byPass = passRead(usage?.usdByPass);
+  const rerun = rerunRead(usage?.rerun);
+  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2834,7 +2839,9 @@ export function spendOf(body) {
  * The spend line's parts: `usd` (the known total the daily sum counts), for a sandbox stage `modelUsd` (the harness's)
  * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null when the vendor reported none), and
  * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none) and its known dollars by billing
- * (`usdByBilling`, usage.mjs BILLING; absent when the line names none). Null when the body has no spend line.
+ * (`usdByBilling`, usage.mjs BILLING; absent when the line names none) and by pass kind (`usdByPass`, usage.mjs passRead;
+ * absent when it names none), and what the stage ran again (`rerun`, usage.mjs rerunRead; `judgeOnly`, a review stage
+ * started only to judge answers already made). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2842,7 +2849,9 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r) };
+    const byPass = passRead(r?.usdByPass);
+    const rerun = rerunRead(r?.rerun);
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...billingParts(r), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(r?.judgeOnly === true ? { judgeOnly: true } : {}) };
   } catch {
     return null;
   }

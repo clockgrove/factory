@@ -23,6 +23,7 @@ A Blocked notice's last line records its cause as `<!-- pendulum:block {"cause":
 | Cause | External | Way on | What stopped it |
 | --- | --- | --- | --- |
 | `max-usd` | yes | resume | the stage reached `max_usd` |
+| `max-objective-usd` | yes | resume | the Objective's known spend across its stages reached `max_objective_usd` (raise or unset it before resuming) |
 | `gateway-budget` | yes | resume | the AI Gateway refused for its own budget or credits |
 | `provider-quota` | yes | resume | a provider's quota, usage limit, plan limit or billing refusal, GitHub's Git LFS storage or API rate limit, or the sandbox vendor's plan |
 | `outage` | yes | resume | a provider or GitHub outage, or this machine's own network |

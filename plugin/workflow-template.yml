@@ -63,6 +63,7 @@ env:
   PENDULUM_MAX_CONCURRENT: {{max_concurrent}}
   PENDULUM_DAILY_USD: {{daily_usd}}
   PENDULUM_MAX_USD: {{max_usd}}
+  PENDULUM_MAX_OBJECTIVE_USD: {{max_objective_usd}} # one Objective's dollars across all its stages and parts; empty: no cap
   PENDULUM_TIMEOUT_MINUTES: {{timeout_minutes}} # under 360 on hosted runners; mirrored in timeout-minutes below
   PENDULUM_AUTO_MERGE: {{auto_merge}}
   PENDULUM_PUBLISH_TRANSCRIPTS: {{publish_transcripts}} # true: on a public repository the usage artifacts carry the agent's event stream and sessions readable by anyone signed in to GitHub; false seals them (docs/PRIVACY.md)

@@ -12,6 +12,7 @@ A first setup asks only the harness and its credential, the caps and auto-merge 
 | `--subagent-model` | the harness's | `PENDULUM_SUBAGENT_MODEL` | The implementer sub-agents' model. |
 | `--reviewer-model` | `--model`'s | `PENDULUM_REVIEWER_MODEL` | The reviewer's model. |
 | `--max-usd` | `25` | `PENDULUM_MAX_USD` | The per-job dollar cap. |
+| `--max-objective-usd` | none | `PENDULUM_MAX_OBJECTIVE_USD` | The dollar cap on one Objective across all its stages and parts; unset or 0 is no cap. |
 | `--daily-usd` | `100` | `PENDULUM_DAILY_USD` | Nothing starts once today's spend passes it (UTC day). |
 | `--max-concurrent` | `3` | `PENDULUM_MAX_CONCURRENT` | Worker jobs at once. |
 | `--timeout-minutes` | `240` | `PENDULUM_TIMEOUT_MINUTES` | Each job's wall clock; under 360 on hosted runners; on Actions a variable can lower it, not raise it. |

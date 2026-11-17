@@ -21,7 +21,7 @@ import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWri
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unknownRuns, unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
-import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage, onCancel, cancelledEnd, stageProgressRun } from "./lib/session.mjs";
 import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
@@ -193,13 +193,30 @@ async function main() {
   let shellSecretValues = [];
   // The gateway relay for an opted-in AI Gateway key (lib/worker-relay.mjs), closed and booked when the stage ends.
   let relay = null;
+  // The stage's progress comment (its key names the usage record), set once the App's token is read.
+  let progress = null;
+  let reentry = null;
+  // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
+  let chosenLabels = [];
+  let access;
+  // Every secret the stage holds, masked in what it uploads.
+  const heldSecrets = () => [...Object.values(cred.env), ...Object.values(decisionCred), ...shellSecretValues, ...(access?.keeper.issued ?? []), inputs.githubToken, inputs.appPrivateKey];
+  // A cancelled job (the runner's stop signal) still leaves the stage's own usage record (session.mjs onCancel).
+  onCancel((sig) =>
+    cancelledEnd(sig, {
+      usageDir,
+      mask: [eventsFile, join(usageDir, CALL_LOG)],
+      secrets: heldSecrets(),
+      fields: () => ({ progressRun: progress?.runId ?? stageProgressRun(), ran: ranWith(inputs, chosenLabels, process.env.PENDULUM_STAGE_ACCOUNT), account: process.env.PENDULUM_STAGE_ACCOUNT ?? null, spendInProgress: spendInProgress(), harness: inputs.harness, model: inputs.model, passes, credentialBasis, billing: credentialBilling, reentry, workerKey: relay ? relay.totals() : null }),
+      sessionOf: (recs) => ({ harness: inputs.harness, sessionId: recs.map((r) => r?.sessionId).filter(Boolean).at(-1) ?? null, also: stageThreads(recs), checkout }),
+    }),
+  );
 
   // The App token: every write goes through it. The keeper re-mints it during the
   // job (an installation token lives an hour; a job may run six) and the children
   // read it from a file, so a six-hour harness session never holds a stale token.
   // The write token in memory; on Actions the agent uid, its read-only token and its own clone (session.mjs openAccess).
   const pendulumTree = checkout;
-  let access;
   try {
     access = await openAccess({ inputs, repo, args, given: pendulumTree });
   } catch (e) {
@@ -216,14 +233,11 @@ async function main() {
   const agentError = access.agentError || null;
   await primeWriters(repo, token, { maintainers: inputs.maintainers });
   const app = keeper.app;
-  const progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
+  progress = progressReporter(repo, issue, token, { stage: "work", harness: inputs.harness, model: inputs.model });
 
-  let reentry = null;
   // While the work pass runs on the local route (not a send-back's): the pause's record a usage limit leaves for the next
   // work stage to continue (lib/continue.mjs), read as the stage ends on it.
   let pauseNow = null;
-  // The harness and model labels this Objective runs on (objective-trust.mjs choiceGate), recorded with its usage.
-  let chosenLabels = [];
   // The watch on the issue for a person's stop (stop.mjs), from the moment the stage has checked the issue.
   let watch = null;
   // A send-back's rebase stage ({conflict}): its end writes the rebase line and this Objective's rebases so far (#277).

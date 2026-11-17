@@ -5,6 +5,7 @@
 import { closeSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
 import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
@@ -61,7 +62,7 @@ import {
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
-import { agentUser, atStop, exec, git } from "./proc.mjs";
+import { agentUser, atStop, exec, git, trapStops } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
@@ -91,7 +92,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -343,6 +344,38 @@ export async function saveAgentTranscript({ harness, sessionId, also = [], usage
   };
   mask(dest);
   return savedRecord({ harness, sessionId, saved, checkout });
+}
+
+/**
+ * The stage's sessions saved at once, with no await, for a stage that is exiting on a stop signal (cancelledEnd): off the
+ * agent uid saveTranscript; on it, the sessions Pendulum captured right after each finished pass (claude-runner.mjs
+ * captureSession), unpacked as saveAgentTranscript unpacks them. A pass still running has none captured. Returns what
+ * saveTranscript returns.
+ */
+export function savedSessionNow({ harness, sessionId, also = [], usageDir, checkout, secrets = [] }) {
+  if (!agentUser()) return saveTranscript({ harness, sessionId, also, usageDir, checkout, secrets });
+  if (!HELD.has(harness)) return null;
+  const held = stageSessions(sessionId, also)
+    .map((id) => ({ id, archive: capturedSession(id) }))
+    .filter((s) => s.archive?.tar?.length && s.archive.files?.length);
+  if (!held.length) return null;
+  const dest = join(usageDir, "transcript");
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  for (const s of held) {
+    execFileSync("tar", ["-xf", "-", "-C", dest, "--no-same-owner", "--no-same-permissions"], { input: s.archive.tar, stdio: ["pipe", "ignore", "ignore"], timeout: 5_000 });
+    // Links out after each archive, as saveAgentTranscript does.
+    execFileSync("find", [dest, "-type", "l", "-delete"], { stdio: "ignore", timeout: 5_000 });
+  }
+  const mask = (p) => {
+    for (const name of readdirSync(p, { withFileTypes: true })) {
+      const f = join(p, name.name);
+      if (name.isDirectory()) mask(f);
+      else if (name.isFile()) maskFile(f, secrets);
+    }
+  };
+  mask(dest);
+  return savedRecord({ harness, sessionId, saved: held.map((s) => ({ id: s.id, files: s.archive.files })), checkout });
 }
 
 /** The usage artifacts a restore on Actions downloads at most, newest first: each is a download of up to two minutes. */
@@ -2350,6 +2383,44 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
   const tidy = await Promise.race([applyStop(repo, issue, { pr, closed: cause === "closed" }, opts).then(() => "done", () => "failed"), late]);
   clearTimeout(timer);
   if (tidy === "late") log(`#${issue}: the stop's tidy (the PR to a draft, the labels) did not finish in ${Math.round(tidyMs / 1000)} s; the dispatcher finishes it`);
+}
+
+/**
+ * A work or review stage's end when its GitHub Actions job is cancelled. The runner sends the step's process SIGINT, then
+ * SIGTERM, then kills what is left, a few seconds apart; `end(sig)` (cancelledEnd) runs on the first of them, before the
+ * process exits (proc.mjs trapStops and atStop), so it is synchronous and makes no network call. Not in local mode, whose
+ * loop stops its own stages, and not in a cloud sandbox, whose stage writes the record of a child it ended (stage.mjs
+ * killedRecord). Returns what removes it.
+ */
+export function onCancel(end, env = process.env) {
+  if (backend(env).name !== "actions" || env.PENDULUM_STAGE_SANDBOX === "1") return () => {};
+  trapStops();
+  return atStop(end);
+}
+
+/**
+ * The usage record of a stage stopped by a signal (onCancel), unless the stage wrote its own already. It is the stage's
+ * own record, not a stand-in: `exit` `cancelled`, writeUsage's fields as `fields()` gives them now (harness, model,
+ * progressRun, ran and account, billing, the relay's totals), and the records a stop reads (stop.mjs stoppedRecords):
+ * each pass that ended, with the dollars it reported, and each pass still running as a run of unknown cost (usage.mjs
+ * UNKNOWN_WHY `unreported`). The files in `mask` (the stream, the call log) are masked of `secrets` first. Then, when
+ * `sessionOf(records)` names a session a finished pass left (savedSessionNow's arguments), it is saved and the record
+ * written again with it, so a stage killed during that copy still leaves its record. Returns the record, or null.
+ */
+export function cancelledEnd(sig, { usageDir, mask = [], secrets = [], fields, sessionOf = null }) {
+  if (existsSync(join(usageDir, "result.json"))) return null;
+  for (const f of mask) maskFile(f, secrets);
+  const records = stoppedRecords(stagePasses(), openPasses());
+  const usage = { ...fields(), records, exit: "cancelled", reason: `the job was cancelled (${sig})` };
+  let rec = writeUsage(usageDir, usage);
+  try {
+    const session = sessionOf ? savedSessionNow({ ...sessionOf(records), usageDir, secrets }) : null;
+    if (session) rec = writeUsage(usageDir, { ...usage, session });
+  } catch (e) {
+    log(`the cancelled stage's session was not saved: ${String(e?.message || e).slice(0, 120)}`);
+  }
+  log(`exit: cancelled (${sig}); usd ${usdText(rec)}`);
+  return rec;
 }
 
 /**

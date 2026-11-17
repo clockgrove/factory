@@ -165,7 +165,7 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
       const events = findFile(dir, "events.jsonl");
       if (rec && events) rec.sessions = sessionsOf(readFileSync(events, "utf8"));
       // The workflow run that uploaded it: an artifact from before `progressRun` is matched to its stage's progress
-      // comment by that run (bench withLines).
+      // comment by that run (cost-join.mjs withLines).
       const run = Number.isInteger(a.workflow_run) ? { workflowRun: a.workflow_run } : {};
       records.push(rec ? { ...rec, artifact: a.name, ...run } : { ...noResult(a.name), ...run });
     } finally {

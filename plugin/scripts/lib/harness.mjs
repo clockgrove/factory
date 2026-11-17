@@ -1599,6 +1599,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (quota) rec.quota = quota;
   rec.label = label;
   rec.resumed = !!resume;
+  // The reasoning effort Pendulum asked for (null: the model's own), for the stage's pass ledger (usage.mjs passLedger).
+  rec.effort = effort || null;
   rec.cacheTtl = cacheTtl;
   // How long its prompt cache stays warm past `ended` (cacheLifetimeMs): the stage's `cacheWarmUntil`.
   rec.cacheWarmMs = cacheLifetimeMs(harness, env);

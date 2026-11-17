@@ -531,7 +531,8 @@ export const FLAG_ALIASES = { dir: "checkout" };
 
 /**
  * A command line checked against its flags (`spec`: name → `bool`, which takes no value, or {value, number?}, which
- * takes one, a positive number where `number` is set), FLAG_ALIASES read as their names: {_: arguments, flag: value}.
+ * takes one, a positive number where `number` is set, every value given in a list where `many` is set), FLAG_ALIASES
+ * read as their names: {_: arguments, flag: value}.
  * Throws `fail(why)` for an unknown flag, a value given to a bool, or a missing or non-numeric value.
  */
 export function readFlags(argv, spec, fail) {
@@ -561,7 +562,8 @@ export function readFlags(argv, spec, fail) {
       const n = Number(value);
       if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${m[1]} needs a positive number, not ${JSON.stringify(value)}`);
       flags[key] = n;
-    } else flags[key] = value;
+    } else if (kind.many) (flags[key] ??= []).push(value);
+    else flags[key] = value;
   }
   return flags;
 }

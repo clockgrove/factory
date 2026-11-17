@@ -37,6 +37,7 @@ import { githubStatus } from "./lib/adapters/github-status.mjs";
 const requestKey = (o) => `${o.origin ?? o.host ?? ""} ${o.endpoint ?? ""}`;
 const pausesText = (n) => `${n} pause${n === 1 ? "" : "s"}`;
 import { PLUGIN_ROOT, installCommand } from "./lib/checkout.mjs";
+import { DEFAULT_DAYS, DEFAULT_MAX_CALLS, REPORT_SCHEMA, STOPPED_EXIT, buildReport, readReport, renderReport, reportCheck, reportScope } from "./lib/report.mjs";
 import { activeWorkIssues, addLabels, collaboratorPermission, ensureLabel, hasMergeQueue, findPr, mergeQueueEntry, mergeQueueHeads, findProject, getIssue, getPr, getPrSettled, labeledAtIn, listComments, listIssuesByLabel, markReady, moveCard, postReview, prComment, prDiff, primeSelf, primeWriters, removeLabel, repoOf, rest, setStateLabel, transientError, upsertComment, organizationVariableNames, repositoryVariables } from "./lib/github.mjs";
 import { PENDULUM_VERSION, LOCAL_BOUNDS, holdSecrets, input, localBound, localLimits, log, logTo, postedError, readFlags, redactSecrets, resolveInputs, workflowDriftLines, workflowSettings, MACHINE_SETTINGS, MODEL_SETTINGS, ignoredLines, layerLines, machineSettings, organizationVariablesLine, settingLayers } from "./lib/inputs.mjs";
 import { localSecretValues, parseSecretValues, parseWorkerSecrets } from "./lib/worker-secrets.mjs";
@@ -246,6 +247,12 @@ export const COMMANDS = {
     flags: { ...WHERE, since: { value: "CURSOR" }, on: { value: "KINDS" }, follow: "bool", interval: { value: "SECONDS", number: true }, timeout: { value: "SECONDS", number: true } },
     check: (f) => (f.since !== undefined && !parseCursor(f.since) ? `--since needs a cursor a line printed or a time with its zone, not ${JSON.stringify(f.since)}` : f.on !== undefined && !parseKinds(f.on) ? `--on takes ${WAIT_KINDS.join(", ")}, not ${JSON.stringify(f.on)}` : null),
     about: `one JSON line per event on the queue (or the issues named): ${WAIT_KINDS.join(", ")}; exits 0 after the first, ${WAIT_TIMEOUT_EXIT} at --timeout (with --follow, keeps going)`,
+  },
+  report: {
+    args: [],
+    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, app: { value: "ID", number: true } },
+    check: reportCheck,
+    about: `cost and token use of a period (--since, --until; the last ${DEFAULT_DAYS} days by default) or a set of Objectives (--issue, --label, --parent), every figure precomputed: --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },
   hold: {
     args: ["list|release"],
@@ -4347,6 +4354,29 @@ async function waitForQueue(flags) {
 }
 
 /**
+ * `pendulum report`: the cost and token report of the repository (--repo, else the clone's origin; with --repo it runs
+ * outside a clone too) for the scope its flags name (report.mjs), read with the local token, else the gh login. The
+ * planned calls go to stderr first; the report to stdout, as JSON with --json, else Markdown. Returns 0, or STOPPED_EXIT
+ * when the call budget stopped the reads (the report printed is partial).
+ */
+export async function reportCommand(flags, { out = (t) => process.stdout.write(t), err = (t) => process.stderr.write(t), token = null, download = undefined, env = process.env, now = Date.now() } = {}) {
+  const here = resolve(flags.checkout || process.cwd());
+  let checkout = null;
+  try {
+    checkout = cloneTop(here, "--repo OWNER/NAME");
+  } catch (e) {
+    if (!flags.repo) throw e;
+  }
+  const repoFull = cloneRepo(checkout ?? here, flags.repo);
+  const appId = flags.app ?? (/^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null);
+  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
+  const report = buildReport(read, { by: flags.by ? [flags.by] : [], now: new Date(now).toISOString() });
+  out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
+  if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);
+  return report.source.complete ? 0 : STOPPED_EXIT;
+}
+
+/**
  * `pendulum doctor`: doctor.mjs --local on the clone (its top directory) and its repository, --repo else the clone's
  * origin (cloneRepo); with --repo, it runs outside a clone too. Returns doctor's exit code.
  */
@@ -4478,6 +4508,10 @@ async function main() {
   }
   if (cmd === "wait") {
     process.exitCode = await waitForQueue(flags);
+    return;
+  }
+  if (cmd === "report") {
+    process.exitCode = await reportCommand(flags);
     return;
   }
   if (cmd === "hold") {

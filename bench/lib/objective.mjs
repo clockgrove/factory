@@ -21,16 +21,19 @@
 //   operator   minutes from --minutes; 0 on a clean merge; `unknown` else.
 //   ownerStep  a posted workflow hand-over a person applies after the merge:
 //              its minutes from --owner-minutes, apart from the operator's.
-//   cost       lib/cost.mjs, with unit and basis per harness.
+//   cost       lib/cost.mjs (the plugin's cost-join.mjs), with unit and basis per harness.
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
-import { costOf, stageOf } from "./cost.mjs";
-import { BLOCK_CAUSES, blockCauseOf, decisionSpendEntries, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
-import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { ACCOUNT, accountUse, costOf, decisionSpendRecords, stageHarnessOf, stageOf, stageSpendRecords, withLines } from "./cost.mjs";
+import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
+import { billingText, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
 
 export const ROW_VERSION = 1;
+
+/** The cost join's shared parts (plugin cost-join.mjs), as the scorer has always exported them. */
+export { accountUse, stageHarnessOf, withLines };
 const BRANCH = (issue) => `pendulum/${issue}`;
 export const RUNNING_LABEL = "pendulum:running";
 export const OBJECTIVE_LABEL = "pendulum:objective";
@@ -646,21 +649,6 @@ function vendorComments(collected, { app = null } = {}) {
   const mine = (c) => self && String(c.user?.login ?? "").toLowerCase() === self;
   return (collected.issueComments || []).filter((c) => new RegExp(`^<!-- pendulum:${n}:vendor:(work|review)[:\\s-]`).test(c.body || "") && mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
 }
-/** A comment's spend line as written (plugin logic.mjs spendMarker: known `usd`, its parts and `usdUnknown`), or null. */
-const spendOf = (body) => {
-  try {
-    return JSON.parse(/^<!-- pendulum:spend (\{[^\n]*\}) -->$/m.exec(body || "")?.[1] ?? "null");
-  } catch {
-    return null;
-  }
-};
-/** A spend line's runs of unknown cost and why (plugin usage.mjs UNKNOWN_WHY): {} for none or a broken count. */
-const unknownIn = (spend) => {
-  if (!Number.isInteger(spend?.usdUnknown) || spend.usdUnknown < 1) return {};
-  const why = Array.isArray(spend.usdUnknownWhy) ? [...new Set(spend.usdUnknownWhy.filter((w) => typeof w === "string" && Object.hasOwn(UNKNOWN_WHY, w)))] : [];
-  return { usdUnknown: spend.usdUnknown, usdUnknownWhy: why.length ? why : ["unreported"] };
-};
-
 /** Pendulum's own progress comments for the Objective's work and review stages, oldest first: its App's login, or in local mode the login its progress comments are posted as. */
 function pendulumStages(collected, { app = null } = {}) {
   const n = collected.issue.number;
@@ -668,33 +656,6 @@ function pendulumStages(collected, { app = null } = {}) {
   const local = localLogin(collected);
   const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
   return (collected.issueComments || []).filter((c) => new RegExp(`^<!-- pendulum:${n}:progress:(work|review)[:\\s-]`).test(c.body || "") && mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
-}
-
-const HARNESSES = new Set(["claude", "codex", "copilot"]);
-/** An account name as plugin accounts.mjs allows one. */
-const ACCOUNT = /^[a-z0-9][a-z0-9-]{0,33}$/;
-/**
- * The harness one stage ran, from its progress comment's structure: the `<!-- pendulum:harness {...} -->` line (plugin
- * logic.mjs harnessMarker, written from the stage's start), else the fixed line the worker writes as it starts the
- * harness, `harness <name>[ (<model>)] attempt N` (no model when none is set: Copilot's default). Null when neither.
- */
-export function stageHarnessOf(body) {
-  const line = /^<!-- pendulum:harness (\{[^\n]*\}) -->$/m.exec(body || "");
-  if (line) {
-    try {
-      const v = JSON.parse(line[1]);
-      // The line's `models` and `labels` (plugin logic.mjs harnessMarker): the Objective's three models and the labels that chose them.
-      const str = (x) => (typeof x === "string" && x ? x : null);
-      const ran = v?.models && typeof v.models === "object" ? { ran: { worker: str(v.models.worker), subagent: str(v.models.subagent), reviewer: str(v.models.reviewer), labels: Array.isArray(v.labels) ? v.labels.filter((l) => typeof l === "string") : [] } } : {};
-      // The local account the stage ran on (plugin accounts.mjs), by name.
-      const account = typeof v?.account === "string" && ACCOUNT.test(v.account) ? { account: v.account } : {};
-      if (HARNESSES.has(v?.harness)) return { harness: v.harness, model: str(v.model), ...ran, ...account };
-    } catch {
-      // a malformed line: read the progress line instead
-    }
-  }
-  const ran = /^- \d\d:\d\dZ harness (claude|codex|copilot)(?: \(([^)\s]+)\))? attempt \d+/m.exec(body || "");
-  return ran ? { harness: ran[1], model: ran[2] ?? null } : null;
 }
 
 /**
@@ -716,93 +677,6 @@ export function objectiveModels(usage, cost) {
  * record's `account` (a stage's result.json, or its progress comment's harness line). Empty where none names one.
  */
 export const objectiveAccounts = (usage) => [...new Set((usage || []).map((r) => r?.account).filter((a) => typeof a === "string" && ACCOUNT.test(a)))];
-
-/**
- * Each account's share of an Objective (#266), in the order first seen: `stages` (the stages that ran on it), `usd`
- * (their known dollars, null when none was reported), `unknown` (their runs of unknown cost, plugin usage.mjs
- * UNKNOWN_WHY) and `limitPauses` (the stages a usage limit paused on it: a result.json
- * that ended `paused` with its `usageLimit`, or `waiting` with it to go on on another account on GitHub Actions and the
- * cloud sandbox, #268; or a spend line's `limitPaused`). From records that name their account; empty where none does.
- */
-export function accountUse(usage) {
-  const by = new Map();
-  for (const r of usage || []) {
-    if (typeof r?.account !== "string" || !ACCOUNT.test(r.account)) continue;
-    const a = by.get(r.account) ?? { account: r.account, stages: 0, usd: null, unknown: 0, limitPauses: 0 };
-    a.stages += 1;
-    if (typeof r.usd === "number" && Number.isFinite(r.usd)) a.usd = Math.round(((a.usd ?? 0) + r.usd) * 1e4) / 1e4;
-    a.unknown += unknownRuns(r);
-    // What its dollars are (plugin usage.mjs BILLING), when the records name it.
-    const billed = addBilling(a.usdByBilling, r.usdByBilling);
-    if (Object.keys(billed).length) a.usdByBilling = billed;
-    if (r.limitPaused === true || ((r.exit === "paused" || r.exit === "waiting") && r.usageLimit && typeof r.usageLimit === "object")) a.limitPauses += 1;
-    by.set(r.account, a);
-  }
-  return [...by.values()];
-}
-
-/**
- * The usage records given and the stages' progress-line records (spendRecords) together, each stage once, whatever
- * order the records come in. A record stands for the progress comments of its own stage (work or review, stageOf) that
- * it names exactly:
- * - its `progressRun`, the comment's key (plugin session.mjs writeUsage; null: the stage had no comment);
- * - else, a cloud sandbox stage's record (its `vendor.claim`): the comment keyed `<claim>` or `<run>-<claim>`
- *   (plugin launch.mjs stageProgressKey);
- * - else, a GitHub Actions artifact (its `workflowRun`, collect.mjs): the comments keyed `<run>` or `<run>-<attempt>`
- *   (plugin session.mjs progressRunId);
- * - else, a record with no `progressRun` field at all (written before records named their comment) on an account:
- *   that account's comments.
- * A stand-in (`standIn`: Pendulum's record for a stage whose own process wrote none) gives way to the comments it stands
- * for, the first taking its sandbox cost when it has none; when another record stands for them all, its sandbox cost goes
- * to that record (when it has none) and it is dropped. A record that is no stand-in takes the sandbox cost of a comment
- * it stands for when it has none of its own. A record that names no comment counts beside the comments, but a
- * figure is never counted twice: a record with no `progressRun` field beside an unnamed comment of its stage with
- * dollars may be that stage, so its dollars are unknown there (UNKNOWN_WHY `unmatched`).
- */
-export const withLines = (records = [], lines = []) => {
-  const claimOf = (r) => (typeof r?.vendor?.claim === "string" && /^[0-9a-f]{12}$/.test(r.vendor.claim) ? r.vendor.claim : null);
-  const covers = (r) => {
-    const stage = stageOf(r);
-    const key = (l) => (stageOf(l) === stage && typeof l.progressRun === "string" ? l.progressRun : null);
-    if (typeof r.progressRun === "string") return (l) => key(l) === r.progressRun;
-    const claim = claimOf(r);
-    if (claim) return (l) => key(l) === claim || !!key(l)?.endsWith(`-${claim}`);
-    if (Number.isInteger(r.workflowRun)) return (l) => key(l) === String(r.workflowRun) || new RegExp(`^${r.workflowRun}-\\d{1,4}$`).test(key(l) ?? "");
-    if (!Object.hasOwn(r, "progressRun") && typeof r.account === "string") return (l) => key(l) !== null && l.account === r.account;
-    return () => false;
-  };
-  const all = records.filter(Boolean);
-  // Who counts each comment: a record that is no stand-in first, then the stand-ins in turn.
-  const owner = new Map();
-  const out = all.filter((r) => !r.standIn).map((r) => ({ ...r }));
-  for (const r of out) {
-    for (const l of lines.filter(covers(r))) {
-      owner.set(l, owner.get(l) ?? r);
-      // The stage's sandbox cost, booked on its comment (its vendor comment): the record takes it when it has none.
-      if (l.vendor && !r.vendor) r.vendor = l.vendor;
-    }
-  }
-  for (const r of all.filter((x) => x.standIn)) {
-    const mine = lines.filter(covers(r));
-    const free = mine.filter((l) => !owner.has(l));
-    if (free.length) {
-      free.forEach((l, i) => {
-        const line = i === 0 && r.vendor && !l.vendor ? { ...l, vendor: r.vendor } : { ...l };
-        owner.set(l, line);
-        out.push(line);
-      });
-    } else if (mine.length) {
-      const taker = owner.get(mine[0]);
-      if (r.vendor && !taker.vendor) taker.vendor = r.vendor;
-    } else out.push({ ...r });
-  }
-  const rest = lines.filter((l) => !owner.has(l));
-  // A record that cannot say which comment is its own, beside an unnamed comment of its stage with dollars: unknown there.
-  const unsure = (r) => !Object.hasOwn(r, "progressRun") && !lines.some(covers(r)) && rest.some((l) => stageOf(l) === stageOf(r) && typeof l.usd === "number" && l.usd > 0);
-  const known = (r) => r.runs !== 0 && ((typeof r.usd === "number" && r.usd > 0) || (r.harness === "codex" && (r.tokens?.input ?? null) !== null));
-  const counted = out.map((r) => (unsure(r) && known(r) ? { ...r, usd: null, tokens: { input: null, output: null, cached: null, written: null }, subAgents: undefined, workerKeyUsd: undefined, usdByBilling: undefined, usdUnknown: Math.max(1, Number.isInteger(r.usdUnknown) ? r.usdUnknown : 0), usdUnknownWhy: [...new Set([...(Array.isArray(r.usdUnknownWhy) ? r.usdUnknownWhy : []), "unmatched"])] } : r));
-  return [...counted, ...rest];
-};
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20 plus 1 run of unknown cost, 1 limit pause)". */
 const useText = (u) => `${u.account} (${u.stages} stage${u.stages === 1 ? "" : "s"}, ${spendText({ usd: u.usd, unknown: u.unknown ?? 0, byBilling: u.usdByBilling })}${u.limitPauses ? `, ${u.limitPauses} limit pause${u.limitPauses === 1 ? "" : "s"}` : ""})`;
@@ -842,51 +716,7 @@ export function objectiveHarness(collected, { app = null } = {}) {
  * harness and model are the stage's own (stageHarnessOf), carried to the review stages; dollars are the worker's own pricing.
  */
 export function spendRecords(collected, { app = null, all = false } = {}) {
-  const n = collected.issue.number;
-  const stages = pendulumStages(collected, { app });
-  const vendors = vendorComments(collected, { app });
-  const keyOf = (body, kind) => new RegExp(`^<!-- pendulum:${n}:${kind}:([A-Za-z0-9:-]{1,100}) -->`).exec(body || "")?.[1] ?? null;
-  let harness = null;
-  let model = null;
-  const out = [];
-  for (const c of [...stages, ...vendors.filter((v) => !stages.some((p) => keyOf(p.body, "progress") === keyOf(v.body, "vendor")))]) {
-    const own = (c.body || "").startsWith(`<!-- pendulum:${n}:vendor:`);
-    const booked = own ? c : vendors.find((v) => keyOf(v.body, "vendor") === keyOf(c.body, "progress"));
-    const body = own ? (c.body || "").replace(`<!-- pendulum:${n}:vendor:`, `<!-- pendulum:${n}:progress:`) : c.body || "";
-    const kind = new RegExp(`^<!-- pendulum:${n}:progress:(work|review)`).exec(body)[1];
-    // The comment's whole key (plugin session.mjs progressRunId: a re-run's `<run>-<attempt>`, a sandbox stage's
-    // `<run>-<claim>`), which the stage's usage record names as its `progressRun` (withLines).
-    const id = /^<!-- pendulum:\d+:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->/.exec(body)?.[1] ?? /^<!-- pendulum:\d+:progress:(?:work|review):([^\s>-]+)/.exec(body)?.[1] ?? c.id ?? out.length;
-    const ran = stageHarnessOf(body);
-    if (ran) [harness, model] = [ran.harness, ran.model];
-    const line = /^<!-- pendulum:spend (\{[^\n]*\}) -->$/m.exec(body);
-    let spend = null;
-    try {
-      spend = line ? JSON.parse(line[1]) : null;
-    } catch {
-      spend = null;
-    }
-    const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    const bookedSpend = booked && !own ? spendOf(booked.body) : null;
-    const total = num(spend?.usd);
-    const vendor = num(bookedSpend?.vendorUsd) ?? num(spend?.vendorUsd);
-    // The vendor comment's own figure (plugin logic.mjs vendorBody): with no figure, the vendor reported no usage.
-    const booking = own ? spend : bookedSpend;
-    // A sandbox whose usage the vendor did not report: no figure, or its spend line names the sandbox as unknown.
-    const sandboxUnknown = !!booking && Object.hasOwn(booking, "vendorUsd") && (num(booking.vendorUsd) === null || (Array.isArray(booking.usdUnknownWhy) && booking.usdUnknownWhy.includes("sandbox")));
-    const sandbox = booking && Object.hasOwn(booking, "vendorUsd") ? { usd: num(booking.vendorUsd), ...(sandboxUnknown ? { usdUnknown: 1 } : {}) } : vendor !== null ? { usd: vendor } : null;
-    // The model's runs of unknown cost: the progress line's; a vendor comment standing alone counts the sandbox's own in
-    // its line too (vendorBody), which `vendor` above carries, so that one is not counted twice.
-    const lineUnknown = unknownIn(spend);
-    const modelUnknown = own && lineUnknown.usdUnknown && sandboxUnknown ? (lineUnknown.usdUnknown > 1 ? { usdUnknown: lineUnknown.usdUnknown - 1, usdUnknownWhy: lineUnknown.usdUnknownWhy.filter((w) => w !== "sandbox") } : {}) : lineUnknown;
-    // An older stage's spend line holds model plus vendor; a vendor comment's dollars are apart from the progress line's.
-    const modelUsd = num(spend?.modelUsd) ?? (bookedSpend ? total : total !== null && vendor !== null ? Math.max(0, total - vendor) : total);
-    out.push({ source: "spend", harness, model, ...(ran?.ran ? { ran: ran.ran } : {}), ...(ran?.account ? { account: ran.account } : {}), ...(spend?.limitPaused === true ? { limitPaused: true } : {}), usd: spend ? modelUsd : null, ...(num(spend?.workerKeyUsd) !== null ? { workerKeyUsd: num(spend.workerKeyUsd) } : {}), ...(Object.keys(billingRead(spend?.usdByBilling)).length ? { usdByBilling: billingRead(spend.usdByBilling), ...(billingCode(spend.billing) ? { billing: spend.billing } : {}) } : {}), ...modelUnknown, tokens: { input: null, output: null, cached: null, written: null }, runs: 1, artifact: `spend/${kind}/${id}`, progressRun: String(id), basis: spend ? "pendulum:spend line (the worker's own pricing)" : "unknown: no pendulum:spend line in the stage's progress comment", ...(sandbox ? { vendor: sandbox } : {}) });
-  }
-  // None with a spend line (an Actions stage writes none; its artifact expired): no dollars here either.
-  if (!all && !out.some((r) => r.usd !== null || r.vendor)) return [];
-  // The first stage names the harness; a review stage before any work line takes the Objective's.
-  return out.map((r) => ({ ...r, harness: r.harness ?? harness, model: r.model ?? model }));
+  return stageSpendRecords(collected.issue.number, pendulumStages(collected, { app }), vendorComments(collected, { app }), { all });
 }
 
 /**
@@ -897,20 +727,10 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
  * anyone else's comment counts nothing.
  */
 export function decisionRecords(collected, { app = null } = {}) {
-  const n = collected.issue.number;
   const self = pendulumLogin(collected.issueTimeline, app);
   const local = localLogin(collected);
   const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
-  return (collected.issueComments || [])
-    .filter((c) => (c.body || "").startsWith(`<!-- pendulum:${n}:`) && mine(c) && decisionSpendEntries(c.body).length)
-    .sort((a, b) => ms(a.created_at) - ms(b.created_at))
-    .map((c) => {
-      const days = decisionSpendEntries(c.body);
-      const unknown = days.reduce((s, d) => s + (d.usdUnknown ?? 0), 0);
-      const usd = Math.round(days.reduce((s, d) => s + d.usd, 0) * 1e6) / 1e6;
-      // The AI Gateway's calls, billed to its key: `api` (plugin usage.mjs BILLING).
-      return { source: "decisions", harness: null, model: null, billing: "api", usdByBilling: { api: usd }, usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}), tokens: { input: null, output: null, cached: null, written: null }, basis: "pendulum:decision-spend lines of decision calls outside a stage (the AI Gateway's cost)" };
-    });
+  return decisionSpendRecords(collected.issue.number, (collected.issueComments || []).filter(mine));
 }
 
 /**

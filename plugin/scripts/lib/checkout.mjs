@@ -533,14 +533,23 @@ export function autoInstalls(checkout) {
 }
 
 /**
- * The install command: autoInstalls' commands joined with `&&`, for `auto`. It runs with the stage's scrubbed env (sh),
- * so no credential. `install: none` skips; a given command wins.
+ * What the `install` setting resolves to in `checkout`, one `source` each: `off` for `install: none` (installation
+ * turned off by choice), `given` for a command the setting names, `auto` for the lockfiles autoInstalls finds, and
+ * `unrecognised` for `auto` with no lockfile it knows. `command`: what runs (autoInstalls' commands joined with `&&`
+ * for `auto`), null for `off` and `unrecognised`; `installs`: the INSTALLS entries it runs (empty unless `auto`).
  */
-export function installCommand(checkout, setting = "auto") {
-  if (setting && setting !== "auto") return setting === "none" ? null : setting;
-  const picked = autoInstalls(checkout);
-  return picked.length ? picked.map((i) => i.command).join(" && ") : null;
+export function installChoice(checkout, setting = "auto") {
+  if (setting === "none") return { source: "off", command: null, installs: [] };
+  if (setting && setting !== "auto") return { source: "given", command: setting, installs: [] };
+  const installs = autoInstalls(checkout);
+  return installs.length ? { source: "auto", command: installs.map((i) => i.command).join(" && "), installs } : { source: "unrecognised", command: null, installs };
 }
 
+/**
+ * The install command (installChoice's `command`), or null when nothing is installed. It runs with the stage's scrubbed
+ * env (sh), so no credential. `install: none` skips; a given command wins.
+ */
+export const installCommand = (checkout, setting = "auto") => installChoice(checkout, setting).command;
+
 /** The INSTALLS entries installCommand's command runs for `setting` (autoInstalls for `auto`; none for a given command or `none`). */
-export const installTools = (checkout, setting = "auto") => (!setting || setting === "auto" ? autoInstalls(checkout) : []);
+export const installTools = (checkout, setting = "auto") => installChoice(checkout, setting).installs;

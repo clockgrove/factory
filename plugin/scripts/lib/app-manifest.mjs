@@ -87,7 +87,7 @@ export function appManifest(repoData, redirectUrl) {
   return {
     name: appName(repoData.name),
     url: repoData.html_url,
-    description: `Clockgrove Pendulum for ${repoData.full_name}: pushes, pull requests, labels and the board, for this one repository.`,
+    description: `Pendulum for ${repoData.full_name}: pushes, pull requests, labels and the board, for this one repository.`,
     hook_attributes: { url: repoData.html_url, active: false },
     redirect_url: redirectUrl,
     public: false,

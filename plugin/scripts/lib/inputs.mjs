@@ -44,6 +44,7 @@ export const DEFAULTS = {
   effort: "", // empty: MODEL_DEFAULTS for the harness (the worker's effort)
   compaction_window: "", // empty: the CLI default (Claude and Codex; Copilot has no such setting)
   resume_policy: "fresh", // fresh | fix-passes: which re-entries resume the worker's saved session
+  publish_transcripts: "false", // true: a public repository's usage artifacts carry the transcript and the event stream readable (lib/seal.mjs); else sealed
   prompt_cache_ttl: "off", // off | auto | 1h | 5m: Claude's main-conversation cache TTL (harness.mjs promptCacheTtl)
   subagent_model: "",
   reviewer_model: "",
@@ -209,7 +210,7 @@ export function workflowSettings(wf = {}) {
 }
 /**
  * Settings that steer trust or money's route, whom Pendulum answers and what gates a merge, what a stage may reach or
- * receive, or how it is set up and installed (the binaries it runs and the Node.js it runs on included), and the ids of the App, the sandbox vendor
+ * receive or what it publishes, or how it is set up and installed (the binaries it runs and the Node.js it runs on included), and the ids of the App, the sandbox vendor
  * and the federation endpoint the credentials go with, the gateway relay's spend cap on calls it cannot price, and the
  * dispatcher's own per-run `image_owed`: only the reviewed
  * workflow file sets them, never a repository variable (#284), since anyone with write access can set one. One set as a
@@ -220,7 +221,7 @@ export const WORKFLOW_ONLY_SETTINGS = new Set(
     ...["CREDENTIAL", "AUTO_MERGE", "NOTIFY", "MAINTAINERS", "PROTECTED_PATHS", "ALLOWED_DOMAINS", "LOCAL_DOMAINS", "WORKER_SECRETS", "LOCAL_ENV", "SANDBOX", "HARNESS_VERSION", "SETUP", "INSTALL", "BUDGET_COMMAND", "LOCAL_SETUP", "LOCAL_DB"],
     ...["THIRD_PARTY_REVIEWERS", "THIRD_PARTY_WAIT_MINUTES", "CI_CHECKS", "PG_BIN", "NODE_VERSION", "PROJECT"],
     ...["APP_ID", "ANTHROPIC_OIDC_EXCHANGE_URL", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "IMAGE_OWED"],
-    ...["RELAY_UNKNOWN_SHUT", "RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD"],
+    ...["RELAY_UNKNOWN_SHUT", "RELAY_UNKNOWN_FLOOR_USD", "RELAY_SLOW_FLOOR_USD", "PUBLISH_TRANSCRIPTS"],
   ].map((n) => `PENDULUM_${n}`),
 );
 /** The settings a repository variable of the same name sets over the workflow's env block (#284): caps, money, the harness, models, effort, validation, sweep, scheduling. */
@@ -523,12 +524,12 @@ export const GITHUB_TOKEN_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOK
 /** A name that carries one of Pendulum's own service keys: the bare name, or the input under PENDULUM_ or PENDULUM_INPUT_. */
 /**
  * Pendulum's own control variables (#119): a stage's identity and launcher plumbing (launch.mjs, stage.mjs), the bot it
- * acts as, its progress comment's key, its read token, local mode's host-only settings, the tests' fake GitHub for setup's
- * app step (app-manifest.mjs TEST_WEB_ENV). Each is read by the process it was
+ * acts as, its progress comment's key, its read token, the key of the usage artifacts' seal (seal.mjs), local mode's
+ * host-only settings, the tests' fake GitHub for setup's app step (app-manifest.mjs TEST_WEB_ENV). Each is read by the process it was
  * given to (from process.env), never by a child, so scrubbedEnv (harness.mjs) removes them from every child, and a local
  * stage's base env never takes one from PENDULUM_LOCAL_ENV (lib/local.mjs localBaseEnv).
  */
-export const PENDULUM_CONTROL_KEYS = ["PENDULUM_STAGE", "PENDULUM_STAGE_ISSUE", "PENDULUM_STAGE_CLAIM", "PENDULUM_STAGE_PR", "PENDULUM_STAGE_RECORD", "PENDULUM_STAGE_COMMAND_MS", "PENDULUM_STAGE_SESSION_END", "PENDULUM_STAGE_SESSION_CAP", "PENDULUM_STAGE_HARNESS", "PENDULUM_STAGE_HOSTS", "PENDULUM_STAGE_ACCOUNT", "PENDULUM_STAGE_AUTO_ACCOUNT", "PENDULUM_ACCOUNTS", "PENDULUM_RENDERED_ACCOUNTS", "PENDULUM_AUTO_ACCOUNT", "PENDULUM_APP_SLUG", "PENDULUM_PROGRESS_RUN", "PENDULUM_READ_TOKEN", "PENDULUM_IMAGE_CHECKOUT", "PENDULUM_IMAGE_ENV_FILE", "PENDULUM_ADAPTER_INSTALL", "PENDULUM_SANDBOX_VCPUS", "PENDULUM_LOCAL_FIRST_SETUP_MS", "PENDULUM_LOCAL_APP_ID", "PENDULUM_LOCAL_APP_KEY", "PENDULUM_NOTICE_APP_ID", "PENDULUM_LOCAL_AUTO_ACCOUNT", "PENDULUM_GATEWAY_URL", "PENDULUM_STATE_DIR", "PENDULUM_RELAY_SOCKET_DIR", "PENDULUM_SERVE_SWITCHED_AT", "PENDULUM_SERVE_SWITCHED_FROM", "PENDULUM_TEST_GITHUB_WEB"];
+export const PENDULUM_CONTROL_KEYS = ["PENDULUM_STAGE", "PENDULUM_STAGE_ISSUE", "PENDULUM_STAGE_CLAIM", "PENDULUM_STAGE_PR", "PENDULUM_STAGE_RECORD", "PENDULUM_STAGE_COMMAND_MS", "PENDULUM_STAGE_SESSION_END", "PENDULUM_STAGE_SESSION_CAP", "PENDULUM_STAGE_HARNESS", "PENDULUM_STAGE_HOSTS", "PENDULUM_STAGE_ACCOUNT", "PENDULUM_STAGE_AUTO_ACCOUNT", "PENDULUM_ACCOUNTS", "PENDULUM_RENDERED_ACCOUNTS", "PENDULUM_AUTO_ACCOUNT", "PENDULUM_APP_SLUG", "PENDULUM_PROGRESS_RUN", "PENDULUM_READ_TOKEN", "PENDULUM_IMAGE_CHECKOUT", "PENDULUM_IMAGE_ENV_FILE", "PENDULUM_ADAPTER_INSTALL", "PENDULUM_SANDBOX_VCPUS", "PENDULUM_LOCAL_FIRST_SETUP_MS", "PENDULUM_LOCAL_APP_ID", "PENDULUM_LOCAL_APP_KEY", "PENDULUM_NOTICE_APP_ID", "PENDULUM_LOCAL_AUTO_ACCOUNT", "PENDULUM_GATEWAY_URL", "PENDULUM_STATE_DIR", "PENDULUM_RELAY_SOCKET_DIR", "PENDULUM_SERVE_SWITCHED_AT", "PENDULUM_SERVE_SWITCHED_FROM", "PENDULUM_TEST_GITHUB_WEB", "PENDULUM_SEAL_KEY"];
 
 export const isPendulumSecret = (k) => PENDULUM_SECRET_KEYS.some((n) => k === n || k === `PENDULUM_${n}` || k === `PENDULUM_INPUT_${n}`);
 
@@ -637,6 +638,8 @@ export function resolveInputs({ args = {}, env = process.env } = {}) {
     effort: own("effort") || md.effort || "",
     compactionWindow: get("compaction_window").trim(),
     resumePolicy: (get("resume_policy") || "fresh").trim().toLowerCase() === "fix-passes" ? "fix-passes" : "fresh",
+    // Whether a public repository's usage artifacts carry the transcript and the event stream readable: `true` only.
+    publishTranscripts: get("publish_transcripts").trim().toLowerCase() === "true",
     promptCacheTtl: promptCacheSetting(get("prompt_cache_ttl")),
     subagentModel: own("subagent_model") || md.subagent_model || "",
     reviewerModel: own("reviewer_model") || md.reviewer_model || own("model") || md.model || "",

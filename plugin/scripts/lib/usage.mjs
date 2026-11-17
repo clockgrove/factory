@@ -132,6 +132,23 @@ export function jsonLines(text) {
 }
 
 /**
+ * Harness calls and distinct sessions in a raw event stream: Claude's `system/init` lines and `session_id`, Codex's
+ * `thread.started` and thread ids. Null when the text has neither. The scorer reads it from a stream, and a usage record
+ * whose stream was sealed carries it as `sessions` (seal.mjs).
+ */
+export function streamSessions(text) {
+  let calls = 0;
+  const ids = new Set();
+  for (const l of jsonLines(String(text ?? "").trim())) {
+    if (l.type === "system" && l.subtype === "init") calls += 1;
+    if (l.type === "thread.started") calls += 1;
+    if (typeof l.session_id === "string") ids.add(l.session_id);
+    if (typeof l.thread_id === "string") ids.add(l.thread_id);
+  }
+  return calls || ids.size ? { calls, sessions: ids.size } : null;
+}
+
+/**
  * Error types and codes that no retry can pass, whatever the status: an exhausted quota or billing (OpenAI's
  * `insufficient_quota` comes as a 429, so the status alone reads it as a rate limit), a rejected key, and the Vercel AI
  * Gateway's budget (`quota_for_entity_exceeded`, HTTP 402), credits (`insufficient_funds`, 402) and payment-method

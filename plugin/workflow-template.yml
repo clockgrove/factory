@@ -65,6 +65,7 @@ env:
   PENDULUM_MAX_USD: {{max_usd}}
   PENDULUM_TIMEOUT_MINUTES: {{timeout_minutes}} # under 360 on hosted runners; mirrored in timeout-minutes below
   PENDULUM_AUTO_MERGE: {{auto_merge}}
+  PENDULUM_PUBLISH_TRANSCRIPTS: {{publish_transcripts}} # true: on a public repository the usage artifacts carry the agent's event stream and sessions readable by anyone signed in to GitHub; false seals them (docs/PRIVACY.md)
   PENDULUM_NOTIFY: {{notify}} # login#id: the id pins the account (setup writes it)
   PENDULUM_SETUP: {{setup}}
   PENDULUM_INSTALL: {{install}} # auto (from the lockfile), none, or your own command

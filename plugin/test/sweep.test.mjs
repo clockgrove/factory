@@ -100,7 +100,7 @@ test("workflow template: the sweep job, on events, its own wakes, by hand and th
 // The sweep against an in-memory GitHub (fixtures/github-records.mjs, behind fetch) and a fake vendor: one Objective, #7.
 // `hooks(store)` returns adapter calls to replace: store.record() reads the claim comment now, store.write(rec) replaces it.
 // `card`: the Objective's card on a Pendulum board (its Status), or none (no board).
-async function sweepOne({ issue, record, sandbox, card = null, hooks = () => ({}) }) {
+async function sweepOne({ issue, record, sandbox, card = null, hooks = () => ({}), seal = undefined }) {
   const { githubStore, BOT, REPO } = await import("./fixtures/github-records.mjs");
   const { recordBody } = await import("../scripts/launch.mjs");
   const { sweep } = await import("../scripts/sweep.mjs");
@@ -142,7 +142,7 @@ async function sweepOne({ issue, record, sandbox, card = null, hooks = () => ({}
   };
   setSelf(BOT.login);
   try {
-    const r = await sweep({ adapter, repo: REPO, repoId: "1", opts: {}, idleDays: 7, maxDestroys: 5, staleMs: 60 * 60_000, collectRoot: process.env.TMPDIR, harness: "claude", images: false });
+    const r = await sweep({ adapter, repo: REPO, repoId: "1", opts: {}, idleDays: 7, maxDestroys: 5, staleMs: 60 * 60_000, collectRoot: process.env.TMPDIR, harness: "claude", images: false, seal });
     const vendor = [...s.comments.values()].find((c) => c.body.startsWith(`<!-- pendulum:${N}:vendor:work:`));
     return { r, calls, rec: sandboxRecordOf(s.bodyOf(N, marker(N, "sandbox"))), vendor };
   } finally {
@@ -183,6 +183,36 @@ test("sweep: a Block for a vanished stage stops its running sandbox, books its c
   assert.deepEqual(closed.calls, ["destroy pendulum-aaa"]);
   assert.deepEqual(closed.rec.launches.map((l) => [l.ok, l.code]), [[false, "timeout"]], "every launch attempt ends as a stored entry");
   assert.deepEqual([closed.rec.state, closed.rec.id, closed.rec.stage, closed.rec.claim], ["stopped", null, "work", "aaaaaaaaaaaa"]);
+});
+
+test("sweep: a sandbox stage's uncollected usage goes up with its stream and sessions sealed on a public repository, readable on a private one (#490)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { generateKeyPairSync } = await import("node:crypto");
+  const { mkdirSync, mkdtempSync, readdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { SEALED_FILE, openSealed, sealKey, usageSeal } = await import("../scripts/lib/seal.mjs");
+  const ago = (m) => new Date(Date.now() - m * 60_000).toISOString();
+  // The stage's usage directory as stage.mjs packs it in the sandbox (`<home>/pendulum/out/usage-<claim>.tgz`).
+  const stage = mkdtempSync(join(tmpdir(), "stage-usage-"));
+  mkdirSync(join(stage, "transcript", "proj"), { recursive: true });
+  writeFileSync(join(stage, "transcript", "proj", "s1.jsonl"), "the agent read: internal-design-notes\n");
+  writeFileSync(join(stage, "events.jsonl"), '{"type":"system","subtype":"init","session_id":"s1"}\n{"type":"user","message":"the agent read: internal-design-notes"}\n');
+  writeFileSync(join(stage, "result.json"), JSON.stringify({ harness: "claude", usd: 0.5, session: { harness: "claude", id: "s1", files: ["proj/s1.jsonl"], checkout: "/c" } }));
+  const tgz = execFileSync("tar", ["czf", "-", "-C", stage, "."]);
+  const blocked = { state: "open", labels: [{ name: "pendulum:objective" }, { name: "pendulum:blocked" }] };
+  const started = { vendor: "vercel", stage: "work", event: "issues", run: "1", home: "/vercel", id: "pendulum-aaa", state: "running", at: ago(60), leaseUntil: ago(50), claim: "cd737cfa9cec", launches: [{ stage: "work", event: "issues", ok: true, run: "1", cue: "stint-1", at: ago(60) }], meter: { base: null, created: true, ceilingUsd: 0.603515, stored: { ms: 0, bytes: null }, vcpus: 2 }, sessionEnd: ago(-45) };
+  const pem = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" });
+  const key = sealKey(pem, "acme/app");
+  const run = (payload) => sweepOne({ issue: blocked, record: started, hooks: () => ({ readFile: async (id, path) => (path === "/vercel/pendulum/out/usage-cd737cfa9cec.tgz" ? tgz : null) }), seal: usageSeal({ key, publish: "", payload }) });
+
+  const pub = await run({ repository: { private: false } });
+  const [u] = pub.r.usage;
+  assert.deepEqual(readdirSync(u.dir).sort(), ["result.json", SEALED_FILE], "no events.jsonl, no transcript/");
+  assert.deepEqual(JSON.parse(readFileSync(join(u.dir, "result.json"), "utf8")).sessions, { calls: 1, sessions: 1 });
+  assert.deepEqual(await openSealed(u.dir, key), { ok: true }, "the work job's key opens it for a resume");
+  assert.match(readFileSync(join(u.dir, "transcript", "proj", "s1.jsonl"), "utf8"), /internal-design-notes/);
+  const priv = await run({ repository: { private: true } });
+  assert.deepEqual(readdirSync(priv.r.usage[0].dir).sort(), ["events.jsonl", "result.json", "transcript"]);
 });
 
 test("sweep: a Question whose card sits in In review is stopped and booked like a Block, then destroyed after its idle days (#57)", async () => {

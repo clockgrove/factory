@@ -25,6 +25,7 @@ import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
 import { appToken, armSweepWake, firedByWake } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
+import { eventPayload, sealCollected, sealKey, usageSeal } from "./lib/seal.mjs";
 import { CLAIM_LEASE_MS, bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
 import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
 import { lockBase } from "./lib/lock.mjs";
@@ -45,7 +46,7 @@ export const objectiveSandboxes = (listed, repoId) =>
 export const usageTarball = (record) => `${record.home}/pendulum/out/usage-${record.claim}.tgz`;
 
 /** The record's uncollected usage, out of the sandbox and unpacked into `dir`; false when the stage left none. */
-async function collect(adapter, id, record, dir) {
+async function collect(adapter, id, record, dir, seal) {
   const tgz = await adapter.readFile(id, usageTarball(record));
   if (!tgz) return false;
   rmSync(dir, { recursive: true, force: true });
@@ -57,6 +58,8 @@ async function collect(adapter, id, record, dir) {
   } finally {
     rmSync(file, { force: true });
   }
+  // The transcript and the event stream sealed as a work or review job's artifact (lib/seal.mjs).
+  await sealCollected(dir, seal, `sandbox ${id}`);
   return true;
 }
 
@@ -108,7 +111,7 @@ export function ownStage(record) {
  * filled in order (0 in a launcher, which has no upload steps to spare: a sandbox whose usage or vendor cost is still
  * to come out waits for the sweep job).
  */
-export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys, staleMs, collectRoot, now = Date.now(), dryRun = false, harness = null, collectSlots = COLLECT_SLOTS, images = true }) {
+export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys, staleMs, collectRoot, now = Date.now(), dryRun = false, harness = null, collectSlots = COLLECT_SLOTS, images = true, seal = null }) {
   const mine = objectiveSandboxes(await adapter.list({ tag: ["pendulum-repo", String(repoId)] }), repoId);
   const project = await findProject(repo, opts).catch(() => null);
   const numbers = [...new Set(mine.map((s) => Number(s.tags["pendulum-issue"])))];
@@ -191,7 +194,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       try {
         if (d.collect) {
           const dir = join(collectRoot, `slot-${slots.length + 1}`);
-          if (await collect(adapter, s.id, { ...record, ...own }, dir)) {
+          if (await collect(adapter, s.id, { ...record, ...own }, dir, seal)) {
             usage = { dir, name: own.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
             slots.push(usage);
           }
@@ -283,6 +286,8 @@ async function main() {
   if (!inputs.sandbox) throw new Error("mode sweep needs the sandbox input (for example `vercel`)");
   const repo = repoOf(inputs.repo);
   const token = await appToken(inputs);
+  // The collected usage's seal (lib/seal.mjs): its key, derived before the App's key goes, and the repository's policy.
+  const seal = usageSeal({ key: sealKey(inputs.appPrivateKey, repo.full), publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token }) });
   inputs.appPrivateKey = "";
   const opts = { token };
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });
@@ -292,7 +297,7 @@ async function main() {
   const storage = () => storageReport(adapter, repoId).catch((e) => (log(`sweep: storage not read (${e.code ?? "error"})`), null));
   const before = await storage();
   if (before) log(`sweep: storage before: ${storageLine(before)}`);
-  const { results, usage, images, imagesUntil, imagesFailed } = await sweep({ adapter, repo, repoId, opts, idleDays: inputs.sandboxIdleDays, maxDestroys: inputs.sweepMaxDestroys, staleMs: inputs.timeoutMinutes * 60_000, collectRoot, dryRun: args.dry_run === "true", harness: inputs.harness });
+  const { results, usage, images, imagesUntil, imagesFailed } = await sweep({ adapter, repo, repoId, opts, idleDays: inputs.sandboxIdleDays, maxDestroys: inputs.sweepMaxDestroys, staleMs: inputs.timeoutMinutes * 60_000, collectRoot, dryRun: args.dry_run === "true", harness: inputs.harness, seal });
   for (const r of results) log(`sweep: #${r.issue} ${r.id}: ${r.action} (${r.reason})${r.usage ? `; usage collected as ${r.usage}` : ""}`);
   for (const i of images) log(`sweep: image ${i.source} (${i.snapshot}): ${i.action} (${i.reason})`);
   const after = await storage();

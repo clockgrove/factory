@@ -370,6 +370,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     max_usd: String(inputs.maxUsd),
     timeout_minutes: String(inputs.timeoutMinutes),
     auto_merge: String(inputs.autoMerge),
+    publish_transcripts: String(inputs.publishTranscripts),
     credential: inputs.credential,
     notify,
     // A self-hosted label list (ciRunner and runsOnLabel give it as JSON) is a YAML flow sequence as it is; any other

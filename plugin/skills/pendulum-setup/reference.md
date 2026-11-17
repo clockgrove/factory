@@ -29,6 +29,10 @@ When the user picks Claude and has no Anthropic API key, offer `--credential pla
 2. The user saves it with `gh secret set CLAUDE_CODE_OAUTH_TOKEN`, pasting at the prompt, which does not echo it (not `--body`, which leaves it in shell history).
 3. Render the workflow with `--credential plan`; only the workflow file sets it. An `ANTHROPIC_API_KEY` secret beside it goes unused.
 
+## Transcripts in the usage artifacts
+
+Each stage uploads a usage artifact, which anyone signed in to GitHub can download from a public repository. Say what `--publish-transcripts` decides: `false` (the default) seals the agent's event stream and saved sessions in it, so only the workflow's jobs open them (to resume a session) and a download shows the usage record alone; `true` uploads them readable: the files the agent read, the commands it ran and their output. A private repository's artifacts carry them readable either way. Only the workflow file sets it; doctor warns while it is on for a public repository.
+
 ## Skills in the repository
 
 Offer to commit the skills Pendulum's workers load and the agent definitions, which only vendors' cloud sessions need: copy the five worker and reviewer skill directories, whole, from `<plugin root>/skills/` (`pendulum-objective-plan`, `pendulum-implement-split`, `pendulum-prove-acceptance`, `pendulum-deliver-pr` and `pendulum-review-pr`; no other skill runs in a worker) to `.agents/skills/` and `.claude/skills/`, and `<plugin root>/agents/<harness>/*` to `.claude/agents/`, `.codex/agents/` or `.github/agents/`, then commit. Say plainly: committed copies override the plugin's and never update; copy again on every upgrade.

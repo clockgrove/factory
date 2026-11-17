@@ -102,6 +102,7 @@ import {
   mirrorOwnStat,
   redLines,
 } from "./lib/session.mjs";
+import { stageSealKey } from "./lib/seal.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
@@ -685,6 +686,9 @@ async function main() {
   const repo = repoOf(inputs.repo);
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const deadlineAt = deadline(startedAt, inputs.timeoutMinutes);
+  // The key that opens an earlier stage's sealed session (lib/seal.mjs): the one a sandbox stage's launcher handed over,
+  // else derived from the App's private key.
+  const sealKey = stageSealKey({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full });
   // This machine's network (lib/network.mjs), as for the worker: a wait in place, PENDULUM_LOCAL_WAIT_MINUTES on the local route
   // (then paused, for serve to resume) and up to the work's deadline elsewhere; GitHub's spent rate limit too, to its reset.
   const local = backend().name === "local";
@@ -1239,7 +1243,7 @@ async function main() {
   // passes; the reviewer always runs in its own fresh session.
   let restored = null;
   if (inputs.resumePolicy === "fix-passes") {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, sealKey });
     if (restored.id) session.id = restored.id;
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.

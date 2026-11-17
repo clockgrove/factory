@@ -92,7 +92,7 @@ import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, fa
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, ledgerCut, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, findingsMarker, mergeFindings, isSelf, ledgerCut, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -943,10 +943,11 @@ export const progressRunId = (env = process.env) =>
 export const stageProgressRun = (env = process.env) => (/^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") || env.GITHUB_RUN_ID ? progressRunId(env) : null);
 /**
  * The progress comment's structured tail: the stage's harness, then its spend with its per-pass ledger line (`ledger`,
- * logic.mjs ledgerMarker: written only beside a spend line), rebase, decisions read, triage and plan-time asks.
+ * logic.mjs ledgerMarker: written only beside a spend line), rebase, decisions read, triage, plan-time asks and, on a
+ * review stage, its findings record (logic.mjs findingsMarker, #546).
  */
-export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, ledger = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}${ledger ? `\n${ledger}` : ""}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, ledger = null, rebase = null, read = null, triage = null, asked = null, findings = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}${ledger ? `\n${ledger}` : ""}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}${findings ? `\n${findingsMarker(findings)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`pendulum:host:\` labels).` : "");
 /**
@@ -1005,6 +1006,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let triage = null;
   let asked = null;
   let rebase = null;
+  // A review stage's findings record (#546): the reviews it posted and how each finding it handled ended.
+  let findings = null;
   // The decision calls' spend this comment carries (progress.decisionSpend): text at its end, "" for none.
   let carried = "";
   // What the stage's dollars are (usage.mjs BILLING), from its credential once read (progress.billing).
@@ -1035,7 +1038,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    const withLedger = (l) => `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked })}${carried}`;
+    const withLedger = (l) => `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${progressTail({ harness, model, ran, ...interim, ledger: l, rebase, read, triage, asked, findings })}${carried}`;
     const own = spend === null ? null : ledger;
     const body = withLedger(own);
     // A body the ledger line would take past PROGRESS_LEDGER_ROOM gets its cut form (logic.mjs ledgerCut): GitHub refuses
@@ -1202,6 +1205,16 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   /** The heads and failure signatures this run's triage reran (triage.mjs), for later jobs; written with the next line. */
   progress.triage = (rec) => {
     triage = mergeTriage(triage, rec);
+  };
+  /**
+   * A review stage's findings record (#546; logic.mjs mergeFindings `update`): the reviews its reviewer posted, the
+   * findings it listed and each outcome the finding check found. Written with the next write, or now with `write`.
+   */
+  progress.findings = async (update, { write: now = false } = {}) => {
+    findings = mergeFindings(findings, update);
+    if (!now) return true;
+    await writing;
+    return write();
   };
   /** A link shown in the header (the PR, once it exists). */
   progress.link = (label, url) => {

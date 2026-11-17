@@ -22,6 +22,7 @@ import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolv
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, decideExit, decisionsRead, marker, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
+import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -159,6 +160,9 @@ async function main() {
   if (!inputs.issue) throw new Error("--issue N is required");
   const repo = repoOf(inputs.repo);
   const issue = inputs.issue;
+  // The key that opens an earlier stage's sealed session (lib/seal.mjs): the one a sandbox stage's launcher handed over,
+  // else derived from the App's private key.
+  const sealKey = stageSealKey({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full });
   let checkout = resolve(args.checkout || process.env.GITHUB_WORKSPACE || process.cwd());
   const usageDir = resolve(args.usage_dir || process.env.PENDULUM_USAGE_DIR || join(checkout, "..", `pendulum-usage-${issue}`));
   mkdirSync(usageDir, { recursive: true });
@@ -767,7 +771,7 @@ async function main() {
   let restored = null;
   // A continued pause resumes its own session when it carries over (enterStage restored it), whatever the policy.
   if (continued) restored = continued.session ?? { id: null, from: continued.from, reason: continued.carry };
-  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness });
+  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, seal: usageSeal({ key: sealKey, publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token: inputs.githubToken || token.token, noRateWait: true }) }) });
   if (restored?.id) session.id = restored.id;
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json: a continued pause
   // (`continued`), or a pause not continued, naming the guards that changed (`changed`).

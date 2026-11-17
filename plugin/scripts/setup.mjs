@@ -345,8 +345,36 @@ export function workflowSettings(text) {
     runsOn: Array.isArray(runsOn) ? JSON.stringify(runsOn.map(String)) : runsOn == null ? null : String(runsOn),
     action: typeof step?.uses === "string" ? step.uses : null,
     ciWorkflow: Array.isArray(ci) && ci.length ? String(ci[0]) : null,
+    actions: thirdPartyActions(doc, text),
   };
 }
+
+/** Every `uses:` value in a parsed workflow, wherever it sits (a step's, a reusable workflow job's). */
+export const usesOf = (node) => (Array.isArray(node) ? node.flatMap(usesOf) : node && typeof node === "object" ? Object.entries(node).flatMap(([k, v]) => (k === "uses" && typeof v === "string" ? [v.trim()] : usesOf(v))) : []);
+
+/**
+ * The actions a workflow calls besides Pendulum and its own local ones, `{"owner/repo": [ref, ...]}` with each ref's
+ * version comment where its line has one (`3d3c42e5… # v7.0.1` gives `3d3c42e5…`, version `v7.0.1`): what a
+ * re-render resets to the release's pins, which an adopter's Dependabot may have moved.
+ */
+export function thirdPartyActions(doc, text = "") {
+  const versions = {};
+  for (const line of String(text).split("\n")) {
+    const m = /^\s*(?:-\s+)?uses:\s*(\S+)\s+#\s*(v\d[\w.-]*)\s*$/.exec(line);
+    if (m) versions[m[1]] = m[2];
+  }
+  const out = {};
+  for (const uses of usesOf(doc)) {
+    const at = uses.lastIndexOf("@");
+    if (uses.startsWith("./") || uses.startsWith("docker://") || at < 0 || uses.startsWith("clockgrove/pendulum@")) continue;
+    const name = uses.slice(0, at);
+    const ref = { ref: uses.slice(at + 1), version: versions[uses] ?? null };
+    out[name] = [...(out[name] || []), ref].filter((r, i, all) => all.findIndex((o) => o.ref === r.ref) === i).sort((a, b) => a.ref.localeCompare(b.ref));
+  }
+  return out;
+}
+
+const refText = ({ ref, version }) => `${/^[0-9a-f]{40}$/.test(ref) ? ref.slice(0, 12) : ref}${version ? ` (${version})` : ""}`;
 
 /**
  * Each top-level env key's line as the file writes it and the comment lines directly above it (no blank line between),
@@ -452,6 +480,7 @@ export function workflowText({ template, inputs, args, explicit = args, before =
     max_usd: String(inputs.maxUsd),
     timeout_minutes: String(inputs.timeoutMinutes),
     auto_merge: String(inputs.autoMerge),
+    publish_transcripts: String(inputs.publishTranscripts),
     credential: inputs.credential,
     notify,
     // A self-hosted label list (ciRunner and runsOnLabel give it as JSON) is a YAML flow sequence as it is; any other
@@ -587,6 +616,14 @@ export function settingsReport(before, after, explicit = {}) {
       if (a) kept.push(name);
     } else changed.push(`${name} ${JSON.stringify(a ?? "")} -> ${JSON.stringify(b ?? "")}${reason}`);
   }
+  // The other actions' pins are the release's: a re-render undoes a pin the repository's Dependabot moved.
+  const [was, now] = [before.actions || {}, after.actions || {}];
+  const moves = [...new Set([...Object.keys(was), ...Object.keys(now)])].sort().flatMap((name) => {
+    const [a, b] = [(was[name] || []).map(refText).join(", "), (now[name] || []).map(refText).join(", ")];
+    return a === b ? [] : [`${name} ${a || "(none)"} -> ${b || "(none)"}`];
+  });
+  if (moves.length) changed.push(`third-party actions ${moves.join(", ")} (the release's pins: the template is that release's)`);
+  else if (Object.keys(now).length) kept.push("third-party actions");
   return [
     kept.length && `kept ${kept.join(", ")}`,
     changed.length && `changed ${changed.join("; ")}`,

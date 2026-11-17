@@ -1,6 +1,6 @@
 {
   "name": "clockgrove",
-  "description": "Clockgrove plugins for Claude Code.",
+  "description": "Clockgrove plugins for Claude Code, Codex and Copilot CLI.",
   "owner": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
@@ -14,8 +14,21 @@
         "path": "plugin",
         "ref": "main"
       },
-      "description": "File a GitHub Objective, walk away, come back to merged work.",
-      "category": "development"
+      "description": "Label a GitHub issue and walk away: a coding agent (Claude Code, Codex or Copilot CLI) plans, builds and opens the pull request, a second agent reviews it, and your CI and merge queue land it.",
+      "category": "development",
+      "homepage": "https://github.com/clockgrove/pendulum#readme",
+      "keywords": [
+        "claude-code",
+        "codex",
+        "copilot",
+        "github",
+        "github-actions",
+        "issue-to-pr",
+        "coding-agent",
+        "autonomous",
+        "code-review",
+        "merge-queue"
+      ]
     }
   ]
 }

@@ -1,20 +1,30 @@
 {
   "name": "pendulum",
+  "displayName": "Clockgrove Pendulum",
   "version": "0.10.0",
-  "description": "File a GitHub Objective, walk away, come back to merged work: the Pendulum worker, reviewer and scorecard as skills.",
+  "description": "Label a GitHub issue and walk away: a coding agent (Claude Code, Codex or Copilot CLI) plans, builds and opens the pull request, a second agent reviews it, and your CI and merge queue land it.",
   "author": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
   },
   "homepage": "https://github.com/clockgrove/pendulum#readme",
+  "documentationUrl": "https://github.com/clockgrove/pendulum/blob/main/docs/INSTALL.md",
+  "supportUrl": "https://github.com/clockgrove/pendulum/issues",
   "repository": "https://github.com/clockgrove/pendulum",
   "license": "MIT",
   "keywords": [
-    "development",
+    "claude-code",
+    "codex",
+    "copilot",
     "github",
-    "objectives",
+    "github-actions",
+    "issue-to-pr",
+    "coding-agent",
+    "autonomous",
+    "code-review",
     "merge-queue"
   ],
+  "icon": "./assets/icon.png",
   "skills": "./skills/",
   "agents": [
     "./agents/claude/implementer.md",

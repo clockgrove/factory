@@ -36,7 +36,7 @@
       "words": 698,
       "files": {
         "reference.md": {
-          "sha256": "1d2aa1ae2b40195a8e57ea5d7ec79a9c668705793c92700c2070cce90ba40259",
+          "sha256": "4f0adfbe19be105700716d3f1d2c60208426020df74691614cdcb33d34d18474",
           "lines": 65,
           "words": 1281
         }
@@ -65,7 +65,7 @@
       "words": 679,
       "files": {
         "reference.md": {
-          "sha256": "0930e78a16fbe3ee8fed8f13a879eda92cdafff0fd2dd0b195355967fcc480ac",
+          "sha256": "cc77c653723d667bd9424b1d846beeb5cfa16f4e8ff962768fe99a3cd708646f",
           "lines": 18,
           "words": 383
         }
@@ -171,12 +171,12 @@
       "words": 688,
       "files": {
         "local.md": {
-          "sha256": "63a6a2f3b22066422d3046cb76b1baff6801703f5310f0d5df2e252ecc510844",
+          "sha256": "6e6894c7e6dcc4791dc696944f9093742e795d0987a99222b6bd730d25441c10",
           "lines": 36,
           "words": 669
         },
         "reference.md": {
-          "sha256": "1d634b66442069097fcadebf9f73b773293a420859667ed20751586c12cdf43b",
+          "sha256": "ea7dfb3464e4992cba60a91b7cf75213379362276e88b60de2cae61175262619",
           "lines": 48,
           "words": 924
         }

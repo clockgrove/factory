@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <title>Clockgrove Pendulum: label a GitHub issue, walk away, come back to a merged pull request</title>
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#173f31"/>
+      <stop offset="1" stop-color="#081a13"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f5240"/>
+      <stop offset="1" stop-color="#0b2219"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#page)"/>
+  <!-- The icon (icon.svg), drawn at 300 × 300. -->
+  <svg x="72" y="170" width="300" height="300" viewBox="0 0 1024 1024">
+    <rect width="1024" height="1024" rx="216" fill="url(#bg)" stroke="#2f6b55" stroke-width="12"/>
+    <g transform="translate(-48 28)">
+      <path d="M 192 606 A 520 520 0 0 0 832 606" fill="none" stroke="#9fd8bf" stroke-opacity="0.45" stroke-width="30" stroke-linecap="round"/>
+      <line x1="512" y1="196" x2="690" y2="685" stroke="#f4f1e8" stroke-width="52" stroke-linecap="round"/>
+      <circle cx="512" cy="196" r="56" fill="#f4f1e8"/>
+      <circle cx="690" cy="685" r="128" fill="#f2b44a"/>
+    </g>
+  </svg>
+  <g font-family="'DejaVu Sans', 'Helvetica Neue', Arial, sans-serif">
+    <text x="420" y="262" fill="#ffffff" font-size="60" font-weight="bold">Clockgrove Pendulum</text>
+    <text x="420" y="338" fill="#e6efe9" font-size="33">
+      <tspan x="420">Label a GitHub issue, walk away,</tspan>
+      <tspan x="420" dy="46">come back to a merged pull request.</tspan>
+    </text>
+    <text x="420" y="458" fill="#f2b44a" font-size="30" font-weight="bold">Claude Code · Codex · Copilot CLI</text>
+  </g>
+</svg>

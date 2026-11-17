@@ -90,7 +90,7 @@ import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, usdByPass, rerunRead, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
-import { exactJudge, redNames, signed } from "./fix-progress.mjs";
+import { exactJudge, redNames, sameRed, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
 import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead, usdText } from "./logic.mjs";
 
@@ -1236,7 +1236,7 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   handed off ran them). `onRead(state)`: each reading of the checks as awaitChecks makes it. `signal` (an AbortSignal)
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
-export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
+export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null, handed: handedIn = null, returnAfterFix = false, recurOnFirst = false }) {
   // The decision calls' spend during this loop (triage and the rest: decisionSpend) is taken off what is left too; the
   // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
   const passDecisions = () => decisionSpend() - reservedSpend();
@@ -1251,7 +1251,11 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // progress (`stalled`, with its Block's cause). `seen`: every red the stage has seen, the progress check's one list
   // for all the stage's loops, this loop's added as it goes (one seen again after a committed pass is no progress). No
   // progressCheck (no decider wired): only the exact checks decide, and what they cannot is no progress.
-  let handed = null;
+  // `handedIn`: the red an earlier loop of the stage last handed a fix pass (workValidation), so this loop's first red is
+  // judged against it. With none, and `recurOnFirst` (workValidation), a red with no fix pass of this loop before it gets
+  // the exact recurrence check alone: one the stage saw before, failing the same way (sameRed against `seen`), came back
+  // after the passes that committed since, which is no progress; any other goes to its fix pass, no decision model asked.
+  let handed = handedIn;
   const seen = progressCheck?.seen ?? [];
   let stalled = "";
   let stalledCause = "work";
@@ -1281,6 +1285,10 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // Each red a fix pass was handed, as its failure lines and output's end (`tail`): what those passes were asked to fix
   // (review.mjs answerGate), returned as `given` once the checks are green.
   const given = [];
+  // The last check reading of a pass on a head ({sha, runs}), for the hook that names each check's result (checks.resultLine).
+  let lastRead = null;
+  // When the wait on each head began (checks.boundMs bounds it per head: no rerun or later pass on the head restarts it).
+  const boundFrom = new Map();
   // With required checks configured, the repository's CI is Pendulum's validation: the head is
   // pushed and the named checks are awaited, instead of re-running serially what CI runs in
   // parallel. The commands stay the harness's own tool (the task card names them).
@@ -1291,8 +1299,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // The pass's first line, once its head is known: a head a fix pass left unchanged is no pass (said where it is caught).
   const begin = async (sha = null) => {
     if (sha && sha === redHead) return;
-    log(`${label} pass ${passes}: ${byChecks ? `required checks ${checks.names.join(", ")}` : `${commands.length} command(s)`}`);
-    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? "required checks" : `${commands.length} commands`})`);
+    log(`${label} pass ${passes}: ${byChecks ? `${checks.what || "required checks"} ${checks.names.join(checks.request ? "; " : ", ")}` : `${commands.length} command(s)`}`);
+    if (onPhase) await onPhase(`${label} pass ${passes} (${byChecks ? checks.what || "required checks" : `${commands.length} commands`})`);
   };
   const validate = async () => {
     // The commands on this pass: not on a first pass that reads the checks only (checksOnlyFirst).
@@ -1311,7 +1319,13 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // Handed off: the checks on this head are the review stage's to wait for, beside its reviewer.
     if (handOff) return { handedOff: sha, ranCommands: commandsNow, command: `required checks ${checks.names.join(", ")} on ${sha.slice(0, 7)}` };
     if (!commandsNow) await begin(sha);
-    if (onPhase) await onPhase(`waiting for required checks (${checks.names.join(", ")}) on ${sha.slice(0, 7)}`);
+    // Checks the stage asks GitHub to run on this head itself (cross-os.mjs: a workflow dispatched on the branch), once per
+    // head; one refused is no red, and the stage Blocks with its reason.
+    if (checks.request) {
+      const asked = await checks.request(sha);
+      if (asked?.refused) return { green: false, stuck: asked.refused, command: `${checks.what || "required checks"} ${checks.names.join("; ")} on ${sha.slice(0, 7)}`, sha };
+    }
+    if (onPhase) await onPhase(`waiting for ${checks.what || "required checks"} (${checks.names.join(checks.request ? "; " : ", ")}) on ${sha.slice(0, 7)}`);
     // A sibling's merge can make the PR conflict while its checks are awaited: GitHub then starts none, so the wait ends.
     const conflicted = async () => conflictsAt(await getPr(checks.repo, checks.prNumber, { token: checks.token }), sha);
     // A required check with no run will get none once every workflow run on the head has completed, so the wait ends
@@ -1330,6 +1344,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       const page = await rest(`repos/${checks.repo.full}/actions/runs?head_sha=${sha}&per_page=100`, { token: checks.actionsToken || checks.token, cache: etags });
       const all = page?.workflow_runs || [];
       if (!all.length || (page?.total_count ?? 0) > all.length || !all.every((w) => w.status === "completed")) return false;
+      // A workflow run the stage asked for (checks.request): until that run itself has completed, the checks it makes are
+      // still to come, never missing for good.
+      if (checks.runOf && !all.some((w) => w.id === checks.runOf(sha)?.id && w.status === "completed")) return false;
       const missing = checks.names.filter((n) => !runs.some((r) => r.name === n));
       specs ??= await requiredCheckSpecs(checks.repo, { token: checks.token, cache: rulesRead }).catch(() => []);
       const boundTo = (n) => {
@@ -1369,9 +1386,20 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       if (hung.length && !waived.has(sha)) waived.set(sha, headMarks(checks.repo, checks.prNumber, checks.issue, sha, { token: checks.token }).then((m) => m.noProgress));
       return { running, hung: hung.length && !(await waived.get(sha)) ? hung : [] };
     };
+    // What is left of the checks' own bound on this head (checks.boundMs), counted from the head's first wait.
+    if (!boundFrom.has(sha)) boundFrom.set(sha, Date.now());
+    const boundLeft = () => (checks.boundMs !== undefined ? Math.max(0, boundFrom.get(sha) + checks.boundMs - Date.now()) : Infinity);
     // Nothing required running for CHECKS_WAIT_MS ends a wait (queued, waiting, not reported): GitHub's not-started bound.
     // The reads back off from the first hour on.
-    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, actionsToken: checks.actionsToken || checks.token, cache: cancelReads, conflicted, ended: (runs) => ended(runs, ignoreIds), progress, idleMs: checks.stuckWaitMs ?? CHECKS_WAIT_MS, maxPollMs: checks.maxPollMs ?? 5 * 60_000, backoffAfterMs: checks.backoffAfterMs ?? CHECKS_WAIT_MS, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? Infinity, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    const waitOnce = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, actionsToken: checks.actionsToken || checks.token, cache: cancelReads, conflicted, ended: (runs) => ended(runs, ignoreIds), progress, idleMs: checks.stuckWaitMs ?? CHECKS_WAIT_MS, maxPollMs: checks.maxPollMs ?? 5 * 60_000, backoffAfterMs: checks.backoffAfterMs ?? CHECKS_WAIT_MS, ignoreIds, onRead, signal, ...(checks.select ? { select: (rs) => checks.select(sha, rs) } : {}), ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? Infinity, capMs, boundLeft()), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    // Each wait, its last reading kept (lastRead), and marked `atBound` when it ended unfinished at the checks' own bound
+    // (checks.boundMs, cross-os.mjs), not at the stage's wall clock.
+    const wait = async (ignoreIds = null, capMs = Infinity, more = {}) => {
+      const x = await waitOnce(ignoreIds, capMs, more);
+      lastRead = { sha, runs: x.runs || [] };
+      if (x.timedOut && !x.conflict && checks.boundMs !== undefined && Date.now() - boundFrom.get(sha) >= checks.boundMs) x.atBound = true;
+      return x;
+    };
     const waitedFrom = Date.now();
     // How long a triage rerun may wait for its workflow run to complete (GitHub reruns only a completed run's failed
     // jobs): what is left of the checks' own wait, counted from its start, within the stage's wall clock less
@@ -1409,22 +1437,27 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       return { stuck };
     };
     // The wait's end, or {stuck} when it ended unfinished and stayed so. `ignoreIds`: a triage rerun's replaced runs.
+    // A wait that reached the checks' own bound (atBound) is no longer waited for: the Block says the bound.
+    const bounded = (s) => ({ ...s, waits: false, reason: `${s.reason}; ${checks.boundText || "the wait reached its bound"}` });
     const settle = async (x, ignoreIds = null) => {
       if (!unfinished(x)) return x;
       let stuck = noProgress(x, await classify(x));
+      if (x.atBound) return stuckOf(bounded(stuck));
       if (!stuck.waits) return stuckOf(stuck);
-      const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS));
+      const capMs = Math.min(checks.stuckWaitMs ?? CHECKS_WAIT_MS, remainingMs(deadlineAt) - (checks.guardMs ?? CHECKS_WAIT_GUARD_MS), boundLeft());
       if (capMs <= 0) return stuckOf(stuck);
       if (onPhase) await onPhase(`${stuck.reason}; waiting up to ${Math.round(capMs / 60000)} min for ${stuck.runs.length > 1 ? "them" : "it"} to start, no fix run`);
       x = await wait(ignoreIds, capMs, { appearMs: Infinity, backoffAfterMs: 0, progress: null });
       if (x.conflict || !unfinished(x)) return x;
       stuck = await classify(x);
+      if (x.atBound) return stuckOf(bounded(stuck));
       // Started during that wait and still running: it is waited for as a check that started at once is.
       if (stuck.kind === "running") {
         if (onPhase) await onPhase(`required checks on ${sha.slice(0, 7)} started late; waiting for them as usual`);
         x = await wait(ignoreIds);
         if (x.conflict || !unfinished(x)) return x;
         stuck = noProgress(x, await classify(x));
+        if (x.atBound) stuck = bounded(stuck);
       }
       return stuckOf(stuck);
     };
@@ -1507,6 +1540,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         if (r.green && onPhase) await onPhase(`triage rerun on ${sha.slice(0, 7)} turned green: ${(t.jobs || []).join(", ")} passed on rerun with no change; if this failure comes back, it may be an intermittent defect, not a flake`);
       }
     }
+    // Checks that finished passing as a required check would but did not all run (checks.verdict, cross-os.mjs: a skipped
+    // or neutral leg): no red for a fix pass, and the stage Blocks with the reason.
+    if (r.green && checks.verdict) {
+      const notRun = checks.verdict(sha, r.runs || []);
+      if (notRun) return { green: false, stuck: notRun, command, sha };
+    }
     // `waitedMs`: how long this head's checks took, triage's rerun included (a fresh worker pass's floor, freshPassDenied).
     return { green: r.green, results: [], fromChecks: true, sha, failedRuns: r.failedRuns, runs: r.runs, refusal: triaged, waitedMs: Date.now() - waitedFrom, failed: r.green ? null : { command, ok: false, code: r.failedNames.length ? 1 : null, timedOut: r.timedOut, output: r.output } };
   };
@@ -1571,6 +1610,12 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const sha = r?.code === 0 ? String(r.stdout).trim() : "";
     return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
   };
+  // With `returnAfterFix` (workValidation's cross-OS loop): whether the checkout's HEAD is a new commit past `sha`, the head
+  // the red was on, so the caller's other validation runs on it before this loop's next pass.
+  const moved = async (sha) => {
+    const now = await checkoutHead();
+    return !!now && !!sha && now !== sha;
+  };
   const fixClosing = fixClosingText({ commands, setupGuard: outbox?.setupFiles ? await outbox.setupFiles().catch(() => null) : null });
   /**
    * One fix pass on `red` (lastFix): resumed in the stage's session where the harness can. With `fresh`, a new session
@@ -1624,12 +1669,15 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     passes += 1;
     const v = await validate();
     if (v.aborted || signal?.aborted) return { green: false, aborted: true, passes: passes - 1, lastOutput: "", usage };
+    // Each check's result on the head, as the checks name it (cross-os.mjs legsLine), once per pass that read them.
+    if (lastRead && checks?.resultLine && onPhase) await onPhase(checks.resultLine(lastRead.sha, lastRead.runs));
+    lastRead = null;
     if (v.handedOff) {
       // No check was read: a pass only when the commands ran on it (the local route's).
       if (!v.ranCommands) passes -= 1;
       log(`${label}: ${v.command} run while the review starts; handed to the review stage`);
       if (onPhase) await onPhase(`${label}: ${v.command} run while the review starts; handed to the review stage`);
-      return { green: false, handedOff: v.handedOff, passes, lastOutput: "", command: v.command, usage };
+      return { green: false, handedOff: v.handedOff, passes, lastOutput: "", command: v.command, usage, handed };
     }
     // The same head as the red the fix pass had: not a pass of its own.
     if (v.again) passes -= 1;
@@ -1694,6 +1742,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
             return { green: false, passes, lastOutput: red.tail, command: v.command, usage, unchanged: { reason, cause: "work" } };
           }
           if (ended) return ended;
+          if (returnAfterFix && (await moved(head))) return { green: false, fixed: true, passes, lastOutput: "", command: v.command, usage, handed };
           continue;
         }
         block = { ...block, reason: `${block.reason}; no fresh worker pass: ${denied}` };
@@ -1724,7 +1773,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     }
     last = v;
     // `sha`: the head the required checks were green on (the caller's validated marker goes on it), when they were read.
-    if (v.green) return { green: true, passes, lastOutput: "", usage, sha: v.sha ?? null, given };
+    if (v.green) return { green: true, passes, lastOutput: "", usage, sha: v.sha ?? null, given, handed };
     const failed = v.failed;
     const { detail, failures, lead, tail } = await redOf(v);
     // Every failing job fails the same way on the default branch: not this change's, so no fix pass; handed back.
@@ -1749,7 +1798,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A red after a fix pass goes on only when that pass made progress on the red it was handed (fix-progress.mjs); a
     // red on a merge Pendulum made itself is not the change's, so it gets its fix pass unjudged.
     const caught = !!validated && !!outbox?.caughtUp?.(validated);
-    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : null;
+    const back = !handed && !caught && recurOnFirst ? seen.find((r) => sameRed(r, shape, { seen: true })) : null;
+    const judged = handed && !caught ? await judgeProgress({ before: handed, after: shape, seen, diff: await diffStat(handed.head, shape.head) }) : back ? { progress: false, why: `it brought back the red of ${back.at ? `${back.at}: ` : ""}${redNames(back).join(", ")}, failing the same way, after the passes that committed since` } : null;
     seen.push(shape);
     // The stage harness's usage limit stopped the question: the stage ends on it as a pass meeting it does, never as no progress.
     if (judged?.limited) throw new UsageLimitReached(judged.limited, { since: Date.now(), label: "fix-progress check" });
@@ -1784,8 +1834,55 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     given.push(tail);
     const ended = await fixPass(lastFix);
     if (ended) return ended;
+    if (returnAfterFix && (await moved(v.sha))) return { green: false, fixed: true, passes, lastOutput: "", command: failed.command, usage, handed };
   }
   return { green: false, passes, lastOutput: leadDetail(lastLead, last?.failed?.output || ""), command: last?.failed?.command, usage, ...(stalled ? { stalled, stalledCause } : {}), ...(last?.refusal ? { triageRefused: refusedRerunText(last.refusal) } : {}), ...(freshHeads.size ? { freshPass: [...freshHeads.keys()].at(-1) } : {}) };
+}
+
+/**
+ * The work stage's validation (worker.mjs): validationLoop with `args`, then, with cross-OS CI on (`cross`, cross-os.mjs:
+ * {checks} from crossOsChecks, or {problem} for a setting that cannot run), a second loop on the head it left: the
+ * cross-OS legs, asked for and awaited on that head, no commands, never handed off. A red leg goes to that loop's fix
+ * pass like any red; once a fix pass there commits, that loop ends (`fixed`) and the first loop validates the new head
+ * (or hands it off) before the legs are asked for on it. The first loop after such a fix starts from the red that fix
+ * was handed, so the stage's one progress check judges a fix that breaks the other side as it judges any red after a fix
+ * pass. A loop that ends green or hands off has fixed its reds: the next loop starts from none, and its first red gets
+ * only the exact recurrence check (validationLoop `recurOnFirst`), so a red that comes back after it was fixed (Linux,
+ * Windows, Linux again) is no progress, and any other red goes to its fix pass. Every round spends from the same
+ * max_usd and wall clock. The legs
+ * green on the head the first loop left end the stage's validation with that loop's end (a hand-off included); any
+ * other end of either loop ends it there. Returns the deciding loop's result, with every loop's passes and usage summed.
+ * A setting problem Blocks as a setup gap once the first loop is green.
+ */
+export async function workValidation(args, cross = null) {
+  const usage = [];
+  let passes = 0;
+  let handed = args.handed ?? null;
+  const add = (r) => {
+    usage.push(...(r.usage || []));
+    passes += r.passes || 0;
+    if (r.handed !== undefined) handed = r.handed;
+    return { ...r, passes, usage: [...usage] };
+  };
+  const spent = () => (args.spentUsd || 0) + sumSpend(usage).usd;
+  // One list of the stage's reds for every loop (the recurrence check reads it): the caller's progress check's, else,
+  // with cross-OS CI on, the exact checks' own.
+  if (cross && !args.progressCheck) args = { ...args, progressCheck: { judge: exactJudge, seen: [] } };
+  for (;;) {
+    const v = add(await validationLoop({ ...args, spentUsd: spent(), handed, recurOnFirst: !!cross }));
+    if (!cross || v.aborted || !(v.green || v.handedOff)) return v;
+    // Green, or handed off: the red its fix passes were handed is fixed, and judges nothing after it.
+    handed = null;
+    if (cross.problem) {
+      log(`cross-os-validation: ${cross.problem}`);
+      if (args.onPhase) await args.onPhase(`cross-os-validation: ${cross.problem}`);
+      return { green: false, passes, lastOutput: "", usage: [...usage], stuck: { reason: cross.problem, cause: "setup" } };
+    }
+    const c = add(await validationLoop({ ...args, spentUsd: spent(), commands: [], checks: cross.checks, label: "cross-os-validation", handOff: false, checksOnlyFirst: false, holdRed: null, handed, returnAfterFix: true, recurOnFirst: true }));
+    if (c.fixed) continue;
+    if (c.green) return { ...v, passes, usage: [...usage] };
+    return c;
+  }
 }
 
 /**

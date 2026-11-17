@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CHOICE_PREFIXES, LABEL_MAX, choiceLabels, choiceOf, chosenInputs, harnessVersionFor, modelProblem, ranWith, routeProblem } from "../scripts/lib/choice.mjs";
-import { MODEL_DEFAULTS, resolveInputs, variableSettings } from "../scripts/lib/inputs.mjs";
+import { MODEL_DEFAULTS, PENDULUM_VERSION, resolveInputs, variableSettings } from "../scripts/lib/inputs.mjs";
 import { CODEX_PRICES } from "../scripts/lib/usage.mjs";
 import { CHOICE_FIX, choiceGate, choiceTrusted, editedSincePlan, objectiveInputs, objectiveSha, planTextState } from "../scripts/lib/objective-trust.mjs";
 import { harnessMarker, setMaintainers, setSelf } from "../scripts/lib/logic.mjs";
@@ -350,7 +350,7 @@ test("the usage record names the models the stage ran on and the labels that cho
   const inputs = chosenInputs({ env: ENV, choice: { harness: "codex", model: "gpt-6.1-terra" } }).inputs;
   const r = writeUsage(dir, { harness: inputs.harness, model: inputs.model, records: [], passes: 0, exit: "blocked", reason: "x", credentialBasis: null, ran: ranWith(inputs, ["pendulum:harness:codex", "pendulum:model:gpt-6.1-terra"]) });
   const stored = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
-  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["pendulum:harness:codex", "pendulum:model:gpt-6.1-terra"], hosts: [] });
+  assert.deepEqual(stored.ran, { worker: "gpt-6.1-terra", subagent: "gpt-6.1-sol", reviewer: "gpt-6.1-sol", labels: ["pendulum:harness:codex", "pendulum:model:gpt-6.1-terra"], hosts: [], effort: null, reviewerEffort: "high", pendulum: PENDULUM_VERSION });
   assert.deepEqual(r.ran, stored.ran);
 });
 

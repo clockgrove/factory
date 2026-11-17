@@ -10,7 +10,7 @@
 
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
-import { checkRuns, getPr, listComments, listReviewComments, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
+import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
 import { BILLING_WORDS, addBilling, billingRead, unknownRuns } from "./usage.mjs";
@@ -588,7 +588,8 @@ export async function objectiveRecords(repo, n, { token, download }) {
       throw e;
     });
     for (const a of page?.artifacts || []) {
-      if (a.expired || !Number.isSafeInteger(a.workflow_run?.id)) continue;
+      // A fork's run can upload an artifact of this name: only this repository's own runs are read (ownRunArtifact).
+      if (a.expired || !Number.isSafeInteger(a.workflow_run?.id) || !ownRunArtifact(a)) continue;
       const rec = await download(a).catch(() => null);
       if (rec && typeof rec === "object") out.push(rec);
     }

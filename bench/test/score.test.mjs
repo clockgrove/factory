@@ -1081,8 +1081,8 @@ test("the drill's usage wait: a Blocked Objective's artifact that lands after th
     if (path.includes("/comments")) return n === 44 ? [] : n === 49 ? [work(n), review49] : [work(n)];
     if (path.includes("actions/artifacts")) {
       // #47's upload lands on the second poll; #48's never does; #49 is still in review at the deadline, its work uploaded.
-      if (n === 49 && /pendulum-usage-49&/.test(path)) return [{ artifacts: [{ id: 9, name: "pendulum-usage-49", created_at: "2031-03-02T01:20:00Z", expired: false, workflow_run: { id: 79 } }] }];
-      if (n === 47 && /pendulum-usage-47&/.test(path) && polls >= 2) return [{ artifacts: [{ id: 5, name: "pendulum-usage-47", created_at: "2031-03-02T01:30:03Z", expired: false, workflow_run: { id: 77 } }] }];
+      if (n === 49 && /pendulum-usage-49&/.test(path)) return [{ artifacts: [{ id: 9, name: "pendulum-usage-49", created_at: "2031-03-02T01:20:00Z", expired: false, workflow_run: { id: 79, repository_id: 1, head_repository_id: 1 } }] }];
+      if (n === 47 && /pendulum-usage-47&/.test(path) && polls >= 2) return [{ artifacts: [{ id: 5, name: "pendulum-usage-47", created_at: "2031-03-02T01:30:03Z", expired: false, workflow_run: { id: 77, repository_id: 1, head_repository_id: 1 } }] }];
       return [{ artifacts: [] }];
     }
     throw Object.assign(new Error(`no answer for ${path}`), { status: 404 });

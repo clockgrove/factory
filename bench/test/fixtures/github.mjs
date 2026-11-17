@@ -147,8 +147,8 @@ export function snapshotOf(collected) {
     [`${base}/pulls?head=${head}&state=open&per_page=100`]: collected.pulls.filter((p) => p.state === "open"),
     [`${base}/pulls?head=${head}&state=closed&per_page=100`]: collected.pulls.filter((p) => p.state !== "open"),
     // The artifacts name the runs whose jobs are counted: the worker's run and each review run.
-    [`${base}/actions/artifacts?name=pendulum-usage-${n}&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name.startsWith("work")).map((j) => ({ id: j.id * 100, name: `pendulum-usage-${n}`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run } })) }],
-    [`${base}/actions/artifacts?name=pendulum-usage-${n}-review&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name === "review").map((j) => ({ id: j.id * 100, name: `pendulum-usage-${n}-review`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run } })) }],
+    [`${base}/actions/artifacts?name=pendulum-usage-${n}&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name.startsWith("work")).map((j) => ({ id: j.id * 100, name: `pendulum-usage-${n}`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run, repository_id: 1, head_repository_id: 1 } })) }],
+    [`${base}/actions/artifacts?name=pendulum-usage-${n}-review&per_page=100`]: [{ artifacts: collected.jobs.filter((j) => j.name === "review").map((j) => ({ id: j.id * 100, name: `pendulum-usage-${n}-review`, expired: false, created_at: j.completed_at, workflow_run: { id: j.run, repository_id: 1, head_repository_id: 1 } })) }],
   };
   for (const pr of collected.pulls) {
     const d = collected.pullDetails[pr.number];

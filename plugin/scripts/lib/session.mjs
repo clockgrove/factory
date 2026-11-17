@@ -58,7 +58,7 @@ import {
   transientError,
   RETRY,
 } from "./github.mjs";
-import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { PENDULUM_VERSION, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
@@ -86,7 +86,7 @@ import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, passLedger, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
 import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -2068,8 +2068,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     harnessVersion,
     model: merged.model ?? model ?? null,
     // The Objective's three models as this stage ran them (choice.mjs ranWith; null for a harness default), the harness,
-    // model and host labels that chose them (none: the repository's defaults) and the hosts its host labels opened.
-    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [] } } : {}),
+    // model and host labels that chose them (none: the repository's defaults), the hosts its host labels opened, the
+    // worker's and the reviewer's reasoning effort (null: the model's own) and the Pendulum release that ran the stage.
+    ...(ran ? { ran: { worker: ran.worker ?? null, subagent: ran.subagent ?? null, reviewer: ran.reviewer ?? null, labels: ran.labels ?? [], hosts: ran.hosts ?? [], effort: ran.effort ?? null, reviewerEffort: ran.reviewerEffort ?? null, pendulum: PENDULUM_VERSION } } : {}),
     // The account the stage ran on, by name only: a local account (accounts.mjs), or on GitHub Actions and the cloud
     // sandbox the account step's pick (PENDULUM_STAGE_ACCOUNT) when the workflow declares accounts; none otherwise.
     ...((stageAccountName(account) ?? stageAccountName(ran?.account ?? null)) ? { account: stageAccountName(account) ?? ran.account } : {}),
@@ -2126,6 +2127,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     // daily sum and the scorecard say "plus N runs of unknown cost".
     ...unknown,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
+    // Each pass's own figures (usage.mjs passLedger), which the merged ones above are summed from: `pendulum report` breaks
+    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder), never on GitHub.
+    ledger: passLedger(records || [], billing),
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),
     session,

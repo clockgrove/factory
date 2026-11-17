@@ -6,7 +6,7 @@
 // the answer check's answered record or unanswered notice, the merge pass's read record), so it costs no comment and no
 // call; or, where the check writes no record, into the one decisions comment of the process's role on the issue
 // (flushDecisionSpend, `<!-- pendulum:<n>:decisions:<role> -->`, read fresh before each write). daily_usd (github.mjs localSpendToday) and the
-// scorecard (bench objective.mjs decisionRecords) read the lines in Pendulum's own comments. Dollars are the gateway's
+// scorecard and `pendulum report` (cost-join.mjs decisionSpendRecords) read the lines in Pendulum's own comments. Dollars are the gateway's
 // cost or unknown (usage.mjs UNKNOWN_WHY `decision`), never an estimate; a day of $0 known with nothing unknown is no
 // line.
 import { setTimeout as sleep } from "node:timers/promises";

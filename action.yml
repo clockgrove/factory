@@ -523,10 +523,12 @@ runs:
         # step fills from the stage's (never the stage's own), so a stage cut off before that step uploads nothing of its stream.
         case "$PENDULUM_INPUT_MODE" in work|review) echo "usage_dir=$RUNNER_TEMP/pendulum-upload" >> "$GITHUB_OUTPUT" ;; esac
         mkdir -p "$PENDULUM_USAGE_DIR"
+        # Work and review replace this shell (exec): a cancelled job's SIGINT and SIGTERM go to the step's process alone,
+        # which a shell waiting on its child never passes on, so the stage gets them and writes its usage record first.
         case "$PENDULUM_INPUT_MODE" in
           dispatch) node "$PENDULUM_PLUGIN_ROOT/scripts/dispatch.mjs" --repo "$GITHUB_REPOSITORY" ;;
-          work)     node "$PENDULUM_PLUGIN_ROOT/scripts/worker.mjs"   --repo "$GITHUB_REPOSITORY" --issue "$PENDULUM_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
-          review)   node "$PENDULUM_PLUGIN_ROOT/scripts/review.mjs"   --repo "$GITHUB_REPOSITORY" --pr "$PENDULUM_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
+          work)     exec node "$PENDULUM_PLUGIN_ROOT/scripts/worker.mjs" --repo "$GITHUB_REPOSITORY" --issue "$PENDULUM_INPUT_ISSUE" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
+          review)   exec node "$PENDULUM_PLUGIN_ROOT/scripts/review.mjs" --repo "$GITHUB_REPOSITORY" --pr "$PENDULUM_INPUT_PR" --checkout "$GITHUB_WORKSPACE" --usage-dir "$PENDULUM_USAGE_DIR" ;;
           gate)     node "$PENDULUM_PLUGIN_ROOT/scripts/launch.mjs"   --repo "$GITHUB_REPOSITORY" --gate ;;
           launch)   PENDULUM_ADAPTER_INSTALL=1 node "$PENDULUM_PLUGIN_ROOT/scripts/launch.mjs" --repo "$GITHUB_REPOSITORY" ;;
           image)    node "$PENDULUM_PLUGIN_ROOT/scripts/image.mjs"    --repo "$GITHUB_REPOSITORY" --checkout "$GITHUB_WORKSPACE" ;;

@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { skillsDigest, unshippedRefs } from "../skills.mjs";
+import { INTERNAL_SKILLS, PLUGIN_ROOT_SENTENCE, skillRules, skillsDigest, unshippedRefs } from "../skills.mjs";
 
 const SCRIPT = join(import.meta.dirname, "..", "skills.mjs");
 const skills = (args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
@@ -154,4 +154,69 @@ test("the setup skill's local-mode steps give only commands, paths and examples 
   assert.ok(spans.length > 20);
   assert.deepEqual(spans.filter((s) => !guide.includes(s)), [], "code docs/LOCAL.md does not give");
   assert.match(readFileSync(join(CHECKOUT, "plugin", "skills", "factory-setup", "SKILL.md"), "utf8"), /walk \[local\.md\]\(local\.md\)/);
+});
+
+// How a skill is shown and loaded (#456): the internal stage skills stay out of every harness's user menu and implicit
+// loading but load when Factory names them; a user skill's description opens with what it does, never a Claude-only
+// /command line; a skill that names a plugin path says how each harness finds the plugin.
+test("every skill follows the rules of how it is shown and loaded", () => {
+  assert.deepEqual(skillRules(join(CHECKOUT, "plugin")), []);
+});
+
+test("skillRules: an internal skill without each harness's hide setting, a user skill opening with a /command and a plugin path with no plugin-root sentence are refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "factory-bench-rules-"));
+  const [internal, other] = INTERNAL_SKILLS;
+  const skill = (name, fm, body = "Body.", files = {}) => {
+    mkdirSync(join(dir, "plugin", "skills", name), { recursive: true });
+    writeFileSync(join(dir, "plugin", "skills", name, "SKILL.md"), `---\nname: ${name}\n${fm}\n---\n${body}\n`);
+    for (const [f, text] of Object.entries(files)) {
+      mkdirSync(join(dir, "plugin", "skills", name, f, ".."), { recursive: true });
+      writeFileSync(join(dir, "plugin", "skills", name, f), text);
+    }
+  };
+  const hidden = { "agents/openai.yaml": "policy:\n  allow_implicit_invocation: false\n" };
+  // Hidden in every harness, and a user skill as it should be: no break.
+  skill(internal, 'description: "Internal: a stage."\nuser-invocable: false', "Body.", hidden);
+  skill("user-ok", "description: Does a thing. Use when asked. Not for the other thing.", `Run it. ${PLUGIN_ROOT_SENTENCE} Then \`node <plugin root>/scripts/x.mjs\`.`);
+  const rules = () => skillRules(join(dir, "plugin")).map((r) => `${r.skill}: ${r.why}`);
+  assert.deepEqual(rules(), []);
+  // Each break on its own.
+  skill(other, 'description: "Internal: a stage."', "Body.", hidden);
+  skill("user-slash", 'description: "/factory:factory-x <issue>. Does a thing."');
+  skill("user-root", "description: Does a thing.", 'Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/x.mjs"`.');
+  skill("user-ref", "description: Does a thing.", "Body.", { "reference.md": "Read `<plugin root>/templates/task-card.md`.\n" });
+  assert.deepEqual(rules(), [
+    `${other}: an internal skill sets \`user-invocable: false\` (out of Claude Code's / menu)`,
+    "user-ref: a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md",
+    "user-root: a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md",
+    "user-slash: a user skill's description starts with what it does and when to use it, not a /command line",
+  ]);
+  // The internal skill's other settings: Codex's implicit loading on, model invocation blocked, a description that hides nothing.
+  skill(internal, "description: The first stage.\nuser-invocable: false\ndisable-model-invocation: true", "Body.", { "agents/openai.yaml": "policy:\n  allow_implicit_invocation: true\n" });
+  assert.deepEqual(
+    rules().filter((r) => r.startsWith(`${internal}:`)),
+    [
+      `${internal}: an internal skill sets no \`disable-model-invocation\`: a worker loads it itself`,
+      `${internal}: an internal skill has agents/openai.yaml with \`policy: allow_implicit_invocation: false\` (out of Codex's implicit loading)`,
+      `${internal}: an internal skill's description starts with \`Internal\``,
+    ],
+  );
+  // The plugin files they name exist, so the gate fails on these rules alone.
+  mkdirSync(join(dir, "plugin", "scripts"));
+  mkdirSync(join(dir, "plugin", "templates"));
+  for (const f of ["x.mjs", "local.mjs"]) writeFileSync(join(dir, "plugin", "scripts", f), "");
+  writeFileSync(join(dir, "plugin", "templates", "task-card.md"), "");
+  const r = skills(["--plugin", join(dir, "plugin"), "--out", join(dir, "skills.json")]);
+  assert.equal(r.status, 5, "the CI gate fails on them");
+  assert.match(r.stderr, /user-slash: a user skill's description starts with what it does/);
+});
+
+// Codex loads a skill whose implicit invocation is off only when the prompt names it as `$name`; Claude Code and Copilot
+// read the same mention as the skill's name. Every prompt Factory gives a worker or reviewer names its stage skills so.
+test("the task card and the review job's prompts name each internal skill they load as a $ mention", () => {
+  const card = readFileSync(join(CHECKOUT, "plugin", "templates", "task-card.md"), "utf8");
+  for (const s of ["factory-objective-plan", "factory-implement-split", "factory-prove-acceptance", "factory-deliver-pr"]) assert.ok(card.includes(`$${s}`), s);
+  const review = readFileSync(join(CHECKOUT, "plugin", "scripts", "review.mjs"), "utf8");
+  assert.equal(review.match(/Follow the \$factory-review-pr skill/g)?.length, 2, "the reviewer and the foundation pass");
+  assert.match(review, /Load the \$factory-deliver-pr skill's "Reviewer comments" section/);
 });

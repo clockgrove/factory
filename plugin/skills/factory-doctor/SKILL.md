@@ -1,17 +1,17 @@
 ---
 name: factory-doctor
-description: /factory:factory-doctor. Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Factory runs, and name the fix for each failure. Use when the user asks whether Clockgrove Factory is set up, why Objectives Block at the first step, or before enabling the workflow.
+description: "Check that this repository, its GitHub settings, its model credential and its runner are ready for unattended Clockgrove Factory runs, and name the fix for each failure; changes nothing. Use when the user asks whether Clockgrove Factory is set up, why Objectives Block at the first step, or before enabling the workflow. Not for applying the fixes (factory-setup)."
 ---
 
 # /factory:factory-doctor
 
-Run every check, print one line each (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; `/factory:factory-setup` applies fixes on consent. Run the plugin's `scripts/doctor.mjs` and render its output:
+Print one line per check (`PASS`, `WARN` or `FAIL`, then the fix), and stop. Change nothing; the factory-setup skill applies fixes on consent. `<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead. Run the plugin's doctor and render its output:
 
 ```sh
-node "${CLAUDE_PLUGIN_ROOT}/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup] [--local]
+node "<plugin root>/scripts/doctor.mjs" --repo OWNER/NAME --checkout . --json [--probe] [--run-setup] [--local]
 ```
 
-The GitHub checks need the App's installation token: the user exports `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, in their own shell. Without one, doctor checks the secrets by name and reads GitHub with the user's `gh` login; inside a job, every GitHub line FAILs with "no installation token". `--run-setup` runs `setup`, not only finds it. `--local` adds local mode's checks (a Postgres repository needs `FACTORY_LOCAL_DB=1` there). Off Actions the settings (harness, models, credential) are the workflow's env block: without `--checkout`, the default branch's copy on GitHub (unreadable, a warning names the harness assumed); with it, that checkout's (`--local`: its default branch's). Repository `FACTORY_*` variables go over it (`--local`: read with the local token), and this shell's win; `settings` names each layer. Unknown flags exit 64.
+The GitHub checks need the App's token: the user exports `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`, in their own shell. Flags, reads without a token, and settings: [reference.md](reference.md).
 
 ## Credentials
 
@@ -26,7 +26,7 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 - The workflow checks read the default branch's `.github/workflows/factory.yml` on GitHub, as runs do; a differing local copy is a warning. Fix: pull the default branch.
 - The job token is read-only on code (`permissions: contents: read`, plus `actions: read` for the usage artifacts). Fix: edit the workflow's `permissions:`.
 - No `secrets[...]` lookup, which sends the runner every secret. Fix: re-render.
-- The default branch has the merge queue on; workflows on `pull_request` and on `merge_group` (parsed `on:`) make each required check (unread, or unmade: a warning). Fix: setup's protection step; add the missing event to that workflow's `on:`.
+- The default branch requires checks (none FAILs). Its merge queue: off is a warning while required checks gate merges (concurrent Objectives are then not re-tested on the integrated head; GitHub offers no queue on a repository a user owns), a FAIL with none. Workflows on `pull_request` and, with the queue on, `merge_group` (parsed `on:`) make each required check (unread, or unmade: a warning). Fix: setup's protection step; add the missing event to that workflow's `on:`.
 - The `factory:objective` label exists; the Project board has Queued, Running, In review, Blocked and Done; `notify` is a collaborator. Fix: setup creates the label and board.
 
 ## Repository
@@ -39,4 +39,4 @@ The GitHub checks need the App's installation token: the user exports `FACTORY_A
 
 ## After
 
-End with one line: `ready`, or the failure count and `run /factory:factory-setup to apply the GitHub fixes`. Every worker job runs these checks first, Blocking on a FAIL.
+End with one line: `ready`, then next: say what to build, and the factory-file skill files it as an Objective; or the failure count and `run the factory-setup skill to apply the GitHub fixes`. Every worker job runs these checks first, Blocking on a FAIL.

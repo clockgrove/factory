@@ -1,0 +1,3 @@
+# Flags and settings
+
+Without the App's installation token, doctor checks the secrets by name and reads GitHub with the user's `gh` login; inside a job, every GitHub line FAILs with "no installation token". `--run-setup` runs `setup`, not only finds it. `--local` adds local mode's checks (a Postgres repository needs `FACTORY_LOCAL_DB=1` there). Off Actions the settings (harness, models, credential) are the workflow's env block: without `--checkout`, the default branch's copy on GitHub (unreadable, a warning names the harness assumed); with it, that checkout's (`--local`: its default branch's). Repository `FACTORY_*` variables go over it (`--local`: read with the local token), and this shell's win; `settings` names each layer. Unknown flags exit 64.

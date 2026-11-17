@@ -10,13 +10,14 @@
  * each, and no line is added without a scored Objective). The one-page cap applies to SKILL.md
  * only. `--check` exits 3 when the recorded entries differ from the tree (a skill or one of its
  * files changed without a new record). Both forms exit 4 when a skill or agent definition names something an installed
- * plugin does not hold (unshippedRefs).
+ * plugin does not hold (unshippedRefs), and 5 when a skill breaks a rule of how it is shown and loaded (skillRules).
  */
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { parseYaml } from "../plugin/scripts/lib/yaml.mjs";
 
 export const SKILL_PAGE = { lines: 60, words: 700 };
 
@@ -137,6 +138,70 @@ export function unshippedRefs(pluginDir) {
   return out;
 }
 
+/**
+ * The stage skills Factory's own runs load: the worker's four, by the task card, and the reviewer's, by the review job,
+ * its reviewer agents and the factory-review skill. No user asks for them, and one that fires in a user's session works
+ * without the run around it (the reviewer's without the trust check and the posting step), so each is hidden in every
+ * harness that can hide a skill, and says it is internal where none can (Copilot).
+ */
+export const INTERNAL_SKILLS = ["factory-objective-plan", "factory-implement-split", "factory-prove-acceptance", "factory-deliver-pr", "factory-review-pr"];
+
+/** The one sentence, word for word, by which every skill that runs a plugin command finds the plugin in each harness. */
+export const PLUGIN_ROOT_SENTENCE =
+  "`<plugin root>` is `${CLAUDE_PLUGIN_ROOT}` in Claude Code, elsewhere two directories above this SKILL.md; where `factory` is not on PATH (only Claude Code puts the plugin's `bin/` there), run `node <plugin root>/scripts/local.mjs` instead.";
+
+/** A SKILL.md's frontmatter, parsed as the YAML 1.2 core schema reads it; null when it has none or it does not parse. */
+function frontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (!m) return null;
+  try {
+    const fm = parseYaml(m[1], { typed: true });
+    return fm && typeof fm === "object" && !Array.isArray(fm) ? fm : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every break of how the plugin's skills are shown and loaded, as `{skill, why}`:
+ * - an internal skill (INTERNAL_SKILLS) is out of Claude Code's `/` menu (`user-invocable: false`) but still loaded by
+ *   the model (no `disable-model-invocation`), out of Codex's implicit loading (`agents/openai.yaml`'s
+ *   `policy.allow_implicit_invocation: false`; the task card's `$name` mention still loads it), and its description
+ *   starts `Internal`, which is all Copilot has;
+ * - a user skill's description starts with what it does, never a `/command` line, which only Claude Code reads as one
+ *   (its listing shows `<issue>` escaped) and the other harnesses show as text;
+ * - a skill that names a plugin path (from `<plugin root>/` or `${CLAUDE_PLUGIN_ROOT}/`) in any of its files says how to
+ *   find the plugin in its SKILL.md, in PLUGIN_ROOT_SENTENCE.
+ */
+export function skillRules(pluginDir) {
+  const dir = join(pluginDir, "skills");
+  const out = [];
+  for (const skill of existsSync(dir) ? readdirSync(dir).sort() : []) {
+    const file = join(dir, skill, "SKILL.md");
+    if (!existsSync(file)) continue;
+    const flag = (why) => out.push({ skill, why });
+    const text = readFileSync(file, "utf8");
+    const fm = frontmatter(text) ?? {};
+    const description = typeof fm.description === "string" ? fm.description : "";
+    if (INTERNAL_SKILLS.includes(skill)) {
+      if (fm["user-invocable"] !== false) flag("an internal skill sets `user-invocable: false` (out of Claude Code's / menu)");
+      if (Object.hasOwn(fm, "disable-model-invocation")) flag("an internal skill sets no `disable-model-invocation`: a worker loads it itself");
+      const policy = join(dir, skill, "agents", "openai.yaml");
+      let codex = null;
+      try {
+        codex = existsSync(policy) ? parseYaml(readFileSync(policy, "utf8"), { typed: true }) : null;
+      } catch {}
+      if (codex?.policy?.allow_implicit_invocation !== false) flag("an internal skill has agents/openai.yaml with `policy: allow_implicit_invocation: false` (out of Codex's implicit loading)");
+      if (!/^Internal\b/.test(description)) flag("an internal skill's description starts with `Internal`");
+    } else if (description.startsWith("/")) flag("a user skill's description starts with what it does and when to use it, not a /command line");
+    const files = [file, ...skillFiles(join(dir, skill)).map((f) => join(dir, skill, f))];
+    if (files.some((f) => /(?:<plugin root>|\$\{CLAUDE_PLUGIN_ROOT\})\//.test(readFileSync(f, "utf8").replaceAll(PLUGIN_ROOT_SENTENCE, ""))) && !text.includes(PLUGIN_ROOT_SENTENCE)) {
+      flag("a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md");
+    }
+  }
+  return out;
+}
+
 /** The one digest over a record's skills (sorted by name, as recordSkills writes them). */
 export function skillsDigest(skills) {
   // One line per SKILL.md and one per other file, so a tree without reference files keeps the digest it had before them.
@@ -159,6 +224,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (refs.length) {
     process.stderr.write(`skills name what an installed plugin does not hold (an install copies plugin/ alone):\n${refs.map((r) => `  ${r.file}: ${r.ref} (${r.why})`).join("\n")}\nWrite a plugin file from <plugin root>/, a tool the plugin does not ship from <factory clone>/ (and say up front that the skill needs a clone), and a page a person reads as a link at a release tag.\n`);
     process.exit(4);
+  }
+  const rules = skillRules(plugin);
+  if (rules.length) {
+    process.stderr.write(`skills break how they are shown and loaded:\n${rules.map((r) => `  ${r.skill}: ${r.why}`).join("\n")}\n`);
+    process.exit(5);
   }
   if (values.check) {
     const prev = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")).skills ?? null : null;

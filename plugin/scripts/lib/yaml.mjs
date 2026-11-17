@@ -87,12 +87,20 @@ export function workflowEvents(doc) {
   return [];
 }
 
-const WRITE_SCOPES = ["contents", "pull-requests", "issues", "actions"];
+/** The values a `permissions:` scope may hold without granting write. */
+const READ_ONLY = new Set(["read", "none"]);
+/** A permission value as a grant names it: its text, else (empty text, a list, a mapping) its JSON. */
+const shown = (v) => (typeof v === "string" && v ? v : JSON.stringify(v));
 
-/** Whether a `permissions:` value grants write on contents, pull-requests, issues or actions. */
-export function grantsWrite(perms) {
+/**
+ * What a `permissions:` value grants beyond read, read exactly: null when it is unset (the repository's default token
+ * applies); else each grant, as `scope: value` for a mapping's scope or the value itself (`write-all`). Empty only for
+ * `read-all`, `{}` or a mapping whose every scope is `read` or `none`: any other value is a grant, a scope at `write`
+ * (`id-token`, `packages` and any GitHub adds) and a value that is no permission level alike.
+ */
+export function writeGrants(perms) {
   if (perms === undefined || perms === null) return null; // not set: the default applies
-  if (typeof perms === "string") return perms.trim() === "write-all";
-  if (typeof perms === "object") return WRITE_SCOPES.some((k) => String(perms[k] ?? "").trim() === "write");
-  return true;
+  if (typeof perms === "string") return perms === "read-all" ? [] : [shown(perms)];
+  if (typeof perms === "object" && !Array.isArray(perms)) return Object.entries(perms).filter(([, v]) => !READ_ONLY.has(v)).map(([k, v]) => `${k}: ${shown(v)}`);
+  return [shown(perms)];
 }

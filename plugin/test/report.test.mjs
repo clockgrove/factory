@@ -383,10 +383,10 @@ const shape = (v, at = "") => (Array.isArray(v) ? (v.length ? shape(v[0], `${at}
 test("report: --json keeps its schema: every field the documented shape names, of its type", async () => {
   const { json: r } = await report(world(), { since: "2026-11-17", by: "account" });
   const keys = (o) => Object.keys(o).sort();
-  assert.deepEqual(keys(r), ["breakdowns", "findings", "generatedAt", "hotSpots", "objectives", "pendulum", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
+  assert.deepEqual(keys(r), ["breakdowns", "comparison", "findings", "generatedAt", "hotSpots", "objectives", "pendulum", "repository", "schema", "scope", "source", "totals", "unknown", "words"]);
   assert.deepEqual(keys(r.findings), ["byReviewer", "byStage", "outcomes", "totals"]);
   assert.deepEqual(keys(r.findings.totals), ["cost", "findings", "outcomes", "reviewStages", "unnamed"]);
-  assert.deepEqual(keys(r.scope), ["by", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
+  assert.deepEqual(keys(r.scope), ["by", "compare", "defaultPeriod", "issues", "label", "parent", "since", "until"]);
   assert.deepEqual(keys(r.words), ["api", "credits", "sandbox", "subscription", "unknown"]);
   assert.deepEqual(keys(r.totals), ["cost", "objectives", "passes", "stages", "tokens"]);
   const cost = [".unknownRuns:number", ".unknownWhy[]", ".usd.api:number", ".usd.credits:number", ".usd.sandbox:number", ".usd.subscription:number", ".usd.unknown:number"];
@@ -423,13 +423,13 @@ test("report: privacy: no reason, Block text, task card, transcript or credentia
 
 test("report: the command line: a period by default, one set at a time, dates and numbers checked before any read", () => {
   const scope = reportScope({}, NOW);
-  assert.deepEqual(scope, { since: "2026-10-19T00:00:00Z", until: null, defaultPeriod: true, issues: [], label: null, parent: null });
+  assert.deepEqual(scope, { since: "2026-10-19T00:00:00Z", until: null, defaultPeriod: true, issues: [], label: null, parent: null, compare: null });
   assert.deepEqual(reportScope({ issue: ["3,7", "7"] }, NOW).issues, [3, 7]);
   assert.equal(reportScope({ label: "wave-6" }, NOW).since, null, "a set is read whole unless a period is given");
   assert.equal(reportCheck({ since: "yesterday" }), '--since takes a date (2026-11-01) or a time with its zone, not "yesterday"');
   assert.equal(reportCheck({ since: "2026-11-02", until: "2026-11-01" }), "--since must come before --until");
   assert.equal(reportCheck({ issue: ["3", "x"] }), '--issue takes issue numbers (12, or 12,15), not "3 x"');
-  assert.equal(reportCheck({ issue: ["3"], label: "a" }), "give one of --issue, --label or --parent");
+  assert.equal(reportCheck({ issue: ["3"], label: "a" }), "give one of --issue, --label, --parent or --compare");
   assert.equal(reportCheck({ by: "model" }), '--by takes account, not "model"');
   assert.equal(reportCheck({ since: "2026-11-01T10:00:00+02:00" }), null);
   assert.throws(() => parseArgs(["report", "--by", "model"]), /--by takes account/);
@@ -574,7 +574,7 @@ test("report (S5, S6): the plan follows each read's last page; --issue reads tha
   assert.ok(one.calls.includes("GET /issues/3/comments?per_page=100&page=1"));
   assert.ok(!one.calls.some((c) => c.startsWith("GET /issues/comments")), "no repository-wide read for named issues");
   assert.ok(one.calls.some((c) => c.startsWith("GET /pulls?state=all&head=acme%3Apendulum%2F3")));
-  assert.deepEqual(reportScope({ until: "2026-11-10T08:00:00Z" }, NOW), { since: "2026-10-11T00:00:00Z", until: "2026-11-10T08:00:00Z", defaultPeriod: true, issues: [], label: null, parent: null });
+  assert.deepEqual(reportScope({ until: "2026-11-10T08:00:00Z" }, NOW), { since: "2026-10-11T00:00:00Z", until: "2026-11-10T08:00:00Z", defaultPeriod: true, issues: [], label: null, parent: null, compare: null });
   assert.equal(reportScope({}, Date.parse("2026-11-18T15:30:00Z")).since, "2026-10-19T00:00:00Z");
   // #5's decision calls are dated 2026-11-17: a period from noon that day leaves them out.
   const { json: noon } = await report(world(), { since: "2026-11-17T03:00:00Z" });

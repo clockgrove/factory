@@ -262,6 +262,36 @@ test("required checks: only the branch's own or --ci-checks are applied; the pre
   }
 });
 
+test("#556: doctor's ci token row FAILs a pull_request or merge_group workflow, on any page of the list, that grants any scope write, or write-all, at the top or on a job, naming each grant; read, none, read-all and {} pass", async () => {
+  const scopes = ["id-token", "packages", "checks", "statuses", "deployments", "security-events", "pages", "attestations", "discussions", "repository-projects", "a-scope-github-adds-later"];
+  const flow = (top, job) => `on: [pull_request, merge_group]\npermissions: ${top}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    permissions: ${job}\n    steps:\n      - run: npm test\n`;
+  const files = {
+    ...Object.fromEntries(scopes.flatMap((s) => [[`.github/workflows/top-${s}.yml`, flow(`{contents: read, ${s}: write}`, "{}")], [`.github/workflows/job-${s}.yml`, flow("{}", `{contents: read, ${s}: write}`)]])),
+    ".github/workflows/top-all.yml": flow("write-all", "read-all"),
+    ".github/workflows/job-all.yml": flow("read-all", "write-all"),
+    ".github/workflows/read.yml": flow("{contents: read, id-token: none, packages: read}", "{}"),
+    ".github/workflows/none.yml": flow("{}", "{contents: none, checks: read}"),
+  };
+  const gh = await fakeGitHub({ perms: { default_workflow_permissions: "read" }, files });
+  try {
+    const row = await withApi(gh, async () => (await workflowTokenChecks({ repo: REPO, token: "dummy" })).find((r) => r.name === "ci token"));
+    assert.equal(row.status, "FAIL");
+    const named = row.detail.replace(/^branch code would run with a token that can write: /, "").split("; ").sort();
+    const expected = [...scopes.flatMap((s) => [`.github/workflows/top-${s}.yml (top-level permissions grant ${s}: write)`, `.github/workflows/job-${s}.yml job test (permissions grant ${s}: write)`]), ".github/workflows/top-all.yml (top-level permissions grant write-all)", ".github/workflows/job-all.yml job test (permissions grant write-all)"].sort();
+    assert.deepEqual(named, expected, "every grant named, and neither read-only workflow");
+    assert.match(row.fix, /no scope at `write` and no `write-all`/);
+  } finally {
+    await gh.close();
+  }
+  const clean = await fakeGitHub({ perms: { default_workflow_permissions: "read" }, files: { ".github/workflows/read.yml": files[".github/workflows/read.yml"], ".github/workflows/none.yml": files[".github/workflows/none.yml"] } });
+  try {
+    const row = await withApi(clean, async () => (await workflowTokenChecks({ repo: REPO, token: "dummy" })).find((r) => r.name === "ci token"));
+    assert.equal(row.status, "PASS", row.detail);
+  } finally {
+    await clean.close();
+  }
+});
+
 test("the default-token step: its dry run names who gets a read-only token, a called workflow that asks for write, those left alone and those off the default branch; with --yes the default is read-only and doctor's row passes", async () => {
   const gh = await fakeGitHub({ files: { ".github/workflows/ci.yml": CI, ".github/workflows/release.yml": RELEASE, ".github/workflows/deploy.yml": DEPLOY }, missing: [".github/workflows/old.yml"], broken: [".github/workflows/broken.yml"] });
   try {

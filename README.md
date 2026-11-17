@@ -45,7 +45,7 @@ then, in a Claude Code session: **"Set up Clockgrove Pendulum for this repositor
 - **Codex:** `codex plugin marketplace add clockgrove/pendulum && codex plugin add pendulum@clockgrove`
 - **GitHub Copilot CLI:** `copilot plugin marketplace add clockgrove/pendulum && copilot plugin install pendulum@clockgrove`
 
-Setup asks a few questions, shows each change and waits for your yes, and opens a pull request that adds Pendulum's workflow; Pendulum starts once you merge it. Check first that [it will work for you](#will-it-work-for-you); [Set it up, step by step](#set-it-up-step-by-step) has the details. To run on your own machine on the Claude Code or Codex login you already have, say "Set up Clockgrove Pendulum in local mode" instead ([local mode](#run-it-on-your-own-machine-instead)).
+Setup asks three questions (your coding agent, the spending caps, auto-merge), shows each change and waits for your yes, and opens a pull request that adds Pendulum's workflow; Pendulum starts once you merge it. Check first that [it will work for you](#will-it-work-for-you); [Set it up, step by step](#set-it-up-step-by-step) has the details. To run on your own machine on the Claude Code or Codex login you already have, say "Set up Clockgrove Pendulum in local mode" instead ([local mode](#run-it-on-your-own-machine-instead)).
 
 ## How it differs
 
@@ -101,7 +101,7 @@ Pendulum never handles a payment, and no bill comes from Clockgrove. To keep tho
 - **Several subscriptions or keys of one coding agent work as one pool:** each run starts on the account with the most quota left, and a usage limit sets aside only the account that met it ([docs/LOCAL.md](docs/LOCAL.md), Accounts; [docs/INSTALL.md](docs/INSTALL.md), Several accounts).
 - **Runs take from a few minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run pendulum.yml -f issue=<number>`) runs it even when that limit is reached.
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
-- **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Pendulum stops at a ready-for-review PR and you merge it yourself.
+- **For your first runs, start small:** setup recommends its first-run preset, `max_usd` 5, `max_concurrent` 1 and auto-merge off, and says how to raise each later. With auto-merge off, Pendulum stops at a ready-for-review PR and you merge it yourself.
 - **With auto-merge on, which is the default, nobody reads the code before it lands.** What stands between a change and your default branch is your required checks; the reviewer only comments, and the worker has to answer each comment.
 - **To stop one Objective,** remove its `pendulum:objective` label or close its issue, or ask "Stop Clockgrove Pendulum Objective 12". A worker or reviewer run in progress ends within about two minutes with its spend recorded, its PR becomes a draft, and nothing picks it up again until you re-apply the label; your other Objectives keep running ([docs/USAGE.md](docs/USAGE.md), An Objective's lifecycle).
 - **To restart one from its current text,** in any state, label its issue `pendulum:restart`, or ask "Restart Clockgrove Pendulum Objective 12". A run in progress stops first; the earlier PR is closed with a comment, its branch deleted, and the run starts over from the default branch.

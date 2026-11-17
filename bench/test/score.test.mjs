@@ -1444,3 +1444,19 @@ test("#506 re-check: a record that is no stand-in takes the sandbox cost of the 
   const row = scoreObjective(c, { prices, now: NOW });
   assert.deepEqual([row.cost.usd, row.cost.vendorUsd, row.cost.totalUsd, row.cost.usdUnknown], [4, 0.6, 4.6, undefined]);
 });
+
+test("#566 S6: a vendor comment standing alone with no model dollars and no model run of unknown cost is one run of unknown cost in the scorer's spend records, never a known $0", async () => {
+  const { spendRecords } = await import("../lib/objective.mjs");
+  const alone = (spend) => {
+    // A sandbox stage that left no progress comment: only its vendor comment, by Pendulum's App.
+    const c = cleanMerge(98);
+    const app = c.issueComments[0].user;
+    c.issueComments.push({ user: app, created_at: "2031-03-02T02:00:00Z", body: `<!-- pendulum:98:vendor:work:5552-abcdef012345 -->\nPendulum's sandbox cost for this stage:\n<!-- pendulum:spend ${JSON.stringify(spend)} -->` });
+    return spendRecords(c, { all: true }).map((r) => [r.usd, r.usdUnknown ?? 0, r.usdUnknownWhy ?? [], r.vendor]);
+  };
+  // Its usage record could not be read (launch.mjs bookVendor): no `modelUsd`, no model run of unknown cost.
+  assert.deepEqual(alone({ usd: 0.04, vendorUsd: 0.04 }), [[null, 1, ["unreported"], { usd: 0.04 }]]);
+  // With the model's dollars, they are known; with its run of unknown cost, that one run, not a second.
+  assert.deepEqual(alone({ usd: 0.34, modelUsd: 0.3, vendorUsd: 0.04 }), [[0.3, 0, [], { usd: 0.04 }]]);
+  assert.deepEqual(alone({ usd: 0.04, vendorUsd: 0.04, usdUnknown: 1, usdUnknownWhy: ["unreported"] }), [[null, 1, ["unreported"], { usd: 0.04 }]]);
+});

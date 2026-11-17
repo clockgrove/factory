@@ -359,7 +359,7 @@ test("report --rates: a stage's decision records are in no model's mix, from its
   }
 });
 
-test("report --rates: a stage whose ledger names another model than its harness line is under the ledger's model; an alias of its own is its own", async () => {
+test("report --rates: a stage whose ledger names another model than its harness line is under the ledger's model; an alias of its own is its own, named by the table's row", async () => {
   const w = empty();
   // The harness line names the worker's model; every pass of its ledger ran on another.
   reviewStage(w, 52, { kind: "work", model: WORKER, extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", REVIEWER, ANSWER_T, 0)], { model: WORKER, version: PENDULUM_VERSION, published: [WORKER, REVIEWER] })] });
@@ -368,11 +368,12 @@ test("report --rates: a stage whose ledger names another model than its harness 
   assert.deepEqual(r.rates.items.map((x) => x.model), [REVIEWER]);
   assert.deepEqual(mixOf(r, REVIEWER), partsOf(ANSWER_T));
   priceRatio(r, REVIEWER, "gpt-6.1-terra", ANSWER_T);
-  // A ledger naming the price table's row of the harness line's alias (gpt-5.6 is gpt-5.6-sol): one model, the line's.
+  // A ledger naming the price table's row of the harness line's alias (gpt-5.6 is gpt-5.6-sol): one model, under the
+  // row's id (report.mjs modelName).
   const alias = empty();
   reviewStage(alias, 53, { kind: "work", model: "gpt-5.6", extra: [spendMarker(0.1, { usdByBilling: { api: 0.1 }, billing: "api" }), ledgerMarker([pass("work-1", "gpt-5.6-sol", ANSWER_T, 0)], { model: "gpt-5.6", version: PENDULUM_VERSION, published: ["gpt-5.6", "gpt-5.6-sol"] })] });
   const { json: a } = await report(alias, ["--issue", "53", "--rates", "gpt-6.1-terra"]);
-  assert.deepEqual([...new Set([...a.rates.items, ...a.rates.skipped].map((x) => x.model).filter(Boolean))], ["gpt-5.6"]);
+  assert.deepEqual([...new Set([...a.rates.items, ...a.rates.skipped].map((x) => x.model).filter(Boolean))], ["gpt-5.6-sol"]);
 });
 
 test("report --rates: the command line takes model ids only", () => {

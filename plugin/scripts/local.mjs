@@ -158,6 +158,8 @@ const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
 /** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
 export const START_VARIABLES_MS = 15_000;
+/** How long serve's start waits on the gh login's read of Pendulum's App id (keepAppId): no rate-limit wait, then on. */
+export const APP_ID_READ_MS = 15_000;
 /** How many times backfillMark tries to write the mark of a pendulum:local label this process put on. */
 const MARK_TRIES = 5;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
@@ -3337,13 +3339,15 @@ export class Local {
    * serve's start (#564): Pendulum's App id from the repository variable as the start's list read it, or, when the list
    * was refused, read alone with the gh login's token (unless it is the local token), so a copy of a replaced App is
    * brought up to date; saved as its local copy for `pendulum report` (lib/app-id.mjs learnAppId). A variable that is not
-   * set is said with the line that sets it. Nothing here stops serve.
+   * set is said with the line that sets it. Nothing here stops serve, nor holds its start: the gh login's read takes no
+   * rate-limit wait and ends after APP_ID_READ_MS (`appIdReadMs`), and then `pendulum report` reads the id itself.
    */
   async keepAppId({ fallback = ghLoginToken } = {}) {
     if (!this.repo || (!this.variables && !this.variablesRefused)) return null;
     const listed = this.variablesRefused ? { refused: this.variablesRefused } : { vars: this.variables };
     try {
-      const r = await learnAppId(this.repo, { listed, token: this.token, fallback });
+      const ms = this.appIdReadMs ?? APP_ID_READ_MS;
+      const r = await learnAppId(this.repo, { listed, token: this.token, fallback, read: { noRateWait: true, deadlineAt: Date.now() + ms, signal: AbortSignal.timeout(ms) } });
       if (r.saved) log(`saved Pendulum's App id ${r.id} (the repository variable ${r.from === "variable-gh" ? "as the gh login reads it" : "PENDULUM_APP_ID"}) for \`pendulum report\` to ${r.file}`);
       if (r.problem) log(`the local copy of Pendulum's App id for \`pendulum report\`: ${r.problem}`);
       if (r.from === "unset") log(`the repository variable PENDULUM_APP_ID ${appIdWhyText(r)}, so \`pendulum report\` cannot tell Pendulum's App's comments from another App's${r.copy ? ` (it takes the local copy, ${r.copy}, meanwhile)` : ""}; set it once: ${appIdSetLine(this.repoFull)}`);

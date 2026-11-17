@@ -1,0 +1,3 @@
+# Lines the Quality workflow's old-name check lets through (#465): one entry per line, written PATH:TEXT, the tracked
+# file's path and the line's exact text as git grep prints it. Each entry has its reason on the comment line above it.
+# Keep it to lines that must name the old product, such as a third-party name that contains it.

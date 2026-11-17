@@ -4,7 +4,7 @@
 // equal failure signatures, else, where the signatures cannot tell, a decision call (triage.mjs openTriage `same`).
 import { checkRuns, getRepo, jobLog, logWindow, rest } from "./github.mjs";
 import { filesDiff, trustedAuthor } from "./logic.mjs";
-import { MAX_JOBS, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
+import { MAX_JOBS, cachedJob, checkCancel, failedStep, failureSignature, failureWindow, isAggregate, sameFailure, workflowJobs } from "./triage.mjs";
 
 /** The largest log or diff handed to the harness as one file; past it the head is cut and the tail kept. */
 export const RED_FILE_CAP = 8 * 1024 * 1024;
@@ -108,18 +108,20 @@ export function evidenceText({ branch, job, evidence, lines }) {
 }
 
 /**
- * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence}],
+ * The detail of a checks red on `sha`: {jobs: [{name, id, required, log, window, sig, base, baseUndecided, evidence, cancel}],
  * truncated, branch, green, diff, diffError}. `base` is {sha, said} when the job fails the same way, steadily, on the
  * default branch (baseMatch, with `same`: triage.mjs openTriage `same`, which the caller passes only when nothing on the
  * head points at the change, session.mjs baseJudge; else the signature alone), else null;
  * `baseUndecided` ({cause, said, limited?}) when a judgement that could have made it so got no answer; `evidence` is
- * what the base's newest runs of it show (baseEvidence), for the prompt. `green` is the PR's last green head; `diff` the
+ * what the base's newest runs of it show (baseEvidence), for the prompt; `cancel` (triage.mjs checkCancel) when the job
+ * was cancelled (at its time limit, by fail-fast or otherwise), else null, read through `cache` (triage's: openTriage
+ * `cache`), so a job triage read is not read again. `green` is the PR's last green head; `diff` the
  * two-dot diff from it to `sha`, made by `diffOf(from, to)` (Pendulum's own mirror) or, when the red head descends from
  * it, GitHub's compare; `diffError` says why there is none.
  * With `sinceGreen` false (a merge queue commit, no head of the PR) neither is read: `green` and `diff` are null.
  * `token` reads the repository and the PR; `actionsToken` the job logs and jobs.
  */
-export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5, sinceGreen = true, same = null }) {
+export async function redDetail({ repo, issue, prNumber, sha, failedRuns, required = [], token, actionsToken = token, diffOf = null, lookBack = 5, sinceGreen = true, same = null, cache = new Map() }) {
   const opts = { token };
   const actions = { token: actionsToken };
   const { jobs: picked, truncated } = jobsToDetail(failedRuns, required);
@@ -139,11 +141,7 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
   };
   // A job's Actions job, read once: its failed step's name, when a same-failure judgement needs it, and the step's times,
   // which cut the failed job's window (github.mjs logWindow).
-  const actionsJobs = new Map();
-  const jobOf = (id) => {
-    if (!actionsJobs.has(id)) actionsJobs.set(id, rest(`repos/${repo.full}/actions/jobs/${id}`, actions).catch(() => null));
-    return actionsJobs.get(id);
-  };
+  const jobOf = (id) => cachedJob(repo, id, { actionsToken, cache });
   const stepOf = (id) => jobOf(id).then((j) => failedStep(j)?.name || "");
   const short = (s) => String(s).slice(0, 7);
   const jobs = [];
@@ -167,7 +165,9 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
     const base = match.base ? { sha: runs[0].sha, said: match.said, exact: match.exact } : null;
     const u = match.undecided;
     const baseUndecided = u ? { cause: u.cause || "pendulum", said: u.said, ...(u.limited ? { limited: u.limited } : {}) } : null;
-    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs) });
+    // A job that was cancelled (triage.mjs checkCancel): what the fix pass and a Block say of it.
+    const cancel = await checkCancel(repo, r, { token, actionsToken, sha, runs: failedRuns, cache }).catch(() => null);
+    jobs.push({ name: r.name, id: r.id, suite: r.suite ?? null, required: required.includes(r.name), log: capped(log), window: logWindow(log, 4000, job), sig, base, baseUndecided, aggregate, evidence: baseEvidence(runs), cancel });
   }
   // A red required check whose run has other failing jobs: its workflow file at the run's head says which of them it
   // needs and which may fail without failing the run (triage.mjs workflowJobs), so the Block's lead (leadJobs) quotes a
@@ -200,7 +200,7 @@ export async function redDetail({ repo, issue, prNumber, sha, failedRuns, requir
 async function workflowAt(repo, suite, opts, actions) {
   const run = (await rest(`repos/${repo.full}/actions/runs?check_suite_id=${suite}&per_page=1`, actions))?.workflow_runs?.[0];
   const path = String(run?.path || "").replace(/@.*$/, "");
-  if (!path || !/^[0-9a-f]{40}$/.test(run?.head_sha || "")) return "";
+  if (!path || !/^[0-9a-f]{40,64}$/.test(run?.head_sha || "")) return "";
   return String(await rest(`repos/${repo.full}/contents/${path}?ref=${run.head_sha}`, { ...opts, raw: "Accept: application/vnd.github.raw+json" }));
 }
 
@@ -217,7 +217,8 @@ async function workflowAt(repo, suite, opts, actions) {
  * None when no failing job printed a failure line: the Block then quotes the output's tail.
  */
 export function leadJobs(jobs) {
-  const all = jobs || [];
+  // A cancelled job's line is that it was cancelled (triage.mjs jobCancel), before anything its log printed.
+  const all = (jobs || []).map((j) => (j.cancel ? { ...j, sig: { ...j.sig, line: j.cancel.text, lines: j.sig?.lines || [] } } : j));
   const lined = (j) => !!(j.sig?.line || j.sig?.lines?.length);
   if (!all.some(lined)) return [];
   const rank = (j) => (j.coe === false ? 0 : j.coe === true ? 2 : 1);

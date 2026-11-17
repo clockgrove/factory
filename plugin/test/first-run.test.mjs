@@ -25,7 +25,17 @@ function fixture({ origin = true } = {}) {
   mkdirSync(clone);
   spawnSync("git", ["init", "-q", clone]);
   if (origin) spawnSync("git", ["-C", clone, "remote", "add", "origin", `git@github.com:${REPO}.git`]);
-  return { root, home, clone, env: { ...process.env, HOME: home, GIT_SSH_COMMAND: "false", GIT_TERMINAL_PROMPT: "0" } };
+  return { root, home, clone, env: { ...devEnv(), HOME: home, GIT_SSH_COMMAND: "false", GIT_TERMINAL_PROMPT: "0" } };
+}
+
+/**
+ * This process's env as a developer's shell would have it: no GitHub Actions runner's variables (GITHUB_REPOSITORY,
+ * GITHUB_ACTIONS and the rest, which doctor.mjs and setup.mjs take before the clone's origin), no CI marker and no
+ * Factory setting, so the command behaves the same here and on a runner. A test sets what it needs.
+ */
+function devEnv() {
+  const off = /^(GITHUB_|RUNNER_|ACTIONS_|FACTORY_|INPUT_)|^CI$/;
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !off.test(k)));
 }
 
 /** A folder with git alone in it, for PATH: every other tool local mode needs is missing. */

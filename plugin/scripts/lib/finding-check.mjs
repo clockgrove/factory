@@ -16,7 +16,7 @@ import { openDecider } from "./decider.mjs";
 import { rest, resolveThread, reviewThreads } from "./github.mjs";
 import { parseReplies } from "./handoff.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
-import { CODE_SCANNING, acceptanceEntries, decisionsShown, isBodyFindingId, marker } from "./logic.mjs";
+import { CODE_SCANNING, acceptanceEntries, isBodyFindingId, marker } from "./logic.mjs";
 import { MIN_CONFIDENCE, TRIAGE_MODEL, confidenceFloor } from "./triage.mjs";
 
 /** The one question each answered finding is asked. */
@@ -61,27 +61,62 @@ const decisionWhere = (d) => (d.kind === "line" ? "on a line of the pull request
 /**
  * One recorded decision as a question shows it: who, when, where (with a review's state) and its text, cut at
  * INPUT_CAPS.decision so one long paste cannot crowd out the rest. Held secrets are redacted before the cut, so none
- * survives as a fragment the whole input's redaction would miss. decisionsShown sizes each by this same text.
+ * survives as a fragment the whole input's redaction would miss. decisionsPart sizes each by this same text.
  */
 const decisionText = (d) => {
   const where = decisionWhere(d);
   return `${d.author}, ${when(d.at)}${where ? `, ${where}` : ""}${d.state && (d.kind === "review" || d.kind === "line") ? ` (review state ${d.state})` : ""}:\n${cut(redactSecrets(String(d.body ?? "").trim()), INPUT_CAPS.decision)}`;
 };
-/** The decisions a question shows first when not all fit: the Objective's issue, then the pull request's. */
-const issueFirst = (d) => (d.on === "issue" ? 0 : 1);
+/** A decision's time for ordering: its last edit, else when it was made. */
+const decisionTime = (d) => Date.parse(d.seen ?? d.at) || 0;
+/** The share of INPUT_CAPS.decisions the issue's decisions may take while the pull request's compete for the rest. */
+export const ISSUE_SHARE = 0.5;
 
 /**
- * The decisions part of one question: a dismissed review's word (and its inline comments) left out; within
- * INPUT_CAPS.decisions, the issue's newest first, then the pull request's (logic.mjs decisionsShown, sized as shown),
- * oldest first; and how many did not fit.
+ * The decisions part of one question: `{text, shown, left}`. A dismissed review's word (and its inline comments) is
+ * left out. Within INPUT_CAPS.decisions, each sized as decisionText shows it: the newest decision always; then the
+ * issue's newest within ISSUE_SHARE of the window when the pull request has decisions too (an Objective-level decision
+ * outlived by the pull request's comments still shows, and the issue's cannot crowd out a newer reversal on the pull
+ * request); then the pull request's newest in the rest; then the issue's next newest in any room left. `text` shows them
+ * oldest first with how many did not fit; `left`, those, for checkAnswers' guard on a `decided` verdict.
  */
 export function decisionsPart(decisions) {
-  const live = (decisions || []).filter((d) => String(d?.body ?? "").trim() && d.state !== "DISMISSED");
-  if (!live.length) return "(none recorded)";
-  const shown = decisionsShown(live, INPUT_CAPS.decisions, { render: decisionText, rank: issueFirst });
-  const left = live.length - shown.length;
-  return `${left ? `(${left} more decision(s), older ones or the pull request's, are not shown for length.)\n\n` : ""}${shown.map(decisionText).join("\n\n")}`;
+  const live = (decisions || []).filter((d) => String(d?.body ?? "").trim() && d.state !== "DISMISSED").sort((a, b) => decisionTime(a) - decisionTime(b));
+  if (!live.length) return { text: "(none recorded)", shown: [], left: [] };
+  const cap = INPUT_CAPS.decisions;
+  const size = (d) => decisionText(d).length + 2;
+  const newest = live.at(-1);
+  const kept = new Set([newest]);
+  let used = size(newest);
+  const issue = live.filter((d) => d.on === "issue" && d !== newest).reverse();
+  const pr = live.filter((d) => d.on !== "issue" && d !== newest).reverse();
+  let issueUsed = newest.on === "issue" ? used : 0;
+  const share = pr.length ? Math.floor(cap * ISSUE_SHARE) : cap;
+  let next = 0;
+  for (; next < issue.length && used + size(issue[next]) <= cap && issueUsed + size(issue[next]) <= share; next += 1) {
+    kept.add(issue[next]);
+    used += size(issue[next]);
+    issueUsed += size(issue[next]);
+  }
+  for (const d of pr) {
+    if (used + size(d) > cap) break;
+    kept.add(d);
+    used += size(d);
+  }
+  for (; next < issue.length && used + size(issue[next]) <= cap; next += 1) {
+    kept.add(issue[next]);
+    used += size(issue[next]);
+  }
+  const shown = live.filter((d) => kept.has(d));
+  const left = live.filter((d) => !kept.has(d));
+  return { text: `${left.length ? `(${left.length} more decision(s), none of them the newest, are not shown for length.)\n\n` : ""}${shown.map(decisionText).join("\n\n")}`, shown, left };
 }
+
+/**
+ * Whether a decision newer than the oldest one a question shows was left out of it for length: then the question may
+ * show a decision a later one overruled, so a `decided` verdict on it resolves nothing (checkAnswers).
+ */
+export const newerLeftOut = ({ shown, left }) => shown.length > 0 && left.some((d) => decisionTime(d) > Math.min(...shown.map(decisionTime)));
 
 /** Whether a finding is code scanning's: a maintainer's decision never settles a security alert (as logic.mjs answersComment). */
 const codeScanning = (f) => String(f?.from ?? "").toLowerCase() === CODE_SCANNING;
@@ -132,7 +167,7 @@ export function findingInput({ repo, prNumber, finding, reply, diff, issue = "",
       ...data("What it changed in its other files since then:", own === null ? "(the change could not be read)" : other.trim() ? cut(other, INPUT_CAPS.other) : "(no change)"),
       ...data("The issue's acceptance entries:", entries.length ? cut(entries.map((e) => `${e.id}. ${e.text}`).join("\n"), INPUT_CAPS.entries) : String(issue || "").trim() ? cut(issue, INPUT_CAPS.entries) : "(none stated)"),
       ...data("The repository's rules:", String(rules || "").trim() ? cut(rules, INPUT_CAPS.rules) : "(none given)"),
-      ...data("Decisions recorded on the issue and the pull request by maintainers (people with write access to the repository), oldest first:", decisionsPart(decisions)),
+      ...data("Decisions recorded on the issue and the pull request by maintainers (people with write access to the repository), oldest first:", decisionsPart(decisions).text),
     ].join("\n"),
   );
 }
@@ -184,7 +219,8 @@ export function openFindingCheck({ inputs = {}, env = process.env, home = homedi
  * changed from `from` to its head (session.mjs answerDiff), `from` the commit a finding was raised on (`raisedOn`, else
  * `since`). `decisions`: the maintainers' recorded decisions the check may read a finding as settled by, only as
  * session.mjs objectiveDecisions returns them (authors with write access); never a comment whose author is not checked.
- * A `decided` verdict never resolves code scanning's finding.
+ * A `decided` verdict never resolves code scanning's finding, nor any finding when a decision newer than the oldest one
+ * the question showed was left out for length (newerLeftOut).
  * With the check off, every answer resolves its finding, as the progress comment says. Returns {resolved,
  * open, unjudged}: ids, `unjudged` the ones the gateway gave no verdict on, each {id, error}.
  */
@@ -204,6 +240,8 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
     for (const from of new Set(answered.map((f) => f.raisedOn || since))) diffs.set(from, from ? await Promise.resolve(diffOf(from)).catch(() => null) : null);
     const items = answered.map((f) => ({ id: f.id, path: f.path ?? null, line: f.line ?? f.original_line ?? null, body: f.body, ...(f.from ? { from: f.from } : {}), ...(f.raisedAt ? { raisedAt: f.raisedAt } : {}), reply: replies.get(String(f.id)), diff: diffs.get(f.raisedOn || since) ?? null }));
     const verdicts = await check.judge(items, { repo: repo.full, prNumber, issue: issueBody, rules, decisions });
+    // The question may have shown a decision a later one, left out for length, overruled: then `decided` settles nothing.
+    const overruled = newerLeftOut(decisionsPart(decisions));
     const floor = check.floor?.() ?? confidenceFloor();
     const byId = new Map(verdicts.map((v) => [String(v.id), v]));
     yes = new Set();
@@ -211,9 +249,10 @@ export async function checkAnswers({ repo, issue, prNumber, findings = [], repli
       const v = byId.get(String(it.id));
       // A maintainer's decision never settles code scanning's alert: only a fix or a rebuttal does.
       const alertDecided = v?.verdict === "decided" && codeScanning(it);
-      const said = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}${alertDecided ? " (code scanning's alert: a decision does not settle it: open)" : AT_FLOOR.has(v.verdict) && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
+      const unsure = v?.verdict === "decided" && !alertDecided && overruled;
+      const said = v?.verdict ? `${v.verdict}${typeof v.confidence === "number" ? ` ${v.confidence.toFixed(2)}` : ""}${alertDecided ? " (code scanning's alert: a decision does not settle it: open)" : unsure ? " (a newer decision did not fit the question: open)" : AT_FLOOR.has(v.verdict) && !resolves(v, floor.min) ? ` (under ${floor.text}: open)` : ""}` : `no verdict (${v?.error || "no_answer"}); judged again next stage`;
       log(`finding check (${check.model}): ${findingPlace(it)} (comment ${it.id}): ${said}`);
-      if (resolves(v, floor.min) && !alertDecided) yes.add(String(it.id));
+      if (resolves(v, floor.min) && !alertDecided && !unsure) yes.add(String(it.id));
       else if (!v?.verdict) unjudged.push({ id: it.id, error: v?.error || "no_answer" });
     }
     const left = items.filter((it) => !yes.has(String(it.id)));

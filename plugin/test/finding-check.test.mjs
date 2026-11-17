@@ -454,7 +454,7 @@ const OWNER = { login: "owner-kim", type: "User", id: 41 };
  * reply quoting a decision counts for nothing. Whether a real model reads a broad or stale decision so is the
  * instrument run's to show, not this fake's.
  */
-function decisionReader(phrase = SETTLES) {
+function decisionReader(phrase = SETTLES, unless = null) {
   const asked = [];
   return {
     asked,
@@ -462,7 +462,8 @@ function decisionReader(phrase = SETTLES) {
     model: "fake/decider",
     async decide(input, question) {
       asked.push({ input, question });
-      return { verdict: (partOf(input) ?? "").includes(phrase) ? "decided" : "unresolved", confidence: 0.9 };
+      const part = partOf(input) ?? "";
+      return { verdict: part.includes(phrase) && !(unless && part.includes(unless)) ? "decided" : "unresolved", confidence: 0.9 };
     },
   };
 }
@@ -474,10 +475,11 @@ function decisionReader(phrase = SETTLES) {
  * `self` and `me`: the login Factory posts as (local mode: the developer's). Returns what the check was asked, what it
  * resolved, the findings left open and the stage's exit.
  */
-async function decisionAfterRounds(author, { decision = `Owner decision (2026-11-16): the owner session ticks #347's five items after the PR merges. ${SETTLES}, say so in the PR body, and go on without asking.`, finding = null, phrase = SETTLES, self = SELF, me = app, writers = ["owner-kim"], reviews = undefined, issueComments = [] } = {}) {
+async function decisionAfterRounds(author, { decision = `Owner decision (2026-11-16): the owner session ticks #347's five items after the PR merges. ${SETTLES}, say so in the PR body, and go on without asking.`, finding = null, phrase = SETTLES, unless = null, self = SELF, me = app, writers = ["owner-kim"], reviews = undefined, issueComments = [], prComments = [] } = {}) {
   const raised = finding ?? { ...root(100, "docs/review.md", 88, "acceptance 2: #347's five items are not ticked, and no change in this PR ticks them. FINDING-TICK"), created_at: "2026-11-16T21:57:33Z" };
   const gh = github({ lineComments: [raised], writers, me, ...(reviews ? { reviews } : {}) });
   gh.state.issueComments.push({ id: 900, user: OWNER, author_association: "MEMBER", body: "Owner: the merge queue's red is main's own, not this PR's.", created_at: "2026-11-16T18:57:12Z" }, ...issueComments);
+  gh.state.prComments.push(...prComments);
   gh.state.issueComments.push({ id: 901, user: author, author_association: writers.includes(author.login) ? "MEMBER" : "NONE", body: decision, created_at: "2026-11-16T22:37:31Z" });
   const ctx = { repo: REPO, issue: 7, prNumber: 12, objectiveLabel: "factory:objective" };
   const where = { id: raised.id, path: raised.path, line: raised.line };
@@ -494,7 +496,7 @@ async function decisionAfterRounds(author, { decision = `Owner decision (2026-11
       const replies = JSON.stringify([{ id: raised.id, body: `Rebuttal, naming the owner's recorded decision on #7: "${SETTLES}". No commit can tick another issue's checklist.` }]);
       await postReplies(REPO, 12, 7, replies, [raised.id], { token: "t" });
       const decisions = await objectiveDecisions(REPO, { issue: 7, prNumber: 12 }, { token: "t" }, { strict: true });
-      const fake = decisionReader(phrase);
+      const fake = decisionReader(phrase, unless);
       const out = await checkAnswers({ repo: REPO, issue: 7, prNumber: 12, findings: toAnswer, repliesText: replies, check: openFindingCheck({ decider: fake }), diffOf, since: RAISED, issueBody: "## Acceptance\n1. the review doc records the hashes\n2. #347 ticks these five items", decisions, opts: { token: "t" } });
       const open = await list();
       const decision = exitFor(open.length);
@@ -583,25 +585,57 @@ test("#474: in local mode, where Factory posts as the developer, the developer's
   assert.equal(exit.exit, "delivered");
 });
 
-test("#474: the decisions part measures what it shows: each decision cut at its own cap, the issue's ahead of the PR's, a count of those left out, dismissed reviews dropped, review states shown", () => {
+test("#474: the decisions part measures what it shows: each decision cut at its own cap, the newest kept, the issue's within its share, a count of those left out, dismissed reviews dropped, review states shown", () => {
   const at = (m) => `2026-11-16T${String(10 + Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}:00Z`;
   const d = (n, extra) => ({ author: "owner-kim", at: at(n), body: `decision ${n}`, key: `comment:${n}`, kind: "comment", state: null, ...extra });
   // One long paste is cut at its own cap, not the part's.
-  const long = decisionsPart([d(1, { body: `start ${"x".repeat(5000)}`, on: "issue" })]);
+  const long = decisionsPart([d(1, { body: `start ${"x".repeat(5000)}`, on: "issue" })]).text;
   assert.match(long, /^owner-kim, 2026-11-16 10:01Z, on the issue:\nstart x+\n\[cut at 2000 characters\]$/);
   assert.equal(INPUT_CAPS.decision, 2000);
   // The issue's decision, the oldest, outlived by PR chatter: kept ahead of it; the PR's newest whole ones fill the rest,
   // none of them clipped, and the part says how many it left out.
   const chatter = Array.from({ length: 8 }, (_, i) => d(10 + i, { body: `pr ${i} ${"y".repeat(1700)}`, on: "pr" }));
-  const part = decisionsPart([d(1, { body: SETTLES, on: "issue" }), ...chatter]);
-  assert.match(part, /^\(4 more decision\(s\), older ones or the pull request's, are not shown for length\.\)\n\nowner-kim, 2026-11-16 10:01Z, on the issue:\nTreat that acceptance entry/);
+  const { text: part, left } = decisionsPart([d(1, { body: SETTLES, on: "issue" }), ...chatter]);
+  assert.match(part, /^\(4 more decision\(s\), none of them the newest, are not shown for length\.\)\n\nowner-kim, 2026-11-16 10:01Z, on the issue:\nTreat that acceptance entry/);
+  assert.deepEqual(left.map((x) => x.key), ["comment:10", "comment:11", "comment:12", "comment:13"]);
   assert.deepEqual([...part.matchAll(/\npr (\d) y+(?=\n\n|$)/g)].map((m) => m[1]), ["4", "5", "6", "7"], "the newest whole, oldest first");
   assert.doesNotMatch(part, /\[cut at/);
   assert.ok(part.length - part.indexOf("owner-kim") <= INPUT_CAPS.decisions, "what is measured is what is shown");
   // A dismissed review's word is no decision; a review's state is shown with it.
-  const reviews = decisionsPart([d(1, { kind: "review", state: "DISMISSED", body: "Do it the other way." }), d(2, { kind: "line", state: "DISMISSED", body: "a.ts:3: no" }), d(3, { kind: "review", state: "CHANGES_REQUESTED", body: "Keep the old API.", on: "pr" })]);
+  const reviews = decisionsPart([d(1, { kind: "review", state: "DISMISSED", body: "Do it the other way." }), d(2, { kind: "line", state: "DISMISSED", body: "a.ts:3: no" }), d(3, { kind: "review", state: "CHANGES_REQUESTED", body: "Keep the old API.", on: "pr" })]).text;
   assert.equal(reviews, "owner-kim, 2026-11-16 10:03Z, in a review of the pull request (review state CHANGES_REQUESTED):\nKeep the old API.");
-  assert.equal(decisionsPart([d(1, { kind: "review", state: "DISMISSED" })]), "(none recorded)");
+  assert.deepEqual(decisionsPart([d(1, { kind: "review", state: "DISMISSED" })]), { text: "(none recorded)", shown: [], left: [] });
+});
+
+const REVERSAL = "Reversal: tick #347 in this PR after all.";
+const longDecision = (id, at) => ({ id, user: OWNER, author_association: "MEMBER", body: `Notes ${id}: ${"x".repeat(1900)}`, created_at: at });
+
+test("#474: an issue waiver, then a newer reversal on the PR, then a window full of long issue decisions: the reversal still reaches the check, which then reads no waiver as standing", async () => {
+  const older = ["09:00", "09:10", "09:20", "09:30"].map((t, i) => longDecision(800 + i, `2026-11-16T${t}:00Z`));
+  const reversal = { id: 950, user: OWNER, author_association: "MEMBER", body: REVERSAL, created_at: "2026-11-16T22:45:00Z" };
+  const { input, out, exit } = await decisionAfterRounds(OWNER, { unless: REVERSAL, issueComments: older, prComments: [reversal] });
+  const part = partOf(input);
+  assert.match(part, /owner-kim, 2026-11-16 22:45Z, on the pull request:\nReversal: tick #347/, "the newest decision is always shown");
+  assert.match(part, new RegExp(SETTLES), "the issue's waiver, within its share");
+  assert.match(part, /^\(1 more decision\(s\), none of them the newest, are not shown for length\.\)/);
+  assert.doesNotMatch(part, /Notes 800:/, "the oldest issue decision is the one left out");
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.equal(exit.exit, "blocked");
+});
+
+test("#474: when a decision newer than the oldest one shown is left out for length, a decided verdict resolves nothing", async () => {
+  const reversal = { id: 950, user: OWNER, author_association: "MEMBER", body: REVERSAL, created_at: "2026-11-16T22:45:00Z" };
+  const chatter = ["23:00", "23:10", "23:20", "23:30", "23:40"].map((t, i) => longDecision(960 + i, `2026-11-16T${t}:00Z`));
+  const { decisions, input, out, exit } = await decisionAfterRounds(OWNER, { unless: REVERSAL, prComments: [reversal, ...chatter] });
+  const part = partOf(input);
+  // The issue's waiver is shown within its share; the reversal, older than the PR's newest, did not fit.
+  assert.match(part, new RegExp(SETTLES));
+  assert.doesNotMatch(part, /Reversal/);
+  // The fake model, seeing only the waiver, answers decided: the guard keeps the finding open.
+  assert.deepEqual(out, { resolved: [], open: [100], unjudged: [] });
+  assert.equal(exit.exit, "blocked");
+  const { left } = decisionsPart(decisions);
+  assert.ok(left.some((d) => d.key === "comment:950"));
 });
 
 test("#474: a held secret in a decision never reaches the decision model, even where the decision's cap would cut through it", () => {

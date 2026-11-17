@@ -2543,22 +2543,17 @@ export function answerDuring({ unread = [], writers = new Set(), events = [], re
 const decisionText = (d) => `### ${d.author}, ${String(d.at).slice(0, 16).replace("T", " ")}Z\n\n${d.body}`;
 /**
  * The decisions that fit a prompt section: the newest whole ones within `cap` characters (the newest always), oldest
- * first. Only these reach the model, so only these are recorded as read; the cut ones stay unread. Each is sized as
- * `render` writes it (the caller's own rendering, so what is measured is what is shown), joined by a blank line;
- * `rank(d)`, when given, picks lower ranks first (the newest first within a rank).
+ * first. Only these reach the model, so only these are recorded as read; the cut ones stay unread.
  */
-export function decisionsShown(decisions, cap = 12_000, { render = decisionText, rank = null } = {}) {
-  const all = [...(decisions || [])];
-  const order = all.map((d, i) => ({ d, i })).reverse();
-  if (rank) order.sort((a, b) => rank(a.d) - rank(b.d));
-  const kept = [];
+export function decisionsShown(decisions, cap = 12_000) {
+  const shown = [];
   let size = 0;
-  for (const { d, i } of order) {
-    size += render(d).length + 2;
-    if (kept.length && size > cap) break;
-    kept.push(i);
+  for (const d of [...(decisions || [])].reverse()) {
+    size += decisionText(d).length + 2;
+    if (shown.length && size > cap) break;
+    shown.unshift(d);
   }
-  return kept.sort((a, b) => a - b).map((i) => all[i]);
+  return shown;
 }
 /** The decisions as a prompt section ("" when none), capped so a long thread cannot crowd out the task. */
 export function decisionsSection(decisions, cap = 12_000) {

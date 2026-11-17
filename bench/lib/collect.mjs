@@ -148,6 +148,9 @@ export async function awaitUsage(api, repoFull, issues, { ended = issues, waitMs
   return { missing };
 }
 
+/** The record of an artifact with no result.json to read: one run of unknown cost, never $0 and never priced from a stream. */
+const noResult = (artifact) => ({ artifact, harness: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], tokens: { input: null, output: null, cached: null, written: null }, basis: `unknown: no result.json in ${artifact} (its stage ended before it wrote one)` });
+
 /** The usage records of the artifacts, downloaded and read; each tagged with its artifact name. */
 async function usageFromArtifacts(artifacts, repoFull, download) {
   const records = [];
@@ -155,11 +158,13 @@ async function usageFromArtifacts(artifacts, repoFull, download) {
     if (a.expired) continue;
     const dir = await download(repoFull, a);
     try {
-      const file = findFile(dir, "result.json") ?? findFile(dir, "events.jsonl");
+      // Only the stage's own result.json prices it: a raw stream is never priced (a resumed pass's total would count twice
+      // and a killed pass not at all). An artifact without one is a run of unknown cost (usage.mjs UNKNOWN_WHY).
+      const file = findFile(dir, "result.json");
       const rec = file ? parseUsageText(readFileSync(file, "utf8")) : null;
       const events = findFile(dir, "events.jsonl");
       if (rec && events) rec.sessions = sessionsOf(readFileSync(events, "utf8"));
-      records.push(rec ? { ...rec, artifact: a.name } : { artifact: a.name, harness: null, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: `unreadable: no result.json or events.jsonl in ${a.name}` });
+      records.push(rec ? { ...rec, artifact: a.name } : noResult(a.name));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -378,8 +383,14 @@ export function usageFromDir(dir, { readdir, read, isDir = null }) {
       const file = `${at}/${name}`;
       if (name === "result.json" || name === "events.jsonl" || (depth === 0 && /\.(json|jsonl)$/.test(name))) {
         const text = read(file);
-        const rec = parseUsageText(text);
-        if (rec?.harness) records.push({ ...rec, ...(name === "events.jsonl" ? { sessions: sessionsOf(text) } : {}), artifact: basename(at) === basename(dir) ? name : `${basename(at)}/${name}` });
+        const artifact = basename(at) === basename(dir) ? name : `${basename(at)}/${name}`;
+        // A raw stream is never priced: it gives its sessions only, and stands for a run of unknown cost when no
+        // result.json is beside it (merged below).
+        if (name === "events.jsonl") records.push({ ...noResult(artifact), sessions: sessionsOf(text), streamOnly: true });
+        else {
+          const rec = parseUsageText(text);
+          if (rec?.harness) records.push({ ...rec, artifact });
+        }
       } else if (depth < 2 && (isDir ? isDir(file) : !name.includes("."))) {
         try {
           walk(file, depth + 1);
@@ -396,8 +407,8 @@ export function usageFromDir(dir, { readdir, read, isDir = null }) {
     const key = r.artifact.replace(/\/?(result\.json|events\.jsonl)$/, "");
     const have = byDir.get(key);
     const sessions = r.sessions ?? have?.sessions ?? null;
-    if (!have || r.artifact.endsWith("result.json")) byDir.set(key, { ...r, sessions });
+    if (!have || (have.streamOnly && !r.streamOnly)) byDir.set(key, { ...r, sessions });
     else if (sessions && !have.sessions) byDir.set(key, { ...have, sessions });
   }
-  return [...byDir.values()];
+  return [...byDir.values()].map(({ streamOnly, ...r }) => r);
 }

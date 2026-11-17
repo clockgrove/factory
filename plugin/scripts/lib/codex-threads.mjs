@@ -24,7 +24,7 @@ export const plainThread = (id) => typeof id === "string" && /^[0-9A-Fa-f]{8}-[0
 
 /** The largest rollout read (the largest real one seen: 13 MB for a 21M-token thread); a larger one is not counted. */
 export const MAX_ROLLOUT_BYTES = 64 * 1024 * 1024;
-/** The most rollouts read for one run (its own, then each thread named): more leaves the run's dollars a lower bound. */
+/** The most rollouts read for one run (its own, then each thread named): a thread past it is spend of unknown cost. */
 export const MAX_THREAD_READS = 256;
 
 /** Codex's sessions directory for a process started with `env` (local mode, a developer's own run). */

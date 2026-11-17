@@ -11,7 +11,7 @@ import { CODEX_GATEWAY_ENV, PENDULUM_SECRET_KEYS, MODEL_SECRET_KEYS, resolveInpu
 import { parseWorkerSecrets } from "../scripts/lib/worker-secrets.mjs";
 import { isSecretEnv, stageEnvironment } from "../scripts/launch.mjs";
 import { gatewayKeyProbe, neededSecrets } from "../scripts/doctor.mjs";
-import { fromCodexEvents, loadPrices, priceTokens } from "../../bench/lib/cost.mjs";
+import { loadPrices, priceTokens } from "../../bench/lib/cost.mjs";
 import { harnessActivity } from "../scripts/lib/logic.mjs";
 
 const fixtures = join(import.meta.dirname, "fixtures");
@@ -87,9 +87,6 @@ test("Codex through the gateway: cache writes parsed, priced at the write rate, 
   const own = sinceSession(resumed, { usd: fresh.usd, tokens: fresh.tokens });
   assert.deepEqual(own.tokens, { input: 22228, output: 61, cached: 21912, written: 310 });
   assert.deepEqual(own.cache.first, { unit: "turn", input: 22228, cached: 21912, written: 310 });
-  // The bench reads a raw stream of both passes the same way.
-  const raw = fromCodexEvents(`${fixture("codex-0.167-gateway-thread.jsonl")}${fixture("codex-0.167-gateway-resumed.jsonl")}`, "gpt-6.1-sol");
-  assert.deepEqual(raw.tokens, { input: 43800, output: 122, cached: 32637, written: 11151 });
   // The live counter on the progress comment counts the resumed pass's own writes too.
   const live = harnessActivity();
   for (const l of fixture("codex-0.167-gateway-thread.jsonl").split("\n")) live.feed(l);

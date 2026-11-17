@@ -3,9 +3,8 @@
 // job uploads (`pendulum-usage-<issue>`, and `pendulum-usage-<issue>-review`
 // for the reviewer pass): its normalized `result.json` (action/scripts/lib/
 // usage.mjs: {harness, model, usd, tokens, basis, started, ended, runs,
-// passes, exit, reason, credential, turns, priceTableDate}). A raw Claude
-// result (`{type: "result", total_cost_usd, modelUsage}`) or a raw Codex
-// JSONL (`events.jsonl`) is accepted too, for runs made outside the Action.
+// passes, exit, reason, credential, turns, priceTableDate}). A raw stream is
+// never priced: an artifact with no result.json is a run of unknown cost.
 //
 //   claude   unit usd      total_cost_usd, modelUsage (sub-agents included)
 //   codex    unit usd      tokens priced at OpenAI's Standard rates from the Codex price table (plugin/scripts/lib/codex-prices.json, dated)
@@ -28,7 +27,6 @@ const PRICES_NAME = "codex-prices.json";
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const add = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
-const less = (a, b) => (a === null ? null : Math.max(0, a - (b ?? 0)));
 const round4 = (n) => (n === null ? null : Math.round(n * 10000) / 10000);
 
 export function loadPrices(file = PRICES_FILE) {
@@ -39,56 +37,6 @@ export function loadPrices(file = PRICES_FILE) {
 
 /** USD for Codex tokens at the table's rates (usage.mjs codexRate: exact id or dated snapshot); null when unlisted. */
 export { priceTokens };
-
-/** Non-JSON lines are skipped (CLIs print warnings on stdout). */
-function jsonLines(text) {
-  const out = [];
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t.startsWith("{")) continue;
-    try {
-      out.push(JSON.parse(t));
-    } catch {
-      // partial line
-    }
-  }
-  return out;
-}
-
-/** A raw Claude result object (json or the last stream-json line) to the normalized record. */
-export function fromClaudeResult(result, model = null) {
-  const rec = { harness: "claude", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unknown", turns: num(result.num_turns), exit: null, runs: 1 };
-  const byModel = result.modelUsage && typeof result.modelUsage === "object" ? result.modelUsage : null;
-  if (byModel && Object.keys(byModel).length) {
-    let input = null;
-    let output = null;
-    let cached = null;
-    let written = null;
-    let cost = null;
-    rec.models = {};
-    for (const [name, u] of Object.entries(byModel)) {
-      const m = { input: num(u.inputTokens), cached: num(u.cacheReadInputTokens), written: num(u.cacheCreationInputTokens), output: num(u.outputTokens), usd: num(u.costUSD) };
-      input = add(input, add(m.input, add(m.cached, m.written)));
-      output = add(output, m.output);
-      cached = add(cached, m.cached);
-      written = add(written, m.written);
-      if (m.usd !== null) cost = add(cost, m.usd);
-      rec.models[name] = m;
-      if (!rec.model) rec.model = name;
-    }
-    rec.tokens = { input, output, cached, written };
-    rec.usd = num(result.total_cost_usd) ?? cost;
-    rec.basis = "harness-reported: total_cost_usd, modelUsage (sub-agents included)";
-  } else {
-    const u = result.usage || {};
-    const cached = num(u.cache_read_input_tokens);
-    const written = num(u.cache_creation_input_tokens);
-    rec.tokens = { input: add(num(u.input_tokens), add(cached, written)), output: num(u.output_tokens), cached, written };
-    rec.usd = num(result.total_cost_usd);
-    rec.basis = rec.usd === null ? "unknown: no total_cost_usd" : "harness-reported: total_cost_usd, usage (sub-agents excluded)";
-  }
-  return rec;
-}
 
 /**
  * The prompt cache across an Objective's artifacts (the usage record's `cache`, session.mjs writeUsage): the TTLs
@@ -132,84 +80,31 @@ export function vendorOf(records) {
   const withVendor = [...byStage.values()];
   if (!withVendor.length) return null;
   const priced = withVendor.filter((r) => num(r.vendor.usd) !== null);
+  // A stage whose usage the vendor did not report: its known parts (a creation, storage) are summed, its compute unknown.
+  const unreported = (r) => num(r.vendor.usd) === null || r.vendor.usageUnknown === true || (r.vendor.usdUnknown ?? 0) > 0;
   const rates = withVendor.map((r) => r.vendor.rates).find((x) => x && typeof x === "object");
   const usd = priced.length ? round4(priced.reduce((s, r) => s + r.vendor.usd, 0)) : null;
-  const unknown = withVendor.length - priced.length;
+  const unknown = withVendor.filter(unreported).length;
   const basis = `${withVendor.length} sandbox stage(s)${unknown ? `, ${unknown} of unknown cost (${UNKNOWN_WHY.sandbox})` : ""}; ${rates ? `${rates.vendor ?? "vendor"} ${rates.plan ?? ""} list rates (${rates.region ?? "?"}) read ${rates.date ?? "?"}` : "list rates"}`;
   return { usd, parts: withVendor.length, ...(unknown ? { usdUnknown: unknown } : {}), basis, storedUsd: round4(withVendor.reduce((s, r) => s + (num(r.vendor.storedUsd) ?? 0), 0)) };
-}
-
-/**
- * Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already
- * includes the reasoning tokens, and `input_tokens` the cached and written ones (`cache_write_input_tokens`). Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
- * the stream reports the thread's running total, so it counts only its own share (as the worker's runHarness does).
- */
-export function fromCodexEvents(text, model = null) {
-  const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
-  const totals = new Map();
-  let thread = null;
-  let pass = null;
-  const close = () => {
-    if (!pass) return;
-    const prior = thread ? totals.get(thread) : null;
-    if (thread) totals.set(thread, pass);
-    for (const k of ["input", "output", "cached", "written"]) rec.tokens[k] = add(rec.tokens[k], prior ? less(pass[k], prior[k]) : pass[k]);
-    pass = null;
-  };
-  for (const e of jsonLines(text)) {
-    if (e.type === "thread.started") {
-      close();
-      thread = typeof e.thread_id === "string" ? e.thread_id : null;
-    }
-    if (e.type !== "turn.completed") continue;
-    rec.turns += 1;
-    const u = e.usage || {};
-    pass ??= { input: null, output: null, cached: null, written: null };
-    pass.input = add(pass.input, num(u.input_tokens));
-    pass.output = add(pass.output, num(u.output_tokens));
-    pass.cached = add(pass.cached, num(u.cached_input_tokens));
-    pass.written = add(pass.written, num(u.cache_write_input_tokens));
-  }
-  close();
-  return rec;
 }
 
 /** Harness calls and distinct sessions in a raw event stream (the worker's own reading, usage.mjs streamSessions). */
 export const sessionsOf = streamSessions;
 
-/** Any usage file's content to a normalized record, by shape; null when it is none of them. */
-export function parseUsageText(text, { model = null } = {}) {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return null;
+/**
+ * A usage file's content to its record: a stage's result.json (the worker's normalized record), else null. A raw
+ * stream (events.jsonl, a harness's own output) is never priced here: a resumed pass's running total would count
+ * twice and a killed pass not at all; the stage's own record says what was reported and what is unknown.
+ */
+export function parseUsageText(text) {
   let value = null;
-  if (!trimmed.includes("\n") || trimmed.startsWith("{\n") || trimmed.startsWith("{\r\n")) {
-    try {
-      value = JSON.parse(trimmed);
-    } catch {
-      value = null;
-    }
+  try {
+    value = JSON.parse(String(text || "").trim());
+  } catch {
+    return null;
   }
-  if (value && typeof value === "object") {
-    if (value.harness) return { ...value, runs: value.runs ?? 1 };
-    if (value.type === "result" || "total_cost_usd" in value) return fromClaudeResult(value, model);
-  }
-  const lines = jsonLines(trimmed);
-  if (!lines.length) return null;
-  if (lines.some((l) => l.type === "turn.completed" || l.type === "thread.started")) return fromCodexEvents(trimmed, model);
-  // The worker appends one result per harness run (the first prompt, each validation fix pass): sum them all.
-  const results = lines.filter((l) => l.type === "result").map((r) => fromClaudeResult(r, model));
-  if (!results.length) return null;
-  const sum = results[0];
-  for (const r of results.slice(1)) {
-    sum.usd = sum.usd === null && r.usd === null ? null : (sum.usd ?? 0) + (r.usd ?? 0);
-    sum.tokens = { input: add(sum.tokens.input, r.tokens.input), output: add(sum.tokens.output, r.tokens.output), cached: add(sum.tokens.cached, r.tokens.cached), written: add(sum.tokens.written, r.tokens.written) };
-    sum.models = mergeModels(sum.models, r.models);
-    sum.turns = add(sum.turns, r.turns);
-    sum.model = sum.model ?? r.model;
-  }
-  sum.usd = round4(sum.usd);
-  sum.runs = results.length;
-  return sum;
+  return value && typeof value === "object" && !Array.isArray(value) && value.harness ? { ...value, runs: value.runs ?? 1 } : null;
 }
 
 /**

@@ -750,7 +750,8 @@ test("costByPhase: each harness run's cost by label on the exit line", async () 
   const { costByPhase } = await import("../scripts/lib/logic.mjs");
   assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }, { label: "validation-fix-1", usd: 0.543 }]), " (work-1 7.90, validation-fix-1 0.54)");
   assert.equal(costByPhase([{ label: "work-1", usd: 7.9 }]), "");
-  assert.equal(costByPhase([{ label: "work-1", usd: null }, { label: "exit", usd: 0.1 }]), "");
+  assert.equal(costByPhase([{ label: "work-1", usd: null }, { label: "exit", usd: 0.1 }]), " (work-1 unknown, exit 0.10)", "a pass of unknown cost is named, never left out");
+  assert.equal(costByPhase([{ label: "work-1", usd: 0, noRun: true }, { label: "exit", usd: 0.1 }]), "", "a pass that never ran is none");
 });
 
 test("Git LFS: a plain blob is refused (renames aside), local mode commits media, comments are no LFS use", async () => {

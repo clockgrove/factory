@@ -2080,3 +2080,56 @@ test("#483: however many calls of unknown cost a stage makes, the relay relays o
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("#483 review: a stream of several finish events is priced from its generation's record, never its dearest event; an outage that outlasts one lookup's bound holds later calls no longer", async () => {
+  const fin = (cost) => ({ type: "finish", finishReason: "stop", providerMetadata: { gateway: { cost: String(cost) } } });
+  let down = true;
+  const tries = {};
+  const gw = await fakeGateway({
+    [LANG]: (body) => {
+      const { mode, id } = JSON.parse(body || "{}");
+      if (mode === "two") return { type: "text/event-stream", headers: { "x-generation-id": id }, body: sse([{ type: "stream-start" }, fin(0.9), fin(0.02)]) };
+      if (mode === "twoNoId") return { type: "text/event-stream", body: sse([{ type: "stream-start" }, fin(0.9), fin(0.02)]) };
+      // A complete answer naming no cost: its only price is its generation's record.
+      return { headers: { "x-generation-id": id }, body: {} };
+    },
+    "/v1/generation": (_b, req) => {
+      const id = new URL(req.url, "http://x").searchParams.get("id");
+      (tries[id] ||= []).push(Date.now());
+      if (id === "gen_TWOFINISH0001") return { body: { data: { total_cost: 0.05 } } };
+      if (id === "gen_UPAGAIN00001") return down ? { status: 503, body: {} } : { body: { data: { total_cost: 0.01 } } };
+      return { status: 503, body: { error: "down" } };
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "relay-finish-"));
+  const r = await openRelay({ key: KEY, dir: join(dir, "r"), maxUsd: 25, origin: gw.origin, lookupDelaysMs: [1, 1], lookupRetryMs: 5, lookupOutageMs: 400 });
+  try {
+    const go = (body) => call(r.socketPath, { token: r.token, path: LANG, body: JSON.stringify(body) });
+    r.beginPass(25);
+    assert.equal((await go({ mode: "two", id: "gen_TWOFINISH0001" })).status, 200);
+    assert.equal((await go({ mode: "twoNoId" })).status, 200);
+    let pass = await r.endPass();
+    assert.deepEqual([pass.usd, pass.unknown, pass.calls], [0.05, 1, 2], "the record's $0.05, never the dearest event's $0.90; with no generation, unknown");
+    // The lookup endpoint is down. An answer is priced after the caller has it, holding the turn: the call after the
+    // first unpriced answer waits out that answer's whole bound; the one after the second waits only the usual tries.
+    r.beginPass(25);
+    const timed = async (id) => {
+      const t = Date.now();
+      assert.equal((await go({ id })).status, 200);
+      return Date.now() - t;
+    };
+    await timed("gen_DOWNFIRST001");
+    assert.ok((await timed("gen_DOWNNEXT0001")) >= 350, "held while the first's lookup waited out its bound");
+    down = false;
+    assert.ok((await timed("gen_UPAGAIN00001")) < 300, "the second's lookup gave up after the usual tries: no second bound");
+    // A lookup that found a cost again ends that: the next failing one holds the turn for the bound once more.
+    await timed("gen_DOWNAGAIN001");
+    assert.ok((await timed("gen_DOWNLAST0001")) >= 350);
+    pass = await r.endPass();
+    assert.deepEqual([pass.usd, pass.unknown], [0.01, 4]);
+  } finally {
+    await r.close();
+    await gw.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

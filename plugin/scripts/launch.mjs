@@ -602,7 +602,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   if (!v || typeof v !== "object") return { usage, vendor: null };
   const cost = stageVendorCost(adapter.rates, { before: v.base ?? null, after, created: v.created === true, stored: v.stored ?? null, settled });
   const { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth } = adapter.rates;
-  const vendor = { ...cost, sandbox: pendulumSandboxId(record.id) ? record.id : null, stage: record.stage, claim: record.claim, state, ...(error ? { error } : {}), rates: { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth }, basis: cost.usd === null ? "unknown: the vendor reported no usage for the stage's session (not read, or not settled)" : `the vendor's usage totals across the stage's session, at ${rv} ${plan} list rates (${region}) read ${date} from ${source}; the stop snapshot's storage for the stretch before it` };
+  const vendor = { ...cost, sandbox: pendulumSandboxId(record.id) ? record.id : null, stage: record.stage, claim: record.claim, state, ...(error ? { error } : {}), rates: { vendor: rv, plan, region, date, source, activeCpuHour, memoryGbHour, memoryMinMs, snapshotGbMonth }, basis: cost.usageUnknown ? "unknown: the vendor reported no usage for the stage's session (not read, or not settled); its creation and stored bytes at the listed rates" : `the vendor's usage totals across the stage's session, at ${rv} ${plan} list rates (${region}) read ${date} from ${source}; the stop snapshot's storage for the stretch before it` };
   // The usage record the artifact carries: the vendor's dollars beside the harness's.
   let modelUsd = null;
   let modelUnknown = null;
@@ -642,7 +642,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
       if (!held.taken) return log(`#${n}: the ${record.stage} stage's vendor cost is booked by another process; its comment is that one's`);
       const head = marker(n, "vendor", key);
       // A stage that left no progress comment has its model dollars here, so the daily sum still counts them.
-      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, ...(mine ? {} : { modelUsd, modelUnknown }) })}`;
+      const body = `${head}\n${vendorBody({ line: vendorLine({ id: record.id, state, cost, rates: adapter.rates, error }), vendorUsd: cost.usd, vendorUnknown: !!cost.usageUnknown, ...(mine ? {} : { modelUsd, modelUnknown }) })}`;
       const had = comments.find((c) => isSelf(c) && (c.body || "").startsWith(`${head}\n`));
       if (had) await api.rest(`repos/${repo.full}/issues/comments/${had.id}`, { ...opts, method: "PATCH", body: { body } });
       else await api.rest(`repos/${repo.full}/issues/${n}/comments`, { ...opts, method: "POST", body: { body } });
@@ -654,7 +654,7 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   // (it never rejects). The usage record above is written either way before this returns.
   const posted = post();
   if (!detach) await posted;
-  log(`#${n}: the ${record.stage} stage's sandbox cost ${cost.usd === null ? "unknown" : `$${cost.usd}`} (${cost.usd === null ? "the vendor reported no usage" : `${cost.activeCpuMs} ms active CPU in ${cost.wallMs} ms`}; stored $${cost.storedUsd} for ${cost.storedMs} ms)`);
+  log(`#${n}: the ${record.stage} stage's sandbox cost ${cost.usageUnknown ? `$${cost.usd} known plus its unknown usage` : `$${cost.usd}`} (${cost.usageUnknown ? "the vendor reported no usage" : `${cost.activeCpuMs} ms active CPU in ${cost.wallMs} ms`}; stored $${cost.storedUsd} for ${cost.storedMs} ms)`);
   return { usage, vendor, posted };
 }
 

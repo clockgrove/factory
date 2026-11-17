@@ -42,20 +42,29 @@ test("stage cost: the totals' difference at list rates, memory rounded up to the
   assert.equal(fresh.activeCpuMs, after.activeCpuMs, "created: the totals are all this stage's");
 });
 
-test("stage cost: an unread, partial or unsettled reading is unknown, never the session's ceiling or $0; its spend line says so", () => {
+test("stage cost: an unread, partial or unsettled reading leaves the compute unknown, never the session's ceiling or $0; the stored bytes stay real; its spend line says so", () => {
   const after = { wallMs: 1000, activeCpuMs: 10, memoryMb: 4096, vcpus: 2 };
+  const storedReal = storedUsd(R, { bytes: 1e9, ms: H });
   for (const args of [{ before: null, after }, { before: { wallMs: 0, activeCpuMs: 0 }, after: null }, { before: { wallMs: 0, activeCpuMs: 0 }, after: { ...after, activeCpuMs: null } }, { before: { wallMs: 0, activeCpuMs: 0 }, after, settled: false }]) {
     const c = stageVendorCost(R, { ...args, ceilingUsd: 0.25, stored: { ms: H, bytes: 1e9 } });
-    assert.equal(c.usd, null, JSON.stringify(args));
+    assert.equal(c.usageUnknown, true, JSON.stringify(args));
     assert.equal(c.computeUsd, null);
+    close(c.usd, storedReal, "the stored bytes at the published rate, the one real part");
     assert.equal(Object.hasOwn(c, "upperBound"), false, "no bound field");
-    // The vendor comment's spend line: one run of unknown cost, for the sandbox, beside the model's known dollars.
+    // The vendor comment's spend line: the known parts, and one run of unknown cost for the sandbox's usage.
     const line = vendorLine({ id: "pendulum-a0dd", state: "running", cost: c, rates: R, error: "unavailable" });
-    assert.match(line, /running: usage not reported \(unavailable\), .* vendor unknown this stage/);
-    const body = vendorBody({ line, vendorUsd: c.usd, modelUsd: 2 });
-    assert.deepEqual(spendParts(body), { usd: 2, modelUsd: 2, vendorUsd: null, usdUnknown: 1, usdUnknownWhy: ["sandbox"] });
-    assert.deepEqual(spendOf(body), { usd: 2, unknown: 1 });
+    assert.match(line, /running: usage not reported \(unavailable\), .* vendor \$0\.\d{4} plus its unknown usage this stage/);
+    const body = vendorBody({ line, vendorUsd: c.usd, vendorUnknown: c.usageUnknown, modelUsd: 2 });
+    const parts = spendParts(body);
+    assert.deepEqual([parts.modelUsd, parts.vendorUsd, parts.usdUnknown, parts.usdUnknownWhy], [2, c.usd, 1, ["sandbox"]]);
+    assert.deepEqual(spendOf(body).unknown, 1);
   }
+  // A created sandbox's creation is real too: listed per creation.
+  const made = stageVendorCost(R, { before: null, after: null, created: true });
+  close(made.usd, R.creation, "the creation at its listed price");
+  assert.equal(made.usageUnknown, true);
+  // No figure at all (an older booking): unknown in full.
+  assert.deepEqual(spendParts(vendorBody({ line: "x", vendorUsd: null, modelUsd: 2 })).usdUnknown, 1);
 });
 
 test("ceiling: every vCPU busy for the whole session plus its memory, so compute cannot pass it", () => {
@@ -194,7 +203,7 @@ test("book: the vendor's cost goes into the usage record beside the model's, or 
   assert.equal(own.usd, null, "the model's dollars are unknown, never zero");
   assert.deepEqual([own.usdUnknown, own.usdUnknownWhy], [1, ["unreported"]], "one run of unknown cost, said in structure");
   assert.equal(own.spendInProgress, true, "the stage's progress comment carries its spend: daily_usd counts it there, once");
-  assert.equal(own.vendor.usd, null, "the vendor's usage was not read: unknown, never the session's ceiling");
+  assert.deepEqual([own.vendor.usd, own.vendor.usageUnknown], [0, true], "the vendor's usage was not read: unknown (nothing else real to count), never the session's ceiling");
   assert.match(own.vendor.basis, /^unknown: /);
   assert.equal(own.harness, "claude", "a record with no harness: the caller's");
   // A stage on an Objective's label harness (#224): its record names it, whatever the repository's default.

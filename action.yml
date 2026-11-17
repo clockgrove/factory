@@ -272,6 +272,12 @@ outputs:
   pr:
     description: (work) The PR number for the branch, when one exists.
     value: ${{ steps.run.outputs.pr }}
+  usd:
+    description: (work) The stage's known dollars (what its harnesses and vendors reported); empty when none were reported.
+    value: ${{ steps.run.outputs.usd }}
+  usd_unknown:
+    description: (work) How many of the stage's runs are of unknown cost (spend nobody reported, never counted in `usd` or against a cap); 0 when none.
+    value: ${{ steps.run.outputs.usd_unknown }}
   issue_number:
     description: (review, gate, launch) The Objective issue number the reviewed PR or the event belongs to.
     value: ${{ steps.run.outputs.issue }}

@@ -890,11 +890,6 @@ export function spendText({ usd, unknown = 0, byBilling = null }) {
   return `$${usd.toFixed(2)}${billingText(usd, byBilling)}${unknownText(unknown)}`;
 }
 
-/**
- * Whether a run left max_usd unenforceable: a Copilot run that did work (turns) but reported no priced AI credits.
- * Its caller stops further passes rather than spend blind (logic.mjs decideExit names it).
- */
-export const unmeteredRun = (rec) => rec?.harness === "copilot" && (rec.usd === null || rec.usd === undefined) && (rec.turns ?? 0) > 0;
 
 // --------------------------------------------------------------- exit logic
 
@@ -1091,7 +1086,7 @@ export function decideExit({ harness, pr, commits = 0, validation, protectedHits
   if (harness?.died >= 2) return { exit: "blocked", reason: "worker process died twice", cause: "pendulum" };
   // In a sandbox whose vendor session cut the stage's wall clock (sessionCapNote), the reason names that cap.
   if (harness?.timedOut) return { exit: "blocked", reason: sessionCap ? `time cap reached: ${sessionCap}` : "time cap reached", cause: "work" };
-  if (harness?.budgetExceeded) return { exit: "blocked", reason: harness.unmetered ? "unmetered: max_usd cannot be enforced" : "dollar cap reached", cause: harness.unmetered ? "pendulum" : "max-usd" };
+  if (harness?.budgetExceeded) return { exit: "blocked", reason: "dollar cap reached", cause: "max-usd" };
   if (unresolved) return { exit: "blocked", reason: unresolved, cause: "work" };
   if (protectedHits.length) return { exit: "blocked", reason: protectedReason(protectedHits), cause: "work" };
   // The worker's workflow hand-over could not go out (handover.mjs handoverProblem, outbox.mjs handover).
@@ -1158,12 +1153,6 @@ export const EXITS = ["delivered", "question", "blocked"];
  */
 export const capReached = (maxUsd, records) => maxUsd > 0 && sumSpend(records).usd >= maxUsd;
 
-/**
- * Whether Pendulum's max_usd was in fact reached, not only a pass ended over budget for another cause (the gateway relay
- * shut, gateway-relay.mjs): the spend at the cap, the relay's refusal at it (`relayTotals.capped`), or a harness's own cap
- * (Claude Code's error_max_budget_usd, Copilot's start refused under its credit floor).
- */
-export const maxUsdReached = (maxUsd, records, relayTotals = null) => capReached(maxUsd, records) || !!relayTotals?.capped || records.some((r) => r?.subtype === "error_max_budget_usd" || r?.error === "dollar cap reached");
 
 /**
  * The exit line's dollars: the known figure and what it is (usage.mjs billingText on the record's `usdByBilling`: billed

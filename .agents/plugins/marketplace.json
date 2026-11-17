@@ -7,10 +7,8 @@
     {
       "name": "pendulum",
       "source": {
-        "source": "git-subdir",
-        "url": "https://github.com/clockgrove/pendulum.git",
-        "path": "plugin",
-        "ref": "main"
+        "source": "local",
+        "path": "./plugin"
       },
       "description": "Label a GitHub issue and walk away: a coding agent (Claude Code, Codex or Copilot CLI) plans, builds and opens the pull request, a second agent reviews it, and your CI and merge queue land it.",
       "homepage": "https://github.com/clockgrove/pendulum#readme",
@@ -27,7 +25,8 @@
         "merge-queue"
       ],
       "policy": {
-        "installation": "AVAILABLE"
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
       },
       "category": "Developer Tools"
     }

@@ -59,8 +59,10 @@ updates:
       pip-security:
         applies-to: security-updates
         patterns: ["*"]
+  # /plugin as well: Dependabot reads every YAML file directly in a directory other than /, so it keeps the actions
+  # plugin/workflow-template.yml pins (the workflow setup renders into each adopter's repository) current.
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/plugin"]
     schedule:
       interval: weekly
     cooldown:

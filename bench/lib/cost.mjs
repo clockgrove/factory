@@ -22,7 +22,7 @@
 // dollars, never into them: `usd` stays the harness's, `vendorUsd` the sandboxes', `totalUsd` both.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BILLING, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingRead, priceStage, priceTokens, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
+import { BILLING, CODEX_NO_TOKENS, UNKNOWN_WHY, addBilling, billingRead, priceStage, priceTokens, streamSessions, unknownOf, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 
 /** The one Codex price table, the worker's own (plugin/scripts/lib/codex-prices.json). */
 export const PRICES_FILE = join(import.meta.dirname, "..", "..", "plugin", "scripts", "lib", "codex-prices.json");
@@ -176,23 +176,10 @@ export function fromCodexEvents(text, model = null) {
   return rec;
 }
 
-/** Any usage file's content to a normalized record, by shape; null when it is none of them. */
-/**
- * Harness calls and distinct sessions in a raw event stream: Claude's `system/init` lines and
- * `session_id`, Codex's `thread.started` and thread ids. Null when the text has neither.
- */
-export function sessionsOf(text) {
-  let calls = 0;
-  const ids = new Set();
-  for (const l of jsonLines(String(text ?? "").trim())) {
-    if (l.type === "system" && l.subtype === "init") calls += 1;
-    if (l.type === "thread.started") calls += 1;
-    if (typeof l.session_id === "string") ids.add(l.session_id);
-    if (typeof l.thread_id === "string") ids.add(l.thread_id);
-  }
-  return calls || ids.size ? { calls, sessions: ids.size } : null;
-}
+/** Harness calls and distinct sessions in a raw event stream (the worker's own reading, usage.mjs streamSessions). */
+export const sessionsOf = streamSessions;
 
+/** Any usage file's content to a normalized record, by shape; null when it is none of them. */
 export function parseUsageText(text, { model = null } = {}) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return null;

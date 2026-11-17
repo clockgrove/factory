@@ -43,6 +43,7 @@ import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
 import { unknownOf } from "./lib/usage.mjs";
+import { sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
@@ -324,10 +325,10 @@ export const stageProgressKey = (runId, claim) => (/^\d{1,20}$/.test(String(runI
 /**
  * The environment the stage starts with in the sandbox: the workflow's settings as inputs (never a secret), the GitHub
  * context, the stage's own names, the two tokens, only the credential its harness needs (of the one account the job's
- * account step picked, the only one the workflow passed) and the worker secrets' values
- * (the work stage's harness and the review stage's fix and answer passes get them; its reviewer never does).
+ * account step picked, the only one the workflow passed), the worker secrets' values (the work stage's harness and the
+ * review stage's fix and answer passes get them; its reviewer never does) and the key of the usage artifacts' seal.
  */
-export function stageEnvironment({ inputs, defaults = inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "" }) {
+export function stageEnvironment({ inputs, defaults = inputs, env = process.env, stage, issue, pr, claim, tokens, appSlug, runId = "", transcriptKey = null }) {
   const out = {};
   for (const name of Object.keys(DEFAULTS)) {
     if (NOT_FOR_STAGE.has(name)) continue;
@@ -358,6 +359,8 @@ export function stageEnvironment({ inputs, defaults = inputs, env = process.env,
   if (pr) out.PENDULUM_STAGE_PR = String(pr);
   if (tokens.read) out.PENDULUM_READ_TOKEN = tokens.read;
   if (appSlug) out.PENDULUM_APP_SLUG = appSlug;
+  // The key that opens an earlier stage's sealed session for a resume (lib/seal.mjs), never the App's key it comes from.
+  if (transcriptKey) out.PENDULUM_SEAL_KEY = transcriptKey.toString("base64");
   return out;
 }
 
@@ -549,16 +552,26 @@ export async function startInSandbox({ adapter, repo, repoId, issue, recordedId,
  * The ended stage's usage directory, out of the sandbox and unpacked on the runner for the artifact upload; null when the
  * stage left none (no file: the adapter's readFile says so). A read or unpack that fails throws: the tarball may still be there.
  */
-async function collectUsage(adapter, record, n) {
+export async function collectUsage(adapter, record, n, seal = null) {
   if (!pendulumSandboxId(record.id) || !record.home) return null;
   const tgz = await adapter.readFile(record.id, `${record.home}/pendulum/out/usage-${record.claim}.tgz`);
   if (!tgz) return null;
   const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
+  const file = join(dir, "..", `usage-${record.claim}.tgz`);
   rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "..", `usage-${record.claim}.tgz`), tgz);
-  execFileSync("tar", ["xzf", join(dir, "..", `usage-${record.claim}.tgz`), "-C", dir, "--no-same-owner", "--no-same-permissions"]);
-  rmSync(join(dir, "..", `usage-${record.claim}.tgz`), { force: true });
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, tgz);
+    execFileSync("tar", ["xzf", file, "-C", dir, "--no-same-owner", "--no-same-permissions"]);
+    // The transcript and the event stream sealed as a work or review job's artifact (lib/seal.mjs).
+    await sealCollected(dir, seal, { issue: n, stage: record.stage }, `#${n}`);
+  } catch (e) {
+    // Nothing half-unpacked stays for an upload: bookVendor's record of its own then goes up in its place.
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  } finally {
+    rmSync(file, { force: true });
+  }
   return { dir, name: record.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
 }
 
@@ -597,6 +610,8 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   try {
     if (!usage) {
       const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
+      // Emptied first: a collection that failed must leave nothing of its own beside this record.
+      rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
       writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], runs: 1, exit: "unknown", spendInProgress: true, basis: "unknown: the stage's usage did not come out of the sandbox" })}
@@ -717,6 +732,11 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
 
   // The App's write token (and a read-only one when a stage may start or need fresh ones); the key is gone after.
   const tokens = await mintTokens(inputs, repo, { read: !gate && ev.kind !== "comment" });
+  // The usage artifacts' seal (lib/seal.mjs): its key, derived before the App's key goes, and the repository's policy.
+  const key = sealKey(inputs.appPrivateKey, repo.full);
+  if (key) mask(key.toString("base64"));
+  else log(`usage artifacts: ${sealKeyProblem(inputs.appPrivateKey, key)}: a public repository's stage usage goes up without its transcript and event stream`);
+  const seal = usageSeal({ key, publish: inputs.publishTranscripts, payload, readRepo: () => getRepo(repo, { token: tokens.write, noRateWait: true }) });
   inputs.appPrivateKey = "";
   watch.mark("mint");
   // A five-minute job: a rate limit is thrown at once and handled as today, never waited out per call (#168).
@@ -739,7 +759,7 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   if (decision.skip) return out({ exit: "skipped", reason: `#${n} (${ev.kind}): ${decision.skip}` });
   // The repository's own harness and models (`defaults`), taken once before any start applies an Objective's labels to
   // `inputs`: for the stage's env (stageEnvironment) and the CLI version pin, however many starts this run makes.
-  const run = { inputs, defaults: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]])), eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen };
+  const run = { inputs, defaults: Object.fromEntries(CHOSEN_FIELDS.map((k) => [k, inputs[k]])), eventName, runId, repo, n, ev, tokens, opts, decide, out, watch, seen, seal };
   if (decision.block) return out(await block(run, `launcher: ${decision.block}`));
   if (decision.requeue && ev.kind === "comment") {
     // The answer check (lib/answer-check.mjs) on the AI Gateway, when this job has a key: a comment that gives no
@@ -901,7 +921,7 @@ function endStage(run, ctx) {
     if (!again.stop && !again.stage) return out({ exit: "skipped", reason: `#${n}: under the lock the decision changed (${again.skip || "nothing to end"})` });
     const prior = now.record;
     let usageFailed = false;
-    let usage = await collectUsage(adapter, prior, n).catch((e) => {
+    let usage = await collectUsage(adapter, prior, n, run.seal).catch((e) => {
       usageFailed = true;
       log(`usage not collected (${e.code || "error"}): ${String(e.message).slice(0, 200)}`);
       return null;
@@ -1068,7 +1088,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   try {
     // The vendor's list of the Objective's sandboxes, from after the claim, beside the check.
     const listing = quiet(adapter.list({ tag: ["pendulum-issue", String(n)] }));
-    const env = stageEnvironment({ inputs, defaults: run.defaults, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId });
+    const env = stageEnvironment({ inputs, defaults: run.defaults, stage, issue: n, pr, claim, tokens, appSlug: tokens.app?.appSlug, runId, transcriptKey: run.seal?.key });
     const plugin = pluginPackage();
     const failed = (await ciToken).filter((c) => c.status === "FAIL");
     watch.mark("doctor");
@@ -1131,7 +1151,7 @@ async function startLocked(run, ctx, { stage, pr: wanted, cue }) {
   let usage = null;
   const lost = ev.kind !== "stage" && prior?.claim && prior.claim !== claim && ["ended", "stopped", "running"].includes(prior.state);
   if (lost && prior.collected !== true) {
-    usage = await collectUsage(adapter, { ...prior, id: result.id, home: result.home }, n).catch(() => null);
+    usage = await collectUsage(adapter, { ...prior, id: result.id, home: result.home }, n, run.seal).catch(() => null);
     if (usage) log(`#${n}: the usage of an earlier ${prior.stage} stage (claim ${prior.claim}) came out with this start`);
   }
   // Its vendor cost too, when no end booked it: the totals read before this start's resume close its session.

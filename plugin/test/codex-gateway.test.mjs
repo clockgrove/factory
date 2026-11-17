@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { CODEX_PRICES, codexRate, jsonLines, parseCodex, parseUsage, priceCodex, providerRefusal, rotatedPin, sinceSession } from "../scripts/lib/usage.mjs";
+import { AGENT_SHELL_TELEMETRY_OFF } from "../scripts/lib/local.mjs";
 import { SHELL_SECRET_KEYS, codexGatewayArgs, credentialEnv, gatewaySession, harnessCommand, hiddenFromShell, runHarness, scrubbedEnv } from "../scripts/lib/harness.mjs";
 import { CODEX_GATEWAY_ENV, PENDULUM_SECRET_KEYS, MODEL_SECRET_KEYS, resolveInputs } from "../scripts/lib/inputs.mjs";
 import { parseWorkerSecrets } from "../scripts/lib/worker-secrets.mjs";
@@ -114,7 +115,7 @@ test("the gateway route's Codex flags: provider, key name, session header, and t
   const fresh = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", gateway });
   for (const a of args) assert.ok(fresh.args.includes(a), a);
   assert.deepEqual(fresh.args.slice(fresh.args.indexOf("-m"), fresh.args.indexOf("-m") + 2), ["-m", "openai/gpt-6.1-sol"]);
-  assert.deepEqual(fresh.env, { PENDULUM_GATEWAY_SESSION: "pendulum-abc" }, "the session id travels with the key to the agent uid");
+  assert.deepEqual(fresh.env, { ...AGENT_SHELL_TELEMETRY_OFF, PENDULUM_GATEWAY_SESSION: "pendulum-abc" }, "the session id travels with the key to the agent uid");
   const resumed = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", resume: "t-1", gateway });
   assert.deepEqual(resumed.args.slice(resumed.args.indexOf("-m"), resumed.args.indexOf("-m") + 2), ["-m", "openai/gpt-6.1-sol"], "a resume keeps the thread's model");
   const prefixed = harnessCommand({ harness: "codex", model: "openai/gpt-5.5", prompt: "P", gateway });
@@ -122,7 +123,7 @@ test("the gateway route's Codex flags: provider, key name, session header, and t
   // The direct route is as before: no provider flags, and no model flag on a resume.
   const direct = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", resume: "t-1" });
   assert.ok(!direct.args.some((a) => a.startsWith("model_provider")) && !direct.args.includes("-m"));
-  assert.deepEqual(direct.env, {});
+  assert.deepEqual(direct.env, AGENT_SHELL_TELEMETRY_OFF, "no gateway session");
   // Locally the gateway's host is among Codex's own API hosts and the flags are the same.
   const local = harnessCommand({ harness: "codex", model: "gpt-6.1-sol", prompt: "P", gateway, local: { addDirs: ["/u"], domains: ["github.com"], clone: "/c", readOnly: [] } });
   assert.ok(local.args.includes('model_provider="vercel"') && local.env.PENDULUM_GATEWAY_SESSION === "pendulum-abc");

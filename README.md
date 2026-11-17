@@ -94,8 +94,8 @@ Use the full name in requests like this one: it is what Pendulum's skills answer
 The session follows Pendulum's `pendulum-setup` skill. It asks a few questions first; the ones that matter on day one are the cost caps and auto-merge, and the defaults are fine for the rest. Then it shows each change and waits for your yes. It:
 
 - writes Pendulum's workflow file, `.github/workflows/pendulum.yml`, which holds the jobs that run your Objectives, and opens a pull request that adds it;
-- walks you through creating a GitHub App for this one repository, a few minutes in GitHub's settings: on GitHub Actions, Pendulum writes to your repository as that App rather than as you;
-- has you save the App's two secrets and your model credential;
+- creates a GitHub App for this one repository from a pre-filled definition, a few clicks in your browser, and saves its two secrets (or walks you through GitHub's settings by hand): on GitHub Actions, Pendulum writes to your repository as that App rather than as you;
+- has you save your model credential;
 - creates the labels and, on a repository an organization owns, a GitHub Project board that shows each Objective's state, requires your CI's checks on the default branch, adds a merge queue where GitHub offers one, and sets squash merges to use each PR's title and body.
 
 Merge that pull request when you are ready. Pendulum starts once the workflow file is on your default branch.

@@ -176,9 +176,9 @@
       }
     },
     "pendulum-setup": {
-      "sha256": "5862da556bbea9ceeeb068a1b584788f391020b31eabde96eef3ab75bf4d8c59",
-      "lines": 47,
-      "words": 688,
+      "sha256": "dc74795dee2060034406ec3da6da6eefb4b562716fc73b0346f18575318953ff",
+      "lines": 42,
+      "words": 696,
       "files": {
         "local.md": {
           "sha256": "63a6a2f3b22066422d3046cb76b1baff6801703f5310f0d5df2e252ecc510844",
@@ -186,9 +186,9 @@
           "words": 669
         },
         "reference.md": {
-          "sha256": "1d634b66442069097fcadebf9f73b773293a420859667ed20751586c12cdf43b",
-          "lines": 48,
-          "words": 924
+          "sha256": "65c0662293cfe421024df02ec937a4b5241afaa03081723122520719318f3198",
+          "lines": 57,
+          "words": 1022
         }
       }
     },

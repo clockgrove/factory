@@ -1,7 +1,7 @@
 // Mint a short-lived installation token from the adopter's Pendulum GitHub App.
 // Node's crypto signs the RS256 JWT, so no dependency and no extra action is
 // needed; the same code serves the Action and `/pendulum doctor` on a laptop.
-// Pendulum never creates an App; it only verifies and uses the one it is given.
+// Only setup's app step creates an App (lib/app-manifest.mjs); everything here verifies and uses the one it is given.
 import { createSign } from "node:crypto";
 import { NetworkDown, OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, downFor, networkBack, quotaNow, spentCandidate, spentResetOf, stoppedWaiting, waitingOutages } from "./network.mjs";
 

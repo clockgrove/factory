@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Pendulum setup: apply the GitHub fixes doctor names, on consent.
-//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
+//   node scripts/setup.mjs [--repo OWNER/NAME] --yes [--apply app|labels|project|protection|workflow|all]  (several: repeat --apply, or a,b)
+//                          [--secret-scope repo|org]   where the app step saves the App's secrets (default: the repository)
 //                          [--ci-checks "Quality,Tests"] [--merge-queue false] [--harness claude] [--out .github/workflows/pendulum.yml]
 //                          [--action clockgrove/pendulum@vX.Y.Z]   (default: the latest Pendulum release)   the `uses:` the workflow calls (a path inside the repo works: owner/repo/dir@ref)
 //                          [--sandbox vercel [--ci-workflow NAME]]   stages run in a cloud sandbox, started by launch jobs (docs/ADAPTERS.md)
@@ -9,9 +10,12 @@
 //                                                                    setup or validation, else a required check's, else ubuntu-latest.
 //                                                                    Doctor's runner check compares against the one on pull_request.
 // Without --repo, the repository is the origin remote of the clone (--checkout, else here), as `pendulum serve` finds it.
-// Without --yes it prints what each step would do and exits. It never creates a
-// GitHub App: it verifies the one whose app_id and app_private_key it is given
-// (or PENDULUM_APP_TOKEN) and tells the adopter the App's permissions.
+// Without --yes it prints what each step would do and exits. Outside the app step it verifies the App whose app_id and
+// app_private_key it is given (or PENDULUM_APP_TOKEN) and tells the adopter the App's permissions.
+//   app         a new GitHub App from a pre-filled definition (GitHub's App Manifest flow, lib/app-manifest.mjs): the
+//               browser posts it to GitHub, GitHub redirects back to a listener on 127.0.0.1, the code becomes the
+//               App's id and key, saved as the PENDULUM_APP_ID and PENDULUM_APP_PRIVATE_KEY secrets with `gh secret set`
+//               on stdin, and the browser goes on to the install page. Only when named: `all` leaves it out.
 //   labels      pendulum:objective, the state labels, P0..P2
 //   project     the Pendulum Project (v2) with Status = Queued, Running, In review, Blocked, Done (GraphQL)
 //   protection  the "pendulum" ruleset on the default branch: merge queue, required checks,
@@ -27,6 +31,7 @@ import { pathToFileURL } from "node:url";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { appPermissionsText, mintInstallationToken } from "./lib/app-token.mjs";
+import { APP_SECRETS, appName, createAppFromManifest, manifestPermissions } from "./lib/app-manifest.mjs";
 import { PLUGIN_ROOT } from "./lib/checkout.mjs";
 import { cloneRepo } from "./lib/local.mjs";
 import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRepo, graphql, listRulesets, projectTitle, repoOf, requiredChecks, rest } from "./lib/github.mjs";
@@ -604,13 +609,28 @@ export async function latestRelease() {
   return /^v\d+\.\d+\.\d+$/.test(tag || "") && pinRow(tag).status === "PASS" ? tag : `v${PENDULUM_VERSION}`;
 }
 
-/** setup's steps, in the order it runs them. */
+/** What the App step does, for the dry run. */
+export function appPlan(repoData, secretScope = "repo") {
+  const userAccount = repoData.owner?.type === "User";
+  const perms = Object.entries(manifestPermissions({ userAccount })).map(([k, v]) => `${k}: ${v}`).join(", ");
+  return `create the GitHub App "${appName(repoData.name)}" for ${repoData.owner.login} from a pre-filled definition in your browser (permissions ${perms}; nothing else, never workflows; webhook inactive), save its id and private key as ${secretScope === "org" ? `${repoData.owner.login}'s organization secrets, shared with ${repoData.name} only,` : "the repository's secrets"} ${APP_SECRETS.id} and ${APP_SECRETS.key} with gh secret set (never printed or written to a file), then open its install page`;
+}
+
+/** setup's App step: the manifest flow (lib/app-manifest.mjs); its note names the App and the install page. */
+async function applyApp(repo, repoData, secretScope) {
+  const app = await createAppFromManifest(repo, repoData, { org: secretScope === "org" });
+  return `created the App ${app.slug} (id ${app.appId}) for ${repoData.owner.login} and saved ${app.saved.join(" and ")} as ${secretScope === "org" ? "organization" : "repository"} secrets; install it on ${repoData.full_name} only (Only select repositories): ${app.installUrl}`;
+}
+
+/** setup's steps, in the order it runs them: `all` (or no `--apply`) is these. */
 export const SETUP_STEPS = ["labels", "project", "protection", "workflow"];
+/** The App step: it creates a new GitHub App each time, so it runs only when asked for by name, before the others. */
+export const APP_STEP = "app";
 
 /**
  * The steps `argv` asks for: every `--apply` given (`--apply a --apply b`, `--apply=a`, `--apply a,b`), in setup's own
- * order, `all` (or no `--apply`) for every step. parseArgs keeps one value per flag, so the flags are read here. Throws
- * on a step setup does not have.
+ * order, `all` (or no `--apply`) for every step but `app`, which runs only when named. parseArgs keeps one value per
+ * flag, so the flags are read here. Throws on a step setup does not have.
  */
 export function setupSteps(argv) {
   const asked = [];
@@ -619,10 +639,11 @@ export function setupSteps(argv) {
     else if (argv[i].startsWith("--apply=")) asked.push(argv[i].slice("--apply=".length));
   }
   const names = asked.flatMap((a) => a.split(",")).map((n) => n.trim()).filter(Boolean);
-  if (!names.length || names.includes("all")) return [...SETUP_STEPS];
-  const unknown = names.filter((n) => !SETUP_STEPS.includes(n));
-  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${SETUP_STEPS.join(", ")} or all`);
-  return SETUP_STEPS.filter((n) => names.includes(n));
+  const unknown = names.filter((n) => n !== "all" && n !== APP_STEP && !SETUP_STEPS.includes(n));
+  if (unknown.length) throw new Error(`--apply: no step ${unknown.join(", ")}; the steps are ${[APP_STEP, ...SETUP_STEPS].join(", ")} or all (every step but ${APP_STEP})`);
+  const app = names.includes(APP_STEP) ? [APP_STEP] : [];
+  if (!names.length || names.includes("all")) return [...app, ...SETUP_STEPS];
+  return [...app, ...SETUP_STEPS.filter((n) => names.includes(n))];
 }
 
 async function main() {
@@ -657,9 +678,15 @@ async function main() {
     process.stdout.write(`App ${app.appSlug}: installation ${app.installationId}${app.missing.length ? `; MISSING ${app.missing.join(", ")}` : "; permissions ok"}${app.extra.length ? `; extra ${app.extra.join(", ")}` : ""}\n`);
     if (app.missing.length) throw new Error(`the App lacks ${app.missing.join(", ")}; fix its permissions (${appPermissionsText({ userAccount: app.userAccount })}) before setup`);
   }
-  if (!token && yes) process.stdout.write("no App credentials given: GitHub steps run as your gh login\n");
+  if (!token && yes && steps.some((st) => st !== APP_STEP)) process.stdout.write("no App credentials given: GitHub steps run as your gh login\n");
   const opts = { token };
+  const secretScope = String(args.secret_scope || "repo");
+  if (steps.includes(APP_STEP) && !["repo", "org"].includes(secretScope)) throw new Error(`--secret-scope ${secretScope}: repo or org`);
+  // The App step reads the repository (its owner and ids) with the user's own gh login: no App exists yet.
+  const repoData = steps.includes(APP_STEP) ? await getRepo(repo, { token: null }) : null;
+  if (repoData && secretScope === "org" && repoData.owner?.type !== "Organization") throw new Error(`--secret-scope org: ${repo.owner} is no organization; the secrets go on the repository`);
   const plan = {
+    app: repoData && appPlan(repoData, secretScope),
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,
     project: `create the Pendulum Project (v2) with Status ${COLUMNS.join(", ")} and link it, or add missing columns (none on a repository a user owns: no GitHub App can move its cards)`,
     protection: `create or update the "pendulum" ruleset on the default branch (a merge queue where GitHub offers one, required checks ${inputs.ciChecks.join(", ") || "(none given: pass --ci-checks)"}, no deletion or force push) and set squash commits to take the PR's title and body; runs as your gh login (needs admin), not the App`,
@@ -672,7 +699,8 @@ async function main() {
   }
   for (const s of steps) {
     let note;
-    if (s === "labels") note = await applyLabels(repo, opts);
+    if (s === APP_STEP) note = await applyApp(repo, repoData, secretScope);
+    else if (s === "labels") note = await applyLabels(repo, opts);
     else if (s === "project") note = await projectStep({ repo, opts, args, explicit, steps, outPath, checkout });
     else if (s === "protection") note = await applyProtection(repo, { ciChecks: inputs.ciChecks, queue: args.merge_queue !== "false" }, { token: null });
     else if (s === "workflow") note = await applyWorkflow({ inputs, args, explicit, before, template, checkout, latest: await latestRelease(), repo, opts });

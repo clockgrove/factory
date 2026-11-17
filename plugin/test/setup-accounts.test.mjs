@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { resolveInputs } from "../scripts/lib/inputs.mjs";
 import { routeAccounts } from "../scripts/lib/accounts.mjs";
 import { secretReferences, workflowSecretChecks } from "../scripts/doctor.mjs";
-import { keptArgs, pickRunner, settingsReport, workflowSettings, workflowText } from "../scripts/setup.mjs";
+import { accountSettings, accountsNote, keptArgs, pickRunner, settingsReport, workflowSettings, workflowText } from "../scripts/setup.mjs";
 
 // Setup adds and removes the accounts of GitHub Actions and the cloud sandbox (#551): its options set PENDULUM_ACCOUNTS
 // and PENDULUM_AUTO_ACCOUNT in the rendered workflow, checked as the jobs read them, and the jobs name each account's
@@ -29,6 +29,13 @@ function render(explicit, text = null) {
 const accountSecrets = (text) => [...secretReferences(text).names].filter((n) => /^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|PENDULUM_CODEX_GATEWAY_KEY|COPILOT_GITHUB_TOKEN)/.test(n)).sort();
 const USUAL = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "COPILOT_GITHUB_TOKEN", "PENDULUM_CODEX_GATEWAY_KEY"];
 const rowOf = (text, name) => workflowSecretChecks(text).find((c) => c.name === name);
+/** The workflow step's accounts note for `explicit` over the existing file `text`, as setup --yes writes it. */
+function noteOf(explicit, text) {
+  const before = workflowSettings(text);
+  const args = { ...keptArgs(before, explicit, template), ...explicit };
+  const inputs = resolveInputs({ args, env: {} });
+  return accountsNote({ inputs, before, acc: accountSettings({ before, explicit, harness: inputs.harness }), oldText: text, newText: render(explicit, text).text });
+}
 
 test("setup's account options render the accounts and name each account's secrets; an account named after its harness keeps the usual ones", () => {
   for (const sandbox of [{}, { sandbox: "vercel" }]) {
@@ -81,6 +88,14 @@ test("with no accounts option a re-render keeps the file's accounts lines and th
   // An option over a file's line keeps the comments above it.
   const three = render({ add_account: "claude-3" }, declared.text);
   assert.match(three.text, /^ {2}# the team's second subscription\n {2}PENDULUM_ACCOUNTS: '\{"claude":\["claude","claude-2","claude-3"\]\}'$/m);
+  // Options whose result names the file's own accounts keep its line byte for byte, spaced as it is.
+  assert.equal(render({ add_account: "claude-3", remove_account: "claude-3" }, declared.text).text, declared.text);
+  assert.equal(render({ accounts: '{"claude":["claude","claude-2"]}' }, declared.text).text, declared.text);
+  // A file that declares a harness's usual account alone keeps that too.
+  const lone = first.replace(/^env:\n/m, "env:\n  PENDULUM_ACCOUNTS: '{\"claude\": [\"claude\"]}'\n");
+  const loneText = render({}, lone).text;
+  assert.equal(render({ add_account: "claude-2", remove_account: "claude-2" }, loneText).text, loneText);
+  assert.match(loneText, /^ {2}PENDULUM_ACCOUNTS: '\{"claude": \["claude"\]\}'$/m);
 });
 
 test("removing an account drops its secret names from every job; removing the last added one gives back the workflow with none declared", () => {
@@ -99,7 +114,23 @@ test("removing an account drops its secret names from every job; removing the la
   assert.equal(render({ accounts: "" }, three.text).text, none);
 });
 
-test("setup's command line: repeated --add-account flags all count, the dry run names the new secrets to save at the prompt, and a refused set exits 1 with its line", () => {
+test("the note names only the secrets the rendered jobs stop naming: another harness's usual secrets stay, and so do the API keys on a move to plan", () => {
+  const both = render({ accounts: '{"claude": ["claude", "claude-2"], "codex": ["codex", "codex-2"]}' }).text;
+  // Removing codex-2 takes codex out (its usual account alone is what none declared means); the jobs still name its usual secrets.
+  const collapsed = render({ remove_account: "codex-2" }, both);
+  assert.equal(collapsed.after.env.PENDULUM_ACCOUNTS, JSON.stringify({ claude: ["claude", "claude-2"] }));
+  assert.ok(accountSecrets(collapsed.text).includes("CODEX_API_KEY") && accountSecrets(collapsed.text).includes("PENDULUM_CODEX_GATEWAY_KEY"));
+  const note = noteOf({ remove_account: "codex-2" }, both);
+  assert.match(note, /the jobs no longer name CODEX_API_KEY_CODEX_2, PENDULUM_CODEX_GATEWAY_KEY_CODEX_2 \(delete/);
+  assert.doesNotMatch(note, /no longer name[^;]*\b(CODEX_API_KEY|PENDULUM_CODEX_GATEWAY_KEY)\b(?!_)/);
+  // A move to the plan credential: the jobs name every account's API key and plan token alike, so nothing is unused.
+  const two = render({ add_account: "claude-2" }).text;
+  const plan = noteOf({ credential: "plan", add_account: "claude-3" }, two);
+  assert.doesNotMatch(plan, /no longer name/);
+  assert.match(plan, /save CLAUDE_CODE_OAUTH_TOKEN \(if not already set\), CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2, CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_3 with `gh secret set NAME`/);
+});
+
+test("setup's command line: repeated --add-account flags all count, the dry run names the secrets to save and those the jobs stop naming, and a refused set, an empty name or no workflow step exits 1 with its line", () => {
   const dir = mkdtempSync(join(tmpdir(), "acct-"));
   const out = join(dir, "pendulum.yml");
   writeFileSync(out, render({}).text);
@@ -108,10 +139,17 @@ test("setup's command line: repeated --add-account flags all count, the dry run 
   const dry = run("--add-account", "claude-2", "--add-account", "codex:codex-2");
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /accounts claude: claude, claude-2 \(default claude\); codex: codex, codex-2 \(default codex\)/);
-  assert.match(dry.stdout, /save ANTHROPIC_API_KEY_CLAUDE_2, PENDULUM_CODEX_GATEWAY_KEY or CODEX_API_KEY, PENDULUM_CODEX_GATEWAY_KEY_CODEX_2 or CODEX_API_KEY_CODEX_2 with `gh secret set NAME`, pasting the value at its prompt \(never --body\)/);
+  assert.match(dry.stdout, /save ANTHROPIC_API_KEY_CLAUDE_2, PENDULUM_CODEX_GATEWAY_KEY or CODEX_API_KEY \(if not already set\), PENDULUM_CODEX_GATEWAY_KEY_CODEX_2 or CODEX_API_KEY_CODEX_2 with `gh secret set NAME`, pasting the value at its prompt \(never --body\)/);
   const plan = run("--add-account", "claude-2", "--credential", "plan");
-  assert.match(plan.stdout, /save CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2 with/, "a plan credential names the plan token's secrets");
-  assert.match(plan.stdout, /no longer named: ANTHROPIC_API_KEY/);
+  assert.match(plan.stdout, /save CLAUDE_CODE_OAUTH_TOKEN \(if not already set\), CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2 with/, "a plan credential names the plan token's secrets");
+  assert.doesNotMatch(plan.stdout, /no longer name/, "the jobs still name ANTHROPIC_API_KEY");
+  writeFileSync(out, render({ add_account: "claude-2" }).text);
+  assert.match(run("--remove-account", "claude-2").stdout, /accounts none declared: every job runs on the usual secrets; the jobs no longer name ANTHROPIC_API_KEY_CLAUDE_2, CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2 \(delete/);
+  writeFileSync(out, render({}).text);
+  assert.equal(run("--add-account=").stderr.trim(), "[pendulum] setup failed: --add-account: name the account");
+  const labels = spawnSync(process.execPath, [join(PLUGIN, "scripts", "setup.mjs"), "--repo", "acme/app", "--apply", "labels", "--add-account", "claude-2"], { cwd: dir, env, encoding: "utf8" });
+  assert.equal(labels.status, 1);
+  assert.equal(labels.stderr.trim(), "[pendulum] setup failed: --add-account: only the workflow step writes the accounts; add --apply workflow");
   const bad = run("--accounts", '{"claude": ["codex"]}');
   assert.equal(bad.status, 1);
   assert.equal(bad.stderr.trim(), `[pendulum] setup failed: --accounts: ${routeAccounts('{"claude": ["codex"]}').problem}`);

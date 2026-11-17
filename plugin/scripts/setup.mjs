@@ -54,7 +54,7 @@ import { COLUMNS, createProject, ensureLabel, ensureRuleset, findProject, getRep
 import { DEFAULTS, PENDULUM_VERSION, SECRET_INPUTS, VARIABLE_SETTINGS, mask, parseArgs, resolveInputs } from "./lib/inputs.mjs";
 import { ADAPTERS } from "./lib/adapters/sandbox.mjs";
 import { parseMaintainer, protectedPaths, unprotectedFiles } from "./lib/logic.mjs";
-import { ciRunner, ciWorkflowTriggers, neededSecrets, pinRow, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
+import { ciRunner, ciWorkflowTriggers, neededSecrets, pinRow, secretReferences, runnerLabels, setupRuns, unreadableRunners } from "./doctor.mjs";
 import { parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { ACCOUNT_HARNESSES, ROUTE_AUTO_ENV, ROUTE_CREDENTIAL_INPUTS, routeAccounts, routeAccountsText, routeCredentialRef, validAccountName } from "./lib/accounts.mjs";
 
@@ -473,8 +473,9 @@ const listOf = (value) => (Array.isArray(value) ? value : value === undefined ? 
  * and PENDULUM_AUTO_ACCOUNT and the options `explicit` gives: --accounts (the whole declaration; `--accounts=` clears
  * it), then --add-account (`name`, of `harness`, the workflow's, or `harness:name`; added to a harness that declares
  * none after the account named after it, its usual one, so that one stays its default on the usual secrets) and
- * --remove-account (a declared name; one that leaves each harness only its usual account leaves none declared), and
- * --auto-account on|off. The result is checked as the jobs read it
+ * --remove-account (a declared name; one that leaves a harness only its usual account takes that harness out, unless
+ * the file declares it so), and --auto-account on|off. A result that names the same accounts as the file keeps the
+ * file's own line. The result is checked as the jobs read it
  * (accounts.mjs routeAccounts): an option's declaration it refuses throws its problem. {declared, accounts, set, given}:
  * `declared` routeAccounts's, `accounts` the PENDULUM_ACCOUNTS text the jobs are rendered for, `set` the env lines an
  * option sets (`""` drops the line), `given` whether an accounts option was given. With no option, `set` is empty and
@@ -500,42 +501,61 @@ export function accountSettings({ before = null, explicit = {}, harness = "claud
     if (!lists[h].length) lists[h].push(h);
     lists[h].push(name);
   }
+  const removedFrom = new Set();
   for (const name of removes) {
     const h = ACCOUNT_HARNESSES.find((x) => lists[x].includes(name));
     if (!h) throw new Error(`--remove-account: PENDULUM_ACCOUNTS declares no account ${validAccountName(name) ? `\`${name}\`` : "by that name"}`);
     lists[h] = lists[h].filter((n) => n !== name);
+    removedFrom.add(h);
   }
+  // A removal that leaves a harness only its usual account leaves what declaring none for it means, so that harness
+  // goes, unless the file itself declares it so (`{"claude": ["claude"]}` stays as the file has it).
+  const own = routeAccounts(file);
+  for (const h of removedFrom) if (lists[h].length === 1 && lists[h][0] === h && !(own.ok && own.accounts[h].length === 1 && own.accounts[h][0] === h)) lists[h] = [];
   const kept = Object.fromEntries(Object.entries(lists).filter(([, l]) => l.length));
-  // A removal that leaves each harness only its usual account leaves what declaring none means: the line goes.
-  const usual = removes.length && Object.entries(kept).every(([h, l]) => l.length === 1 && l[0] === h);
-  const text = Object.keys(kept).length && !usual ? JSON.stringify(kept) : "";
+  const text = Object.keys(kept).length ? JSON.stringify(kept) : "";
   const declared = routeAccounts(text);
   if (!declared.ok) throw new Error(`${["accounts", "add_account", "remove_account"].filter((n) => explicit[n] !== undefined).map((n) => `--${n.replace(/_/g, "-")}`).join(", ")}: ${declared.problem}`);
   const accounts = routeAccountsText(text);
+  // The same accounts as the file's, declared or not: its own line stays, byte for byte.
+  if (own.ok && accounts === routeAccountsText(file)) return { declared, accounts: file, set: autoSet, given };
   return { declared, accounts, set: { PENDULUM_ACCOUNTS: accounts, ...autoSet }, given };
 }
 
+/** A harness credential's secret, its usual name or an account's (accounts.mjs routeSecretSuffix). */
+const CREDENTIAL_SECRET = new RegExp(`^(${Object.values(ROUTE_CREDENTIAL_INPUTS).map((c) => c.secret).join("|")})(_[A-Z0-9_]+)?$`);
+const USUAL_SECRETS = new Set(Object.values(ROUTE_CREDENTIAL_INPUTS).map((c) => c.secret));
+/** The harness credential secrets a workflow's text names (doctor.mjs secretReferences), sorted. */
+const credentialSecrets = (text) => [...secretReferences(text || "").names].filter((n) => CREDENTIAL_SECRET.test(n)).sort();
+
 /**
- * What an accounts option changes in the secrets the jobs name (doctor.mjs neededSecrets): `add`, the secrets the new
- * declaration `now` names that `was` (under `wasInputs`, the existing file's harness and credential) did not, and
- * `gone`, those it no longer names; a list entry is met by any one of its names (Codex: the gateway key or the API key).
+ * What an accounts option changes in the secrets: `add`, the ones the jobs need under the new declaration `now` that
+ * they did not under `was` (doctor.mjs neededSecrets: `wasInputs` the existing file's harness and credential; a list
+ * entry is met by any one of its names, Codex's gateway key or API key), and `gone`, the harness credential secrets the
+ * old workflow text names and the new one does not, so a secret the rendered jobs still name is never called unused.
  */
-export function accountSecretChanges({ inputs, was = "", now = "", wasInputs = inputs }) {
+export function accountSecretChanges({ inputs, was = "", now = "", wasInputs = inputs, oldText = "", newText = "" }) {
   const names = (i, a) => neededSecrets(i, a).slice(2).map((n) => [].concat(n).join(" or "));
-  const [before, after] = [names(wasInputs, was), names(inputs, now)];
-  return { add: after.filter((n) => !before.includes(n)), gone: before.filter((n) => !after.includes(n)) };
+  const before = names(wasInputs, was);
+  const still = new Set(credentialSecrets(newText));
+  return { add: names(inputs, now).filter((n) => !before.includes(n)), gone: credentialSecrets(oldText).filter((n) => !still.has(n)) };
 }
 
-/** The workflow step's line for an accounts option: the accounts, each new secret to save at `gh secret set`'s prompt, and those no longer named. */
-export function accountsNote({ inputs, before, acc }) {
+/**
+ * The workflow step's line for an accounts option: the accounts, each new secret to save at `gh secret set`'s prompt (a
+ * harness's usual one only if not already set), and the secrets the rendered jobs stop naming (`oldText`, the existing
+ * file; `newText`, the rendered one).
+ */
+export function accountsNote({ inputs, before, acc, oldText = "", newText = "" }) {
   if (!acc.given) return "";
   const wasInputs = { harness: before?.env.PENDULUM_HARNESS || inputs.harness, credential: String(before?.env.PENDULUM_CREDENTIAL || inputs.credential).toLowerCase() };
-  const { add, gone } = accountSecretChanges({ inputs, was: before?.env.PENDULUM_ACCOUNTS ?? "", now: acc.accounts, wasInputs });
+  const { add, gone } = accountSecretChanges({ inputs, was: before?.env.PENDULUM_ACCOUNTS ?? "", now: acc.accounts, wasInputs, oldText, newText });
   const each = Object.entries(acc.declared.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
+  const usual = (n) => n.split(" or ").every((x) => USUAL_SECRETS.has(x));
   return [
     `accounts ${each.length ? each.join("; ") : "none declared: every job runs on the usual secrets"}`,
-    add.length && `save ${add.join(", ")} with \`gh secret set NAME\`, pasting the value at its prompt (never --body)`,
-    gone.length && `no longer named: ${gone.join(", ")} (delete with \`gh secret delete NAME\` once nothing else uses it)`,
+    add.length && `save ${add.map((n) => (usual(n) ? `${n} (if not already set)` : n)).join(", ")} with \`gh secret set NAME\`, pasting the value at its prompt (never --body)`,
+    gone.length && `the jobs no longer name ${gone.join(", ")} (delete with \`gh secret delete NAME\` once nothing else uses it)`,
   ].filter(Boolean).join("; ");
 }
 
@@ -782,7 +802,7 @@ async function applyWorkflow({ inputs, args, explicit, before, template, checkou
   const defaultBranch = sandbox ? (await getRepo(repo, opts)).default_branch : "";
   const out = resolve(args.out || join(checkout, ".github", "workflows", "pendulum.yml"));
   const text = workflowText({ template, inputs, args, explicit, before, latest, notify, runsOn: runner?.runsOn, ciWorkflow, defaultBranch, protectedPaths: protectedList });
-  const accounts = accountsNote({ inputs, before, acc: accountSettings({ before, explicit, harness: inputs.harness }) });
+  const accounts = accountsNote({ inputs, before, acc: accountSettings({ before, explicit, harness: inputs.harness }), oldText: existsSync(out) ? readFileSync(out, "utf8") : "", newText: text });
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, text);
   const added = unresolved.length
@@ -1056,10 +1076,13 @@ async function main() {
     const key = flag.replace(/-/g, "_");
     if (explicit[key] === undefined) continue;
     explicit[key] = flagValues(process.argv.slice(2), flag);
-    if (!explicit[key].length) throw new Error(`--${flag}: name the account`);
+    if (!explicit[key].length || explicit[key].some((v) => !listOf(v).length)) throw new Error(`--${flag}: name the account`);
   }
   const checkout = resolve(explicit.checkout || process.cwd());
   const steps = setupSteps(process.argv.slice(2));
+  // Only the workflow step writes the accounts: an accounts option without it would change nothing.
+  const accountFlags = ["accounts", "add_account", "remove_account", "auto_account"].filter((n) => explicit[n] !== undefined);
+  if (accountFlags.length && !steps.includes("workflow")) throw new Error(`${accountFlags.map((n) => `--${n.replace(/_/g, "-")}`).join(", ")}: only the workflow step writes the accounts; add --apply workflow`);
   // A re-render keeps what the existing file states (its env block, the gate's ids, the runner, the CI workflow and a
   // pinned Action); a flag still wins. The protection step's required checks come from the same settings.
   const template = readFileSync(join(PLUGIN_ROOT, "workflow-template.yml"), "utf8");
@@ -1114,7 +1137,11 @@ async function main() {
   const checksText = protectionChecks.length ? `${protectionChecks.join(", ")} (from ${checksFrom})` : `none${checksFrom ? ` (${checksFrom})` : ""}${candidates}`;
   const presetNote = args.preset && steps.includes("workflow") ? await presetOverrides(repo, args.preset, { token: null }) : "";
   // An accounts option is checked before anything is applied, and the dry run names the accounts and their secrets.
-  const accountsLine = steps.includes("workflow") ? accountsNote({ inputs, before, acc: accountSettings({ before, explicit, harness: inputs.harness }) }) : "";
+  // The secrets the jobs would name do not hang on the repository's answers (the runner, notify, the release): a render
+  // with stand-ins for those names them.
+  const dryAcc = steps.includes("workflow") ? accountSettings({ before, explicit, harness: inputs.harness }) : null;
+  const dryText = () => workflowText({ template, inputs, args, explicit, before, latest: `v${PENDULUM_VERSION}`, notify: "", ciWorkflow: args.ci_workflow || "CI", defaultBranch: "main" });
+  const accountsLine = dryAcc?.given ? accountsNote({ inputs, before, acc: dryAcc, oldText: existsSync(outPath) ? readFileSync(outPath, "utf8") : "", newText: dryText() }) : "";
   const plan = {
     app: repoData && appPlan(repoData, secretScope),
     labels: `create the labels ${LABELS.map(([n]) => n).join(", ")} when absent`,

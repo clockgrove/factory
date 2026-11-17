@@ -410,7 +410,7 @@ export const wallClockPr = (stage, prNumber, found) => (stage === "review" ? { n
 /**
  * The child died before it wrote its usage: a result of Pendulum's own (a stand-in, `standIn`), so the stage's spend
  * still counts. It carries the stage's progress comment key and account, so a scorer given it and the stage's comment
- * counts the stage once, from the comment (bench withLines). Nothing when the child wrote its own.
+ * counts the stage once, from the comment (cost-join.mjs withLines). Nothing when the child wrote its own.
  */
 export function killedRecord({ why, stage, env, usageDir }) {
   if (existsSync(join(usageDir, "result.json"))) return;

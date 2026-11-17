@@ -10,7 +10,7 @@
 
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
-import { checkRuns, getPr, listComments, listReviewComments, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
+import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
 import { BILLING_WORDS, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
@@ -809,7 +809,8 @@ export async function objectiveRecords(repo, n, { token, download, want = [] }) 
     for (const a of page?.artifacts || []) {
       const run = a.workflow_run;
       if (a.expired || a.name !== name || !Number.isSafeInteger(run?.id) || !runs.has(run.id)) continue;
-      if (!Number.isSafeInteger(run.repository_id) || run.head_repository_id !== run.repository_id) continue;
+      // A fork's run can upload an artifact of this name: only this repository's own runs are read (ownRunArtifact).
+      if (!ownRunArtifact(a)) continue;
       const rec = await download(a).catch(() => null);
       if (rec && typeof rec === "object") out.push({ ...rec, artifact: name });
     }

@@ -95,6 +95,18 @@
         }
       }
     },
+    "pendulum-report": {
+      "sha256": "ea9e9edd4873d5d5e235523c54b574f645c64df8d486959e56f76213b20d4c80",
+      "lines": 31,
+      "words": 623,
+      "files": {
+        "reference.md": {
+          "sha256": "1bda2df160b694a06504fdc0dd5e2810be8da47612ffe8b431bbc45a76af03bd",
+          "lines": 20,
+          "words": 343
+        }
+      }
+    },
     "pendulum-restart": {
       "sha256": "024f7c1771559a35af1cb4cb27ae20d8ce68f458b9ca91fcfd99355aaec7696f",
       "lines": 31,

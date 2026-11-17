@@ -237,6 +237,12 @@ const MACHINE_LOCAL = LOCAL_WORKFLOW_SETTINGS.filter((k) => k.startsWith("PENDUL
  * the VARIABLE_SETTINGS they set (an empty value sets nothing); `excluded`, the WORKFLOW_ONLY_SETTINGS names they set,
  * which are ignored; `unknown`, any other PENDULUM_* name, no setting. Names without the PENDULUM_ prefix are not Pendulum's.
  */
+/**
+ * The repository variable that records Pendulum's App id (`pendulum setup` writes it beside the PENDULUM_APP_ID secret):
+ * no setting, so no run reads it; `pendulum report` and doctor do (report.mjs, doctor.mjs appIdVariableCheck).
+ */
+export const APP_ID_VARIABLE = "PENDULUM_APP_ID";
+
 export function variableSettings(vars = {}) {
   const kept = {};
   const excluded = [];
@@ -244,7 +250,7 @@ export function variableSettings(vars = {}) {
   const invalid = [];
   for (const [k, v] of Object.entries(vars && typeof vars === "object" ? vars : {})) {
     const name = String(k).toUpperCase();
-    if (!name.startsWith("PENDULUM_")) continue;
+    if (!name.startsWith("PENDULUM_") || name === APP_ID_VARIABLE) continue;
     if (VARIABLE_SETTINGS.has(name)) {
       if (v === null || v === undefined || String(v) === "") continue;
       const why = valueProblem(name, String(v));
@@ -485,6 +491,7 @@ export function applyVariables(env = process.env, { say = log } = {}) {
   }
   const workflow = {};
   for (const k of WORKFLOW_SETTINGS) if (env[k] !== undefined) workflow[k] = env[k];
+  APP_ID_VAR = vars && typeof vars === "object" && Object.hasOwn(vars, APP_ID_VARIABLE) ? String(vars[APP_ID_VARIABLE]) : null;
   const layers = settingLayers({ workflow, variables: vars });
   layers.workflowHarness = harnessName(workflow.PENDULUM_HARNESS);
   const ceiling = Number(workflow.PENDULUM_TIMEOUT_MINUTES || DEFAULTS.timeout_minutes);
@@ -533,7 +540,8 @@ export const FLAG_ALIASES = { dir: "checkout" };
 
 /**
  * A command line checked against its flags (`spec`: name → `bool`, which takes no value, or {value, number?}, which
- * takes one, a positive number where `number` is set), FLAG_ALIASES read as their names: {_: arguments, flag: value}.
+ * takes one, a positive number where `number` is set, every value given in a list where `many` is set), FLAG_ALIASES
+ * read as their names: {_: arguments, flag: value}.
  * Throws `fail(why)` for an unknown flag, a value given to a bool, or a missing or non-numeric value.
  */
 export function readFlags(argv, spec, fail) {
@@ -563,7 +571,8 @@ export function readFlags(argv, spec, fail) {
       const n = Number(value);
       if (!value.trim() || !Number.isFinite(n) || n <= 0) throw fail(`--${m[1]} needs a positive number, not ${JSON.stringify(value)}`);
       flags[key] = n;
-    } else flags[key] = value;
+    } else if (kind.many) (flags[key] ??= []).push(value);
+    else flags[key] = value;
   }
   return flags;
 }
@@ -912,10 +921,13 @@ export function eventAction(env = process.env) {
 }
 
 // On Actions, before any script reads a setting (applyVariables); what it laid over, for doctor's report.
+let APP_ID_VAR = null;
 let APPLIED = null;
 if (process.env.PENDULUM_INPUT_VARS !== undefined) APPLIED = applyVariables(process.env);
 /** On Actions, the layers applyVariables laid over this process's env when this module loaded; null without the input. */
 export const appliedLayers = () => APPLIED;
+/** On Actions, the PENDULUM_APP_ID repository variable's value as the `vars` input held it (APP_ID_VARIABLE), else null. */
+export const appIdVariable = () => APP_ID_VAR;
 /** A harness setting's value as Pendulum reads it: trimmed, lower case, claude when empty. */
 export function harnessName(v) {
   return String(v || "").trim().toLowerCase() || DEFAULTS.harness;

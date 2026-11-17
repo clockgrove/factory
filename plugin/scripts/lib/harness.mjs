@@ -1599,6 +1599,8 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   if (quota) rec.quota = quota;
   rec.label = label;
   rec.resumed = !!resume;
+  // The reasoning effort Pendulum asked for (null: the model's own), for the stage's pass ledger (usage.mjs passLedger).
+  rec.effort = effort || null;
   rec.cacheTtl = cacheTtl;
   // How long its prompt cache stays warm past `ended` (cacheLifetimeMs): the stage's `cacheWarmUntil`.
   rec.cacheWarmMs = cacheLifetimeMs(harness, env);
@@ -1941,7 +1943,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout: r.code !== 0 ? rollout : null, requests: rollout, since: started });
   if (harness === "codex" && codexPlanLimits(rollout, started)) rec.planLimits = true;
   metered.end(rec);
-  Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
+  Object.assign(rec, { label, effort: effort || null, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
   else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Pendulum" });
   else if (r.code !== 0 && rec.ok) Object.assign(rec, { ok: false, error: `${CLI[harness].bin} exited ${r.code ?? r.signal}` });
@@ -1963,7 +1965,7 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
  * with the stage's passes (keepDecisionPass) so a stopped stage counts it (stop.mjs stoppedRecords).
  */
 export function keepDecision(rec) {
-  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...unknownOf([rec]), ...billingSigns(rec), turns: rec.turns ?? null, basis: rec.basis, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
+  return { harness: rec.harness, model: rec.model ?? null, label: "decision", usd: rec.usd ?? null, tokens: rec.tokens ?? { input: null, output: null, cached: null, written: null }, ...(rec.models ? { models: rec.models } : {}), ...(typeof rec.premiumRequests === "number" ? { premiumRequests: rec.premiumRequests } : {}), ...(typeof rec.aiu === "number" ? { aiu: rec.aiu } : {}), ...unknownOf([rec]), ...billingSigns(rec), turns: rec.turns ?? null, basis: rec.basis, effort: typeof rec.effort === "string" && rec.effort ? rec.effort : null, started: rec.started ?? null, ended: rec.ended ?? null, ok: true, decision: true, calls: 1 };
 }
 
 /** One more call (`one`, keepDecision's) folded into the stage's decision record `kept`, in place: spend, tokens, credits, turns, end. */

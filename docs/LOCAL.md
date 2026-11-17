@@ -93,6 +93,7 @@ pendulum post-review <pr> <findings.json>         # post a /pendulum:pendulum-re
 pendulum handover <issue> [--push] [--app ID]     # apply Pendulum's workflow hand-over on pendulum-workflow/<issue> and show it (/pendulum:pendulum-handover), below
 pendulum wait [<issue>...] [--since CURSOR] [--on KINDS] [--follow] [--interval 30] [--timeout S]   # one JSON line per event on the queue, for an agent that supervises it (below)
 pendulum hold list | pendulum hold release <account>   # this machine's usage-limit holds, or lift one account's (A harness's usage limit, below)
+pendulum report [--since DATE] [--issue N] [--json]    # cost and token use, every figure precomputed (/pendulum:pendulum-report, REPORT.md)
 ```
 
 - **`pendulum issue`** writes the issue only when its author, last editor and latest title renamer can push.

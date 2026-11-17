@@ -46,7 +46,7 @@ async function withFetch(fetch, fn) {
 const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
 
 test("a stage's spend record carries its dollars by pass kind, from the pass labels only, and what it ran again; its spend line keeps both", () => {
-  assert.deepEqual(["work-1", "conflict", "review", "review-retry", "review-foundation-fallback", "answer", "answer-scope", "validation-fix-2", "pre-review-validation-fresh-1", "review-validation-scope-3", "validation-fresh-scope-1", "exit", "decision", "question-check", "fix"].map(passKind), ["work", "conflict", "review", "review", "review", "answer", "answer", "fix", "fix", "fix", "fix", null, null, null, null]);
+  assert.deepEqual(["work-1", "conflict", "review", "review-retry", "review-foundation-fallback", "answer", "answer-scope", "validation-fix-2", "pre-review-validation-fresh-1", "review-validation-scope-3", "validation-fresh-scope-1", "exit", "decision", "question-check", "fix"].map(passKind), ["work", "conflict", "review", "review", "review", "answer", "answer", "fix", "fix", null, null, null, null, null, null]);
   const dir = mkdtempSync(join(tmpdir(), "by-pass-"));
   const records = [
     { harness: "claude", model: "m", label: "work-1", usd: 2, billing: "subscription", tokens: {}, ok: true },
@@ -90,7 +90,8 @@ test("every pass label the code runs a harness under is a pass kind, or named he
     "pre-review-validation": ["pre-review-validation-fresh-2", "fix"],
     "review-validation": ["review-validation-fix-3", "fix"],
     '${label}-${fresh ? "fresh" : "fix"}-${red.passes}': ["review-validation-fresh-1", "fix"],
-    '${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}': ["validation-fresh-scope-1", "fix"],
+    // A fix pass's scope hold has no kind: the report's passes count it as neither an answer nor a fix pass either.
+    '${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}': ["validation-fresh-scope-1", null],
     // Pendulum's own calls: their dollars stay the stage's.
     decision: ["decision", null],
     exit: ["exit", null],

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, latestRuns, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, decisionSpendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
 import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
@@ -458,9 +458,10 @@ export const githubNow = () => Date.now() + clockSkewMs;
  * classified (`e.rateLimited`), for a caller that handles it itself (the dispatcher's next tick, a five-minute launch job).
  * `cache` (a Map, kept by the caller across calls) makes each GET page a conditional read: the page's last ETag goes as
  * If-None-Match, and GitHub's 304 for an unchanged page, which its rate limit does not count, answers with the page kept.
- * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it.
+ * `signal` (an AbortSignal) ends a request in flight; give `deadlineAt` too, so no retry follows it. `onLink(link)` is
+ * given each page's Link header (null without one), for a caller that pages itself.
  */
-export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null } = {}) {
+export async function rest(path, { method = "GET", body, token, paginate = false, raw = false, maxBytes = 0, deadlineAt = Infinity, landed = null, noRateWait = false, cache = null, signal = null, onLink = null } = {}) {
   let url = /^https?:/.test(path) ? path : `${API()}/${path.replace(/^\//, "")}`;
   const accept = raw ? raw.replace(/^Accept:\s*/i, "") : "application/vnd.github+json";
   const again = repeatable(method, path) ? async () => true : createAgain(landed ?? commentLanded(method, url, body, { token, signal, deadlineAt }));
@@ -507,6 +508,7 @@ export async function rest(path, { method = "GET", body, token, paginate = false
     // A create the caller's `landed` found: its value is the answer.
     if (LANDED in res) return res[LANDED];
     const { text, link } = res;
+    onLink?.(link ?? null);
     if (raw) return text;
     const data = text.trim() ? JSON.parse(text) : null;
     if (!paginate) return data;
@@ -1131,7 +1133,8 @@ export async function jobLogTail(repo, jobId, opts, chars = 4000) {
  * required check unfinished, given the checks as queueCommitChecks shapes them, and answers `{running, hung}`: hung
  * checks (session.mjs hangsOn) end the wait unfinished, returned as `hung`, and so does `idleMs` with no required check
  * running. `timeoutMs` is the caller's bound (the stage's wall clock); the reads back off only past `backoffAfterMs`.
- * `onRead(state, runs)` (optional) gets
+ * A required check red only by a `cancelled` run whose workflow run a newer run of its workflow on this head replaced
+ * (supersededRun, its reads through `cache`, the caller's: triage's) is read as not finished. `onRead(state, runs)` (optional) gets
  * each reading's evaluateChecks state as it is made, with every check run read on the head; `signal` (an AbortSignal,
  * optional) ends the wait, unfinished, at its next pause.
  */
@@ -1148,10 +1151,26 @@ const pause = (ms, signal = null) =>
     signal?.addEventListener("abort", done, { once: true });
   });
 
+/**
+ * Whether a cancelled check run's workflow run was replaced: it is not the newest run of its workflow (`workflow_id`) at
+ * its head commit (a concurrency group's cancel-in-progress, a re-trigger on the same head). Read on the jobs and runs
+ * APIs with `actionsToken`, each job and run once per `cache`; false when it is no Actions job or cannot be read.
+ */
+export async function supersededRun(repo, r, { actionsToken, cache = new Map() }) {
+  const once = (key, make) => (cache.has(key) ? cache.get(key) : (cache.set(key, make()), cache.get(key)));
+  const job = await once(`job:${r.id}`, () => rest(`repos/${repo.full}/actions/jobs/${r.id}`, { token: actionsToken }).catch(() => null));
+  if (!job?.run_id) return false;
+  const run = await once(`run:${job.run_id}`, () => rest(`repos/${repo.full}/actions/runs/${job.run_id}`, { token: actionsToken }).catch(() => null));
+  if (!run?.workflow_id || !run.head_sha) return false;
+  const list = await rest(`repos/${repo.full}/actions/workflows/${run.workflow_id}/runs?head_sha=${run.head_sha}&per_page=100`, { token: actionsToken }).catch(() => null);
+  const newest = (list?.workflow_runs || []).reduce((a, w) => (!a || String(w.created_at || "") > String(a.created_at || "") || (String(w.created_at || "") === String(a.created_at || "") && (w.id ?? 0) > (a.id ?? 0)) ? w : a), null);
+  return !!newest && newest.id !== run.id;
+}
+
 /** A check run as awaitChecks returns it (and checksNotStarted reads it). */
 const runShape = (r) => ({ id: r.id, name: r.name, status: r.status, conclusion: r.conclusion ?? null, suite: r.check_suite?.id ?? null, app: r.app?.slug ?? null, started_at: r.started_at ?? null });
 
-export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
+export async function awaitChecks(repo, sha, names, { token, actionsToken = token, cache = new Map(), timeoutMs = Infinity, appearMs = 15 * 60_000, pollMs = 60_000, maxPollMs = pollMs, backoffAfterMs = 0, onPoll = null, onRead = null, conflicted = null, ended = null, progress = null, idleMs = Infinity, ignoreIds = null, signal = null, sleep = (ms) => pause(ms, signal) } = {}) {
   const started = Date.now();
   // When a required check was last seen running (progress), from the wait's start.
   let ranAt = started;
@@ -1167,6 +1186,10 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinit
   let hangs = [];
   // Whether a read of the check runs has succeeded since the wait began.
   let readOnce = false;
+  // Cancelled check runs whose workflow run a newer run of its workflow on this head replaced (supersededRun), by id: read
+  // as not finished, so the wait goes on for the newer run's own; `view` is the runs as the wait reads them.
+  const replaced = new Set();
+  const view = (rs) => rs.map((r) => (replaced.has(r.id) ? { ...r, status: "queued", conclusion: null } : r));
   for (;;) {
     // A failed read is no reading: once one has succeeded, the last good one stands and the wait goes on to its own
     // deadline; with none yet, the wait ends at `appearMs` as for nothing ran.
@@ -1177,9 +1200,19 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinit
       if (names.some((n) => !runs.some((r) => r.name === n))) statuses = await rest(`repos/${repo.full}/commits/${sha}/status`, { token, cache: etags }).then((st) => (st?.statuses || []).map(statusRun), () => statuses);
       runs = [...runs, ...statuses.filter((x) => !runs.some((r) => r.name === x.name))];
     }
-    state = evaluateChecks(names, runs);
+    state = evaluateChecks(names, view(runs));
+    // A required check red only by a cancel of a replaced run (a concurrency group's cancel-in-progress, a re-trigger on
+    // the same head) is still pending: its newer run's check has not reported yet.
+    if (state.done && state.failed.some((f) => f.conclusion === "cancelled")) {
+      let more = false;
+      for (const r of latestRuns(runs)) {
+        if (replaced.has(r.id) || r.commitStatus || r.status !== "completed" || r.conclusion !== "cancelled") continue;
+        if (await supersededRun(repo, r, { actionsToken, cache }).catch(() => false)) (replaced.add(r.id), (more = true));
+      }
+      if (more) state = evaluateChecks(names, view(runs));
+    }
     // Each reading as it is made (session.mjs validationLoop's `onRead`: whether the head is known red yet).
-    onRead?.(state, runs.map(runShape));
+    onRead?.(state, view(runs).map(runShape));
     if (state.done) break;
     if (conflicted && (await conflicted().catch(() => false))) {
       conflict = true;
@@ -1191,11 +1224,11 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinit
     // A required check with no run while others reported (with none, appearMs above ends the wait), and `ended` (async,
     // optional, given the runs as returned below) says it will get none: its own workflow runs ended before their jobs
     // ran. The wait ends at once, unfinished.
-    if (read && state.missing.length && runs.length > 0 && ended && (await ended(runs.map(runShape)).catch(() => false))) break;
+    if (read && state.missing.length && runs.length > 0 && ended && (await ended(view(runs).map(runShape)).catch(() => false))) break;
     // A required check that made no progress (its step past its usual duration) ends it too, and so does `idleMs` with
     // none running (queued, waiting or not reported: GitHub's not-started bound). An unanswered reading is running.
     if (read && progress) {
-      const p = await progress(runs.map(commitCheck)).catch(() => null);
+      const p = await progress(view(runs).map(commitCheck)).catch(() => null);
       if (!p || p.running) ranAt = Date.now();
       if ((hangs = p?.hung || []).length) break;
     }
@@ -1206,13 +1239,14 @@ export async function awaitChecks(repo, sha, names, { token, timeoutMs = Infinit
     if (elapsed >= backoffAfterMs) pause = Math.min(pause * 2, Math.max(pollMs, maxPollMs));
   }
   const timedOut = !state.done && !conflict;
-  const failedRuns = runs.filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
+  // The latest run of each name only (evaluateChecks): a run a re-run or a newer run on this head superseded is no red.
+  const failedRuns = latestRuns(view(runs)).filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
   const parts = [];
   for (const r of failedRuns.slice(0, 4)) parts.push(`--- ${r.name}: ${r.conclusion}\n${r.commitStatus ? `commit status${r.details_url ? ` ${r.details_url}` : ""}` : await jobLogTail(repo, r.id, { token })}`);
   if (timedOut) parts.unshift(`required check(s) not finished after ${Math.round((Date.now() - started) / 60000)} min: missing ${state.missing.join(", ") || "none"}; pending ${state.pending.join(", ") || "none"}`);
   if (conflict) parts.unshift("the PR conflicts with its base branch: GitHub starts no required-check run for it");
   // `runs` and `minutes`: what a wait that timed out with nothing failed is read against (triage.mjs checksNotStarted).
-  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, hung: hangs, minutes: Math.round((Date.now() - started) / 60000), runs: runs.map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
+  return { green: state.done && state.green, checks: state, output: parts.join("\n"), timedOut, conflict, hung: hangs, minutes: Math.round((Date.now() - started) / 60000), runs: view(runs).map(runShape), failedNames: state.failed.map((f) => f.name), failedRuns: failedRuns.map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null })) };
 }
 
 /** GitHub merges the base branch into the PR's branch (its "Update branch" button): 202 accepted; 422 when it is up to date or conflicting. */
@@ -1614,6 +1648,14 @@ export async function createProject(repo, opts) {
 
 // --------------------------------------------------------------- artifacts
 
+/**
+ * Whether an Actions artifact came from a run of this repository's own code, not a fork's: its workflow run's head
+ * repository is the run's repository (GitHub's `workflow_run.head_repository_id` and `repository_id` on the artifact). A
+ * fork's pull request run can upload an artifact of any name, so its usage records are never Pendulum's; an artifact that
+ * names no repository id is not read either.
+ */
+export const ownRunArtifact = (a) => Number.isSafeInteger(a?.workflow_run?.repository_id) && a.workflow_run.head_repository_id === a.workflow_run.repository_id;
+
 /** An artifact never changes once uploaded: a long-lived dispatcher (pendulum serve) reads each one once. */
 const usageCache = new Map();
 const USAGE_DOWNLOADS = 8;
@@ -1660,7 +1702,7 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
   // The artifacts endpoint wraps each page as {total_count, artifacts}; rest's pagination returns the artifacts.
   const artifacts = (await rest(`repos/${repo.full}/actions/artifacts?per_page=100`, { token, paginate: true })) || [];
   // Names and run ids go to `gh` as arguments: only Pendulum's own artifact names and numeric ids.
-  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && !a.expired && String(a.created_at || "").startsWith(dateIso));
+  const today = artifacts.filter((a) => /^[A-Za-z0-9._-]+$/.test(a.name || "") && a.name.startsWith(prefix) && Number.isSafeInteger(a.workflow_run?.id) && ownRunArtifact(a) && !a.expired && String(a.created_at || "").startsWith(dateIso));
   // One download is about a second and a busy day has a hundred artifacts, so eight at a time. With a cloud sandbox
   // the dispatcher reads none of them (dispatch.mjs todaysSpend): each stage's dollars are in its spend line.
   const one = async (a) => {

@@ -189,7 +189,7 @@ test("finish card, posted for real: a split Objective's spend per part and per k
  * (none: Copilot's default); each run's usage artifact names the model it ran. Returns the card, the GitHub reads and the
  * `gh` downloads.
  */
-async function actionsCard(harness, model) {
+async function actionsCard(harness, model, { ledger = {} } = {}) {
   const n = 9;
   const root = mkdtempSync(join(tmpdir(), "card-model-"));
   mkdirSync(join(root, "bin"));
@@ -197,7 +197,7 @@ async function actionsCard(harness, model) {
   writeFileSync(downloads, "");
   writeFileSync(join(root, "bin", "gh"), `#!${process.execPath}\nconst a = process.argv.slice(2);\nconst fs = require("node:fs");\nfs.appendFileSync(${JSON.stringify(downloads)}, JSON.stringify(a) + "\\n");\nconst dir = a[a.indexOf("-D") + 1];\nfs.writeFileSync(require("node:path").join(dir, "result.json"), JSON.stringify({ harness: "copilot", model: "claude-sonnet-5.5", progressRun: a[2], usd: 7, runs: 1 }));\n`, { mode: 0o755 });
   const ran = { worker: model, subagent: null, reviewer: model, labels: [] };
-  const stage = (stageName, key, at, end, usd) => ({ id: Number(key), user: bot, created_at: at, updated_at: end, body: `<!-- pendulum:${n}:progress:${stageName}:${key} -->\nPendulum ${stageName}: started.\n- ${at.slice(11, 16)}Z harness ${harness}${model ? ` (${model})` : ""} attempt 1\n${harnessMarker(harness, model, ran)}${spend({ usd, usdByBilling: { credits: usd }, billing: "credits" })}` });
+  const stage = (stageName, key, at, end, usd) => ({ id: Number(key), user: bot, created_at: at, updated_at: end, body: `<!-- pendulum:${n}:progress:${stageName}:${key} -->\nPendulum ${stageName}: started.\n- ${at.slice(11, 16)}Z harness ${harness}${model ? ` (${model})` : ""} attempt 1\n${harnessMarker(harness, model, ran)}${spend({ usd, usdByBilling: { credits: usd }, billing: "credits" })}${ledger[stageName] ? `\n${ledger[stageName]}` : ""}` });
   const comments = [stage("work", "4401", "2026-11-16T10:05:00Z", "2026-11-16T10:20:00Z", 0.4), stage("review", "4402", "2026-11-16T10:25:00Z", "2026-11-16T10:30:00Z", 0.2)];
   const pr = { number: 20, state: "closed", user: bot, created_at: "2026-11-16T10:20:00Z", merged_at: "2026-11-16T10:40:00Z", html_url: "https://github.com/acme/app/pull/20", head: { sha: "c".repeat(40), ref: `pendulum/${n}` }, base: { ref: "main" }, merge_commit_sha: null, commits: 1, additions: 1, deletions: 0, changed_files: 1, body: `Refs #${n}` };
   const issue = { number: n, state: "closed", labels: [{ name: "pendulum:objective" }, { name: "pendulum:in-review" }], user: { login: "kirk", type: "User" } };
@@ -247,6 +247,22 @@ test("finish card, posted for real (#539): a Copilot stage with a spend line tak
   const claude = await actionsCard("claude", "claude-opus-5-5");
   assert.deepEqual([claude.artifactReads, claude.downloads], [[], []], "a harness line that names its model: nothing more is read");
   assert.match(claude.card, /\| Build · Opus 5\.5 \| 15 min \| \$0\.40 \|\n\| Review · Opus 5\.5 \| 5 min \| \$0\.20 \|/);
+});
+
+test("finish card, posted for real (#543): a Copilot stage whose ledger line names its model reads no usage artifact; its dollars stay the spend line's", async () => {
+  // Each stage's end as worker.mjs writes it: its usage record (the real writer), and the ledger line beside its spend line.
+  const lineOf = (key, usd) => {
+    const dir = mkdtempSync(join(tmpdir(), "card-ledger-"));
+    const usage = writeUsage(dir, { harness: "copilot", model: null, records: [{ harness: "copilot", model: "claude-sonnet-5.5", label: key === "4401" ? "work-1" : "review", usd, tokens: { input: 1000, output: 100, cached: 0, written: null }, started: "2026-11-16T10:06:00Z", ended: "2026-11-16T10:19:00Z", billing: "credits", ok: true }], passes: 1, exit: "delivered", reason: "", credentialBasis: "COPILOT_GITHUB_TOKEN", billing: "credits", progressRun: key, ran: { worker: null, subagent: null, reviewer: null, labels: [], hosts: [] } });
+    return stageSpendLine(usage).ledger;
+  };
+  const ledgered = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: lineOf("4402", 0.2) } });
+  assert.deepEqual([ledgered.artifactReads, ledgered.downloads], [[], []], "the ledger lines name the model: nothing more is read");
+  assert.match(ledgered.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
+  // A ledger line that did not fit names no model: that stage's own run's artifact is read for it, as before.
+  const cut = await actionsCard("copilot", null, { ledger: { work: lineOf("4401", 0.4), review: 'Per-pass ledger: 80 passes, over the 6000-character bound of its line; the stage\'s usage record holds it.\n<!-- pendulum:ledger {"cut":80} -->' } });
+  assert.deepEqual(cut.downloads.map((a) => [a[2], a[4]]), [["4402", "pendulum-usage-9-review"]]);
+  assert.match(cut.card, /\| Build · claude-sonnet-5\.5 \| 15 min \| \$0\.40 \|\n\| Review · claude-sonnet-5\.5 \| 5 min \| \$0\.20 \|/);
 });
 
 test("finish card: a stage whose kinds do not fit inside its own figure stays whole in its stage; a Blocked notice or an answer-rounds record names no churn, only a stage's own record does; a plain run shows no breakdown", () => {

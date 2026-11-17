@@ -17,6 +17,7 @@ The Clockgrove and Pendulum names and this logo are the project's trademarks and
 
 - `web/favicon.ico`: bundled 16, 32 and 48 px favicon.
 - `web/favicon-16.png`, `favicon-32.png`, `favicon-48.png`: the mark alone, at each size.
+- `web/mark-240.png`: the transparent mark at 240 px, which the repository's README shows at 120 px.
 - `web/apple-touch-icon.png`: 180 px, on cream.
 - `web/icon-192.png`, `web/icon-512.png`: web-app manifest sizes, on cream.
 

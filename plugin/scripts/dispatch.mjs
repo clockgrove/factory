@@ -1529,7 +1529,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       const closed = recent.find((i) => i.number === number);
       if (labels.length && closed && hasLocalLabel(closed) === (backend().name === "local")) {
         const usageToken = inputs.githubToken || token;
-        const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, log, records: (n) => objectiveRecords(repo, n, { token: usageToken, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
+        const card = await postFinishCard(repo, closed, opts, { label: inputs.objectiveLabel, prBody: !backend().trigger.asPerson, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, log, records: (n) => objectiveRecords(repo, n, { token: usageToken, download: (a) => downloadArtifactResult(repo, a, usageToken) }) }).catch((e) => e);
         if (card === "posted") {
           finished.push(number);
           log(`  #${number}: merged; its finish card is posted`);

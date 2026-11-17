@@ -5,13 +5,14 @@
 //   renderFinishCard / finishBlock   the card's markdown, and the headline with its badges for the PR body (pure);
 //   postFinishCard  the reads and writes, once per Objective (the `finish` marker), from the dispatcher's Done pass.
 // A figure Pendulum has no record of is left out or shown as unknown, never estimated (usage.mjs UNKNOWN_WHY). Every
-// marker the card reads is trusted only from Pendulum's own logins (pendulumLogins: the App's and a local loop's).
+// marker the card reads is trusted only from Pendulum itself (pendulumOwn: its login here, or its App by id). A stage
+// comment by someone else who can push counts as a run of unknown cost, never its dollars; anyone else's counts nothing.
 
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
 import { RUNNING_LABEL, STATE_LABELS, bodyFindings, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, selfLogin, spendParts } from "./logic.mjs";
-import { LOCAL_LABEL } from "./local.mjs";
+import { pendulumNotice } from "./answer-check.mjs";
 import { BILLING_WORDS, addBilling, billingRead, unknownRuns } from "./usage.mjs";
 
 const OBJECTIVE = DEFAULTS.objective_label;
@@ -44,33 +45,12 @@ export function labelTime(issue, timeline, label = OBJECTIVE, clockAfter = null)
   return starts.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1) ?? first;
 }
 
-const loginKey = (l) => String(l ?? "").trim().replace(/^@/, "").toLowerCase();
-
 /**
- * Pendulum's own logins on Objective `n`, whose markers the card trusts: the login this process writes as (selfLogin);
- * the App's `<slug>[bot]` that applied `pendulum:running` (the Action's, as the scorer's pendulumLogin reads it); and a
- * local loop's login, which acts as a person who can push: the one that applied `pendulum:running` while `pendulum:local`
- * was on the issue, or that wrote the local-route mark naming its own `labeled pendulum:local` event (local.mjs
- * markLocalRoute). An Objective that ran on both routes then counts every stage, whichever route posts the card.
+ * Whether a comment, review or PR is Pendulum's own, whose markers the card trusts: by the login this process writes as
+ * (isSelf), or through Pendulum's own App matched by id (`appId`: GitHub's `performed_via_github_app`, its author that
+ * App's `<slug>[bot]`; answer-check.mjs pendulumNotice). No other App or bot, `github-actions[bot]` included.
  */
-export function pendulumLogins(n, timeline = [], comments = []) {
-  const out = new Set();
-  if (selfLogin()) out.add(loginKey(selfLogin()));
-  let local = false;
-  for (const e of [...(timeline || [])].sort((a, b) => ms(a.created_at) - ms(b.created_at))) {
-    if (e?.label?.name === LOCAL_LABEL && (e.event === "labeled" || e.event === "unlabeled")) local = e.event === "labeled";
-    if (e?.event !== "labeled" || e.label?.name !== RUNNING_LABEL || !e.actor?.login) continue;
-    if (e.actor.type === "Bot" && /\[bot\]$/i.test(e.actor.login)) out.add(loginKey(e.actor.login));
-    else if (local && pushAuthor({ user: e.actor })) out.add(loginKey(e.actor.login));
-  }
-  const mark = new RegExp(`^<!-- pendulum:${n}:local-route:(\\d+) -->`);
-  for (const c of comments || []) {
-    const id = mark.exec(c?.body || "")?.[1];
-    const ev = id ? (timeline || []).find((e) => String(e?.id) === id && e.event === "labeled" && e.label?.name === LOCAL_LABEL) : null;
-    if (ev && loginKey(ev.actor?.login) === loginKey(c.user?.login) && pushAuthor(c)) out.add(loginKey(c.user.login));
-  }
-  return out;
-}
+export const pendulumOwn = (appId = null) => (x) => pendulumNotice(x, appId);
 
 /** Whether a closed Objective gets a finish card by its labels: none that ended Blocked or on a Question. */
 export const cardable = (labels) => !labels.some((n) => STATE_LABELS[n] === "Blocked" || STATE_LABELS[n] === "Question");
@@ -123,9 +103,11 @@ export function gateChecks(checks, mergedAt, required = []) {
  *               merge queue, else its head); `required` the default branch's required checks (gateChecks)
  *  records      the stages' usage records (session.mjs writeUsage: the Actions artifacts), each naming its progress
  *               comment's key (`progressRun`)
- *  mine         whose comments, reviews and PRs are Pendulum's (postFinishCard: pendulumLogins; logic.mjs isSelf by default)
+ *  mine         whose comments, reviews and PRs are Pendulum's (pendulumOwn; logic.mjs isSelf by default)
+ *  pushed       whose comments are by someone who can push (logic.mjs pushAuthor): a progress or vendor comment of theirs
+ *               that is not Pendulum's is a stage of unknown cost (its time shown, never its figures)
  */
-export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf }) {
+export function finishData({ repo, issue, timeline = [], comments = [], pulls = [], checks = [], required = [], records = [], label = OBJECTIVE, mine = isSelf, pushed = pushAuthor }) {
   const n = issue.number;
   const merged = pulls.filter((p) => p?.pr?.merged_at).sort((a, b) => ms(a.pr.merged_at) - ms(b.pr.merged_at));
   if (!merged.length) return null;
@@ -134,6 +116,9 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   const started = labelTime(issue, timeline, label) ?? merged[0].pr.created_at;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(mergedAt);
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
+  // Stage comments by someone who can push that Pendulum cannot attribute to itself (another route's login): each is
+  // a run of unknown cost. A stranger's paste counts nothing.
+  const vouched = comments.filter((c) => !mine(c) && pushed(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
 
   // Each stage: its progress comment, from its first write (the stage's start) to its last (its exit line).
   const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
@@ -171,6 +156,13 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     const usd = parts.modelUsd;
     const unknown = Math.max((parts.usdUnknown ?? 0) - (parts.vendorUsd === null ? 1 : 0), usd === null ? 1 : 0);
     stages.push({ stage: key.startsWith("review:") ? "review" : "work", rebase: false, part: partOf(c.created_at) + 1, at: c.created_at, start: null, end: null, model: null, usd: unknown && !usd ? null : usd, unknown, byBilling: billingRead(parts.usdByBilling) });
+  }
+  for (const c of vouched) {
+    const m = progress.exec(c.body || "");
+    if (m && inRun(c.created_at)) {
+      keys.add(`${m[1]}:${m[2]}`);
+      stages.push({ stage: m[1], rebase: false, part: partOf(c.created_at) + 1, at: c.created_at, start: c.created_at, end: c.updated_at && ms(c.updated_at) >= ms(c.created_at) ? c.updated_at : c.created_at, model: null, usd: null, unknown: 1, byBilling: {} });
+    } else if (vendorHead.test(c.body || "") && inRun(c.created_at)) sandbox = { usd: sandbox?.usd ?? 0, unknown: (sandbox?.unknown ?? 0) + 1 };
   }
   stages.sort((a, b) => ms(a.at) - ms(b.at));
   // Each stage's name, in time order, from recorded fields only: a review; a send-back's rebase (its rebase line); the
@@ -596,14 +588,15 @@ export async function objectiveRecords(repo, n, { token, download }) {
 /**
  * Post the finish card of closed Objective `issue` ({number, labels, user}) once: none for one that ended Blocked or on
  * a Question, or whose newest PR on its branch did not merge, or that already has its card (its `finish` marker, by
- * Pendulum's own login: a reopened and merged-again Objective gets no second one). With `prBody` (not when Pendulum acts
+ * Pendulum itself, pendulumOwn: a reopened and merged-again Objective gets no second one). `appId`: Pendulum's App
+ * (the Action's app_id, or a local loop's PENDULUM_LOCAL_APP_ID), whose comments are Pendulum's too. With `prBody` (not when Pendulum acts
  * under a person's login), the merged PR's body gets the headline and badges at its top first, read just before it is
  * written; a refusal of that write (not a passing failure) leaves the PR as it is and the card is still posted.
  * Returns "posted", "had" (posted before), or why none is due: "not merged", "blocked", "no self" (Pendulum's own login
  * unknown, so no marker can be trusted). `records(n)`: the usage records of its Actions stages (objectiveRecords), read
  * only when a stage has no spend line. A failed read or write throws.
  */
-export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, log = () => {} } = {}) {
+export async function postFinishCard(repo, issue, opts, { records = async () => [], label = OBJECTIVE, prBody = true, appId = null, log = () => {} } = {}) {
   const n = issue.number;
   const names = (issue.labels || []).map((l) => (typeof l === "string" ? l : l.name));
   if (!cardable(names)) return "blocked";
@@ -616,9 +609,8 @@ export async function postFinishCard(repo, issue, opts, { records = async () => 
   const prs = branch.filter((p) => p.merged_at);
   const comments = await listComments(repo, n, opts);
   const timeline = (await rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true })) || [];
-  // Pendulum's own logins on this Objective, the App's and a local loop's alike (pendulumLogins): their markers only.
-  const owners = pendulumLogins(n, timeline, comments);
-  const mine = (x) => owners.has(loginKey(x?.user?.login));
+  // Pendulum's own comments only (pendulumOwn): its login here, or its App by id.
+  const mine = pendulumOwn(appId);
   if (comments.some((c) => mine(c) && (c.body || "").startsWith(finishMarker(n)))) return "had";
   const started = labelTime(issue, timeline, label);
   // The Objective's merged PRs since its clock (a split Objective's parts), oldest first, each read whole.

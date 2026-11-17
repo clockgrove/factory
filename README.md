@@ -152,7 +152,7 @@ It asks whether to start it now (it adds the `pendulum:objective` label), save i
 - The reviewer comments on the PR, and the coding agent answers each comment.
 - With the first-run preset, the PR is marked ready for review. Read it and merge it yourself.
 
-Runs take from a few minutes to a few hours. If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
+Runs take from a few minutes to a few hours. Afterwards, the plan comment, the progress comment, the PR's body and the review show how Pendulum ran it ([What it records](#what-it-records)). If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
 
 **Why the issue has this shape:** the worker reads the issue as the whole specification. The Goal says what should change; each Acceptance entry is something a reviewer can check, and the reviewer judges every one, met or not; the Context records what you have already decided. Your tests then confirm the behaviour on the PR.
 
@@ -181,6 +181,23 @@ Runs take from a few minutes to a few hours. If the issue comes back Blocked or 
 | **You** | Start, stop and restart Objectives, answer Questions, and merge when auto-merge is off. A "request changes" review from someone with write access holds the merge | |
 
 Pendulum acts only on issues written by people who can push to the repository, or by maintainers you name during setup, and counts only their comments as answers: a stranger's issue or comment cannot instruct the worker.
+
+### What it records
+
+Every Objective leaves a written trail on GitHub, so you can see how Pendulum ran it without opening a log:
+
+| Where | What it shows |
+| --- | --- |
+| **Plan comment** on the issue | The worker's plan: the goal in its own words, a checklist mapping each Acceptance entry to the files it changes, ticked as items are done, and every assumption it made |
+| **Progress comment** on the issue, one per run | A live status line (elapsed time, turns, tool calls, the sub-agents running and what each was asked), then each phase with its clock (setup, the coding agent, each validation pass, the reviewer, the answer pass) and an exit line with the run's outcome and spend, such as `exit: delivered; usd 0.35637` |
+| **The PR's body** | For each Acceptance entry, the change that meets it and the test that proves it; every validation command as run, with its result; anything proved only against a fake; the assumptions; and anything left undone, with why |
+| **The reviewer's comment** on the PR | Its findings, tied to lines, and each Acceptance entry as the reviewer judged it, met or not; under each finding, the worker's reply: the commit that fixed it, or why no change is needed |
+| **Blocked or Question notice** on the issue | The reason, the fix, and whether to resume or restart |
+| **Labels and Project board** | Where each Objective stands: `pendulum:running`, `pendulum:in-review`, `pendulum:blocked`, `pendulum:question` |
+| **Usage artifact** on each Actions run | `pendulum-usage-<issue>`: the models, tokens and dollars, how the job ended, and its event log, kept up to 90 days. On a public repository the session transcripts are sealed by default ([Data and privacy](docs/PRIVACY.md#what-goes-to-github)) |
+| **Scorecard** | Ask "Show the Pendulum scorecard": one row per Objective with whether it merged with no one stepping in, solution quality, operator minutes and dollars ([bench/README.md](bench/README.md)) |
+
+The [real run](#a-real-run) above shows the progress comment and the reviewer's comment as they appear on GitHub. [What you see on the issue](docs/USAGE.md#what-you-see-on-the-issue) has the details.
 
 ## Write a good Objective
 

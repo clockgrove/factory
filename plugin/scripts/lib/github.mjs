@@ -173,7 +173,8 @@ async function markSpent(err, quota, url, token, headers, signal = null) {
   if (resetAt === null) {
     const resource = headers.get("x-ratelimit-resource") || quotaResource(url);
     const count = await call(`${API()}/rate_limit`, { token, signal }).then(({ r, text }) => (r.ok ? quotaNow(JSON.parse(text), resource, r.headers.get("date")) : null)).catch(() => null);
-    resetAt = spentResetOf(headers, count, now);
+    // The count's reset goes through the count's own Date, so this machine's time is read once that answer is here.
+    resetAt = spentResetOf(headers, count, count ? RETRY.now() : now);
   }
   if (resetAt === null) return;
   err.code = RATE_LIMIT_SPENT;

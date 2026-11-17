@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { homedir, platform as osPlatform, uptime } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { dropOwned, ownedTemp, sweepOwned } from "./fsafe.mjs";
-import { listComments, primeWriters, rest, upsertComment } from "./github.mjs";
+import { addLabels, listComments, primeSelf, primeWriters, prComment, rest, upsertComment } from "./github.mjs";
 import { isSelf, knownWriter, marker, pinnedMaintainer, selfLogin, trustedAuthor } from "./logic.mjs";
 import { FACTORY_CONTROL_KEYS, commandFailed, isFactorySecret } from "./inputs.mjs";
 import { parseWorkerSecrets } from "./worker-secrets.mjs";
@@ -42,6 +42,65 @@ export const factoryCodeDirs = (home = homedir()) => [releasesDir(home)].filter(
 
 /** The routing label: an Objective carrying it belongs to a developer's local loop, and the Actions path leaves it alone. */
 export const LOCAL_LABEL = "factory:local";
+const issueTimeline = (repo, n, opts) => rest(`repos/${repo.full}/issues/${n}/timeline?per_page=100`, { ...opts, paginate: true });
+/** The marker of Factory's mark of the `labeled factory:local` event `id` on issue `n` (localRouteEvent, markLocalRoute). */
+export const localRouteMarker = (n, id) => marker(n, "local-route", String(id));
+
+/**
+ * The `labeled factory:local` event that put the label on an issue as it is now, from its timeline `events`: the last
+ * such event with no `unlabeled factory:local` after it, as {id, mine} (`mine`: Factory's own login, selfLogin, made it;
+ * `id` null when the event carries none). Null when the timeline shows no such label on.
+ */
+export function localRouteEvent(events) {
+  let current = null;
+  for (const e of events || []) {
+    if (e?.label?.name !== LOCAL_LABEL) continue;
+    if (e.event === "labeled") current = e;
+    else if (e.event === "unlabeled") current = null;
+  }
+  return current ? { id: /^\d+$/.test(String(current.id ?? "")) ? String(current.id) : null, mine: isSelf({ user: current.actor }) } : null;
+}
+
+/**
+ * Factory's mark of the factory:local label a local loop put on Objective `n` (#455): one comment whose marker names
+ * that exact label event (localRouteMarker), which the scorer reads (bench/lib/objective.mjs localFactoryActions) so the
+ * label counts as Factory's, not a person's. The event is read from the issue's timeline (localRouteEvent), by Factory's
+ * own login (read once if unknown; unreadable, no mark). `check`: read the comments first and write nothing when this
+ * login's mark of that event is there (a later tick's backfill). Never throws: {id, marked, why, person}, `marked` true
+ * when the mark is written or already there, false with the cause otherwise (no such event yet, a failed read or write);
+ * `person` when the label on now is another login's, which no mark may claim.
+ */
+export async function markLocalRoute(repo, n, opts, { check = false, timeline = issueTimeline } = {}) {
+  if (!selfLogin()) await primeSelf(opts).catch(() => null);
+  if (!selfLogin()) return { id: null, marked: false, why: "Factory's own login could not be read" };
+  const events = await timeline(repo, n, opts).catch((e) => ({ failed: e }));
+  if (events?.failed) return { id: null, marked: false, why: `the timeline could not be read (${String(events.failed?.message || events.failed).slice(0, 120)})` };
+  const ev = localRouteEvent(events);
+  if (ev && !ev.mine) return { id: null, marked: false, why: "a person put the factory:local label on", person: true };
+  if (!ev?.id) return { id: null, marked: false, why: "the timeline does not show this login's factory:local label event yet" };
+  const id = ev.id;
+  const mark = localRouteMarker(n, id);
+  if (check) {
+    const comments = await listComments(repo, n, opts).catch(() => null);
+    if (!comments) return { id, marked: false, why: "the comments could not be read" };
+    if (comments.some((c) => isSelf(c) && String(c.body || "").startsWith(mark))) return { id, marked: true, why: null };
+  }
+  return prComment(repo, n, `${mark}\nFactory: no Action runs Objectives in this repository, so a local loop took this Objective and labelled it \`${LOCAL_LABEL}\`; it stays that machine's.`, opts).then(
+    () => ({ id, marked: true, why: null }),
+    (e) => ({ id, marked: false, why: `the mark could not be posted (${String(e?.message || e).slice(0, 120)})` }),
+  );
+}
+
+/**
+ * Labels Objective `n` factory:local for a local loop where no Action runs (#455), then marks that label event as
+ * Factory's (markLocalRoute). Throws only when the label write fails; a mark that could not be written is {marked: false,
+ * why}, for a later tick to write (Local.backfillMark).
+ */
+export async function adoptLocal(repo, n, opts, { timeline = issueTimeline } = {}) {
+  await addLabels(repo, n, [LOCAL_LABEL], opts);
+  return markLocalRoute(repo, n, opts, { timeline });
+}
+
 export const hasLocalLabel = (issue) => (issue?.labels || []).some((l) => (typeof l === "string" ? l : l.name) === LOCAL_LABEL);
 
 /** True when this process is the local backend (factory run / serve set it). */

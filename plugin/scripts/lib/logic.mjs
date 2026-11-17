@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { UNKNOWN_WHY, claudeRunningTotals, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING, UNKNOWN_WHY, claudeRunningTotals, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -2735,7 +2735,8 @@ export function spendOf(body) {
 /**
  * The spend line's parts: `usd` (the known total the daily sum counts), for a sandbox stage `modelUsd` (the harness's)
  * and `vendorUsd` (the sandbox's, booked by the launcher at the stage's end; null when the vendor reported none), and
- * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none). Null when the body has no spend line.
+ * the runs of unknown cost in it (`usdUnknown`, `usdUnknownWhy`; absent for none), and its `billing` when it records one
+ * (usage.mjs BILLING). Null when the body has no spend line.
  */
 export function spendParts(body) {
   const m = SPEND.exec(body || "");
@@ -2743,7 +2744,7 @@ export function spendParts(body) {
   try {
     const r = JSON.parse(m[1]);
     const n = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
-    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r) };
+    return { usd: n(r?.usd) ?? 0, modelUsd: n(r?.modelUsd), vendorUsd: n(r?.vendorUsd), ...unknownRead(r), ...(BILLING.includes(r?.billing) ? { billing: r.billing } : {}) };
   } catch {
     return null;
   }

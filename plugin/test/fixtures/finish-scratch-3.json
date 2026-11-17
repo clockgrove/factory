@@ -1,0 +1,410 @@
+{
+ "source": "clockgrove/pendulum-scratch issue 3 and PR 4, read 2026-11-17: the run the approved mock-up was made from (comment bodies and PR body trimmed)",
+ "issue": {
+  "number": 3,
+  "created_at": "2026-11-17T02:23:41Z",
+  "closed_at": "2026-11-17T02:27:39Z",
+  "labels": [
+   {
+    "name": "pendulum:objective"
+   },
+   {
+    "name": "pendulum:in-review"
+   }
+  ]
+ },
+ "timeline": [
+  {
+   "event": "labeled",
+   "created_at": "2026-11-17T02:23:42Z",
+   "label": {
+    "name": "pendulum:objective"
+   },
+   "actor": {
+    "login": "kirkmarple-clockgrove",
+    "type": "User"
+   }
+  },
+  {
+   "event": "labeled",
+   "created_at": "2026-11-17T02:23:55Z",
+   "label": {
+    "name": "pendulum:running"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "unlabeled",
+   "created_at": "2026-11-17T02:25:52Z",
+   "label": {
+    "name": "pendulum:running"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "labeled",
+   "created_at": "2026-11-17T02:25:53Z",
+   "label": {
+    "name": "pendulum:in-review"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "closed",
+   "created_at": "2026-11-17T02:27:39Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "unlabeled",
+   "created_at": "2026-11-17T02:27:51Z",
+   "label": {
+    "name": "pendulum:in-review"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  }
+ ],
+ "comments": [
+  {
+   "id": 6936058114,
+   "user": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   },
+   "author_association": "CONTRIBUTOR",
+   "created_at": "2026-11-17T02:24:34Z",
+   "updated_at": "2026-11-17T02:25:55Z",
+   "body": "<!-- pendulum:3:progress:work:44002648279 -->\nPendulum work [run 44002648279](https://github.com/clockgrove/pendulum-scratch/actions/runs/44002648279) · [PR #4](https://github.com/clockgrove/pendulum-scratch/pull/4): started 02:24Z, 2 min at the last line.\n- 02:24Z re-entry: fresh (resume policy is fresh)\n- 02:24Z harness claude (claude-opus-5-5) attempt 1\n- 02:25Z validation: required checks test on d2fb1ce run while the review starts; handed to the review stage\n- 02:25Z exit: delivered; usd 0.35637\n<!-- pendulum:harness {\"harness\":\"claude\",\"model\":\"claude-opus-5-5\",\"models\":{\"worker\":\"claude-opus-5-5\",\"subagent\":\"claude-sonnet-5-5\",\"reviewer\":\"claude-fable-5-2\"},\"labels\":[]} -->\n<!-- pendulum:decisions-read {} -->"
+  },
+  {
+   "id": 6936078864,
+   "user": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   },
+   "author_association": "CONTRIBUTOR",
+   "created_at": "2026-11-17T02:25:37Z",
+   "updated_at": "2026-11-17T02:25:37Z",
+   "body": "<!-- pendulum:3:plan -->\n# Plan for #3: Add multiply(a, b) to the math module"
+  },
+  {
+   "id": 6936093233,
+   "user": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   },
+   "author_association": "CONTRIBUTOR",
+   "created_at": "2026-11-17T02:26:20Z",
+   "updated_at": "2026-11-17T02:26:55Z",
+   "body": "<!-- pendulum:3:progress:review:44002920873 -->\nPendulum review [run 44002920873](https://github.com/clockgrove/pendulum-scratch/actions/runs/44002920873) · [PR #4](https://github.com/clockgrove/pendulum-scratch/pull/4): started 02:26Z, 1 min at the last line.\n- 02:26Z re-entry: fresh (resume policy is fresh)\n- 02:26Z pre-review-validation pass 1 (required checks)\n- 02:26Z waiting for required checks (test) on d2fb1ce\n- 02:26Z reviewer claude-fable-5-2\n- 02:26Z exit: delivered; usd 0.163442\n<!-- pendulum:harness {\"harness\":\"claude\",\"model\":\"claude-fable-5-2\",\"models\":{\"worker\":\"claude-opus-5-5\",\"subagent\":\"claude-sonnet-5-5\",\"reviewer\":\"claude-fable-5-2\"},\"labels\":[]} -->"
+  }
+ ],
+ "pr": {
+  "number": 4,
+  "html_url": "https://github.com/clockgrove/pendulum-scratch/pull/4",
+  "state": "closed",
+  "created_at": "2026-11-17T02:25:40Z",
+  "merged_at": "2026-11-17T02:27:36Z",
+  "merge_commit_sha": "685b920fb050456240fd14355f42c3fca1b50909",
+  "commits": 2,
+  "additions": 20,
+  "deletions": 1,
+  "changed_files": 3,
+  "body": "Closes #3\n\nAdds multiply(a, b).",
+  "head": {
+   "sha": "d2fb1ce6f76c7347108c05b21eed0d2bed0ac4c1"
+  }
+ },
+ "prTimeline": [
+  {
+   "event": "cross-referenced",
+   "created_at": "2026-11-17T02:25:45Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "commented",
+   "created_at": "2026-11-17T02:25:47Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "ready_for_review",
+   "created_at": "2026-11-17T02:25:48Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "labeled",
+   "created_at": "2026-11-17T02:25:50Z",
+   "label": {
+    "name": "pendulum:review"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "commented",
+   "created_at": "2026-11-17T02:26:25Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "unlabeled",
+   "created_at": "2026-11-17T02:26:43Z",
+   "label": {
+    "name": "pendulum:review"
+   },
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "commented",
+   "created_at": "2026-11-17T02:26:46Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "added_to_merge_queue",
+   "created_at": "2026-11-17T02:26:52Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "merged",
+   "created_at": "2026-11-17T02:27:36Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "closed",
+   "created_at": "2026-11-17T02:27:36Z",
+   "actor": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "event": "removed_from_merge_queue",
+   "created_at": "2026-11-17T02:27:36Z",
+   "actor": {
+    "login": "github-merge-queue[bot]",
+    "type": "Bot"
+   }
+  }
+ ],
+ "reviews": [
+  {
+   "id": 5931721481,
+   "user": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   },
+   "author_association": "CONTRIBUTOR",
+   "submitted_at": "2026-11-17T02:26:39Z",
+   "state": "COMMENTED",
+   "body": "<!-- pendulum:3:review -->\nPendulum reviewer: one comment-only pass, 1 comment(s).\n\nAcceptance as the reviewer judged it:\n- 1: met (`export function multiply(a, b)` returns `a * b`; the diff only adds lines 4-7 to src/math.mjs, so `add` (lines 1-3) is unchanged.)\n- 2: met (test/math.test.mjs imports `{ add, multiply }` from `../src/math.mjs` (line 3) and the `multiply` test asserts with strict `assert.equal` that multiply(3, 4) is 12, multiply(-2, 5) is -10 and multiply(7, 0) is 0 (lines 10-12).)\n- 3: met (I ran `npm test` on the PR branch: 2 tests (`add`, `multiply`), 2 pass, 0 fail; the `add` test is unchanged and package.json is not in the diff.)\n- 4: met (A single new `## Math module` section says `multiply(a, b)` returns the product of `a` and `b` and gives a `js` usage example (lines 9-12: import, then `multiply(3, 4); // 12`).)"
+  }
+ ],
+ "reviewComments": [
+  {
+   "id": 4594498410,
+   "pull_request_review_id": 5931721481,
+   "user": {
+    "login": "clockgrove-pendulum[bot]",
+    "type": "Bot"
+   },
+   "path": "README.md",
+   "line": 4,
+   "body": "<!-- pendulum:placeholder -->\nPendulum reviewer: no findings; the pass ran and returned nothing line-tied."
+  }
+ ],
+ "checks": [
+  {
+   "id": 133772284452,
+   "name": "wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:40Z",
+   "completed_at": "2026-11-17T02:28:40Z"
+  },
+  {
+   "id": 133772284390,
+   "name": "queue watch",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:40Z",
+   "completed_at": "2026-11-17T02:28:40Z"
+  },
+  {
+   "id": 133772284338,
+   "name": "work",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:40Z",
+   "completed_at": "2026-11-17T02:28:40Z"
+  },
+  {
+   "id": 133772127160,
+   "name": "work",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:17Z",
+   "completed_at": "2026-11-17T02:28:16Z"
+  },
+  {
+   "id": 133772126552,
+   "name": "wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:17Z",
+   "completed_at": "2026-11-17T02:28:16Z"
+  },
+  {
+   "id": 133772126299,
+   "name": "queue watch",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:16Z",
+   "completed_at": "2026-11-17T02:28:16Z"
+  },
+  {
+   "id": 133772036675,
+   "name": "review (${{ github.head_ref }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:03Z",
+   "completed_at": "2026-11-17T02:28:03Z"
+  },
+  {
+   "id": 133772035971,
+   "name": "wake (${{ needs.dispatch.outputs.wake_kind }} ${{ needs.dispatch.outputs.wake_at }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:03Z",
+   "completed_at": "2026-11-17T02:27:53Z"
+  },
+  {
+   "id": 133772034988,
+   "name": "dispatch",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-17T02:28:18Z",
+   "completed_at": "2026-11-17T02:28:39Z"
+  },
+  {
+   "id": 133772023217,
+   "name": "work",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:28:01Z",
+   "completed_at": "2026-11-17T02:27:53Z"
+  },
+  {
+   "id": 133771975483,
+   "name": "review (${{ github.head_ref }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:27:54Z",
+   "completed_at": "2026-11-17T02:27:53Z"
+  },
+  {
+   "id": 133771975107,
+   "name": "queue watch",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:27:54Z",
+   "completed_at": "2026-11-17T02:27:53Z"
+  },
+  {
+   "id": 133771974357,
+   "name": "dispatch",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:27:54Z",
+   "completed_at": "2026-11-17T02:27:53Z"
+  },
+  {
+   "id": 133771897195,
+   "name": "review (${{ github.head_ref }})",
+   "status": "completed",
+   "conclusion": "skipped",
+   "started_at": "2026-11-17T02:27:43Z",
+   "completed_at": "2026-11-17T02:27:42Z"
+  },
+  {
+   "id": 133771895490,
+   "name": "dispatch",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-17T02:27:58Z",
+   "completed_at": "2026-11-17T02:28:16Z"
+  },
+  {
+   "id": 133771686869,
+   "name": "test",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-11-17T02:27:13Z",
+   "completed_at": "2026-11-17T02:27:18Z"
+  }
+ ],
+ "records": [
+  {
+   "harness": "claude",
+   "model": "claude-opus-5-5",
+   "usd": 0.35637,
+   "runs": 1,
+   "passes": 0,
+   "exit": "delivered",
+   "progressRun": "44002648279",
+   "started": "2026-11-17T02:24:37.893Z",
+   "ended": "2026-11-17T02:25:36.337Z",
+   "basis": "harness-reported: total_cost_usd, modelUsage (sub-agents included)"
+  },
+  {
+   "harness": "claude",
+   "model": "claude-fable-5-2",
+   "usd": 0.163442,
+   "runs": 1,
+   "passes": 1,
+   "exit": "delivered",
+   "progressRun": "44002920873",
+   "started": "2026-11-17T02:26:27.979Z",
+   "ended": "2026-11-17T02:26:38.188Z",
+   "basis": "harness-reported: total_cost_usd, modelUsage (sub-agents included)"
+  }
+ ]
+}

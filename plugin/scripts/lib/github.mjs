@@ -1658,7 +1658,7 @@ export async function todaysUsage(repo, { prefix = "pendulum-usage-", token, dat
 }
 
 /** One artifact's result.json; `gh run download` unpacks it, so nothing beyond gh is needed. */
-async function downloadArtifactResult(repo, artifact, token) {
+export async function downloadArtifactResult(repo, artifact, token) {
   const dir = mkdtempSync(join(tmpdir(), "pendulum-usage-"));
   try {
     await run("gh", ["run", "download", String(artifact.workflow_run?.id), "-n", artifact.name, "-D", dir, "-R", repo.full], { env: env(token), timeoutMs: 120_000 });

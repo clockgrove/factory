@@ -54,6 +54,13 @@ export const UNKNOWN_WHY = {
   sandbox: "the sandbox vendor did not report the stage's usage",
 };
 
+/**
+ * How a record's dollars are billed, as its `billing` field says (#481): billed to an API key, a subscription's
+ * API-equivalent figure (what the usage would cost at API prices; not billed), or a plan's included credits at their
+ * list price. A record without the field says nothing about it, and the finish card says so (finish-card.mjs).
+ */
+export const BILLING = Object.freeze(["api", "subscription", "credits"]);
+
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */
 export function markUnknown(rec, why) {
   if (!rec) return rec;

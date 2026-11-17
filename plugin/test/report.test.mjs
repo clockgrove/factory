@@ -911,3 +911,59 @@ test("report (#544): a forged summary counts nothing: only Pendulum's own card i
   const none = await report(bare, { since: "2026-11-17" });
   assert.ok(!none.json.objectives.some((o) => o.issue === 3 && (o.cost.usd.api > 0 || o.stages.work + o.stages.review > 0)));
 });
+
+test("report (#544): a run with a sandbox, decision lines, comments Pendulum cannot attribute and sub-second times reads the same from its card; anything written after the card sends it back to the stages", async () => {
+  const { readSummary } = await import("../scripts/lib/finish-card.mjs");
+  const TEAMMATE = { login: "teammate", type: "User" };
+  // #3's run with: a sandbox booked on its work stage, one on its review whose usage the vendor did not report, decision
+  // calls outside a stage, a teammate's stage comment and vendor comment, and passes ending on a fraction of a second.
+  const rich = () => {
+    const w = world();
+    for (const rec of [w.recs.work, w.recs.review]) rec.ledger = rec.ledger.map((e) => ({ ...e, ended: e.ended.replace("Z", ".750Z") }));
+    const vendor = (key, at, parts) => comment(3, `<!-- pendulum:3:vendor:${key} -->\nPendulum's sandbox cost for this stage:\nx\n${spendMarker(parts.usd, parts)}`, { at });
+    w.comments.push(
+      vendor("work:44002648279", "2026-11-17T02:25:56Z", { usd: 0.05, vendorUsd: 0.05 }),
+      vendor("review:44002920873", "2026-11-17T02:26:56Z", { usd: 0.02, vendorUsd: 0.02, usdUnknown: 1, usdUnknownWhy: ["sandbox"] }),
+      comment(3, `<!-- pendulum:3:decisions:dispatcher -->\n${decisionSpendMarker({ date: "2026-11-17", calls: 2, usd: 0.01 })}`, { at: "2026-11-17T02:27:00Z" }),
+      progress(3, "review", "teammate-1", { user: TEAMMATE, association: "MEMBER", at: "2026-11-17T02:26:30Z" }),
+      comment(3, `<!-- pendulum:3:vendor:work:teammate-2 -->\nx\n${spendMarker(0.3, { vendorUsd: 0.3 })}`, { user: TEAMMATE, association: "MEMBER", at: "2026-11-17T02:26:31Z" }),
+    );
+    return w;
+  };
+  const stages = await report(rich(), { issue: 3 });
+  const w = rich();
+  const posted = await finishCard3(w);
+  w.comments.push(posted);
+  const card = await report(w, { issue: 3 });
+  assert.equal(card.json.source.read.summaries, 1);
+  assert.deepEqual(artifactCalls(card.calls), []);
+  assert.deepEqual(figures(card.json), figures(stages.json));
+  // Each is in it: the sandbox's run of unknown cost, the teammate's stage and vendor comment, the decision calls.
+  const s = readSummary(posted.body, 3);
+  assert.deepEqual([s.sandbox.usd, s.sandbox.unknown, s.sandbox.foreign], [0.07, 2, ["work"]]);
+  assert.deepEqual(byIssue(card.json, 3).cost.unknownWhy, ["sandbox", "unattributed"]);
+  assert.equal(usd(byIssue(card.json, 3)).api, Math.round((0.519812 + 0.01) * 1e6) / 1e6);
+  assert.deepEqual(card.json.source.missing.find((m) => m.code === "unattributed")?.issues, [3]);
+  assert.equal(s.passes, null, "a stage Pendulum cannot attribute: the Objective's passes are not known");
+
+  // Written or edited after the card: a late vendor comment, a vendor comment patched, a spend line changed.
+  const after = "2026-11-17T02:40:00Z";
+  for (const [name, change] of [
+    ["a late vendor comment", (x) => x.comments.push(comment(3, `<!-- pendulum:3:vendor:review:44002920873 -->\nx\n${spendMarker(0.4, { vendorUsd: 0.4 })}`, { at: after }))],
+    ["a vendor comment patched", (x) => Object.assign(x.comments.find((c) => c.body.startsWith("<!-- pendulum:3:vendor:work:44002648279")), { updated_at: after })],
+    ["a spend line changed", (x) => Object.assign(x.comments.find((c) => c.body.startsWith("<!-- pendulum:3:progress:work:44002648279")), { updated_at: after })],
+  ]) {
+    const late = rich();
+    late.comments.push(await finishCard3(late));
+    change(late);
+    const r = await report(late, { issue: 3 });
+    assert.equal(r.json.source.read.summaries, 0, name);
+    assert.ok(artifactCalls(r.calls).length > 0, `${name}: the stages are read`);
+  }
+  // A card that found no stage at all is no summary to read an Objective from.
+  const empty = world();
+  const blank = await finishCard3({ ...empty, comments: empty.comments.filter((c) => c.issue_url !== issueUrl(3)) });
+  assert.deepEqual(readSummary(blank.body, 3).stages, []);
+  empty.comments.push(blank);
+  assert.equal((await report(empty, { issue: 3 })).json.source.read.summaries, 0);
+});

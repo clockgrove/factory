@@ -590,9 +590,46 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   // A summary over its bound is written with no stage's passes: a reader then reads the stages.
   const many = Array.from({ length: 200 }, (_, i) => pass(`k${i}x`, 0.001, "2026-11-17T02:24:40Z", "2026-11-17T02:25:10Z"));
   const huge = withSelf(() => data({ records: real.records.map((r) => ({ ...r, ledger: many })) }));
-  const hugeLine = card.finishCardBody(huge).split("\n")[1];
-  assert.ok(hugeLine.length <= card.SUMMARY_MAX);
-  assert.deepEqual(card.readSummary(hugeLine, 3).stages.map((x) => x.passes), [null, null]);
+  const hugeBody = card.finishCardBody(huge);
+  assert.ok(hugeBody.split("\n")[1].length <= card.SUMMARY_MAX);
+  assert.deepEqual(card.readSummary(hugeBody, 3).stages.map((x) => x.passes), [null, null]);
+  // Still over it with no stage's passes, or a body over GitHub's 65,536: the card is posted without a summary.
+  const crowd = Array.from({ length: 200 }, (_, i) => comment(2000 + i, `2026-11-17T02:25:${String(i % 60).padStart(2, "0")}Z`, `${work.body.replace(/progress:work:\d+/, `progress:work:${7000 + i}`)}\n${spendLine({ usd: 0.01, usdByBilling: { api: 0.01 } })}`));
+  const crowded = withSelf(() => data({ comments: [...real.comments, ...crowd] }));
+  assert.ok(card.summaryMarker(crowded) === null, "no summary line fits");
+  const crowdedBody = card.finishCardBody(crowded);
+  assert.equal(crowdedBody, `${finishMarker(3)}\n${renderFinishCard(crowded)}`);
+  assert.equal(card.readSummary(crowdedBody, 3), null);
+  // A marker anywhere but the line under the finish marker reads as none.
+  const plainBody = card.finishCardBody(runs[0]);
+  const [first, second, ...after] = plainBody.split("\n");
+  assert.equal(card.readSummary([first, "", second, ...after].join("\n"), 3), null);
+  assert.equal(card.readSummary(second, 3), null);
+
+  // A stage with a ledger line takes its passes from it, the source the report reads, even with its usage record read:
+  // the record's sub-second times give the same passes but not the same minutes.
+  const lined = withSpend({ work: { usd: 0.35637, usdByBilling: { api: 0.35637 } }, review: { usd: 0.163442, usdByBilling: { api: 0.163442 } } });
+  const ledgerLine = (i) => `<!-- pendulum:ledger ${JSON.stringify({ v: "0.10.1", p: ledgers[i].map((e) => ({ l: e.label, b: "api", u: e.usd, t: [Date.parse(e.started) / 1000, Date.parse(e.ended) / 1000], n: [1000, 10, 500, 200] })) })} -->`;
+  const withLines = lined.map((c) => (/^<!-- pendulum:3:progress:work:/.test(c.body) ? { ...c, body: `${c.body}\n${ledgerLine(0)}` } : /^<!-- pendulum:3:progress:review:/.test(c.body) ? { ...c, body: `${c.body}\n${ledgerLine(1)}` } : c));
+  const subSecond = real.records.map((r, i) => ({ ...r, ledger: ledgers[i].map((e) => ({ ...e, ended: e.ended.replace("Z", ".750Z") })) }));
+  const both = withSelf(() => data({ comments: withLines, records: subSecond }));
+  assert.deepEqual(card.finishSummary(both).stages.map((x) => x.passes.map((k) => k.minutes)), [[0.5, 0.5], [0.5]], "the ledger line's seconds, not the record's");
+
+  // A sandbox whose dollars are known but whose usage the vendor did not report keeps its run of unknown cost (as the
+  // cost join counts it), on the card and in the summary.
+  const keyOf = (stage) => /^<!-- pendulum:3:progress:((?:work|review):[A-Za-z0-9-]+) -->/.exec(real.comments.find((c) => c.body.startsWith(`<!-- pendulum:3:progress:${stage}:`)).body)[1];
+  const partial = comment(904, "2026-11-17T02:26:40Z", `<!-- pendulum:3:vendor:${keyOf("review")} -->\nx\n${spendLine({ usd: 0.02, vendorUsd: 0.02, usdUnknown: 1, usdUnknownWhy: ["sandbox"] })}`);
+  const sandboxed = withSelf(() => data({ comments: [...real.comments, partial] }));
+  assert.deepEqual(sandboxed.sandbox, { usd: 0.02, unknown: 1 });
+  assert.match(renderFinishCard(sandboxed), /plus spend that was not reported/);
+  assert.deepEqual(card.finishSummary(sandboxed).sandbox, { usd: 0.02, cents: 2, unknown: 1, why: ["sandbox"], foreign: [] });
+  // A teammate's vendor comment of one of Pendulum's stages is that stage's, no run of its own; one of no stage is a
+  // run of unknown cost of its stage's kind, one each.
+  const teammate = { login: "teammate", type: "User" };
+  const theirs = (id, at, key) => ({ ...comment(id, at, `<!-- pendulum:3:vendor:${key} -->\nx\n${spendLine({ usd: 0.5, vendorUsd: 0.5 })}`), user: teammate, author_association: "MEMBER" });
+  const foreign = withSelf(() => data({ comments: [...real.comments, theirs(905, "2026-11-17T02:26:41Z", keyOf("work")), theirs(906, "2026-11-17T02:26:42Z", "review:zz9"), theirs(907, "2026-11-17T02:26:43Z", "work:zz8")] }));
+  assert.deepEqual(foreign.sandbox, { usd: 0, unknown: 2 });
+  assert.deepEqual(card.finishSummary(foreign).sandbox.foreign, ["review", "work"]);
 
   // Another issue's, another version's or a broken one reads as none.
   const body = card.finishCardBody(runs[0]);

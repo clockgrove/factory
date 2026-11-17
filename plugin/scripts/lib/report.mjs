@@ -306,7 +306,8 @@ export function ownPredicate(appId = null, self = []) {
  * issue that is its finish card and carries a summary of a version this reader takes (finish-card.mjs readSummary),
  * when every stage of Pendulum's own in it has its per-pass figures (pass-figures.mjs stagePassFigures, from its ledger),
  * the card's run (its clock to its merge) lies in the period, and every stage comment in the period, Pendulum's or
- * one by someone who can push (`pushed`), is one the card counted: in that run, or a vendor comment of a stage in it.
+ * one by someone who can push (`pushed`), is one the card counted: in that run, or a vendor comment of a stage in it;
+ * and none of them, in the period or not, was written or edited after the card. A card with no stage is none.
  * Anyone else's card, or a summary that does not read, is none: the stages are read. Returns {comment, summary}.
  */
 export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAuthor(c) || throughApp(c), by = [] } = {}) {
@@ -321,13 +322,16 @@ export function summaryFor(n, comments, scope, { mine, pushed = (c) => pushAutho
     }
   }
   if (!found) return null;
-  // A stage of Pendulum's own that has no per-pass ledger in the card: its stages are read, for its record's.
-  if (found.summary.stages.some((s) => !s.unattributed && !Array.isArray(s.passes))) return null;
+  // A card with no stage, or a stage of Pendulum's own that has no per-pass ledger in it: its stages are read.
+  if (!found.summary.stages.length || found.summary.stages.some((s) => !s.unattributed && !Array.isArray(s.passes))) return null;
   const { started, merged } = found.summary;
   if (!inWindow(started, scope) || (scope.until && !(ms(merged) < ms(scope.until)))) return null;
   const inRun = (at) => ms(at) >= ms(started) && ms(at) <= ms(merged);
   const head = new RegExp(`^<!-- pendulum:${n}:(progress|vendor):((?:work|review):[A-Za-z0-9:-]{1,100}) -->`);
   const stageComments = on.filter((c) => (mine(c) || pushed(c)) && head.test(c.body || ""));
+  // A stage comment written or edited after the card (a late vendor booking, a spend line changed) is in no figure of it.
+  const card = ms(found.comment.created_at);
+  if (stageComments.some((c) => !(ms(c.created_at) <= card) || (c.updated_at && !(ms(c.updated_at) <= card)))) return null;
   const ran = new Set(stageComments.filter((c) => head.exec(c.body)[1] === "progress" && inRun(c.created_at)).map((c) => head.exec(c.body)[2]));
   const counted = (c) => inRun(c.created_at) || (head.exec(c.body)[1] === "vendor" && ran.has(head.exec(c.body)[2]));
   return stageComments.every((c) => !inWindow(c.created_at, scope) || counted(c)) ? found : null;
@@ -862,6 +866,38 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
     };
     // Stages Pendulum cannot attribute to itself: no ledger of theirs is read, so the arm measures leave this Objective out.
     let unattributedStages = 0;
+    if (summary) {
+      // Its stages as its finish card counted them, each with the cost, tokens, release and passes the card recorded, in
+      // the order the stage path counts them (Pendulum's stages, then its sandbox stages with no progress comment, then
+      // those it cannot attribute and their vendor comments), before the decision calls outside a stage (cost.parts).
+      summariesUsed += 1;
+      const count = (kind, c, s, stage) => {
+        const tokens = s.tokens ?? zeroTokens();
+        addCost(row.cost, c);
+        addCost(totals, c);
+        addTokens(row.tokens, tokens);
+        addTokens(totalTokens, tokens);
+        views.stage.add(kind, c, tokens, stage ? 1 : 0);
+        views.harness.add(s.harness ?? null, c, tokens, stage ? 1 : 0);
+        views.model.add(s.model ?? null, c, tokens, stage ? 1 : 0);
+        views.version.add(s.version ?? null, c, tokens, stage ? 1 : 0);
+        if (stage) {
+          stagesSeen += 1;
+          row.stages[kind] += 1;
+          if (!s.version && !s.unattributed) missing.noVersion.add(n);
+        }
+        if (c.unknownRuns) unknownItems.push({ issue: n, stage: kind, runs: c.unknownRuns, why: c.unknownWhy });
+        // Its passes (summaryFor reads a card only when every stage of Pendulum's own has them).
+        if (stage && s.unattributed) unattributedStages += 1;
+        else if (stage) foldPasses(s.passes);
+      };
+      const ordered = [...summary.stages.filter((s) => !s.unattributed && s.ms !== null), ...summary.stages.filter((s) => !s.unattributed && s.ms === null), ...summary.stages.filter((s) => s.unattributed)];
+      for (const s of ordered) count(reportStageKind(s.kind), summaryCost(s, s.sandbox, s.why, s.sandbox?.unknown ? ["sandbox"] : []), s, true);
+      // Each vendor comment Pendulum cannot attribute, with no stage of its own: a run of unknown cost of its stage's kind.
+      const foreign = summary.sandbox?.foreign ?? [];
+      for (const kind of foreign) count(kind, summaryCost({ usd: 0, unknown: 0, byBilling: {} }, { usd: 0, unknown: 1 }, [], ["unattributed"]), {}, false);
+      if (foreign.length || summary.stages.some((s) => s.unattributed)) missing.unattributed.add(n);
+    }
     cost.parts.forEach((part, i) => {
       const rec = all[i];
       const c = partCost(part, rec, claimOf(rec) === null || lastByClaim.get(claimOf(rec)) === i);
@@ -919,38 +955,6 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       }
       foldPasses(stagePassFigures(ledger));
     });
-    if (summary) {
-      // Its stages as its finish card counted them, each with the cost, tokens, release and passes the card recorded.
-      summariesUsed += 1;
-      const count = (kind, c, s, stage) => {
-        const tokens = s.tokens ?? zeroTokens();
-        addCost(row.cost, c);
-        addCost(totals, c);
-        addTokens(row.tokens, tokens);
-        addTokens(totalTokens, tokens);
-        views.stage.add(kind, c, tokens, stage ? 1 : 0);
-        views.harness.add(s.harness ?? null, c, tokens, stage ? 1 : 0);
-        views.model.add(s.model ?? null, c, tokens, stage ? 1 : 0);
-        views.version.add(s.version ?? null, c, tokens, stage ? 1 : 0);
-        if (stage) {
-          stagesSeen += 1;
-          row.stages[kind] += 1;
-          if (!s.version && !s.unattributed) missing.noVersion.add(n);
-        }
-        if (c.unknownRuns) unknownItems.push({ issue: n, stage: kind, runs: c.unknownRuns, why: c.unknownWhy });
-        // Its passes (summaryFor reads a card only when every stage of Pendulum's own has them).
-        if (stage && s.unattributed) unattributedStages += 1;
-        else if (stage) foldPasses(s.passes);
-      };
-      for (const s of summary.stages) count(reportStageKind(s.kind), summaryCost(s, s.sandbox, s.why, s.sandbox?.unknown ? ["sandbox"] : []), s, true);
-      // The sandbox's cost beyond its stages' own: vendor comments Pendulum cannot attribute, with no stage of their own.
-      if (summary.sandbox) {
-        const unattributed = { usd: round6(summary.sandbox.usd - summary.stages.reduce((t, s) => t + (s.sandbox?.usd ?? 0), 0)), unknown: summary.sandbox.unknown - summary.stages.reduce((t, s) => t + (s.sandbox?.unknown ?? 0), 0) };
-        if (unattributed.usd > 0 || unattributed.unknown > 0) count("work", summaryCost({ usd: 0, unknown: 0, byBilling: {} }, unattributed, [], ["unattributed"]), {}, false);
-      }
-      // No stages found at all: the card's one run of unknown cost.
-      if (!summary.stages.length && summary.cost.unknown) count("work", summaryCost({ usd: 0, unknown: summary.cost.unknown, byBilling: {} }, null, summary.cost.why, []), {}, false);
-    }
     if (ledgered && !unledgered) {
       row.modelMinutes = round2(minutes.priced);
       // Each kind's dollars over the same priced passes' minutes: one ratio per kind, never summed across kinds.

@@ -147,7 +147,8 @@ export const artifactStage = (name) => (typeof name !== "string" ? null : /(^|[-
  * its spend line, else its usage record's; null for none), version (the Pendulum release that ran it, or null), tokens
  * (its ledger line's passes' or its usage record's), unattributed (true for a stage Pendulum cannot attribute)}, in time order; and the cloud sandbox's own cost
  * {usd, unknown}, every vendor comment's, or null: beyond its stages' own, the runs of unknown cost of vendor comments
- * Pendulum cannot attribute (sandboxWhy).
+ * Pendulum cannot attribute (sandboxWhy), whose stage kinds are `foreignVendors`, one per comment (a vendor comment of a
+ * stage that has a progress comment, Pendulum's or not, is that stage's).
  */
 export function objectiveStages({ issue: n, comments = [], records = [], mine = isSelf, pushed = (c) => pushAuthor(c) || throughApp(c), inRun = () => true, partOf = () => 1 }) {
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
@@ -190,12 +191,12 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const from = line ?? rec ?? {};
     const harness = stageHarnessOf(c.body)?.harness ?? (HARNESSES.has(record?.harness) ? record.harness : null);
     const why = line || rec ? whyOf(unknown, from.usdUnknownWhy) : ["no-record"];
-    // Its per-pass ledger, release and tokens, as the report takes them: the ledger of its usage record when one was read
-    // (its times to the millisecond), else the ledger line beside its spend line (logic.mjs ledgerOfComment, times to the
-    // second); a spend line carries no tokens.
+    // Its per-pass ledger, release and tokens, from the source the report reads them from: a stage with a spend line, the
+    // ledger line beside it (logic.mjs ledgerOfComment), else its usage record's; one with none, its usage record's (its
+    // times to the millisecond). A spend line carries no tokens.
     const written = line ? ledgerOfComment(c.body) : null;
     const onComment = Array.isArray(written?.ledger) ? written : null;
-    const ledger = (Array.isArray(record?.ledger) ? record.ledger : null) ?? onComment?.ledger ?? null;
+    const ledger = onComment?.ledger ?? (Array.isArray(record?.ledger) ? record.ledger : null);
     const version = [rec?.ran?.pendulum, onComment?.version, record?.ran?.pendulum].find((v) => typeof v === "string" && VERSION.test(v)) ?? null;
     const tokens = onComment ? onComment.ledger.reduce((t, p) => addTokens(t, p.tokens), zeroTokens()) : tokensOf(record?.tokens);
     const s = { stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? modelId(record?.model), harness, usd, unknown, why, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true, sandbox: null, ledger, version, tokens };
@@ -210,7 +211,8 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     const key = vendorHead.exec(c.body || "")?.[1];
     const parts = key ? spendParts(c.body) : null;
     if (!parts || (!keys.has(key) && !inRun(c.created_at))) continue;
-    const vendor = { usd: parts.vendorUsd ?? 0, unknown: parts.vendorUsd === null ? 1 : 0 };
+    // The vendor's usage not reported: no figure, or its line names the sandbox as unknown (cost-join.mjs sandboxUnknown).
+    const vendor = { usd: parts.vendorUsd ?? 0, unknown: parts.vendorUsd === null || (parts.usdUnknownWhy ?? []).includes("sandbox") ? 1 : 0 };
     sandbox = { usd: (sandbox?.usd ?? 0) + vendor.usd, unknown: (sandbox?.unknown ?? 0) + vendor.unknown };
     const had = byKey.get(key);
     if (had) {
@@ -218,19 +220,27 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
       continue;
     }
     const usd = parts.modelUsd;
-    const unknown = Math.max((parts.usdUnknown ?? 0) - (parts.vendorUsd === null ? 1 : 0), usd === null ? 1 : 0);
+    const unknown = Math.max((parts.usdUnknown ?? 0) - vendor.unknown, usd === null ? 1 : 0);
     const s = { stage: key.startsWith("review:") ? "review" : "work", rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: null, end: null, model: null, harness: null, usd: unknown && !usd ? null : usd, unknown, why: whyOf(unknown, (parts.usdUnknownWhy ?? []).filter((w) => w !== "sandbox")), byBilling: billingRead(parts.usdByBilling), byPass: {}, rerun: null, judgeOnly: false, sandbox: vendor, ledger: null, version: null, tokens: zeroTokens() };
     stages.push(s);
   }
+  // Every stage's key with a progress comment, Pendulum's or one it cannot attribute: a vendor comment of one of them is
+  // that stage's, never a run of its own.
+  const progressKeys = new Set([...own, ...vouched].map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => `${m[1]}:${m[2]}`));
+  const foreignVendors = [];
   for (const c of vouched) {
     const m = progress.exec(c.body || "");
+    const vendorKey = vendorHead.exec(c.body || "")?.[1];
     if (m && inRun(c.created_at)) {
       keys.add(`${m[1]}:${m[2]}`);
       stages.push({ stage: m[1], rebase: false, conflict: false, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: null, harness: null, usd: null, unknown: 1, why: ["unattributed"], byBilling: {}, byPass: {}, rerun: null, judgeOnly: false, sandbox: null, ledger: null, version: null, tokens: zeroTokens(), unattributed: true });
-    } else if (vendorHead.test(c.body || "") && inRun(c.created_at)) sandbox = { usd: sandbox?.usd ?? 0, unknown: (sandbox?.unknown ?? 0) + 1 };
+    } else if (vendorKey && !progressKeys.has(vendorKey) && inRun(c.created_at)) {
+      sandbox = { usd: sandbox?.usd ?? 0, unknown: (sandbox?.unknown ?? 0) + 1 };
+      foreignVendors.push(vendorKey.startsWith("review:") ? "review" : "work");
+    }
   }
   stages.sort((a, b) => ms(a.at) - ms(b.at));
-  return { stages, sandbox };
+  return { stages, sandbox, foreignVendors };
 }
 
 /**
@@ -338,7 +348,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
   const own = comments.filter((c) => mine(c)).sort((a, b) => ms(a.created_at) - ms(b.created_at));
   // Which merged part a stage worked on: the parts merged before it started (a split Objective's PRs merge in order).
   const partOf = (at) => merged.filter((p) => ms(p.pr.merged_at) < ms(at)).length + 1;
-  const { stages, sandbox } = objectiveStages({ issue: n, comments, records, mine, pushed, inRun, partOf });
+  const { stages, sandbox, foreignVendors } = objectiveStages({ issue: n, comments, records, mine, pushed, inRun, partOf });
   // Each stage's name, in time order, from recorded fields only: a review; a send-back's rebase (its rebase line); the
   // first work stage of the Objective (its build) or of a later split part; any other work stage is work.
   const firstOfPart = new Set();
@@ -408,6 +418,7 @@ export function finishData({ repo, issue, timeline = [], comments = [], pulls = 
     stages,
     queue,
     sandbox,
+    foreignVendors,
   };
 }
 
@@ -884,7 +895,7 @@ export function finishSummary(d) {
     stageCounts,
     ...objectivePasses(d),
     cost: { usd: t.usd, cents: Math.round(t.usd * 100), unknown: t.unknown, why: t.why, byBilling: t.byBilling },
-    sandbox: d.sandbox ? { usd: d.sandbox.usd, cents: rows.at(-1).cents, unknown: d.sandbox.unknown, why: sandboxWhy(d) } : null,
+    sandbox: d.sandbox ? { usd: d.sandbox.usd, cents: rows.at(-1).cents, unknown: d.sandbox.unknown, why: sandboxWhy(d), foreign: [...(d.foreignVendors ?? [])] } : null,
     stages: d.stages.map((s, i) => ({ kind: s.kind, part: s.part, model: s.model, harness: s.harness, version: s.version ?? null, ms: s.start ? ms(s.end) - ms(s.start) : null, ...money({ ...s, cents: rows[i].cents }), why: s.why, sandbox: s.sandbox, churn: s.churn.map((c) => c.row), tokens: s.tokens ?? zeroTokens(), passes: Array.isArray(s.ledger) ? stagePassFigures(s.ledger) : null, ...(s.unattributed ? { unattributed: true } : {}) })),
     asked: b.asked.map((r) => ({ part: r.part ?? null, what: r.what ?? "sandbox", ...money(r) })),
     churn: b.churn.map((r) => ({ row: r.row, stages: r.stages, ...money(r) })),
@@ -902,17 +913,31 @@ const markerJson = (v) => JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/
 
 /**
  * The summary marker: one hidden line, its JSON with `<` and `>` escaped so nothing in it can close the comment. Over
- * SUMMARY_MAX characters it is written with every stage's `passes` null, so a reader reads that Objective's stages.
+ * SUMMARY_MAX characters it is written with every stage's `passes` null, so a reader reads that Objective's stages; still
+ * over it, null: the card carries no summary.
  */
 export function summaryMarker(d) {
   const sum = finishSummary(d);
   const line = (stages) => `<!-- pendulum:${d.issue}:summary ${markerJson({ ...sum, tokens: tokensOut(sum.tokens), stages })} -->`;
   const full = line(sum.stages.map((s) => ({ ...s, tokens: tokensOut(s.tokens), passes: s.passes && passesOut(s.passes) })));
-  return full.length <= SUMMARY_MAX ? full : line(sum.stages.map((s) => ({ ...s, tokens: tokensOut(s.tokens), passes: null })));
+  if (full.length <= SUMMARY_MAX) return full;
+  const bare = line(sum.stages.map((s) => ({ ...s, tokens: tokensOut(s.tokens), passes: null })));
+  return bare.length <= SUMMARY_MAX ? bare : null;
 }
 
-/** The finish card comment's whole body: its `finish` marker, its summary marker and the card. */
-export const finishCardBody = (d) => `${finishMarker(d.issue)}\n${summaryMarker(d)}\n${renderFinishCard(d)}`;
+/** The most characters GitHub takes in a comment's body. */
+export const COMMENT_MAX = 65_536;
+
+/**
+ * The finish card comment's whole body: its `finish` marker on its first line, its summary marker on its second, and the
+ * card. With no summary that fits (summaryMarker null), or a body over COMMENT_MAX with it, the card is posted without it.
+ */
+export function finishCardBody(d) {
+  const card = renderFinishCard(d);
+  const summary = summaryMarker(d);
+  const body = summary ? `${finishMarker(d.issue)}\n${summary}\n${card}` : null;
+  return body && body.length <= COMMENT_MAX ? body : `${finishMarker(d.issue)}\n${card}`;
+}
 
 const usdOf = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
 const countOf = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : undefined);
@@ -962,7 +987,10 @@ const moneyRead = (r, { nullable = false } = {}) => {
  * comment it is, is the caller's to check: the marker counts only on Pendulum's own (pendulumOwn).
  */
 export function readSummary(body, n) {
-  const m = new RegExp(`^<!-- pendulum:${n}:summary (\\{[^\\n]*\\}) -->$`, "m").exec(String(body ?? ""));
+  // Only on the line under the card's `finish` marker, where finishCardBody writes it.
+  const [head, second] = String(body ?? "").split("\n", 2);
+  if (head !== finishMarker(n)) return null;
+  const m = new RegExp(`^<!-- pendulum:${n}:summary (\\{[^\\n]*\\}) -->$`).exec(second ?? "");
   if (!m) return null;
   let v;
   try {
@@ -975,6 +1003,7 @@ export function readSummary(body, n) {
   const why = whyRead(v.cost?.why);
   const sandbox = v.sandbox === null ? null : moneyRead(v.sandbox);
   const sandboxWhy = v.sandbox === null ? [] : whyRead(v.sandbox?.why);
+  const foreign = v.sandbox === null ? [] : Array.isArray(v.sandbox?.foreign) && v.sandbox.foreign.every((k) => k === "work" || k === "review") ? v.sandbox.foreign : undefined;
   const stages = v.stages.map((s) => {
     const money = moneyRead(s, { nullable: true });
     const stageWhy = whyRead(s?.why);
@@ -994,7 +1023,7 @@ export function readSummary(body, n) {
   });
   const started = timeOf(v.started);
   const merged = timeOf(v.merged);
-  if (!cost || !why || sandbox === undefined || !sandboxWhy || [...stages, ...asked, ...churn].includes(null) || !started || !merged || !v.prs.every((p) => countOf(p))) return null;
+  if (!cost || !why || sandbox === undefined || !sandboxWhy || !foreign || [...stages, ...asked, ...churn].includes(null) || !started || !merged || !v.prs.every((p) => countOf(p))) return null;
   const counts = v.stageCounts && typeof v.stageCounts === "object" ? v.stageCounts : {};
   return {
     v: v.v,
@@ -1017,7 +1046,7 @@ export function readSummary(body, n) {
     labelled: timeOf(v.labelled) ?? null,
     labelledWallMs: countOf(v.labelledWallMs) ?? null,
     cost: { ...cost, why },
-    sandbox: sandbox ? { usd: sandbox.usd, cents: sandbox.cents, unknown: sandbox.unknown, why: sandboxWhy } : null,
+    sandbox: sandbox ? { usd: sandbox.usd, cents: sandbox.cents, unknown: sandbox.unknown, why: sandboxWhy, foreign: [...foreign] } : null,
     stages,
     asked,
     churn,

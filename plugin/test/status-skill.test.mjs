@@ -42,11 +42,15 @@ test("States: each state label with the state the code reads from it, and re-app
   );
   for (const r of rows) assert.match(r.at(-1), /^(yes|no)$/, `${r[0]}: yes or no`);
   assert.deepEqual(labelled.filter((r) => r.at(-1) === "yes").map((r) => code(r[0])).sort(), [...REQUEUED_FROM].sort());
-  // And as the dispatcher's recovery reads a timeline: the state's label, then the Objective label applied by a writer.
+  // And as the dispatcher's recovery reads a timeline: the state's label, then the re-apply SKILL.md tells a person to run,
+  // the Objective label taken off and put back by a writer.
+  assert.match(skill, /`gh issue edit <issue> --repo OWNER\/NAME --remove-label pendulum:objective`, then `--add-label pendulum:objective`/);
   for (const r of labelled) {
     const events = [
-      { event: "labeled", label: { name: code(r[0]) }, created_at: "2031-01-01T00:00:00Z", actor: { login: "kim" } },
-      { event: "labeled", label: { name: OBJECTIVE }, created_at: "2031-01-01T01:00:00Z", actor: { login: "kim" } },
+      { event: "labeled", label: { name: OBJECTIVE }, created_at: "2031-01-01T00:00:00Z", actor: { login: "kim" } },
+      { event: "labeled", label: { name: code(r[0]) }, created_at: "2031-01-01T00:30:00Z", actor: { login: "pendulum[bot]" } },
+      { event: "unlabeled", label: { name: OBJECTIVE }, created_at: "2031-01-01T01:00:00Z", actor: { login: "kim" } },
+      { event: "labeled", label: { name: OBJECTIVE }, created_at: "2031-01-01T01:00:05Z", actor: { login: "kim" } },
     ];
     const go = await requeuedIn(events, OBJECTIVE, async () => true);
     assert.equal(go.requeued, r.at(-1) === "yes", `${code(r[0])}: re-applying ${OBJECTIVE} ${go.requeued ? "requeues" : "does not requeue"} it`);
@@ -71,6 +75,22 @@ test("Block causes: every cause the code records, whether it is external, and th
     const phrase = [...ref.matchAll(/"([^"]+)"/g)].map((m) => m[1]).find((p) => said.startsWith(p));
     assert.ok(phrase, `reference.md quotes the start of the ${next} notice: ${said.slice(0, 60)}`);
   }
+});
+
+test("Blocked: SKILL.md offers one way on per notice, named by the words that start the notice's last paragraph", () => {
+  const section = skill.split(/^## /m).find((x) => x.startsWith("Blocked\n"));
+  const offered = [...section.matchAll(/^- \*\*"([^"]+)"\*\*/gm)].map((m) => m[1]);
+  // Every way on the code writes (nextStep: a cause's resume or work, a restart that could not finish, an author no one vouches for).
+  const ways = ["resume", "work", "restart", "none"];
+  for (const pr of [null, { number: 34 }]) {
+    for (const next of ways) {
+      const said = nextStep({ issue: 12, pr, next });
+      assert.equal(offered.filter((o) => said.startsWith(o)).length, 1, `one offer for the ${next} notice${pr ? " with a PR" : ""}: ${said.slice(0, 50)}`);
+    }
+  }
+  assert.equal(offered.length, ways.length, "and no offer for a notice the code never writes");
+  // The ways on a cause gives (nextOf) are named beside their offer, so an older notice without the paragraph finds it.
+  for (const way of new Set(Object.keys(BLOCK_CAUSES).map(nextOf))) assert.match(section, new RegExp(`\\*\\* \\(\`${way}\`\\)`), way);
 });
 
 test("the Blocked notice and the Question notice it reads are the ones Pendulum posts", () => {

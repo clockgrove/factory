@@ -49,7 +49,7 @@ Then offer the next step: keep working on it, leave it as a draft, or start it (
 
 Starting a draft takes `pendulum:draft` off and applies `pendulum:objective`; the dispatcher then picks it up like a new Objective. A draft is never run, on any route, even with `pendulum:objective` on it too. Confirm first: a started Objective runs unattended and spends model budget.
 
-**Check the issue.** `pendulum:objective` without `pendulum:draft`: it is started already; say so and stop. No `pendulum:draft`: not a draft, but starting it is the same step. No goal or no acceptance entries (SKILL.md's shape): say so, and offer to refine it first.
+**Check the issue.** `pendulum:objective` without `pendulum:draft`: it is started already; do not start it again. Say so and point to the next step that fits: the pendulum-status skill resumes a Blocked one or answers a Question, and the pendulum-restart skill starts one over from its issue's current text. No `pendulum:draft`: not a draft, but starting it is the same step. No goal or no acceptance entries (SKILL.md's shape): say so, and offer to refine it first.
 
 **Check trust.** Pendulum acts on an issue only when its author, its last editor once the body was edited, and whoever made the latest rename once the title was renamed, is a person who can push to the repository or a maintainer the workflow names (`PENDULUM_NOTIFY` or `PENDULUM_MAINTAINERS` in `.github/workflows/pendulum.yml`, as `login#id`). Otherwise the run Blocks before any model reads the text, so check first:
 

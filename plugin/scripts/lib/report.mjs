@@ -809,38 +809,47 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
+/** A recorded review stage the cost join gave no part: one run of unknown cost, never $0. */
+const noRecordCost = () => ({ ...zeroCost(), unknownRuns: 1, unknownWhy: ["no-record"] });
 /** A count per finding outcome (logic.mjs FINDING_OUTCOMES), each at zero. */
 const zeroOutcomes = () => Object.fromEntries(FINDING_OUTCOMES.map((o) => [o, 0]));
 
 /**
  * One Objective's review findings (#546), from the findings records in Pendulum's own review progress comments (`own`,
  * its stage comments, oldest first; logic.mjs findingsOf), never from prose. A finding's outcome is the one the latest
- * stage that names it recorded. It was raised by the stage whose record names the review it came from (Pendulum's
- * reviewer: that stage's reviewer model) or, for a reviewer outside Pendulum, by that login, first named in the stage
- * that first listed it; a finding of Pendulum's reviewer whose review no record names has no reviewer (null). A
- * finding counts when that stage is in the period. The review stages counted are the ones in the period with a record,
- * each with its dollars (`reviewStages`: the cost loop's, by run key) and model. Adds to `rows` (by reviewer),
- * `stageRows` (by review stage, the findings its own reviewer raised) and `totals`; returns the Objective's figures, or
- * null when it has neither a recorded review stage in the period nor a finding.
+ * stage that names it recorded in a record written (the comment's last edit) before the period's end, except that a
+ * stage's listed `open` replaces only an earlier `open`, never a judgement; with no such record it is `open`. It was
+ * raised by the stage whose record names the review it came from (Pendulum's reviewer: that stage's reviewer model) or,
+ * for a reviewer outside Pendulum, by that login, first named in the stage that first listed it; a finding of
+ * Pendulum's reviewer whose review no record names (a review no recorded stage posted, such as one made in a session)
+ * has no reviewer (null). A finding counts when that stage is in the period. The review stages counted are the ones in
+ * the period with a record, each with its dollars (`reviewStages`: the cost loop's, by run key; one run of unknown cost
+ * where the loop gave it none) and model. Adds to `rows` (by reviewer), `stageRows` (by review stage, the findings its
+ * own reviewer raised) and `totals`; returns the Objective's figures (zero counts when its records are all outside the
+ * period), or null when it has no findings record at all.
  */
 function findingsFor({ n, own, scope, runOf, reviewStages, rows, stageRows, totals }) {
   const head = new RegExp(`^<!-- pendulum:${n}:progress:review:`);
   const recorded = own
     .filter((c) => head.test(c.body || ""))
-    .map((c) => ({ key: runOf(c.body), at: c.created_at, rec: findingsOf(c.body) }))
+    .map((c) => ({ key: runOf(c.body), at: c.created_at, written: c.updated_at ?? c.created_at, rec: findingsOf(c.body) }))
     .filter((s) => s.rec && s.key);
   const counted = recorded.filter((s) => inWindow(s.at, scope));
   const raisedIn = new Map();
   for (const s of recorded) for (const r of s.rec.reviews) if (!raisedIn.has(r)) raisedIn.set(r, s);
+  // An outcome only from a record written before the period's end, so the same period reads the same; a later listed
+  // `open` (no check of that stage's judged it) replaces only an earlier `open`, never a judgement.
   const byId = new Map();
   for (const s of recorded) {
+    const settled = !scope.until || ms(s.written) < ms(scope.until);
     for (const x of s.rec.items) {
       const had = byId.get(String(x.id));
-      byId.set(String(x.id), { first: had?.first ?? s, outcome: x.outcome, review: had?.review ?? x.review ?? null, from: had?.from ?? x.from ?? null });
+      const outcome = !settled ? (had?.outcome ?? "open") : x.listed && had && had.outcome !== "open" ? had.outcome : x.outcome;
+      byId.set(String(x.id), { first: had?.first ?? s, outcome, review: had?.review ?? x.review ?? null, from: had?.from ?? x.from ?? null });
     }
   }
   if (!counted.length && !byId.size) return null;
-  const rowsByKey = new Map(counted.map((s) => [s.key, { issue: n, stage: s.key, model: reviewStages.get(s.key)?.model ?? null, findings: 0, outcomes: zeroOutcomes(), cost: reviewStages.get(s.key)?.cost ?? zeroCost() }]));
+  const rowsByKey = new Map(counted.map((s) => [s.key, { issue: n, stage: s.key, model: reviewStages.get(s.key)?.model ?? null, findings: 0, outcomes: zeroOutcomes(), cost: reviewStages.get(s.key)?.cost ?? noRecordCost() }]));
   const rowOf = (key, outside) => {
     const k = `${outside ? "outside" : "pendulum"}:${key ?? ""}`;
     if (!rows.has(k)) rows.set(k, { key: key ?? null, outside, findings: 0, outcomes: zeroOutcomes(), reviewStages: outside ? null : 0, cost: outside ? null : zeroCost() });

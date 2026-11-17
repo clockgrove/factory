@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY } from "../scripts/lib/github.mjs";
-import { decisionSpendMarker, findingsMarker, harnessMarker, rebaseCostMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
+import { FINDINGS_MAX, decisionSpendMarker, findingsMarker, findingsOf, harnessMarker, rebaseCostMarker, setSelf, spendMarker } from "../scripts/lib/logic.mjs";
 import { PENDULUM_VERSION } from "../scripts/lib/inputs.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
 import { costOf, loadPrices } from "../scripts/lib/cost-join.mjs";
@@ -794,4 +794,27 @@ test("report (#546): a forged findings record counts nothing: a stranger's, a me
   const { json: none } = await report({ ...reviewed(extra), comments: extra }, { issue: 11 });
   assert.deepEqual(none.findings.totals, { findings: 0, outcomes: outcomes(), reviewStages: 0, cost: api(0), unnamed: 0 });
   assert.equal(byIssue(none, 11).findings, null);
+});
+
+test("report (#546): a period reads only the records written before its end; a later stage's listed open never replaces a judgement; a line over its character budget counts the rest", async () => {
+  // The second stage started before 07:00 but its record was last written after it: its dollars are the period's, its
+  // outcomes are not, so the period reads the first stage's whatever the day it is run.
+  const late = reviewed();
+  late.comments[1] = { ...late.comments[1], created_at: "2026-11-17T06:30:00Z", updated_at: "2026-11-17T07:30:00Z" };
+  const { json: r } = await report(late, { issue: 11, since: "2026-11-17", until: "2026-11-17T07:00:00Z" });
+  assert.deepEqual(r.findings.totals, { findings: 3, outcomes: outcomes({ "not-fixed": 1, "not-checkable": 1, open: 1 }), reviewStages: 2, cost: api(0.7), unnamed: 0 });
+  // A third stage listed finding 1 open and ended before any check of its own; its check left r1101-1 open (the resolve failed).
+  const third = progress(11, "review", "local-f3", { user: ME, at: "2026-11-17T09:00:00Z", model: "claude-opus-5-5", spend: { usd: 0.1, parts: { usdByBilling: { api: 0.1 }, billing: "api" } }, findings: { pr: 110, reviews: [], items: [{ id: 1, outcome: "open", review: 1101, listed: true }, { id: "r1101-1", outcome: "open", review: 1101 }] } });
+  const { json: after } = await report(reviewed([third]), { issue: 11 });
+  assert.deepEqual(after.findings.totals.outcomes, outcomes({ "fixed-test": 1, open: 2 }));
+  // The line keeps within FINDINGS_MAX characters: the findings that fit are named, the rest counted, and the report says so.
+  const many = Array.from({ length: 400 }, (_, i) => ({ id: 100_000 + i, outcome: "not-fixed", review: 1101 }));
+  const line = findingsMarker({ pr: 110, reviews: [1101], items: many });
+  assert.ok(line.length <= FINDINGS_MAX, `${line.length}`);
+  const kept = findingsOf(line);
+  assert.ok(kept.items.length > 0 && kept.items.length < 400);
+  assert.equal(kept.items.length + kept.more, 400);
+  const big = progress(11, "review", "local-f4", { user: ME, at: "2026-11-17T10:00:00Z", model: "claude-fable-5-2", spend: { usd: 0.2, parts: { usdByBilling: { api: 0.2 }, billing: "api" } }, findings: { pr: 110, reviews: [1101], items: many } });
+  const { json: wide } = await report({ ...reviewed(), comments: [big] }, { issue: 11 });
+  assert.deepEqual(wide.findings.totals, { findings: kept.items.length, outcomes: outcomes({ "not-fixed": kept.items.length }), reviewStages: 1, cost: api(0.2), unnamed: kept.more });
 });

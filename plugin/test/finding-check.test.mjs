@@ -1045,7 +1045,7 @@ test("#546: the real finding check writes each finding's outcome into the review
         { id: 300, outcome: "answered", review: 1 },
         { id: 400, outcome: "not-fixed", review: 1 },
         { id: 500, outcome: "not-checkable", review: 1 },
-        { id: 600, outcome: "open", review: 1 },
+        { id: 600, outcome: "open", review: 1, listed: true },
         { id: 700, outcome: "answered", from: CODE_SCANNING },
       ],
       more: 0,

@@ -2865,39 +2865,55 @@ export function spendParts(body) {
  * stands unjudged) and `open` (no answer of Pendulum's, or its resolution could not be posted).
  */
 export const FINDING_OUTCOMES = Object.freeze(["fixed-test", "fixed-verdict", "answered", "not-fixed", "not-checkable", "open"]);
-/** The most findings one stage's record names; the rest are counted (`more`), never named. */
-export const FINDINGS_MAX = 300;
+/**
+ * The largest findings line a progress comment carries (findingsMarker), in characters: the findings that fit are
+ * named in order, the rest counted (`more`), never named.
+ */
+export const FINDINGS_MAX = 8_000;
 const FINDING_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 const findingId = (id) => (Number.isSafeInteger(id) && id > 0) || isBodyFindingId(id);
 const reviewId = (n) => Number.isSafeInteger(n) && n > 0;
-/** One finding of a record as kept: {id, outcome, review?, from?}; null when it is not one. */
+/** One finding of a record as kept: {id, outcome, review?, from?, listed?}; null when it is not one. */
 const findingItem = (x) => {
   if (!x || typeof x !== "object" || !findingId(x.id) || !FINDING_OUTCOMES.includes(x.outcome)) return null;
-  return { id: x.id, outcome: x.outcome, ...(reviewId(x.review) ? { review: x.review } : {}), ...(typeof x.from === "string" && FINDING_LOGIN.test(x.from) ? { from: x.from } : {}) };
+  return { id: x.id, outcome: x.outcome, ...(reviewId(x.review) ? { review: x.review } : {}), ...(typeof x.from === "string" && FINDING_LOGIN.test(x.from) ? { from: x.from } : {}), ...(x.listed === true && x.outcome === "open" ? { listed: true } : {}) };
 };
 /**
  * A review stage's findings record (#546), `update` merged in: `pr`; `reviews`, the ids of the reviews its own reviewer
  * posted; `items`, each finding it handled, {id, outcome (FINDING_OUTCOMES), review (the review that raised it, for
- * Pendulum's reviewer's), from (the login of a reviewer outside Pendulum)}, by id. A later outcome replaces an earlier
- * one; with `listed`, the update only adds findings the record does not name yet (the stage's list of open findings,
- * before any check of its own).
+ * Pendulum's reviewer's), from (the login of a reviewer outside Pendulum), listed (true: `open` only because the stage
+ * listed it, no check of its own judged it)}, by id. A later outcome replaces an earlier one; with `listed`, the update
+ * only adds findings the record does not name yet (the stage's list of open findings, before any check of its own),
+ * each marked `listed`.
  */
 export function mergeFindings(rec, { pr = null, reviews = [], items = [], listed = false } = {}) {
   const byId = new Map((rec?.items || []).map((x) => [String(x.id), x]));
   for (const raw of items || []) {
-    const x = findingItem(raw);
+    const x = findingItem(listed && raw?.outcome === "open" ? { ...raw, listed: true } : raw);
     if (!x) continue;
     const had = byId.get(String(x.id));
     if (had && listed) continue;
-    byId.set(String(x.id), { ...had, ...x });
+    // A check's outcome is no longer only listed.
+    const kept = { ...had };
+    delete kept.listed;
+    byId.set(String(x.id), { ...kept, ...x });
   }
   return { pr: Number.isSafeInteger(pr) && pr > 0 ? pr : (rec?.pr ?? null), reviews: [...new Set([...(rec?.reviews || []), ...(reviews || []).filter(reviewId)])], items: [...byId.values()] };
 }
-/** The progress comment's findings line (mergeFindings' record): at most FINDINGS_MAX findings, the rest as `more`. */
+/**
+ * The progress comment's findings line (mergeFindings' record), within FINDINGS_MAX characters: the findings that fit,
+ * in order, and the rest counted as `more`.
+ */
 export const findingsMarker = (rec) => {
   const items = rec?.items || [];
-  const json = JSON.stringify({ ...(rec?.pr ? { pr: rec.pr } : {}), reviews: rec?.reviews || [], items: items.slice(0, FINDINGS_MAX), ...(items.length > FINDINGS_MAX ? { more: items.length - FINDINGS_MAX } : {}) });
-  return `<!-- pendulum:findings ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+  const line = (n) => {
+    const json = JSON.stringify({ ...(rec?.pr ? { pr: rec.pr } : {}), reviews: rec?.reviews || [], items: items.slice(0, n), ...(items.length > n ? { more: items.length - n } : {}) });
+    return `<!-- pendulum:findings ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+  };
+  let n = items.length;
+  let text = line(n);
+  while (text.length > FINDINGS_MAX && n > 0) text = line((n -= 1));
+  return text;
 };
 const FINDINGS = /^<!-- pendulum:findings (\{[^\n]*\}) -->$/gm;
 /**

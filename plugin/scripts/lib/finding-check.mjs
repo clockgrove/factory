@@ -354,8 +354,9 @@ export const FOUND = Object.freeze({ testFailed: "test-failed", notFixed: "not-f
  * Returns {resolved, open, unjudged, found, outcomes}: ids; `unjudged`, the ones the decider gave no verdict on, each {id,
  * error}; `found`, what the check found on each finding it left open, each {id, kind (FOUND), note}; `outcomes`, how
  * each answered finding ended (#546), each {id, outcome} (logic.mjs FINDING_OUTCOMES), from the branch the check took
- * and whether its resolution was posted, never from a note. The stage's progress reporter, when it keeps a findings
- * record (`progress.findings`), gets them in it, written at once.
+ * and whether it ended resolved (its evidence posted and its thread resolved, or a thread already resolved, which gets
+ * no evidence post), never from a note. The stage's progress reporter, when it keeps a findings record
+ * (`progress.findings`), gets them in it, written at once.
  */
 export async function checkAnswers({ repo, issue, prNumber, findings = [], repliesText, check, runTest = null, diffOf = async () => null, since = null, issueBody = "", rules = "", decisions = [], opts, progress = null }) {
   const replies = new Map(parseReplies(repliesText, findings.map((f) => f.id)).map((r) => [String(r.id), r]));

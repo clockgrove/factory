@@ -2650,6 +2650,38 @@ const unknownRead = (v) => {
 };
 
 /**
+ * One UTC day's decision calls made outside a stage (decision-spend.mjs), as a line in a record Pendulum writes anyway
+ * (an answer check's notice, the merge pass's read record) or in a role's own decisions comment: `date`, `calls`, `usd`
+ * (the known dollars, 0 for none) and the calls of unknown cost (`usdUnknown`, `usdUnknownWhy`).
+ */
+export const decisionSpendMarker = ({ date, calls, usd, usdUnknown = 0, usdUnknownWhy = [] }) => `<!-- pendulum:decision-spend ${JSON.stringify({ date, calls, usd, ...unknownRead({ usdUnknown, usdUnknownWhy }) })} -->`;
+const DECISION_SPEND = /^<!-- pendulum:decision-spend (\{[^\n]*\}) -->$/gm;
+/** The decision-spend lines in a comment's body (decisionSpendMarker), each as written; a broken one is left out. */
+export function decisionSpendEntries(body) {
+  const out = [];
+  for (const m of String(body || "").matchAll(DECISION_SPEND)) {
+    try {
+      const r = JSON.parse(m[1]);
+      if (typeof r?.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(r.date)) continue;
+      const usd = typeof r.usd === "number" && Number.isFinite(r.usd) && r.usd >= 0 ? r.usd : 0;
+      out.push({ date: r.date, calls: Number.isInteger(r.calls) && r.calls > 0 ? r.calls : 0, usd, ...unknownRead(r) });
+    } catch {
+      // not a line Pendulum wrote
+    }
+  }
+  return out;
+}
+/**
+ * A body's decision spend as spendOf's `{usd, unknown, byBilling}`: every line's, or `date`'s only. A decision call
+ * outside a stage is the AI Gateway's, billed to its key: its dollars are `api` (usage.mjs BILLING).
+ */
+export function decisionSpendOf(body, { date = null } = {}) {
+  const lines = decisionSpendEntries(body).filter((e) => date === null || e.date === date);
+  const usd = Math.round(lines.reduce((s, e) => s + e.usd, 0) * 1e6) / 1e6;
+  return { usd, unknown: lines.reduce((s, e) => s + (e.usdUnknown ?? 0), 0), byBilling: lines.length ? { api: usd } : {} };
+}
+
+/**
  * The rebase line a send-back's work stage writes into its progress comment on every route (#277): `usd` the stage's
  * known dollars (0 for a clean rebase with no harness run, null when nothing was reported), its runs of unknown cost as
  * the spend line carries them (`usdUnknown`, `usdUnknownWhy`: stageSpendLine) and whether it was a conflict pass. The

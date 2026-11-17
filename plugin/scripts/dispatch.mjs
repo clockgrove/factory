@@ -39,6 +39,7 @@ import { openAnswerCheck, screenAnswer } from "./lib/answer-check.mjs";
 import { RELAUNCH_MAX, commentsOf, endedNotLost, lastRunningAt, newStint, needsWorkStep, notLostBlock, outageBlockOf, personStart, relaunchDecision, setupAgain, relaunchRecordOf, relaunchRun, runningStint, stintKey, stintWorkJob, stintWorkStep, timelineOf, writeRelaunchRecord } from "./lib/relaunch.mjs";
 import { openEditCheck } from "./lib/edit-check.mjs";
 import { openCommentCheck } from "./lib/comment-check.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 
 /** How long a picked Objective, or a labelled PR, may wait for its launch job before the sweep names it again. */
 const RELAUNCH_GRACE_MS = 3 * 60_000;
@@ -113,7 +114,7 @@ export const imageTickEvent = (eventName) => !String(eventName || "").startsWith
 const twoAccounts = (issue) => backend().name !== "local" && routeAccounts(process.env.PENDULUM_ACCOUNTS).declared && !!accountPin(issue.labels).two;
 const nothingDispatched = () => ({ ready: [], skipped: [], running: 0, spentToday: 0, unknownToday: 0, relaunch: [], relaunched: [], relaunchesUsed: [], reset: [], answered: [], released: [], done: [], finished: [], stopped: [], restarted: [], vanished: [], paused: [], unclaimed: [], sentBack: [], rebaseHeld: [], thirdPartyResumed: [], accountResumed: [], reviewHeld: [], reviewResumed: [], nextParts: [], merged: [], updated: [], queueWatch: [], deadlines: [], unrouted: [], unmarked: [], relationSource: null, project: null, queue: null });
 
-export async function dispatch(inputs, { token, notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
+export async function dispatch(inputs, { token, decisionRole = "dispatcher", notice = null, now = new Date(), dryRun = false, localSlots = null, localTake = null, localFull = null, localHeld = {}, localHold = null, localStopped = {}, localLive = null, localStopping = null, localMarked = null, adopt = false, failedLaunch = null, recordWrites = null, thirdPartyReads = null, readCache = null }) {
   const repo = repoOf(inputs.repo);
   // Whether this dispatcher is the sandbox route's: a cloud sandbox set (PENDULUM_SANDBOX) and a backend whose Objectives
   // run in it. A local loop's (serve) never is: its Objectives run on its box, so it writes no sandbox record, launch
@@ -527,7 +528,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       continue;
     }
     answerCheck ??= openAnswerCheck({ inputs });
-    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, opts, dryRun });
+    const screen = await screenAnswer({ check: answerCheck, repo, issue: issue.number, since: asked, comments, decisions, role: decisionRole, label: inputs.objectiveLabel, appId: inputs.appId || process.env.PENDULUM_LOCAL_APP_ID || null, opts, dryRun });
     if (!screen.requeue) {
       // Said when it is judged; a comment judged at an earlier tick keeps it open quietly.
       if (!screen.judged) log(`  #${issue.number}: the Question stays open: ${screen.why}`);
@@ -1905,7 +1906,11 @@ async function main() {
     return;
   }
   const failedLaunch = eventName === "workflow_dispatch" && /^[1-9]\d{0,9}$/.test(String(payload?.inputs?.failed_launch ?? "")) ? Number(payload.inputs.failed_launch) : null;
-  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch });
+  const result = await dispatch(inputs, { token, dryRun: args.dry_run === "true", failedLaunch }).finally(() =>
+    // The tick's decision calls outside a stage that no record carried (the merge pass's edit and comment checks, an
+    // answer check with no verdict): the dispatcher's decisions comment, before the job ends (decision-spend.mjs).
+    flushDecisionSpend(repoOf(inputs.repo), { token }, { role: "dispatcher", dryRun: args.dry_run === "true" }),
+  );
   const summary = reportDispatch(result, inputs, { json: !!args.json });
   // With a cloud sandbox the matrix also carries the sweep's re-launches; the launcher decides each one's stage.
   const named = [...result.ready, ...(result.relaunch || [])];

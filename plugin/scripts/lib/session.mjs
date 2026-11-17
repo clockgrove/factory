@@ -7,7 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { backend, spendInProgress } from "./backend.mjs";
 import { runValidation } from "./checkout.mjs";
-import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
+import { EXIT_ASK_MIN_MS, SESSION_TOTALS_FILE, copilotCreditUsd, decisionSpend, finalText, reservedSpend, openPasses, passesRunning, runHarness, seedSessionTotal, setStageBilling, stagePasses, stageSpendNow, stageSpendSoFar, UsageLimitReached } from "./harness.mjs";
 import { STOP_EXIT_MS, STOP_SETTLE_MS, STOP_TIDY_MS, applyStop, claimExit, exitCommitted, requestStageStop, stopCause, stopText, stoppedRecords } from "./stop.mjs";
 import {
   addLabels,
@@ -59,6 +59,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
@@ -943,6 +944,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let triage = null;
   let asked = null;
   let rebase = null;
+  // The decision calls' spend this comment carries (progress.decisionSpend): text at its end, "" for none.
+  let carried = "";
   // What the stage's dollars are (usage.mjs BILLING), from its credential once read (progress.billing).
   let billing = null;
   // The harness and models the stage runs on once the Objective's labels are read (progress.ran), with its own model.
@@ -972,7 +975,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
-    return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}`;
+    return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}${carried}`;
   };
   /**
    * Stopped by a signal, the harness already killed: the spend so far once more, if it differs from what the line shows.
@@ -1020,6 +1023,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
     // Only a line that landed says what was counted: the session totals it counted are recorded after it, never before.
     if (wrote && counted) live.commit?.();
     if (wrote && soFarNow && commentId !== null) stopHook ??= atStop(stopWrite);
+    return wrote;
   };
   const progress = async (phase) => {
     // A phase can quote the harness (an exit reason, the tool it ran last): sanitised like all harness text.
@@ -1104,7 +1108,14 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
       status = "";
     }
     await writing;
-    await write();
+    return write();
+  };
+  /**
+   * The decision calls' spend this comment carries from its next write (decision-spend.mjs decisionSpendText): the merge
+   * pass's read record carries its comment check's call.
+   */
+  progress.decisionSpend = (text) => {
+    carried = text || "";
   };
   /**
    * The login Pendulum posts as: its token's own identity (the App's bot on Actions, the token's user in local mode),
@@ -1175,8 +1186,10 @@ export function liveActivity(progress, { harness, model, tick = null, drift = nu
  *   ends the checks' wait: the loop returns `{aborted: true}` at once, nothing more read (the stage ended without it).
  */
 export async function validationLoop({ checkout, commands, harness, model, effort = null, maxUsd, spentUsd = 0, session, taskCard, env, deadlineAt, eventsFile, label = "validation", progressCheck = null, onPhase = null, checks = null, outbox = null, progress = null, io = null, triage = null, drift = null, handOff = false, holdRed = null, checksOnlyFirst = false, onRead = null, signal = null }) {
-  // The decision calls' spend during this loop (triage, the drift advisory: decisionSpend) is taken off what is left too.
-  const decisionsAtStart = decisionSpend();
+  // The decision calls' spend during this loop (triage and the rest: decisionSpend) is taken off what is left too; the
+  // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
+  const passDecisions = () => decisionSpend() - reservedSpend();
+  const decisionsAtStart = passDecisions();
   const usage = [];
   let passes = 0;
   let last = null;
@@ -1518,7 +1531,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
       : [`Pendulum's validation pass ${red.passes} failed on the branch you delivered${red.failures.length > 1 ? ` (${red.failures.length} commands)` : ""}.`, ...failureText(red), "", fixClosing].join("\n");
     const resume = !fresh && session.canResume ? session.id : null;
     const full = `${taskCard}\n\n---\n\n${ask}`;
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (passDecisions() - decisionsAtStart)) : 0;
     const live = liveActivity(progress, { harness, model, tick: io?.tick, drift: drift?.watch({ stage, goal: GOALS.fix, root: checkout, plan: () => io?.plan?.() ?? null }) });
     const rec = await runHarness({ harness, model, effort, prompt: resume ? ask : full, freshPrompt: full, maxUsd: left, resume, cwd: checkout, env, timeoutMs: Math.max(60_000, remainingMs(deadlineAt) - 120_000), eventsFile, label: stage, onLine: live.onLine, onResume: live.onResume });
     await live.finish();
@@ -1532,7 +1545,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const end = (more) => ({ green: false, passes, lastOutput: red.tail, command: red.command, usage, ...more });
     if (rec.timedOut || rec.budgetExceeded || rec.refusal) return end({ harness: rec });
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
-    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage).usd + (decisionSpend() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
+    const held = await holdScope({ outbox, session, harness, model, effort, taskCard, cwd: checkout, env, eventsFile, deadlineAt, maxUsd, spentUsd: spentUsd + sumSpend(usage).usd + (passDecisions() - decisionsAtStart), label: `${label}-${fresh ? "fresh-scope" : "scope"}-${red.passes}`, progress, io });
     usage.push(...held.usage);
     if (held.harness) return end({ harness: held.harness, ...(held.harness.died ? { died: true } : {}), ...(held.refused ? { scope: held.refused, ...(held.cause ? { scopeCause: held.cause } : {}) } : {}) });
     if (held.refused) {
@@ -1592,7 +1605,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
         }
         // Read after the rerun's red (its reads can wait on a rate limit): what is left now.
         const runMs = Math.max(0, Date.parse(lastFix.rec?.ended) - Date.parse(lastFix.rec?.started)) || 0;
-        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]).usd, leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
+        const denied = freshPassDenied({ cause: block.cause, head, tried: freshHeads, maxUsd, leftUsd: maxUsd > 0 ? maxUsd - spentUsd - sumSpend(usage).usd - (passDecisions() - decisionsAtStart) : 0, needUsd: sumSpend([lastFix.rec]).usd, leftMs: remainingMs(deadlineAt), needMs: Math.max(60_000, runMs + (lastFix.checksMs || 0) + 120_000) });
         const said = denied ? `the fix pass changed nothing on ${head.slice(0, 7)}; no fresh worker pass (${denied})` : `the fix pass changed nothing on ${head.slice(0, 7)}; one fresh worker pass, a new session with the failing checks' output, before Blocking`;
         log(`${label}: ${said}`);
         if (onPhase) await onPhase(`${label}: ${said}`);
@@ -1691,7 +1704,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     handed = shape;
     redHead = v.fromChecks ? v.sha : null;
     if (remainingMs(deadlineAt) < 60_000) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { timedOut: true } };
-    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (decisionSpend() - decisionsAtStart)) : 0;
+    const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd - (passDecisions() - decisionsAtStart)) : 0;
     if (maxUsd > 0 && left <= 0) return { green: false, passes, lastOutput: tail, command: failed.command, usage, harness: { budgetExceeded: true } };
     // Each failure's whole output goes to $PENDULUM_IN/checks/ with the rest of what the fix run reads.
     if (io) await io.beforeFix(failures, { diff: detail?.diff ?? null });
@@ -2012,6 +2025,14 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
+/** `{gatewayDecisionUsd, gatewayDecisionCalls}` from the stage's AI Gateway decision records, or {} with none. */
+export function gatewayDecisionFields(records) {
+  const recs = (records || []).filter((r) => r?.decision && r.decider === "ai-gateway");
+  if (!recs.length) return {};
+  const priced = recs.filter((r) => typeof r.usd === "number" && Number.isFinite(r.usd));
+  return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
+}
+
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, billing = null, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null, account = null, standIn = false }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
@@ -2102,6 +2123,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(inProgress ? { spendInProgress: true } : {}),
     // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
     ...kb.fields,
+    // The known dollars of the stage's AI Gateway decision calls (decider.mjs gatewayDecisionRecord), already in `usd`:
+    // broken out, so the bench adds them to a Codex stage's tokens it prices again from its own table.
+    ...gatewayDecisionFields(records),
   };
   // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
   const stored = redactSecrets(result);
@@ -3577,7 +3601,12 @@ async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, che
   if (!issueNow) return "pending";
   if (stopCause(issueNow, objectiveLabel)) return "stopped";
   const progress = progressReporter(repo, issue, opts, { stage: "merge", runId: `${progressRunId()}-${versionKey(unread.at(-1))}`, soFar: null });
-  await progress.decisionsRead(judged, r.line);
+  // The comment check's call outside a stage (the dispatcher's, a local loop's) is carried by this record; a held merge
+  // writes none, and the caller's flush writes it.
+  await carryDecisionSpend(repo.full, issue, async (extra) => {
+    progress.decisionSpend(extra);
+    if (!(await progress.decisionsRead(judged, r.line))) throw new Error("the read record was not written");
+  }).catch(() => {});
   return "clear";
 }
 

@@ -213,11 +213,12 @@ export const driftLine = ({ stage, model, verdict, confidence, entries }) =>
  * plan's text as it stands (read at each checkpoint). `now` and `everyMs` set the checkpoint clock.
  */
 export function openDrift({ inputs, env = process.env, home, progress = null, stage = null, decider = null, now = () => Date.now(), everyMs = EVERY_MS }) {
-  const ask = openDecider({ inputs, env, ...(home ? { home } : {}), model: inputs?.driftModel || DRIFT_MODEL, stage, decider });
+  // Advice only, nothing waits on it: not essential, so the stage's harness is not asked it past max_usd (openDecider).
+  const ask = openDecider({ inputs, env, ...(home ? { home } : {}), model: inputs?.driftModel || DRIFT_MODEL, stage, decider, essential: false });
   if (ask.off) return null;
   const { model } = ask;
-  // A refused key or credits, or the stage harness's usage limit, answers every later checkpoint the same: asked no
-  // more in this job.
+  // A refused key or credits, the stage harness's usage limit, or max_usd's known remainder under one call's cap
+  // (`budget`), answers every later checkpoint the same: asked no more in this job.
   let off = false;
   const watch = ({ stage, goal, root = null, plan = () => null }) => {
     const acts = activityLog();
@@ -238,7 +239,7 @@ export function openDrift({ inputs, env = process.env, home, progress = null, st
       inFlight = null;
       // A refused key or credits ends the checks; a rate limit only on the stage's harness (its usage limit), never the
       // gateway's 429, which the next checkpoint may pass.
-      if (a.error === "auth" || a.error === "billing" || (a.error === "rate_limited" && ask.asked?.().name === "harness")) off = true;
+      if (a.error === "auth" || a.error === "billing" || a.error === "budget" || (a.error === "rate_limited" && ask.asked?.().name === "harness")) off = true;
       log(`drift check (${model}) in ${stage} after ${n} activity entries: ${a.verdict ? `${a.verdict}${typeof a.confidence === "number" ? ` ${a.confidence.toFixed(2)}` : ""}` : `no verdict (${a.error || "?"})`}`);
       if (flagged || !isDrift(a)) return;
       flagged = true;

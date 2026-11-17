@@ -91,9 +91,9 @@ export function lapseInput(now, before = null, tag = randomBytes(8).toString("he
  */
 export function openLapseCheck({ inputs = {}, env = process.env, home = homedir(), decider = null } = {}) {
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, decider });
-  const judge = async (input) => {
+  const judge = async (input, { issue = null, repo = null } = {}) => {
     if (ask.off) return null;
-    const a = await Promise.resolve(ask.decide(input, LAPSE_QUESTION)).catch(() => null);
+    const a = await Promise.resolve(ask.decide(input, LAPSE_QUESTION, { issue, repo })).catch(() => null);
     if (typeof a?.confidence !== "number" || a.confidence < confidenceFloor(inputs, ask).min) return null;
     return LAPSE_QUESTION.choices.some((c) => c.value === a.verdict) ? a.verdict : null;
   };

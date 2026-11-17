@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { findProject, listComments, moveCard, primeSelf, setStateLabel, upsertComment } from "./github.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
+import { carryDecisionSpend, decisionSpendBooked, flushDecisionSpend } from "./decision-spend.mjs";
 import { isSelf, marker, questionMarker, selfLogin } from "./logic.mjs";
 import { timelineOf } from "./relaunch.mjs";
 import { RESTART_LABEL, goTrust, labelTrust } from "./stop.mjs";
@@ -154,8 +155,8 @@ export function openAnswerCheck({ inputs = {}, env = process.env, home = homedir
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const floor = () => confidenceFloor(inputs, ask);
   if (ask.off) return { model: ask.model, off: ask.off, floor, judge: null, asked: () => ask.asked() };
-  const judge = async (input) => {
-    const a = await Promise.resolve(ask.decide(input, ANSWER_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
+  const judge = async (input, { issue = null, repo = null } = {}) => {
+    const a = await Promise.resolve(ask.decide(input, ANSWER_QUESTION, { issue, repo })).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     const verdict = ANSWER_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
     return { verdict, confidence: verdict && typeof a?.confidence === "number" ? a.confidence : null, error: verdict ? null : a?.error || "no_answer" };
   };
@@ -189,7 +190,7 @@ export async function judgeAnswer({ check, repo, issue, comments, decisions, sin
   const asked = questionAsked(comments, { issue, since, appId });
   if (!asked) return { resume: true, why: "no Pendulum notice of the Question to judge the comments against: a writer's comment resumes it" };
   if (prepare && (await prepare()) === false) return { resume: true, why: "the stage's decider could not be readied: a writer's comment resumes the Question" };
-  const v = await check.judge(answerInput({ repo, issue, question: asked.text, comments: fresh }));
+  const v = await check.judge(answerInput({ repo, issue, question: asked.text, comments: fresh }), { issue, repo: repo?.full ?? null });
   const floor = check.floor?.() ?? confidenceFloor();
   log(`answer check (${check.model}, ${floor.text}): #${issue}, ${fresh.length} comment(s) since the Question, the newest by ${newest.author}: ${said(v)}`);
   const named = { issue, key, author: newest.author, at: newest.at, root: asked.root, form: asked.form, model: check.model, confidence: v.confidence };
@@ -206,8 +207,11 @@ export function unansweredNotice(open, { label = "pendulum:objective" } = {}) {
   return `Question still open: the comment by ${open.author} (${open.at}) does not give a decision on the Question above, as the decision model (${open.model}${conf(open.confidence)}) reads it. ${how}`;
 }
 
-/** Post the unanswered notice on the issue, with Pendulum's own token (its login is what judgedOf trusts). Throws on failure. */
-export const postUnanswered = (repo, open, { label, opts }) => upsertComment(repo, open.issue, unansweredMarker(open.issue, open), unansweredNotice(open, { label }), opts);
+/**
+ * Post the unanswered notice on the issue, with Pendulum's own token (its login is what judgedOf trusts), `extra` at its
+ * end (the decision calls' spend it carries, decision-spend.mjs). Throws on failure.
+ */
+export const postUnanswered = (repo, open, { label, opts, extra = "" }) => upsertComment(repo, open.issue, unansweredMarker(open.issue, open), `${unansweredNotice(open, { label })}${extra}`, opts);
 
 /**
  * The unanswered notice said again (judgeAnswer `judged` with its `notice`): the same comment, edited with the time
@@ -220,9 +224,12 @@ export function sayAgain(repo, issue, notice, { opts, now = new Date() }) {
   return upsertComment(repo, issue, mark, `${text}\n<!-- pendulum:asked-again ${now.toISOString()} -->`, opts);
 }
 
-/** The record that a comment version gives a decision (judgeAnswer `answered`), with Pendulum's own token. Throws on failure. */
-export const postAnswered = (repo, a, { opts }) =>
-  upsertComment(repo, a.issue, answeredMarker(a.issue, a.key), `The comment by ${a.author} (${a.at}) gives a decision on the Question, as the decision model (${a.model}${conf(a.confidence)}) reads it: the work goes on.`, opts);
+/**
+ * The record that a comment version gives a decision (judgeAnswer `answered`), with Pendulum's own token, `extra` at its
+ * end (the decision calls' spend it carries, decision-spend.mjs). Throws on failure.
+ */
+export const postAnswered = (repo, a, { opts, extra = "" }) =>
+  upsertComment(repo, a.issue, answeredMarker(a.issue, a.key), `The comment by ${a.author} (${a.at}) gives a decision on the Question, as the decision model (${a.model}${conf(a.confidence)}) reads it: the work goes on.${extra}`, opts);
 
 /** A record that could not be written: the verdict is lost, so that version is judged again where it is next read. */
 const unwritten = (what, issue) => (e) => log(`#${issue}: the ${what} was not written (${String(e?.status ?? e?.message ?? "error").slice(0, 80)}); the comment is judged again where it is next read`);
@@ -231,17 +238,22 @@ const unwritten = (what, issue) => (e) => log(`#${issue}: the ${what} was not wr
  * The dispatcher's or the launcher's screen of an answer it found (dispatch.mjs, launch.mjs): `check` is
  * openAnswerCheck with no stage, so it judges only on the AI Gateway. Returns `{requeue, why, judged?}`: false for a
  * version judged no decision before (`judged`) or one the check reads as no decision now (its notice posted, unless
- * `dryRun`); true otherwise. A decision it reads is recorded, so the work stage does not judge it again.
+ * `dryRun`); true otherwise. A decision it reads is recorded, so the work stage does not judge it again. The call ran
+ * outside any stage: its cost goes in the notice or the record it writes (decision-spend.mjs carryDecisionSpend), else
+ * in the decisions comment of the caller's `role` (`dispatcher`, `serve` or `launcher`).
  */
-export async function screenAnswer({ check, repo, issue, since, comments, decisions, label, appId = null, opts, dryRun = false }) {
+export async function screenAnswer({ check, repo, issue, since, comments, decisions, label, appId = null, opts, dryRun = false, role = "dispatcher" }) {
   const r = await judgeAnswer({ check, repo, issue, comments, decisions, since, appId });
+  const carry = (write) => carryDecisionSpend(repo.full, issue, write, { dryRun });
   if (r.none) return { requeue: true, why: "no writer comment since the Question to judge" };
   if (r.judged && !r.resume) return { requeue: false, judged: true, why: "the newest writer comment was judged before as no decision" };
   if (r.open) {
-    if (!dryRun) await postUnanswered(repo, r.open, { label, opts }).catch(unwritten("unanswered notice", issue));
+    if (!dryRun) await carry((extra) => postUnanswered(repo, r.open, { label, opts, extra })).catch(unwritten("unanswered notice", issue));
     return { requeue: false, why: "the decision model reads the comments since the Question as no decision" };
   }
-  if (r.answered && !dryRun) await postAnswered(repo, r.answered, { opts }).catch(unwritten("answered record", issue));
+  if (r.answered && !dryRun) await carry((extra) => postAnswered(repo, r.answered, { opts, extra })).catch(unwritten("answered record", issue));
+  // No record written (no verdict, under the floor, or a record that failed): the role's own decisions comment.
+  if (decisionSpendBooked(repo.full, issue)) await flushDecisionSpend(repo, opts, { role, dryRun });
   return { requeue: true, why: r.why };
 }
 

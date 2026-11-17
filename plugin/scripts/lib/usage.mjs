@@ -58,6 +58,9 @@ export const UNKNOWN_WHY = {
   relay: "calls through the relayed gateway key whose cost the gateway did not report",
   // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
   sandbox: "the sandbox vendor did not report the stage's usage",
+  // Decision calls through the AI Gateway (adapters/decider-ai-gateway.mjs) whose cost the gateway did not report: no
+  // cost in the answer and no generation record, or a call that failed after it was sent.
+  decision: "decision calls through the AI Gateway whose cost the gateway did not report",
   // The scorer's: a usage record from before records named their progress comment, beside a comment of its stage with
   // dollars that no record names; it may be that comment's stage, so its figure is not added to the comment's
   // (bench objective.mjs withLines).
@@ -162,9 +165,13 @@ export function passBilling(billing, rec) {
   return cred;
 }
 
-/** The kind the stage's harness passes share (BILLING): one kind, or `unknown` when they differ, name none or none ran. */
+/**
+ * The kind the stage's harness passes share (BILLING): one kind, or `unknown` when they differ, name none or none ran. An
+ * AI Gateway decision record (`decider` `ai-gateway`, billed `api` to the gateway key) runs no harness: it is in
+ * usdByBilling's `api` part, not in this kind.
+ */
 export function stageBilling(records, billing) {
-  const kinds = new Set((records || []).filter((r) => r && !r.noRun).map((r) => (isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : "unknown")));
+  const kinds = new Set((records || []).filter((r) => r && !r.noRun && r.decider !== "ai-gateway").map((r) => (isKind(r.billing) || isKind(billing) ? passBilling(billing, r) : "unknown")));
   return kinds.size === 1 ? [...kinds][0] : "unknown";
 }
 

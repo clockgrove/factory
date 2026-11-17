@@ -81,7 +81,7 @@ inputs:
     description: 'Dollars per GitHub AI credit for Copilot runs, a positive number; GitHub''s published $0.01 when empty (any other value is refused with a warning). Each Copilot run records the AI credits and premium requests its usage file reports, and its dollars (credits at this rate) count toward `max_usd`, `daily_usd` and the scorecard like the other harnesses''.'
     required: false
   max_usd:
-    description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it; Claude gets what is left as `--max-budget-usd` and Copilot as `--max-ai-credits` (Copilot takes no less than 30 credits, so with less than 30 credits' worth left no Copilot run starts); every harness is also checked after each run, and a Copilot run that reports no priced AI credits ends the job, since the cap cannot be enforced. The review job has the same cap of its own.
+    description: The per-job dollar cap. The worker job's runs (the first prompt and each validation fix) share it, less the job's drift reserve (10% of it, at least $0.30, at most all of it), which only the drift advisory spends; Claude gets what is left as `--max-budget-usd` and Copilot as `--max-ai-credits` (Copilot takes no less than 30 credits, so with less than 30 credits' worth left no Copilot run starts); every harness is also checked after each run, and a Copilot run that reports no priced AI credits ends the job, since the cap cannot be enforced. The review job has the same cap of its own.
     required: false
   timeout_minutes:
     description: The per-Objective wall clock; the worker stops its own work before it and the job's `timeout-minutes` should match. Under 360 on hosted runners.

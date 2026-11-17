@@ -25,7 +25,7 @@
 //   wall       filed (label) to merged; runner minutes from the job log.
 import { dispatchLatency, pendulumLogin, phaseMinutes, setupSeconds, stageLastWrite } from "./phases.mjs";
 import { costOf, stageOf } from "./cost.mjs";
-import { BLOCK_CAUSES, blockCauseOf, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
+import { BLOCK_CAUSES, blockCauseOf, decisionSpendEntries, rebaseTally, spendText } from "../../plugin/scripts/lib/logic.mjs";
 import { UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, unknownRuns, unknownText } from "../../plugin/scripts/lib/usage.mjs";
 import { HANDOVER_LABEL, carriesHandover, handoverMarker, handoverOf } from "../../plugin/scripts/lib/handover.mjs";
 import { labelTime } from "../../plugin/scripts/lib/finish-card.mjs";
@@ -890,6 +890,30 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
 }
 
 /**
+ * Usage records of the decision calls made about the Objective outside any stage (the dispatcher's, the launcher's and
+ * local mode's answer, comment, edit and lapse checks): the decision-spend lines (plugin logic.mjs decisionSpendMarker)
+ * in Pendulum's own comments on the issue, one record per comment that has any, summed over its days: their known
+ * dollars and calls of unknown cost, `source` "decisions", on every route (no usage artifact carries them). A line in
+ * anyone else's comment counts nothing.
+ */
+export function decisionRecords(collected, { app = null } = {}) {
+  const n = collected.issue.number;
+  const self = pendulumLogin(collected.issueTimeline, app);
+  const local = localLogin(collected);
+  const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
+  return (collected.issueComments || [])
+    .filter((c) => (c.body || "").startsWith(`<!-- pendulum:${n}:`) && mine(c) && decisionSpendEntries(c.body).length)
+    .sort((a, b) => ms(a.created_at) - ms(b.created_at))
+    .map((c) => {
+      const days = decisionSpendEntries(c.body);
+      const unknown = days.reduce((s, d) => s + (d.usdUnknown ?? 0), 0);
+      const usd = Math.round(days.reduce((s, d) => s + d.usd, 0) * 1e6) / 1e6;
+      // The AI Gateway's calls, billed to its key: `api` (plugin usage.mjs BILLING).
+      return { source: "decisions", harness: null, model: null, billing: "api", usdByBilling: { api: usd }, usd, ...(unknown ? { usdUnknown: unknown, usdUnknownWhy: ["decision"] } : {}), tokens: { input: null, output: null, cached: null, written: null }, basis: "pendulum:decision-spend lines of decision calls outside a stage (the AI Gateway's cost)" };
+    });
+}
+
+/**
  * The Objective's send-back rebases (#277): `sentBack`, Pendulum's send-back notices on its PRs (each names the head it
  * saw, `<!-- pendulum:<n>:rebase:<sha> -->`), and from its own work stages' rebase lines (plugin logic.mjs
  * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their known dollars with their
@@ -1069,8 +1093,11 @@ export function scoreObjective(collected, opts = {}) {
   // Pendulum's own progress comments (local mode uploads no artifact), a line a record names left out (withLines). Beside
   // artifacts every stage's line counts, one with no spend line as a run of unknown cost (an artifact that expired).
   const artifacts = collected.usage || [];
-  const usage = withLines(artifacts, spendRecords(collected, { app, all: artifacts.length > 0 }));
-  if (!usage.length) missing.push("usage artifact");
+  const stages = withLines(artifacts, spendRecords(collected, { app, all: artifacts.length > 0 }));
+  if (!stages.length) missing.push("usage artifact");
+  // The decision calls made outside any stage, on every route: in no stage's record or spend line, so never matched to a
+  // stage's by withLines, and added once beside them.
+  const usage = [...stages, ...decisionRecords(collected, { app })];
   const cost = costOf(usage, prices, { harness: collected.harness ?? null });
   // The harness for the streak: the usage's, else Pendulum's own progress comments; two harnesses on one Objective, none.
   const ran = objectiveHarness(collected, { app });

@@ -20,7 +20,7 @@ import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
 import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits, stageSpendSoFar } from "./lib/harness.mjs";
-import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
+import { addLabels, requiredChecks, closingIssues, getIssue, getRepo, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
 import { PLACEHOLDER_MARKER, REVIEW_LABEL, acceptanceEntries, capReached, copilotCount, costByPhase, decideExit, decisionsRead, decisionsSection, decisionsShown, diffLines, marker, maxUsdReached, parseFindings, parseReview, promptDiff, protectedPaths, protectedTouched, refusalCause, refusalReason, sessionCapNote, setupPaths, snapComments, sumSpend, toolchainFile, trustedAuthor, unmeteredRun } from "./lib/logic.mjs";
@@ -102,7 +102,7 @@ import {
   mirrorOwnStat,
   redLines,
 } from "./lib/session.mjs";
-import { stageSealKey } from "./lib/seal.mjs";
+import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { claimExit, commitExit, confirmRunning, holdIfStopped, goTrust, labelTrust, objectiveReader, parked, requeuedIn, stopCause, stopText, watchObjective } from "./lib/stop.mjs";
 import { timelineOf } from "./lib/relaunch.mjs";
 import { CODE_SCANNING, answeredReviewers, clearWait, exitUnaddressed, thirdPartyStep, waitEnd } from "./lib/third-party-review.mjs";
@@ -1243,7 +1243,7 @@ async function main() {
   // passes; the reviewer always runs in its own fresh session.
   let restored = null;
   if (inputs.resumePolicy === "fix-passes") {
-    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, sealKey });
+    restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, seal: usageSeal({ key: sealKey, publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token: inputs.githubToken || token.token, noRateWait: true }) }) });
     if (restored.id) session.id = restored.id;
   }
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json.

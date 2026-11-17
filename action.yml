@@ -548,4 +548,7 @@ runs:
         PENDULUM_INPUT_APP_PRIVATE_KEY: ${{ inputs.app_private_key }}
         PENDULUM_INPUT_PUBLISH_TRANSCRIPTS: ${{ inputs.publish_transcripts }}
         PENDULUM_INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
-      run: node "$GITHUB_ACTION_PATH/plugin/scripts/usage-upload.mjs" --repo "$GITHUB_REPOSITORY" --from "$RUNNER_TEMP/pendulum-usage" --to "$RUNNER_TEMP/pendulum-upload"
+        # What the sealed file is bound to: the Objective (the review job's, from its PR's branch) and the stage.
+        PENDULUM_INPUT_ISSUE: ${{ steps.run.outputs.issue || inputs.issue }}
+        PENDULUM_INPUT_MODE: ${{ inputs.mode }}
+      run: node "$GITHUB_ACTION_PATH/plugin/scripts/usage-upload.mjs" --repo "$GITHUB_REPOSITORY" --issue "$PENDULUM_INPUT_ISSUE" --stage "$PENDULUM_INPUT_MODE" --from "$RUNNER_TEMP/pendulum-usage" --to "$RUNNER_TEMP/pendulum-upload"

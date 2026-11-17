@@ -209,7 +209,8 @@ test("sweep: a sandbox stage's uncollected usage goes up with its stream and ses
   const [u] = pub.r.usage;
   assert.deepEqual(readdirSync(u.dir).sort(), ["result.json", SEALED_FILE], "no events.jsonl, no transcript/");
   assert.deepEqual(JSON.parse(readFileSync(join(u.dir, "result.json"), "utf8")).sessions, { calls: 1, sessions: 1 });
-  assert.deepEqual(await openSealed(u.dir, key), { ok: true }, "the work job's key opens it for a resume");
+  assert.equal((await openSealed(u.dir, key, { bind: { issue: 7, stage: "review" } })).ok, false, "bound to its stage");
+  assert.deepEqual(await openSealed(u.dir, key, { bind: { issue: 7, stage: "work" } }), { ok: true }, "the work job's key opens it for a resume");
   assert.match(readFileSync(join(u.dir, "transcript", "proj", "s1.jsonl"), "utf8"), /internal-design-notes/);
   const priv = await run({ repository: { private: true } });
   assert.deepEqual(readdirSync(priv.r.usage[0].dir).sort(), ["events.jsonl", "result.json", "transcript"]);

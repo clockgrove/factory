@@ -37,7 +37,7 @@ import { DRIFT_MODEL } from "./lib/drift.mjs";
 import { deciderKind } from "./lib/decider.mjs";
 import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
-import { publishOn, transcriptPolicy } from "./lib/seal.mjs";
+import { publishOn, sealKey, sealKeyProblem, transcriptPolicy } from "./lib/seal.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
@@ -702,6 +702,8 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
   }
   // Local mode uploads no usage artifact; every other route does. In a job its own setting, else the workflow file's.
   if (!local) out.push(transcriptCheck(repoData, job ? inputs.publishTranscripts : publishOn(workflowValue(text, "PENDULUM_PUBLISH_TRANSCRIPTS"))));
+  const sealRow = local ? null : sealKeyCheck({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full, job });
+  if (sealRow) out.push(sealRow);
   out.push(...(await workflowTokenChecks({ repo, token: inputs.githubToken || token })));
 
   const rulesets = await listRulesets(repo, { token });
@@ -1225,6 +1227,18 @@ export function transcriptCheck(repoData, publish) {
   if (policy === "published" && !isPrivate) return WARN("transcripts", "publish_transcripts is on for a public repository: anyone signed in to GitHub can download the agent's event stream and saved sessions (the files it read, the commands it ran and their output) from the usage artifacts for 90 days", "set PENDULUM_PUBLISH_TRANSCRIPTS: false in .github/workflows/pendulum.yml (setup --publish-transcripts false) unless publishing them is intended");
   if (isPrivate) return PASS("transcripts", `private repository: the usage artifacts carry the agent's event stream and saved sessions readable, to those who can read the repository${publish ? " (publish_transcripts is on: they would be readable to anyone if it turned public)" : ""}`);
   return PASS("transcripts", "public repository: the usage artifacts carry the agent's event stream and saved sessions sealed (AES-256-GCM, a key derived from the App's private key, which only this workflow's jobs hold); the usage record stays readable");
+}
+
+/**
+ * Whether the usage artifacts' seal key derives from the App's private key (lib/seal.mjs sealKey): a key given that
+ * does not parse FAILs, as does none in a job (a public repository's stages would then upload their usage without the
+ * transcript and the stream, and no resume could open one). Null outside a job with no key to try.
+ */
+export function sealKeyCheck({ appPrivateKey, repoFull, job = false }) {
+  if (!appPrivateKey && !job) return null;
+  const key = sealKey(appPrivateKey, repoFull);
+  if (key) return PASS("seal key", "the usage artifacts' seal key derives from the App's private key");
+  return FAIL("seal key", `${sealKeyProblem(appPrivateKey, key)}: a public repository's usage artifacts go up without the agent's event stream and sessions, and no fix-passes resume opens one`, "save the App's private key, the whole PEM file, as PENDULUM_APP_PRIVATE_KEY (gh secret set PENDULUM_APP_PRIVATE_KEY < key.pem)");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

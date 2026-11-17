@@ -80,7 +80,7 @@ import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
 import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
-import { openSealed } from "./seal.mjs";
+import { artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, mergeUsage, noResetLimit, refusalFields, transcriptTotal } from "./usage.mjs";
@@ -350,11 +350,12 @@ export const ARTIFACT_LOOKS = 3;
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
  * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
- * stage continuing its pause, continue.mjs). An artifact's sealed session (seal.mjs) is opened with `sealKey`, the
- * stage's (seal.mjs stageSealKey). Returns `{id, from, reason}`: `id` is the session to resume, or null with the reason
- * it is not.
+ * stage continuing its pause, continue.mjs). An artifact's session comes under the job's `seal` (seal.mjs usageSeal:
+ * the stage's key and the repository's policy): sealed, it is opened for this Objective and the artifact's stage, and
+ * under the sealed policy an unsealed one is refused (seal.mjs openSealed); with no seal given, the sealed policy with no
+ * key. Returns `{id, from, reason}`: `id` is the session to resume, or null with the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null, sealKey = null }) {
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null, seal = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
   const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
@@ -380,10 +381,12 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     if (s.harness !== harness) return { id: null, from: src.name, reason: `the earlier session is ${s.harness ?? "another harness"}'s; this stage runs ${harness}` };
     if (s.checkout !== checkout) return { id: null, from: src.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
     if (!s.files.every(plainRelative)) return { id: null, from: src.name, reason: "the saved session lists a name Pendulum will not use" };
-    // A public repository's artifact carries the session sealed: opened here, or the stage starts fresh (an older
-    // artifact's session would be an earlier point of the same lineage, so none is looked for).
-    const opened = await openSealed(dir, sealKey);
-    if (!opened.ok) return { id: null, from: src.name, reason: opened.reason };
+    // An artifact's session: opened from its seal, or refused when the policy is sealed and it is not; then the stage
+    // starts fresh (an older artifact's session would be an earlier point of the same lineage, so none is looked for).
+    if (!fromStageDirs) {
+      const opened = await openSealed(dir, seal?.key ?? null, { policy: seal ? await seal.policy() : "sealed", bind: { issue, stage: artifactStage(src.name) } });
+      if (!opened.ok) return { id: null, from: src.name, reason: opened.reason };
+    }
     for (const rel of s.files) if (!existsSync(join(dir, "transcript", rel))) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
     // Locally the live session is resumed when it is in place, and it may hold passes of a later stage that was killed
     // before it wrote a result.json: that stage's last persisted total for the session is the seed, so the passes its

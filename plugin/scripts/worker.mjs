@@ -22,7 +22,7 @@ import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolv
 import { unpricedCodex } from "./lib/usage.mjs";
 import { REVIEW_LABEL, conflictFiles, ontoRecord, rebaseCost, copilotCount, costByPhase, stageSpendLine, usdText, unmeteredRun, decideExit, decisionsRead, marker, maxUsdReached, planAskedOf, protectedPaths, protectedTouched, sessionCapNote, setupPaths, sumSpend, isSelf, restartedAt } from "./lib/logic.mjs";
 import { TASK_CARD_TEMPLATE, servedSilent, applyExit as applyExitNow, buildPrompt, commitAuthor, openAccess, configureGit, crashed, deadline, doctorBlock, earlyOutageEnd, exitStep, outageExit, outageFirst, usageLimitExit, exitRecord, gitIdentity, lastMessage, liveActivity, markRunning, maskFile, objectiveDecisions, observe, postHandedOff, postValidated, progressReporter, rebaseExitLine, recordMergeable, remainingMs, reviewScope, restoreTranscript, saveAgentTranscript, saveTranscript, stageThreads, stopStage, stoppedRebase, unreadNow, validationLoop, writeUsage } from "./lib/session.mjs";
-import { stageSealKey } from "./lib/seal.mjs";
+import { eventPayload, stageSealKey, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, claimExit, objectiveReader, commitExit, confirmRunning, holdIfStopped, parked, stopCause, watchObjective } from "./lib/stop.mjs";
 import { openOutbox } from "./lib/outbox.mjs";
 import { allowAgentEnv } from "./lib/agent.mjs";
@@ -773,7 +773,7 @@ async function main() {
   let restored = null;
   // A continued pause resumes its own session when it carries over (enterStage restored it), whatever the policy.
   if (continued) restored = continued.session ?? { id: null, from: continued.from, reason: continued.carry };
-  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, sealKey });
+  else if (inputs.resumePolicy === "fix-passes" && rebaseConflict) restored = await restoreTranscript({ repo, issue, token: inputs.githubToken || token.token, checkout, workDir: join(usageDir, ".."), harness: inputs.harness, seal: usageSeal({ key: sealKey, publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token: inputs.githubToken || token.token, noRateWait: true }) }) });
   if (restored?.id) session.id = restored.id;
   // Every stage says how it entered, resumed or fresh and why, in its progress and in result.json: a continued pause
   // (`continued`), or a pause not continued, naming the guards that changed (`changed`).

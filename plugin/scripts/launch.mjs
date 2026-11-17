@@ -42,7 +42,7 @@ import { waitOnAccounts } from "./lib/account-wait.mjs";
 import { CHOSEN_FIELDS, harnessVersionFor } from "./lib/choice.mjs";
 import { READ_PERMISSIONS } from "./lib/token-keeper.mjs";
 import { backend } from "./lib/backend.mjs";
-import { sealCollected, sealKey, usageSeal } from "./lib/seal.mjs";
+import { sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
@@ -551,17 +551,26 @@ export async function startInSandbox({ adapter, repo, repoId, issue, recordedId,
  * The ended stage's usage directory, out of the sandbox and unpacked on the runner for the artifact upload; null when the
  * stage left none (no file: the adapter's readFile says so). A read or unpack that fails throws: the tarball may still be there.
  */
-async function collectUsage(adapter, record, n, seal = null) {
+export async function collectUsage(adapter, record, n, seal = null) {
   if (!pendulumSandboxId(record.id) || !record.home) return null;
   const tgz = await adapter.readFile(record.id, `${record.home}/pendulum/out/usage-${record.claim}.tgz`);
   if (!tgz) return null;
   const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
+  const file = join(dir, "..", `usage-${record.claim}.tgz`);
   rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "..", `usage-${record.claim}.tgz`), tgz);
-  execFileSync("tar", ["xzf", join(dir, "..", `usage-${record.claim}.tgz`), "-C", dir, "--no-same-owner", "--no-same-permissions"]);
-  rmSync(join(dir, "..", `usage-${record.claim}.tgz`), { force: true });
-  await sealCollected(dir, seal, `#${n}`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, tgz);
+    execFileSync("tar", ["xzf", file, "-C", dir, "--no-same-owner", "--no-same-permissions"]);
+    // The transcript and the event stream sealed as a work or review job's artifact (lib/seal.mjs).
+    await sealCollected(dir, seal, { issue: n, stage: record.stage }, `#${n}`);
+  } catch (e) {
+    // Nothing half-unpacked stays for an upload: bookVendor's record of its own then goes up in its place.
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  } finally {
+    rmSync(file, { force: true });
+  }
   return { dir, name: record.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
 }
 
@@ -598,6 +607,8 @@ export async function bookVendor({ adapter, repo, n, opts, record, after, settle
   try {
     if (!usage) {
       const dir = join(process.env.RUNNER_TEMP || tmpdir(), `pendulum-usage-${n}-${record.claim}`);
+      // Emptied first: a collection that failed must leave nothing of its own beside this record.
+      rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true });
       // The stage's own harness, as its start recorded it (the Objective's), else the caller's.
       writeFileSync(join(dir, "result.json"), `${JSON.stringify({ harness: typeof record.harness === "string" ? record.harness : harness, model: null, usd: null, runs: 1, exit: "unknown", spendInProgress: true, basis: "unmetered: the stage's usage did not come out of the sandbox" })}
@@ -716,7 +727,10 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   // The App's write token (and a read-only one when a stage may start or need fresh ones); the key is gone after.
   const tokens = await mintTokens(inputs, repo, { read: !gate && ev.kind !== "comment" });
   // The usage artifacts' seal (lib/seal.mjs): its key, derived before the App's key goes, and the repository's policy.
-  const seal = usageSeal({ key: sealKey(inputs.appPrivateKey, repo.full), publish: inputs.publishTranscripts, payload, readRepo: () => getRepo(repo, { token: tokens.write, noRateWait: true }) });
+  const key = sealKey(inputs.appPrivateKey, repo.full);
+  if (key) mask(key.toString("base64"));
+  else log(`usage artifacts: ${sealKeyProblem(inputs.appPrivateKey, key)}: a public repository's stage usage goes up without its transcript and event stream`);
+  const seal = usageSeal({ key, publish: inputs.publishTranscripts, payload, readRepo: () => getRepo(repo, { token: tokens.write, noRateWait: true }) });
   inputs.appPrivateKey = "";
   watch.mark("mint");
   // A five-minute job: a rate limit is thrown at once and handled as today, never waited out per call (#168).

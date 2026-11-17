@@ -25,7 +25,7 @@ import { pathToFileURL } from "node:url";
 import { openSandbox } from "./lib/adapters/sandbox.mjs";
 import { appToken, armSweepWake, firedByWake } from "./dispatch.mjs";
 import { SECRET_ENV } from "./image.mjs";
-import { eventPayload, sealCollected, sealKey, usageSeal } from "./lib/seal.mjs";
+import { eventPayload, sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
 import { CLAIM_LEASE_MS, bookVendor, sameRecord, writeSandboxRecord } from "./launch.mjs";
 import { findProject, getIssue, getRepo, listComments, projectStatuses, repoOf } from "./lib/github.mjs";
 import { lockBase } from "./lib/lock.mjs";
@@ -46,20 +46,24 @@ export const objectiveSandboxes = (listed, repoId) =>
 export const usageTarball = (record) => `${record.home}/pendulum/out/usage-${record.claim}.tgz`;
 
 /** The record's uncollected usage, out of the sandbox and unpacked into `dir`; false when the stage left none. */
-async function collect(adapter, id, record, dir, seal) {
+async function collect(adapter, id, record, dir, seal, n) {
   const tgz = await adapter.readFile(id, usageTarball(record));
   if (!tgz) return false;
   rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
   const file = `${dir}.tgz`;
-  writeFileSync(file, tgz);
   try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, tgz);
     execFileSync("tar", ["xzf", file, "-C", dir, "--no-same-owner", "--no-same-permissions"]);
+    // The transcript and the event stream sealed as a work or review job's artifact (lib/seal.mjs).
+    await sealCollected(dir, seal, { issue: n, stage: record.stage }, `sandbox ${id}`);
+  } catch (e) {
+    // Nothing half-unpacked stays in the upload slot.
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
   } finally {
     rmSync(file, { force: true });
   }
-  // The transcript and the event stream sealed as a work or review job's artifact (lib/seal.mjs).
-  await sealCollected(dir, seal, `sandbox ${id}`);
   return true;
 }
 
@@ -194,7 +198,7 @@ export async function sweep({ adapter, repo, repoId, opts, idleDays, maxDestroys
       try {
         if (d.collect) {
           const dir = join(collectRoot, `slot-${slots.length + 1}`);
-          if (await collect(adapter, s.id, { ...record, ...own }, dir, seal)) {
+          if (await collect(adapter, s.id, { ...record, ...own }, dir, seal, n)) {
             usage = { dir, name: own.stage === "review" ? `pendulum-usage-${n}-review` : `pendulum-usage-${n}` };
             slots.push(usage);
           }
@@ -287,7 +291,9 @@ async function main() {
   const repo = repoOf(inputs.repo);
   const token = await appToken(inputs);
   // The collected usage's seal (lib/seal.mjs): its key, derived before the App's key goes, and the repository's policy.
-  const seal = usageSeal({ key: sealKey(inputs.appPrivateKey, repo.full), publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token }) });
+  const key = sealKey(inputs.appPrivateKey, repo.full);
+  if (!key) log(`sweep: ${sealKeyProblem(inputs.appPrivateKey, key)}: a public repository's collected usage goes up without its transcript and event stream`);
+  const seal = usageSeal({ key, publish: inputs.publishTranscripts, payload: eventPayload(), readRepo: () => getRepo(repo, { token, noRateWait: true }) });
   inputs.appPrivateKey = "";
   const opts = { token };
   const adapter = await openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId });

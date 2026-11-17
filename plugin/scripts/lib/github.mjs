@@ -1747,12 +1747,20 @@ export async function activeWorkIssues(repo, opts) {
 }
 
 /**
+ * The work job's last step, which ticks the dispatcher as the job ends (workflow-template.yml): its name as the
+ * workflow file gives it, the part every rendered workflow carries.
+ */
+const FINAL_TICK_STEP = /^Dispatch tick \(this worker finished\b/;
+
+/**
  * The Objectives with a live Pendulum job, by kind: `work (N)` and `review (pendulum/N)` jobs not yet completed, and the
  * dispatcher's wakes queued or sleeping (`wake (<kind> <iso>)`, logic.mjs parseWake) as `wakes: [{kind, at, startedAt}]`.
- * `strict` throws on a failed read instead of treating it as "none running" (a caller that must fail safe).
+ * `finishing`: the live work jobs whose final tick step (FINAL_TICK_STEP) has started or ended, so the tick it fires may
+ * read the job before GitHub marks it completed. `strict` throws on a failed read instead of treating it as "none
+ * running" (a caller that must fail safe).
  */
 export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
-  const out = { work: new Set(), review: new Set(), wakes: [] };
+  const out = { work: new Set(), review: new Set(), wakes: [], finishing: new Set() };
   const read = (path) => rest(path, opts).catch((e) => {
     if (strict) throw e;
     return null;
@@ -1765,6 +1773,7 @@ export async function activePendulumJobs(repo, opts, { strict = false } = {}) {
         if (j.status === "completed") continue;
         const w = /^work \((\d+)\)$/.exec(j.name || "");
         if (w) out.work.add(Number(w[1]));
+        if (w && (j.steps || []).some((st) => FINAL_TICK_STEP.test(String(st?.name ?? "")) && (st.status === "in_progress" || st.status === "completed"))) out.finishing.add(Number(w[1]));
         const r = /^review \(pendulum\/(\d+)\)$/.exec(j.name || "");
         if (r) out.review.add(Number(r[1]));
         const wake = parseWake(j.name);

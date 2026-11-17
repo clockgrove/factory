@@ -206,8 +206,9 @@ export class Budget {
     this.planned = 0;
     this.byKind = {};
     this.open = false;
-    // The paged reads (by what they read) that ended at a full page with no Link header (paged).
-    this.unlinked = new Set();
+    // The paged reads that ended at a full page with no Link header (paged), by path: {what, issue} (the issue whose
+    // thread it read, else null).
+    this.unlinked = new Map();
     this.log = log;
   }
   plan(n, what, { atLeast = false } = {}) {
@@ -242,7 +243,7 @@ async function paged(path, budget, what, opts, { stop = null, into = [], planned
     into.push(...items);
     // A full first page whose answer carries no Link header at all: exactly one page, or a server that names no pages.
     // The read ends here, and the report says it could not tell (after a first page with one, none means the end).
-    if (page === 1 && items.length >= PER_PAGE && !link && !stop?.(items)) budget.unlinked.add(what);
+    if (page === 1 && items.length >= PER_PAGE && !link && !stop?.(items)) budget.unlinked.set(path, { what, issue: Number(/\/issues\/(\d+)\//.exec(path)?.[1]) || null });
     if (!linkTo(link, "next") || items.length < PER_PAGE || stop?.(items)) return into;
     if (page < planned) continue;
     const last = stop ? null : Number(/[?&]page=(\d+)/.exec(linkTo(link, "last") ?? "")?.[1]) || null;
@@ -552,20 +553,12 @@ export async function readReport(repo, scope, { token, fallback = null, maxCalls
       // Each Objective with a record in the comments read whose issue was opened before the floor: its own thread, as
       // --issue reads it, so every figure comes from all its records (a finding an earlier review round raised, the stage
       // a vendor comment books for). Only the comments the repository-wide read lacks are read: each was written before
-      // the floor, so the thread is read page by page until a comment written at or after it, each kept once; and none is
-      // read for an issue the repository-wide read already holds as many comments of as its comment count.
+      // the floor, so the thread is read page by page until a comment written at or after it, each kept once.
       threadsLeft = new Set();
       if (floor) {
         const pushed = (c) => mine(c) || pushAuthor(c) || throughApp(c);
         const recorded = new Set(comments.filter(pushed).map(markerIssue).filter((n) => n !== null));
-        // The comments read on each issue: one whose issue counts no more comments than that has nothing left to read.
-        const held = new Map();
-        for (const c of comments) {
-          const on = Number(/\/issues\/(\d+)$/.exec(c.issue_url || "")?.[1]);
-          if (Number.isSafeInteger(on)) held.set(on, (held.get(on) ?? new Set()).add(c.id));
-        }
-        const whole = (i) => Number.isSafeInteger(i.comments) && (held.get(i.number)?.size ?? 0) >= i.comments;
-        const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor)) && !whole(i)).map((i) => i.number).sort((a, b) => a - b);
+        const begun = [...issues.values()].filter((i) => recorded.has(i.number) && !(ms(i.created_at) >= ms(floor))).map((i) => i.number).sort((a, b) => a - b);
         threadsLeft = new Set(begun);
         if (begun.length) budget.plan(begun.length, `the comments from before ${floor} of ${begun.length} Objective(s) with a record since (a thread's first page each, each further page planned as it is reached)`, { atLeast: true });
         const seen = new Set(comments.map((c) => c.id));
@@ -1451,7 +1444,10 @@ function sourceOf(source, trust, missing, read, summaries = 0) {
   add("label-unverifiable", new Set(arms.flatMap((a) => a.unverifiable)), "issues whose label's last applier's permission the token may not read (403): not vouched for, so not counted for it");
   add("label-unchecked", new Set(arms.flatMap((a) => a.listed.filter((n) => !checked(a, n)))), "issues whose label's applier the call budget stopped the report before reading: not counted");
   if (arms.length === 2) add("in-both-arms", new Set(arms[0].trusted.filter((n) => arms[1].trusted.includes(n))), "issues both arms' labels count for: in neither arm");
-  if (calls.unlinked?.size) out.push({ code: "no-link", count: calls.unlinked.size, counts: none, issues: [], text: `paged reads that ended at a full page whose answer carried no Link header, so whether more followed is not known: ${[...calls.unlinked].join(", ")}` });
+  if (calls.unlinked?.size) {
+    const reads = [...calls.unlinked.values()];
+    out.push({ code: "no-link", count: reads.length, counts: none, issues: issuesOf(new Set(reads.map((r) => r.issue).filter((n) => n !== null))), text: `paged reads that ended at a full first page whose answer carried no Link header, so whether more followed is not known, and the figures from them may be partial: ${reads.map((r) => (r.issue === null ? `the repository's ${r.what}` : `#${r.issue}'s ${r.what}`)).join(", ")}` });
+  }
   if (source.artifacts.expired) out.push({ code: "artifact-expired", count: source.artifacts.expired, counts: none, issues: [], text: "usage artifacts past GitHub's retention, not cached here" });
   if (source.artifacts.failed) out.push({ code: "artifact-failed", count: source.artifacts.failed, counts: none, issues: [], text: "usage artifacts that could not be downloaded" });
   if (source.artifacts.unreadable) out.push({ code: "artifacts-unreadable", count: source.artifacts.unreadable, counts: none, issues: [], text: "artifact lists the token may not read (it needs actions: read), or artifacts that name no workflow run" });

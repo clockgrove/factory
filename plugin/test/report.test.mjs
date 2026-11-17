@@ -159,7 +159,7 @@ function fakeGitHub(w) {
     if (m) return page(w.comments.filter((c) => c.issue_url === issueUrl(Number(m[1]))), u);
     if (p === "/issues") {
       const label = u.searchParams.get("labels");
-      return page(w.issues.filter((i) => !label || i.labels.some((l) => l.name === label)).map((i) => ({ ...i, comments: w.comments.filter((c) => c.issue_url === issueUrl(i.number)).length })), u);
+      return page(w.issues.filter((i) => !label || i.labels.some((l) => l.name === label)), u);
     }
     m = /^\/issues\/(\d+)$/.exec(p);
     if (m) {
@@ -1577,25 +1577,26 @@ test("report (#563 S4): the PR list's early stop leaves no planned page unread",
   assert.equal(r.source.calls.planned, r.source.calls.made);
 });
 
-test("report (#563): no thread is read for an Objective whose comments the repository-wide read already holds, as its comment count says", async () => {
-  // #11's first round was edited at 07:30: the read since 07:00 holds both of #11's comments.
-  const w = reviewed();
-  w.comments[0] = { ...w.comments[0], updated_at: "2026-11-17T07:30:00Z" };
-  const { json: r, calls } = await report(w, { since: "2026-11-17T07:00:00Z" });
-  assert.deepEqual(threadCalls(calls), []);
-  assert.deepEqual(r.findings.totals, { findings: 1, outcomes: outcomes({ open: 1 }), reviewStages: 1, cost: api(0.3), unnamed: 0 });
-  assert.equal(r.source.calls.planned, r.source.calls.made);
-});
-
-test("report (#563): a full first page with no Link header ends the read, and source.missing says so", async () => {
+test("report (#563): a full first page with no Link header ends the read, and source.missing names each such read, by its issue where it read one", async () => {
   const w = world();
   for (let k = 0; k < 150; k += 1) w.comments.push(comment(100 + k, "a comment of no Objective", { user: ME }));
   w.noLink = true;
   const { json: r } = await report(w, { since: "2026-11-17" });
   assert.equal(r.source.calls.byKind.comments, 1);
   assert.equal(r.source.calls.planned, r.source.calls.made);
+  // One read, the repository's comments: no issue's thread.
   const note = r.source.missing.find((m) => m.code === "no-link");
-  assert.ok(note && note.text.includes("comments"), JSON.stringify(r.source.missing));
+  assert.deepEqual([note?.count, note?.issues], [1, []], JSON.stringify(r.source.missing));
+  assert.match(note.text, /the repository's comments/);
+  // --issue 3 with 150 comments of its own: the read of #3's thread is named, by its issue.
+  const own = world();
+  for (let k = 0; k < 150; k += 1) own.comments.push(comment(3, "a comment", { user: ME }));
+  own.noLink = true;
+  const { json: one } = await report(own, { issue: 3 });
+  assert.equal(one.source.calls.byKind.comments, 1);
+  const named = one.source.missing.find((m) => m.code === "no-link");
+  assert.deepEqual([named?.count, named?.issues], [1, [3]]);
+  assert.match(named.text, /#3's comments/);
   // With GitHub's Link headers, no note.
   const { json: linked } = await report({ ...w, noLink: false }, { since: "2026-11-17" });
   assert.ok(!linked.source.missing.some((m) => m.code === "no-link"));

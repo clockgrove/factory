@@ -10,3 +10,8 @@ Asked what running off this machine takes, name all three:
 
 The `factory:local` label routes it: with it `factory serve` takes the Objective and the Action leaves it alone; without it the Action's next tick takes it (sooner by a dispatch, on the user's yes: SKILL.md). Move it between stages, not while one runs.
 
+# Preview the picks
+
+The exact preview is the dispatcher's own dry run, the one way to run that script from a session (a real run here marks issues Running with no worker job to run them): `node "<plugin root>/scripts/dispatch.mjs" --repo OWNER/NAME --dry-run`. It mints the App's installation token, so it needs the App's credentials in the user's own shell, as doctor's GitHub checks do: `FACTORY_APP_TOKEN`, or `FACTORY_APP_ID` and `FACTORY_APP_PRIVATE_KEY="$(cat <path>.pem)"`; never read the key. It takes its caps from that shell's `FACTORY_*` variables, not the workflow, so export the values the workflow sets first, or say its picks assume the defaults.
+
+Without the App's credentials, list the candidates with `gh issue list --repo OWNER/NAME --label factory:objective --state open --json number,title,labels` and drop those labelled `factory:draft`, `factory:running`, `factory:in-review`, `factory:blocked` or `factory:question`. Say the list is approximate: it does not apply the blocking issues, the priority order or the caps.

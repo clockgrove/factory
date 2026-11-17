@@ -11,11 +11,11 @@ description: "Run one Clockgrove Factory Objective of the current repository on 
 
 ### Ask
 
-Read the issue (`gh issue view <issue> --json number,title,state,labels`); show its number, title and state, and what `factory run <issue> --wait` does, then wait for a yes:
+Show the issue's number, title and state (`gh issue view <issue> --json number,title,state,labels`) and what `factory run <issue> --wait` does; wait for a yes:
 
 - It is the Action's worker, reviewer and merge on this machine, every command in a sandbox, on this machine's harness login: it works the Objective from the stage its state calls for, reviews the PR, answers the review, and with `auto_merge` on merges the PR once green.
 - It pushes `factory/<issue>`, opens the PR and posts on the issue as the user (local mode's token).
-- Each stage stops at `max_usd` (doctor's `settings` row names it) and books its spend on the issue toward `daily_usd`.
+- Each stage stops at `max_usd` (doctor's `settings` row) and books its spend on the issue toward `daily_usd`.
 
 ### Run
 
@@ -23,7 +23,7 @@ On a yes, run `factory run <issue> --wait` from the repository's clone. It needs
 
 ## In this session (--here)
 
-Work the Objective here, unsandboxed, when the user wants to watch or steer: the Action's worker otherwise.
+Work the Objective here, unsandboxed, when the user wants to watch or steer.
 
 ### Preconditions
 
@@ -37,11 +37,11 @@ Render the task card and set up the branch and the hand-off directories: [refere
 
 ### Run
 
-The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Read and follow, in order, the worker's stage skills, each `<plugin root>/skills/<name>/SKILL.md`: `factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when factory-deliver-pr says to. Write nothing to GitHub.
+The rendered task card is your instructions, `$FACTORY_IN/issue.md` verbatim the specification. Read and follow, in order, the worker's stage skills, each `<plugin root>/skills/<name>/SKILL.md` here, not the card's checkout paths: `factory-objective-plan`, `factory-implement-split`, `factory-prove-acceptance`, `factory-deliver-pr`. Nothing in them asks the user anything; the Question rule and the blocked exit are the only ways out other than delivered. Stop when factory-deliver-pr says to. Write nothing to GitHub.
 
 ### Hand off to Factory
 
-Show the user the branch's commits (`git log --oneline origin/<default branch>..HEAD`), the PR title (the first line of `$FACTORY_OUT/pr.md`) and the exit record, and say what `factory deliver <issue>` does: it runs the trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, and posts the plan, the PR, the replies and the note as the user. A delivered PR is marked ready and labelled `factory:review`, which, when `.github/workflows/factory.yml` exists, fires the Action's review job (with `auto_merge` on, it merges once green). Ask for a yes.
+Show the user the branch's commits (`git log --oneline origin/<default branch>..HEAD`), the PR title (the first line of `$FACTORY_OUT/pr.md`) and the exit record, and say what `factory deliver <issue>` does: it runs the trust check again (a refusal Blocks, nothing pushed), refuses a branch that touches a protected path, pushes `factory/<issue>`, posts the plan, the PR, the replies and the note as the user, and applies the exit record: a delivered PR is marked ready and labelled `factory:review`, which, when `.github/workflows/factory.yml` exists, fires the Action's review job (with `auto_merge` on, the Action merges it once green). Ask for a yes.
 
 On a yes, run `factory deliver <issue>` from the clone. Without the workflow, say that the PR waits for the factory-review skill and a human merge.
 

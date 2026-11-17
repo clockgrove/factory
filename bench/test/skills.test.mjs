@@ -183,10 +183,12 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
   // Each break on its own.
   skill(other, 'description: "Internal: a stage."', "Body.", hidden);
   skill("user-slash", 'description: "/factory:factory-x <issue>. Does a thing."');
+  skill("user-hidden", "description: Does a thing.\nuser-invocable: false");
   skill("user-root", "description: Does a thing.", 'Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/x.mjs"`.');
   skill("user-ref", "description: Does a thing.", "Body.", { "reference.md": "Read `<plugin root>/templates/task-card.md`.\n" });
   assert.deepEqual(rules(), [
     `${other}: an internal skill sets \`user-invocable: false\` (out of Claude Code's / menu)`,
+    "user-hidden: a user skill sets no `user-invocable`: only the internal skills are hidden",
     "user-ref: a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md",
     "user-root: a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md",
     "user-slash: a user skill's description starts with what it does and when to use it, not a /command line",
@@ -216,6 +218,7 @@ test("skillRules: an internal skill without each harness's hide setting, a user 
 test("the task card and the review job's prompts name each internal skill they load as a $ mention", () => {
   const card = readFileSync(join(CHECKOUT, "plugin", "templates", "task-card.md"), "utf8");
   for (const s of ["factory-objective-plan", "factory-implement-split", "factory-prove-acceptance", "factory-deliver-pr"]) assert.ok(card.includes(`$${s}`), s);
+  assert.match(card, /each is the `SKILL\.md` in `\.agents\/skills\/<name>\/` and `\.claude\/skills\/<name>\/` of this checkout/, "and by path, for a session whose first prompt was compacted away");
   const review = readFileSync(join(CHECKOUT, "plugin", "scripts", "review.mjs"), "utf8");
   assert.equal(review.match(/Follow the \$factory-review-pr skill/g)?.length, 2, "the reviewer and the foundation pass");
   assert.match(review, /Load the \$factory-deliver-pr skill's "Reviewer comments" section/);

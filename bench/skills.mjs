@@ -169,7 +169,7 @@ function frontmatter(text) {
  *   `policy.allow_implicit_invocation: false`; the task card's `$name` mention still loads it), and its description
  *   starts `Internal`, which is all Copilot has;
  * - a user skill's description starts with what it does, never a `/command` line, which only Claude Code reads as one
- *   (its listing shows `<issue>` escaped) and the other harnesses show as text;
+ *   (its listing shows `<issue>` escaped) and the other harnesses show as text, and it sets no `user-invocable`;
  * - a skill that names a plugin path (from `<plugin root>/` or `${CLAUDE_PLUGIN_ROOT}/`) in any of its files says how to
  *   find the plugin in its SKILL.md, in PLUGIN_ROOT_SENTENCE.
  */
@@ -193,7 +193,10 @@ export function skillRules(pluginDir) {
       } catch {}
       if (codex?.policy?.allow_implicit_invocation !== false) flag("an internal skill has agents/openai.yaml with `policy: allow_implicit_invocation: false` (out of Codex's implicit loading)");
       if (!/^Internal\b/.test(description)) flag("an internal skill's description starts with `Internal`");
-    } else if (description.startsWith("/")) flag("a user skill's description starts with what it does and when to use it, not a /command line");
+    } else {
+      if (description.startsWith("/")) flag("a user skill's description starts with what it does and when to use it, not a /command line");
+      if (Object.hasOwn(fm, "user-invocable")) flag("a user skill sets no `user-invocable`: only the internal skills are hidden");
+    }
     const files = [file, ...skillFiles(join(dir, skill)).map((f) => join(dir, skill, f))];
     if (files.some((f) => /(?:<plugin root>|\$\{CLAUDE_PLUGIN_ROOT\})\//.test(readFileSync(f, "utf8").replaceAll(PLUGIN_ROOT_SENTENCE, ""))) && !text.includes(PLUGIN_ROOT_SENTENCE)) {
       flag("a skill that names a plugin path says how to find the plugin, in the shared sentence (PLUGIN_ROOT_SENTENCE), in its SKILL.md");

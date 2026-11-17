@@ -15,8 +15,8 @@ The Action is installed. If the factory-doctor skill has not run here this sessi
 
 A dispatch starts paid work, so show what it will do and wait for a yes:
 
-- What it would start: preview the next tick's picks with `node "<plugin root>/scripts/dispatch.mjs" --repo OWNER/NAME --dry-run` (the one way to run that script from a session: a real run here marks issues Running with no worker job to run them). The dispatcher picks ready Objectives (labelled, not blocked by an open issue, not Running, Blocked, Question or In review), orders them `P0`, `P1`, `P2`, then issue number, and starts up to `max_concurrent`.
-- The spend caps: the dispatcher starts nothing once the day's spend (UTC) passes `daily_usd`, and each stage stops at `max_usd`. Show their values from the workflow's env block (`FACTORY_DAILY_USD`, `FACTORY_MAX_USD`, `FACTORY_MAX_CONCURRENT`), or the repository's `FACTORY_*` variables over it (doctor's `settings` row names each).
+- The caps: the dispatcher starts up to `max_concurrent` at once and nothing once the day's spend (UTC) passes `daily_usd`; each stage stops at `max_usd`. Read them from the committed workflow's env block (`FACTORY_MAX_CONCURRENT`, `FACTORY_DAILY_USD`, `FACTORY_MAX_USD`; the default branch's `.github/workflows/factory.yml` in the clone, or `gh api repos/OWNER/NAME/contents/.github/workflows/factory.yml --jq .content | base64 -d`), with any repository variable of the same name (`gh variable list`) over it. One set nowhere is its default: say so (3 at once, $100 a day, $25 a stage).
+- What it would start: [reference.md](reference.md), Preview the picks. The dispatcher picks ready Objectives (labelled, not blocked by an open issue, not Running, Blocked, Question or In review), orders them `P0`, `P1`, `P2`, then issue number.
 - With an issue number, it dispatches that one Objective alone; its state and blocking rules still apply.
 
 ### Dispatch

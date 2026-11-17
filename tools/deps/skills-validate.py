@@ -2,7 +2,7 @@
 validator (skills-ref, its own parser and rules), where a skill may also carry the frontmatter fields a harness reads
 beyond the standard's (HARNESS_FIELDS), each only with the value Factory writes. The standard's validator refuses every
 field it does not define, and Claude Code hides a skill from its `/` menu only by such a field. Exits 1 when any skill
-fails, naming each failure.
+fails, naming each failure on stderr.
 """
 
 import sys
@@ -34,7 +34,7 @@ for arg in sys.argv[1:]:
     errors = check(skill_dir)
     if errors:
         failed = True
-        print(f"Validation failed for {skill_dir}:\n" + "\n".join(f"  - {e}" for e in errors))
+        print(f"Validation failed for {skill_dir}:\n" + "\n".join(f"  - {e}" for e in errors), file=sys.stderr)
     else:
         print(f"Valid skill: {skill_dir}")
 sys.exit(1 if failed or len(sys.argv) < 2 else 0)

@@ -10,7 +10,7 @@ import "./temp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -42,7 +42,8 @@ const UNKNOWN = "billing not recorded";
  * bearer token (`ANTHROPIC_AUTH_TOKEN`) alike; FAKE_KEY_SOURCE stands in for a stored Console login or a legacy source.
  * It sends a subscription's `rate_limit_event` on a claude.ai login only: an OAuth token, or FAKE_STORED=claudeai, with no
  * key, bearer token or base URL of its own. Its result is FAKE_USD with modelUsage in 2.1.325's shape (`provider`:
- * FAKE_PROVIDER, "firstParty" by default; `costBasis`). FAKE_SLEEP: it then hangs. Codex prints one completed turn;
+ * FAKE_PROVIDER, "firstParty" by default; `costBasis`). FAKE_OVERAGE: after its limit's event, the event of a pass on paid
+ * extra usage (`isUsingOverage`). FAKE_SLEEP: it then hangs. Codex prints one completed turn;
  * Copilot copies the 1.0.107 usage file to its --usage-output-file and prints its stream.
  */
 function fakeBin() {
@@ -56,6 +57,8 @@ const claudeAi = !own && (e.CLAUDE_CODE_OAUTH_TOKEN || e.FAKE_STORED === "claude
 const say = (o) => console.log(JSON.stringify(o));
 say({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5-5", apiKeySource: source, claude_code_version: "2.1.326" });
 if (claudeAi) say({ type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: "five_hour", utilization: 0.2, resetsAt: 1794697200 }, session_id: "s1" });
+// The event a real 2.1.326 OAuth run sent once its plan's limit was met and paid extra usage carried it on.
+if (claudeAi && e.FAKE_OVERAGE) say({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: 1794697200, rateLimitType: "five_hour", overageStatus: "allowed", isUsingOverage: true }, session_id: "s1" });
 if (e.FAKE_SLEEP) setTimeout(() => {}, 60000);
 else say({ type: "result", subtype: "success", is_error: false, num_turns: 2, result: e.FAKE_ANSWER || "done", session_id: "s1", total_cost_usd: usd, usage: { input_tokens: 20, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: { "claude-opus-5-5": { inputTokens: 30, outputTokens: 15, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: usd, provider: e.FAKE_PROVIDER || "firstParty", costBasis: "list" } } });
 `, { mode: 0o755 });
@@ -327,6 +330,54 @@ test("a stage mixing the subscription's figure and a relayed AI Gateway key's bi
     assert.match(cost.basis, /; 1\.2 USD API-equivalent at list prices, on the subscription; 0\.3 USD billed per use(;|$)/);
   }
   assert.ok(card.costCell.startsWith(`$1.50: $1.20 ${SUB} + $0.30 API`), card.costCell);
+});
+
+test("a Claude pass on paid extra usage past the plan's limit is of unknown billing, whatever the credential", async () => {
+  const cred = await credOf("claude", "plan", { claudeCodeOauthToken: "sk-ant-oat01-dummy" });
+  const { records, usage, stored, body } = await stage({ harness: "claude", model: "claude-opus-5-5", cred, run: async () => [await pass("claude", "claude-opus-5-5", cred, { FAKE_USD: "0.9" }), await pass("claude", "claude-opus-5-5", cred, { FAKE_USD: "0.6", FAKE_OVERAGE: "1" })] });
+  assert.deepEqual(records.map((r) => [r.billing, r.overage === true]), [["subscription", false], ["unknown", true]]);
+  assert.deepEqual([stored.billing, stored.usdByBilling], ["unknown", { subscription: 0.9, unknown: 0.6 }]);
+  assert.equal(usdText(usage), `1.5: 0.9 ${SUB} + 0.6 ${UNKNOWN}`);
+  assert.match(body, /"usdByBilling":\{"subscription":0\.9,"unknown":0\.6\},"billing":"unknown"/);
+  // The status line from the same event, and a decision record made from such a pass.
+  const a = harnessActivity();
+  for (const l of [{ type: "system", subtype: "init", session_id: "s1", apiKeySource: "none", claude_code_version: "2.1.326" }, { type: "rate_limit_event", rate_limit_info: { status: "rejected", overageStatus: "allowed", isUsingOverage: true }, session_id: "s1" }, { type: "result", subtype: "success", is_error: false, session_id: "s1", total_cost_usd: 0.6 }]) a.feed(JSON.stringify(l));
+  assert.ok(activityLine(a.snapshot(), { harness: "claude", model: "m", billing: "subscription" }).includes(`, $0.60 ${UNKNOWN}`));
+  assert.equal(passBilling("subscription", keepDecision({ ...records[1], billing: undefined })), "unknown", "kept on a decision record");
+});
+
+test("a Codex decision call on a ChatGPT login reads its rollout's plan limits before its files are removed, so the stage is the subscription's", async () => {
+  // A fake Codex that answers and writes its rollout with a ChatGPT plan's rate limits, stamped now.
+  const bin = mkdtempSync(join(tmpdir(), "billing-codex-"));
+  const home = mkdtempSync(join(tmpdir(), "billing-codexhome-"));
+  const thread = "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0777";
+  const counts = readFileSync(join(FIXTURES, "codex-0.167-usage-limit-rollout.jsonl"), "utf8").split("\n").find((l) => l.includes('"token_count"') && l.includes('"plan_type"'));
+  writeFileSync(join(bin, "codex"), `#!${process.execPath}
+const fs = require("node:fs");
+const dir = process.env.CODEX_HOME + "/sessions/2026/11/16";
+fs.mkdirSync(dir, { recursive: true });
+const o = JSON.parse(${JSON.stringify(counts)});
+o.timestamp = new Date().toISOString();
+fs.writeFileSync(dir + "/rollout-2026-11-16T00-00-00-${thread}.jsonl", JSON.stringify(o) + "\\n");
+console.log(JSON.stringify({ type: "thread.started", thread_id: "${thread}" }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{}" } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 800, cached_input_tokens: 0, output_tokens: 12 } }));
+`, { mode: 0o755 });
+  const cred = await credOf("codex", "login");
+  assert.equal(cred.billing, "unknown", "a stored login: its calls decide");
+  const { records, stored } = await stage({
+    harness: "codex",
+    model: "gpt-6.1-sol",
+    cred,
+    run: async () => {
+      const call = await runDecision({ harness: "codex", model: "gpt-6.1-sol", prompt: "q", env: { HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH}`, TMPDIR: process.env.TMPDIR, CODEX_HOME: home } });
+      assert.equal(call.ok, true, call.error);
+      return [keepDecision(call)];
+    },
+  });
+  assert.deepEqual([records[0].planLimits, records[0].billing], [true, "subscription"]);
+  assert.equal(existsSync(join(home, "sessions", "2026", "11", "16", `rollout-2026-11-16T00-00-00-${thread}.jsonl`)), false, "the call's rollout is removed after the read");
+  assert.deepEqual([stored.billing, Object.keys(stored.usdByBilling)], ["subscription", ["subscription"]]);
 });
 
 test("decision records keep the pass's key source and billing through keepDecision and foldDecision", async () => {

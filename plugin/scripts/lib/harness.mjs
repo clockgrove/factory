@@ -1258,7 +1258,7 @@ async function outageCut(rec, { harness, env }) {
 }
 
 /** What says what a record's dollars are (usage.mjs passBilling), carried to a record made from it: its billing, key source and plan limits. */
-const billingSigns = (rec) => ({ ...(rec.billing ? { billing: rec.billing } : {}), ...(typeof rec.apiKeySource === "string" ? { apiKeySource: rec.apiKeySource } : {}), ...(rec.planLimits === true ? { planLimits: true } : {}) });
+const billingSigns = (rec) => ({ ...(rec.billing ? { billing: rec.billing } : {}), ...(typeof rec.apiKeySource === "string" ? { apiKeySource: rec.apiKeySource } : {}), ...(rec.planLimits === true ? { planLimits: true } : {}), ...(rec.overage === true ? { overage: true } : {}) });
 
 /**
  * The record of a pass that ran again after the network cut it off (`lost`, its earlier runs), with `limit` after it
@@ -1885,14 +1885,17 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   } finally {
     if (dir) local ? dropOwned(dir) : rmSync(dir, { recursive: true, force: true });
   }
+  // The call's own rollout, read once before its files are removed, on success too: a failed call's usage limit
+  // (usage.mjs providerRefusal) and a ChatGPT plan's rate limits (codexPlanLimits), which say how the call is billed.
   let rollout = null;
   if (harness === "codex" && !agent) {
     const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
-    if (thread && r.code !== 0) rollout = await codexPassRollout(thread, null, launch.env, { label });
+    if (thread) rollout = await codexPassRollout(thread, null, launch.env, { label });
     // Only this call's own thread: an id that is no plain thread id names no file (as codexPassRollout reads it).
     if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
   }
-  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout: r.code !== 0 ? rollout : null, since: started });
+  if (harness === "codex" && codexPlanLimits(rollout, started)) rec.planLimits = true;
   metered.end(rec);
   if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });

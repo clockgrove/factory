@@ -130,6 +130,8 @@ const isKind = (k) => typeof k === "string" && BILLING.includes(k);
  *   `unknown`; a model served by Bedrock or Vertex is `api`, by another provider than Anthropic's own `unknown`. Else the
  *   credential's, and on a credential of unknown billing a pass whose Claude Code reported a subscription's rate-limit
  *   windows (`planLimits`, parseClaude) is `subscription`: "none" alone proves nothing, a bearer token reports it too.
+ *   A pass that ran on paid extra usage (`overage`: a `rate_limit_event` with `isUsingOverage`) is `unknown`, whatever
+ *   the credential: it can straddle the plan's included use and the overage.
  * - Codex: the credential's, and on one of unknown billing a pass whose rollout carried a ChatGPT plan's rate limits
  *   (`planLimits`, codexPlanLimits) is `subscription`.
  * A pass record that already names its billing keeps it. `unknown` when nothing positive is known.
@@ -139,6 +141,8 @@ export function passBilling(billing, rec) {
   if (rec?.harness === "copilot") return "credits";
   const cred = isKind(billing) ? billing : "unknown";
   if (rec?.harness === "claude") {
+    // Paid extra usage past the plan's limit: some or all of the pass is billed beyond the subscription.
+    if (rec.overage === true) return "unknown";
     const src = rec.apiKeySource;
     if (typeof src === "string" && CLAUDE_KEY_SOURCES.has(src)) return "api";
     if (typeof src === "string" && src !== "none") return "unknown";
@@ -837,6 +841,9 @@ export function parseClaude(stdout, model) {
   // A subscription's rate-limit windows (`rate_limit_event`), which Claude Code reports on a claude.ai login only: the
   // positive sign of a subscription (passBilling).
   if (lines.some((l) => l?.type === "rate_limit_event")) rec.planLimits = true;
+  // Paid extra usage past the plan's limit (a `rate_limit_event` with `isUsingOverage`): billed beyond the subscription,
+  // and a pass can straddle both, so it is of unknown billing (passBilling).
+  if (lines.some((l) => l?.type === "rate_limit_event" && l.rate_limit_info?.isUsingOverage === true)) rec.overage = true;
   if (!result) {
     rec.error = "no JSON result on stdout";
     rec.sessionId = init?.session_id ?? null; // a crashed process still has a session to resume
@@ -1332,6 +1339,7 @@ export function mergeUsage(records) {
     // What says what the dollars are (passBilling): the first key source named, any plan's limits, one billing or unknown.
     if (out.apiKeySource === undefined && typeof r.apiKeySource === "string") out.apiKeySource = r.apiKeySource;
     if (r.planLimits === true) out.planLimits = true;
+    if (r.overage === true) out.overage = true;
     if (out.billing !== undefined || r.billing !== undefined) out.billing = out.billing === r.billing ? out.billing : "unknown";
   }
   return out;

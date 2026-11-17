@@ -1235,6 +1235,8 @@ export function harnessActivity(now = () => Date.now()) {
     if (e.type === "system" && e.subtype === "init" && typeof e.apiKeySource === "string" && e.apiKeySource.length <= 60) s.apiKeySource = e.apiKeySource;
     // A subscription's rate-limit windows, which Claude Code reports on a claude.ai login only (usage.mjs parseClaude).
     if (e.type === "rate_limit_event") s.planLimits = true;
+    // Paid extra usage past the plan's limit: the pass's billing is unknown (usage.mjs passBilling).
+    if (e.type === "rate_limit_event" && e.rate_limit_info?.isUsingOverage === true) s.overage = true;
     // Claude
     if (e.type === "assistant" && e.message) {
       if (!e.parent_tool_use_id) s.turns += 1;
@@ -1298,7 +1300,7 @@ export function harnessActivity(now = () => Date.now()) {
     const active = all.filter((a) => !a.done && a.kind !== "command").map((a) => ({ ...a, minutes: Math.round((t - a.startedAt) / 60000) }));
     const done = all.filter((a) => a.done && a.kind !== "command").length;
     const commands = all.filter((a) => !a.done && a.kind === "command").length;
-    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended, ...(s.apiKeySource ? { apiKeySource: s.apiKeySource } : {}), ...(s.planLimits ? { planLimits: true } : {}) };
+    return { elapsedMin: Math.round((t - s.startedAt) / 60000), idleMin: s.lastEventAt ? Math.round((t - s.lastEventAt) / 60000) : null, events: s.events, turns: s.turns, toolCalls: s.toolCalls, lastTool: s.lastTool, lastText: s.lastText, subagentsActive: active, subagentsDone: done, backgroundCommands: commands, tokens: { ...s.tokens }, usd: s.usd, ended: s.ended, ...(s.apiKeySource ? { apiKeySource: s.apiKeySource } : {}), ...(s.planLimits ? { planLimits: true } : {}), ...(s.overage ? { overage: true } : {}) };
   };
   const since = (thread, prior) => {
     if (thread && prior) priors.set(thread, { input: prior.tokens?.input ?? 0, output: prior.tokens?.output ?? 0, written: prior.tokens?.written ?? 0, usd: prior.usd ?? null });
@@ -1319,7 +1321,7 @@ export function activityLine(snap, { harness = "harness", model = null, label = 
   const bg = snap.backgroundCommands ? `; ${snap.backgroundCommands} background command${snap.backgroundCommands > 1 ? "s" : ""} running` : "";
   const last = snap.ended ? "ended" : snap.idleMin === null ? "" : snap.idleMin === 0 ? "active now" : `last event ${snap.idleMin} min ago`;
   // What the pass's dollars are, as its record will say when it ends (usage.mjs passBilling); none before the stage reads its credential.
-  const kind = billing ? passBilling(billing, { harness, apiKeySource: snap.apiKeySource, planLimits: snap.planLimits === true }) : null;
+  const kind = billing ? passBilling(billing, { harness, apiKeySource: snap.apiKeySource, planLimits: snap.planLimits === true, overage: snap.overage === true }) : null;
   const cost = snap.usd !== null ? `, $${snap.usd.toFixed(2)}${kind && kind !== "api" ? ` ${BILLING_WORDS[kind]}` : ""}` : "";
   return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}${bg}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
 }

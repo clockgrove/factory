@@ -14,7 +14,7 @@ import { CLAUDE_DECOY_LAUNCH, CLAUDE_PROBE_RESULT, claudeProbeDriver } from "./c
 import { asClaudeAgent, agentServicePorts, archiveSession, captureSession, capturedSession, keepSession, realRoots, resetClaudeState, writeEnvFile, restoreRunnerGit, runnerEnv, runnerLaunch, runnerLayout } from "./claude-runner.mjs";
 import { CONFINEMENT_PROBE, DECOY_LAUNCH, PROBE_MARKER, PROBE_PASS, codexRunnerConfig, codexRunnerEnv, codexRunnerLayout, offListHost, presentPaths, resetCodexState } from "./codex-runner.mjs";
 import { COPILOT_DECOY_LAUNCH, PROBE_PERSIST, PROBE_RESULT, RELAY_RULE, TOOLCHAIN_RULE, copilotLaunch, copilotRunnerEnv, copilotRunnerFlags, copilotRunnerLayout, probeEnv, probeMarker, probeModel, probeResult, resetCopilotState, resetProbe, stageNode } from "./copilot-runner.mjs";
-import { COPILOT_CREDIT_USD, UNKNOWN_WHY, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
+import { COPILOT_CREDIT_USD, UNKNOWN_WHY, answeredError, backgroundJobs, busyCode, markUnknown, mergeUsage, noResetLimit, parseUsage, quotaReading, refusalFields, requestRefused, runningTokens, sinceSession, subAgentRefusal, unknownOf, unknownRuns, usageLimited } from "./usage.mjs";
 import { NetworkDown, OUTAGE, givenUp, minutesText, networkBack, noteBusy, passCutOff, serverWait, stoppedWaiting, waitBound, waitingOutages } from "./network.mjs";
 import { MAX_ROLLOUT_BYTES, codexRolloutFiles, codexSessionRoot, codexThreads, localRollouts, plainThread, withSubAgents } from "./codex-threads.mjs";
 import { backend } from "./backend.mjs";
@@ -1405,9 +1405,9 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const ran = runner || harness === "codex" ? parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}) : null;
   const ranSession = ran?.sessionId ?? null;
   if (runner && ranSession) await captureSession(runner, ranSession, scrubbedEnv(env));
-  // A Codex run's rate-limit snapshots are in its rollout only, from the copy just captured on a runner: every pass's
-  // quota reading (usage.mjs quotaReading), and a failed run's usage limit when the stream names no refusal of its own
-  // (usage.mjs providerRefusal).
+  // A Codex run's rate-limit snapshots and request sizes are in its rollout only, from the copy just captured on a runner:
+  // every pass's quota reading (usage.mjs quotaReading), its long-context share (usage.mjs rolloutLong), and a failed
+  // run's usage limit when the stream names no refusal of its own (usage.mjs providerRefusal).
   const rollout = harness === "codex" && ranSession ? await codexPassRollout(ranSession, runner, runner ? scrubbedEnv(env) : childEnv, { label }) : null;
   // Codex's sub-agent threads (codex-threads.mjs), read from their rollouts now: on a runner each is captured as the
   // run's own session is, before anything else runs as the agent.
@@ -1419,10 +1419,11 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
     usagePath = join(dirname(eventsFile), usageName);
     if (got !== undefined) writeNew(usagePath, got);
   }
-  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, since: started });
+  // The rollout also prices a Codex run past the long-context threshold, request by request (usage.mjs rolloutLong).
+  const reported = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { usageFile: usagePath, creditUsd, rollout: !ran?.ok && !ran?.refusal ? rollout : null, requests: rollout, since: started, at: ended });
   // Each sub-agent thread's own share joins the pass's record, so the caps count it from this pass on; the share is its
   // running total less the one already counted (an earlier pass, or the stage that saved a restored thread).
-  const counted = withSubAgents(prior ? sinceSession(reported, prior) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null);
+  const counted = withSubAgents(prior ? sinceSession(reported, prior, { at: ended }) : reported, found.threads, (id) => SESSION_TOTALS.get(id) ?? null, { at: ended });
   const rec = counted.rec;
   for (const [id, total] of Object.entries(counted.totals)) SESSION_TOTALS.set(id, total);
   // Threads this run may have spawned that were not read (a rollout absent, too large or unreadable, the read limit),
@@ -1440,8 +1441,9 @@ async function runPass({ harness, model, prompt, maxUsd, resume, agent, cwd, env
   const withChildren = (t) => ({ ...t, ...(Object.keys(children).length ? { children: { ...children } } : {}) });
   // A pass with no result line (killed, crashed) reports no total, and a resumed Claude Code before 2.1.277 no running
   // one (usage.mjs sinceSession); the session's last good one stays, with every thread counted so far, so a later stage
-  // counts neither the session nor its threads again, and counts what this pass spent.
-  if (RUNNING_TOTALS.has(harness) && reported.sessionId && reported.usd !== null && !rec.usdUnknownWhy?.includes("resumed-total")) {
+  // counts neither the session nor its threads again, and counts what this pass spent. A Codex total is its tokens
+  // (usage.mjs sinceSession prices each pass's share), kept whether or not this table could price them.
+  if (RUNNING_TOTALS.has(harness) && reported.sessionId && (reported.usd !== null || (harness === "codex" && runningTokens(reported.tokens))) && !rec.usdUnknownWhy?.includes("resumed-total")) {
     const total = withChildren({ usd: reported.usd, tokens: reported.tokens, models: reported.models, premiumRequests: reported.premiumRequests, aiu: reported.aiu, sessionStartTime: reported.sessionStartTime });
     SESSION_TOTALS.set(reported.sessionId, total);
     // The session's running total as Pendulum read it (for Copilot the larger of the usage file and the stream), kept in
@@ -1541,7 +1543,7 @@ export async function subAgentThreads(threadId, runner, env, { label = "run" } =
   }
 }
 /**
- * A Codex run's own rollout, its `token_count` lines only, for its rate limits (usage.mjs quotaReading, providerRefusal): on a runner
+ * A Codex run's own rollout, its `token_count` lines only, for its rate limits and request sizes (usage.mjs quotaReading, providerRefusal, rolloutLong): on a runner
  * from the copy Pendulum captured right after the run (never what the agent's home holds by then), locally from the
  * thread's newest rollout file under the CODEX_HOME in `env`, a regular file of at most MAX_ROLLOUT_BYTES. Null when
  * there is none; never throws: a failed read is logged, and the run's failure stays what its stream says.
@@ -1569,7 +1571,7 @@ export async function codexPassRollout(threadId, runner, env, { label = "run" } 
     if (newest.st.size > MAX_ROLLOUT_BYTES) throw new Error(`over ${MAX_ROLLOUT_BYTES} bytes`);
     return counts(readFileSync(join(root, newest.f), "utf8"));
   } catch (e) {
-    log(`${label}: Codex's rollout could not be read for its rate limits (${String(e?.message || e).slice(0, 160)})`);
+    log(`${label}: Codex's rollout could not be read for its rate limits and request sizes (${String(e?.message || e).slice(0, 160)})`);
     return null;
   }
 }
@@ -1773,7 +1775,9 @@ export const effortRefused = (r) => !!r && r.status === 400 && r.param === "reas
  * One decision call on the stage's own harness and login (adapters/decider-harness.mjs): decisionLaunch's command with
  * `prompt` on stdin, under DECISION_RUN's bounds. Locally in a temp directory of its own. Never resumed, never waited
  * out: a usage limit is a refusal like any other. A Codex thread off a runner keeps its rollout only for this read: a
- * failed run's usage limit is there alone (usage.mjs codexLimit), and the thread's rollout files are removed after it.
+ * failed run's usage limit is there alone (usage.mjs codexLimit), and its request sizes price a call past the
+ * long-context threshold (usage.mjs rolloutLong); the thread's rollout files are removed after it. On a runner the
+ * call's thread is ephemeral (no rollout), so such a call is of unknown cost (`long-context`).
  * A model that refuses the low effort is asked once more with none (`effortRefused`). `signal` ends it early. Its spend
  * counts in the stage's spend so far (and decisionSpend); the adapter keeps its record (keepDecision). Returns the usage
  * record with `answer` (answerText).
@@ -1804,11 +1808,12 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   let rollout = null;
   if (harness === "codex" && !agent) {
     const thread = parseUsage(harness, r.stdout, model || null, r.code ?? 1, {}).sessionId;
-    if (thread && r.code !== 0) rollout = await codexPassRollout(thread, null, launch.env, { label });
+    // Read before the files go: a failed call's usage limit, and every call's request sizes (usage.mjs rolloutLong).
+    if (thread) rollout = await codexPassRollout(thread, null, launch.env, { label });
     // Only this call's own thread: an id that is no plain thread id names no file (as codexPassRollout reads it).
     if (thread && plainThread(thread)) for (const f of codexRolloutFiles(codexSessionRoot(launch.env), thread)) rmSync(join(codexSessionRoot(launch.env), f), { force: true });
   }
-  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
+  const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout: r.code !== 0 ? rollout : null, requests: rollout, since: started });
   metered.end(rec);
   if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });

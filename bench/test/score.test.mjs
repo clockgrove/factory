@@ -296,8 +296,8 @@ test("cost: Codex tokens are priced from the Codex price table, with its date in
   // 35,000 uncached in, 115,000 cached, 10,000 out (reasoning is inside output_tokens) at the gpt-6.1-sol standard rates (2.00 / 0.10 / 10.00)
   assert.equal(row.cost.usd, priceTokens(prices, "gpt-6.1-sol", { input: 150000, cached: 115000, output: 10000 }));
   assert.equal(row.cost.usd, 0.1815);
-  assert.match(row.cost.basis, /codex-prices\.json dated 2026-11-11$|codex-prices\.json dated 2026-11-11;/);
-  assert.equal(row.cost.priceTableDate, "2026-11-11");
+  assert.match(row.cost.basis, /codex-prices\.json dated 2026-11-16$|codex-prices\.json dated 2026-11-16;/);
+  assert.equal(row.cost.priceTableDate, "2026-11-16");
   assert.equal(row.cost.note, null);
   // Raw events.jsonl beside result.json is the same run: one record, the normalized one.
   assert.equal(usage("codex").length, 1);
@@ -1207,7 +1207,7 @@ test("cost: a Codex run killed before any turn completed stays a run of unknown 
   assert.equal(cost.usd, 0.1815);
   assert.equal(cost.usdUnknown, 1);
   assert.deepEqual(cost.parts.map((p) => [p.usd, p.usdUnknown]), [[0.1815, 0], [null, 1]]);
-  assert.match(cost.basis, /^tokens priced from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
+  assert.match(cost.basis, /^tokens priced at OpenAI's Standard rates from codex-prices\.json dated [^;]+; 2 artifacts summed \(worker \+ review\); plus 1 run of unknown cost \(the run ended before its harness reported its cost\)$/);
   const row = scoreObjective(cleanMerge(62, [priced, killed]), { prices, now: NOW });
   assert.match(markdownTable([row]), /\$0\.18 plus 1 run of unknown cost \(/);
 });

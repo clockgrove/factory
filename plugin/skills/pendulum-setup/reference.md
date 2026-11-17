@@ -22,10 +22,10 @@ A first setup asks only the harness and its credential, the caps and auto-merge 
 | `--validation` | none | `PENDULUM_VALIDATION` | The validation commands, comma-separated. |
 | `--budget-command` | none | no | The repository's test-budget command. |
 | `--protected-paths` | none | no | Paths added to the protected list; workers' commits may not touch them. |
-| `--ci-checks` | none | no | The CI's required check names, also the protection step's. |
+| `--ci-checks` | none | no | The CI's required check names, also the protection step's. Without it (and on a first render), setup reads them from the default branch's required checks, else the checks that ran on the latest pull request, else the CI workflow's jobs, and its preview names them and where they came from. |
 | `--node-version` | `22` | no | The Node.js the runner sets up; match your CI's. |
 | `--runs-on` | the CI's Linux runner | no | The work and review jobs' runner. |
-| `--preset first-run` | none | no | `max_usd` 5, `max_concurrent` 1, `auto_merge` false; a flag beside it wins. |
+| `--preset first-run` | none | no | `max_usd` 5, `max_concurrent` 1, `auto_merge` false; `daily_usd` stays at its own value ($100 by default); a flag beside it wins. A `PENDULUM_MAX_USD` or `PENDULUM_MAX_CONCURRENT` repository variable sets its value over the preset: setup warns of one. |
 | `--sandbox vercel` | none | no | The cloud-sandbox jobs instead of runner jobs (Cloud sandbox, below). |
 
 Raising the first-run preset later: `gh variable set PENDULUM_MAX_USD --body 25` and `gh variable set PENDULUM_MAX_CONCURRENT --body 3`, or a re-render with `--max-usd 25 --max-concurrent 3`; auto-merge only by a re-render with `--auto-merge true`.

@@ -2339,9 +2339,20 @@ async function main() {
   if (args.json) process.stdout.write(`${JSON.stringify({ ready: fails === 0, failures: fails, checks: results }, null, 2)}\n`);
   else {
     for (const r of results) process.stdout.write(`${r.status.padEnd(4)} ${r.name}: ${r.detail}${r.fix && r.status !== "PASS" ? `\n     fix: ${r.fix}` : ""}\n`);
-    process.stdout.write(fails ? `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes\n` : "\nready\n");
+    process.stdout.write(doctorFooter(results, repo));
   }
   process.exit(fails ? 1 : 0);
+}
+
+/**
+ * doctor's last line: "ready", or the failures and setup's command for the GitHub fixes. setup's `all` leaves out the
+ * default token, a repository-wide setting the repository's other workflows run on, so a FAIL there names its own step.
+ */
+export function doctorFooter(results, repo) {
+  const fails = results.filter((r) => r.status === "FAIL").length;
+  if (!fails) return "\nready\n";
+  const tokenFix = results.some((r) => r.status === "FAIL" && r.name === "default workflow token") ? `; the default workflow token needs its own step, --apply default-token, whose dry run names the workflows it reaches` : "";
+  return `\n${fails} failure(s); run node ${join(PLUGIN_ROOT, "scripts/setup.mjs")} --repo ${repo.full} --yes to apply the GitHub fixes${tokenFix}\n`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

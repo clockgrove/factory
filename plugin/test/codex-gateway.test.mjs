@@ -17,8 +17,8 @@ import { harnessActivity } from "../scripts/lib/logic.mjs";
 const fixtures = join(import.meta.dirname, "fixtures");
 const fixture = (f) => readFileSync(join(fixtures, f), "utf8");
 
-// The table as listed on 2026-11-11 by OpenAI's pricing page and the AI Gateway's /v1/models: [input, cached, write, output]
-// per million tokens, then the long-context (>272K input tokens) rates where the model has them.
+// The table as OpenAI listed it on 2026-11-16 (its pricing page and model pages): [input, cached, write, output] per
+// million tokens, then the long-context (>272K input tokens) rates where the model has them.
 const LISTED = {
   "gpt-6-astra": [10, 1, 12.5, 50, [20, 2, 25, 75]],
   "gpt-6.1-sol": [2, 0.1, 2.5, 10, [4, 0.2, 5, 15]],
@@ -36,28 +36,32 @@ const LISTED = {
   "gpt-5.2": [1.75, 0.175, null, 14],
   "gpt-5.2-codex": [1.75, 0.175, null, 14],
   "gpt-5.1": [1.25, 0.125, null, 10],
-  "gpt-5.1-codex": [1.25, 0.13, null, 10],
+  "gpt-5.1-codex": [1.25, 0.125, null, 10],
   "gpt-5.1-codex-max": [1.25, 0.125, null, 10],
-  "gpt-5.1-codex-mini": [0.25, 0.03, null, 2],
+  "gpt-5.1-codex-mini": [0.25, 0.025, null, 2],
   "gpt-5": [1.25, 0.125, null, 10],
-  "gpt-5-codex": [1.25, 0.13, null, 10],
+  "gpt-5-codex": [1.25, 0.125, null, 10],
   "gpt-5-mini": [0.25, 0.025, null, 2],
   "gpt-5-nano": [0.05, 0.005, null, 0.4],
 };
 const rates = ([input, cached, write, output]) => ({ input, cached, ...(write === null ? {} : { write }), output });
 
-test("the Codex price table is the list price of 2026-11-11, dated, with both sources; the worker and the bench read one file", () => {
-  assert.equal(CODEX_PRICES.date, "2026-11-11");
+test("the Codex price table is OpenAI's list price of 2026-11-16, dated, with its sources; the worker and the bench read one file", () => {
+  assert.equal(CODEX_PRICES.date, "2026-11-16");
   assert.equal(CODEX_PRICES.status, "verified");
-  assert.deepEqual(CODEX_PRICES.sources, ["https://developers.openai.com/api/docs/pricing", "https://ai-gateway.vercel.sh/v1/models"]);
+  assert.deepEqual(CODEX_PRICES.sources, ["https://developers.openai.com/api/docs/pricing", "https://developers.openai.com/api/docs/models", "https://developers.openai.com/api/docs/guides/prompt-caching"]);
   assert.equal(CODEX_PRICES.longContextAbove, 272000);
-  const want = Object.fromEntries(Object.entries(LISTED).map(([m, r]) => [m, { ...rates(r), ...(r[4] ? { long: rates(r[4]) } : {}) }]));
+  assert.deepEqual(CODEX_PRICES.aliases, { "gpt-5.6": "gpt-5.6-sol" }, "the alias OpenAI's GPT-5.6 Sol page documents");
+  // GPT-5.6 Sol's rates are OpenAI's promotional pricing, "available until November 30, 2026".
+  const until = { "gpt-5.6-sol": "2026-11-30" };
+  const want = Object.fromEntries(Object.entries(LISTED).map(([m, r]) => [m, { ...rates(r), ...(r[4] ? { long: rates(r[4]) } : {}), ...(until[m] ? { until: until[m] } : {}) }]));
   assert.deepEqual(CODEX_PRICES.perMillion, want);
   assert.deepEqual(loadPrices(), CODEX_PRICES, "the bench's table is the worker's");
 });
 
 test("Codex pricing: a provider prefix is stripped, a dated snapshot matches, nothing else borrows another model's rates", () => {
-  const t = { input: 1_000_000, cached: 0, output: 0 };
+  // A million input tokens from requests none of which passed the long-context threshold.
+  const t = { input: 1_000_000, cached: 0, output: 0, long: { input: 0, cached: 0, written: 0, output: 0 } };
   assert.equal(priceCodex("gpt-6.1-sol", t), 2);
   assert.equal(priceCodex("openai/gpt-6.1-sol", t), 2, "the gateway's id prices as the bare one");
   assert.equal(priceCodex("gpt-5.5-2026-04-23", t), 5, "a dated snapshot");
@@ -91,7 +95,7 @@ test("Codex through the gateway: cache writes parsed, priced at the write rate, 
   for (const l of fixture("codex-0.167-gateway-resumed.jsonl").split("\n")) live.feed(l);
   assert.deepEqual(live.snapshot().tokens, { input: 21572 + 22228, output: 122, written: 10841 + 310 });
   // A model without a write rate bills its writes as input.
-  assert.equal(priceCodex("gpt-5.4", { input: 1_000_000, cached: 0, written: 1_000_000, output: 0 }), 2.5);
+  assert.equal(priceCodex("gpt-5.4", { input: 1_000_000, cached: 0, written: 1_000_000, output: 0, long: { input: 0, cached: 0, written: 0, output: 0 } }), 2.5);
   // An item error with no completed turn after it is the run's failure.
   const cut = parseCodex(fixture("codex-0.167-gateway-resumed.jsonl").split("\n").slice(0, 2).join("\n"), "gpt-6.1-sol");
   assert.equal(cut.ok, false);

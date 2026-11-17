@@ -552,6 +552,19 @@ test("#379: a stage harness's usage limit in the rebase check ends the stage thr
   assert.doesNotMatch(blocked, /could not resolve the conflict/);
 });
 
+test("#482: a Codex decision call past the long-context threshold is priced from its rollout, read before it is removed", async () => {
+  const thread = "01a1d3a0-5c1e-7b20-9f3a-2c4d6e8f0482";
+  const usage = { input_tokens: 300_000, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1_000 };
+  const out = jsonl([{ type: "thread.started", thread_id: thread }, { type: "item.completed", item: { type: "agent_message", text: '{"choice":"looping","confidence":0.8}' } }, { type: "turn.completed", usage }]);
+  const rollout = `${JSON.stringify({ timestamp: "__NOW__", type: "session_meta", payload: { id: thread } })}\n${JSON.stringify({ timestamp: "__NOW__", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage, last_token_usage: usage } } })}\n`;
+  const codexHome = mkdtempSync(join(tmpdir(), "pendulum-decider-codexhome-"));
+  const { bin } = fakeHarness("codex", out, { rollout, thread });
+  const rec = await runDecision({ harness: "codex", model: "gpt-5.5", prompt: "q", env: stageOf(bin, "codex", { CODEX_HOME: codexHome }).stage.env });
+  // One request of 300K input tokens: every token at gpt-5.5's long-context rates (10 and 45 per million).
+  assert.equal(rec.usd, Math.round(((300_000 * 10 + 1_000 * 45) / 1e6) * 10000) / 10000);
+  assert.ok(!rec.usdUnknown);
+  assert.deepEqual(readdirSync(join(codexHome, "sessions", "2026", "11", "16")), [], "its rollout removed after the read");
+});
 
 /**
  * A fake AI Gateway on fetch (#479), never the real one: `/v1/decisions` answers `choice`, naming generation `id` in its

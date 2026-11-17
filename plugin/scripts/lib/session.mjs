@@ -85,7 +85,7 @@ import { tarAsAgent, untarAsAgent } from "./untar.mjs";
 import { artifactRunProblem, artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
-import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf } from "./usage.mjs";
+import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf } from "./usage.mjs";
 import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
@@ -432,7 +432,7 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
       if (existsSync(events) && lstatSync(events).isFile()) seedSessionTotal(s.id, clampTotal(copilotSessionTotal(readFileSync(events, "utf8"), copilotCreditUsd()), recorded));
     }
     // Codex too (its thread's token totals): the prior total is the one Pendulum recorded for the stage.
-    if (harness === "codex" && typeof recorded.sessionTotal?.usd === "number") seedSessionTotal(s.id, recorded.sessionTotal);
+    if (harness === "codex" && (typeof recorded.sessionTotal?.usd === "number" || runningTokens(recorded.sessionTotal?.tokens))) seedSessionTotal(s.id, recorded.sessionTotal);
     // And each sub-agent thread the session had spawned, at the total that stage counted: a resumed parent's rollout
     // still names them, and they are never counted twice.
     if (harness === "codex" && recorded.sessionTotal?.children && typeof recorded.sessionTotal.children === "object") for (const [id, t] of Object.entries(recorded.sessionTotal.children)) if (plainThread(id) && t?.tokens) seedSessionTotal(id, t);
@@ -1925,14 +1925,15 @@ export async function reviewScope(mgit, { reviews, comments, issue, base, head, 
 }
 
 /**
- * The saved session's running total for result.json: the last one a run of it reported with dollars (a pass that ended
+ * The saved session's running total for result.json: the last one a run of it reported with dollars, or for Codex with its tokens (a pass that ended
  * without a total keeps the one before), with every Codex sub-agent thread any of its runs counted (`children`), so the
  * stage that restores it counts neither again. Null when there is neither.
  */
 function lineageTotal(id, records) {
   if (!id) return null;
   const runs = records.filter((r) => r?.sessionId === id && r.sessionTotal);
-  const total = runs.filter((r) => typeof r.sessionTotal.usd === "number").at(-1)?.sessionTotal ?? null;
+  // A Codex total is its tokens (usage.mjs sinceSession prices each pass's share), whether or not they were priced.
+  const total = runs.filter((r) => typeof r.sessionTotal.usd === "number" || (r.harness === "codex" && runningTokens(r.sessionTotal.tokens))).at(-1)?.sessionTotal ?? null;
   const children = Object.assign(Object.create(null), ...runs.map((r) => (r.sessionTotal.children && typeof r.sessionTotal.children === "object" ? r.sessionTotal.children : {})));
   if (!Object.keys(children).length) return total;
   return { ...(total ?? { usd: null, tokens: null }), children: { ...children } };

@@ -30,7 +30,7 @@ import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, 
 import { LOCAL_DOMAINS, PREVIOUS_NAME, TOKEN_LINK_FIX, pendulumKeyDir, previousKeyDirProblem, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
-import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
+import { parseUsage, promoCodex, unpricedCodex } from "./lib/usage.mjs";
 import { CHOICE_PREFIXES, HOST_PREFIX, hostsOf } from "./lib/choice.mjs";
 import { TRIAGE_MODEL, triageKey } from "./lib/triage.mjs";
 import { DRIFT_MODEL } from "./lib/drift.mjs";
@@ -59,13 +59,19 @@ const SELF_HOSTED_CEILING = 5 * 24 * 60;
 
 // ------------------------------------------------------------ credentials
 
+/** The `codex tier` row of a repository whose Codex runs on CODEX_API_KEY (OpenAI's pricing page, read 2026-11-16). */
+const CODEX_TIER_ROW = {
+  detail: "Codex's dollars are its tokens at OpenAI's Standard rates: they assume the OpenAI project's Service Tier is Standard. Codex reports no tier, so a project set to Fast is billed 2× those rates (2.5× on gpt-5.5, 1.8× on gpt-5-mini) and Pendulum cannot see it",
+  fix: "keep the key's OpenAI project on the Standard Service Tier (platform.openai.com, Settings, Project, General); Pendulum's Codex runs never ask for Fast",
+};
+
 /** The `claude credential` row of a repository on `credential: plan` (docs/INSTALL.md, Claude on your subscription). */
 const PLAN_ROW = {
   detail: "credential: plan: Claude stages run on your subscription's CLAUDE_CODE_OAUTH_TOKEN secret",
   fix: "plan limits assume ordinary individual use: use it only on your own repository, never for a product; Pendulum does not check whose repository it is (docs/INSTALL.md, Claude on your subscription)",
 };
 
-export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local" }) {
+export async function credentialChecks({ inputs: asked, env: given = process.env, probe = false, local = backend(given).name === "local", now = Date.now() }) {
   // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs), as the stage runs it.
   const inputs = routeInputs(asked, given);
   const out = [];
@@ -114,9 +120,12 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
   if (h === "codex") {
     // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is of unknown cost.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
-    for (const m of new Set([inputs.model, inputs.reviewerModel].filter(Boolean))) {
-      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey });
-      if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
+    for (const m of new Set([inputs.model, inputs.reviewerModel, inputs.subagentModel].filter(Boolean))) {
+      // A promotional rate: WARN in the week before it ends, FAIL once it has (its runs are then of unknown cost).
+      const promo = promoCodex("codex", m, { at: now });
+      const unpriced = unpricedCodex("codex", m, { gateway: !!inputs.codexGatewayKey, at: now });
+      if (promo) out.push(check("codex model", promo.status, promo.detail, "upgrade Pendulum to a release whose plugin/scripts/lib/codex-prices.json has OpenAI's current rate for it, or use another model with a row there"));
+      else if (unpriced) out.push(WARN("codex model", unpriced, "use a model with a row in plugin/scripts/lib/codex-prices.json, or set a budget on the provider key"));
     }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     const gateway = inputs.codexGatewayKey;
@@ -131,6 +140,9 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     } else if (!key) out.push(FAIL("codex credential", "no Codex credential: PENDULUM_CODEX_GATEWAY_KEY and CODEX_API_KEY absent", "gh secret set PENDULUM_CODEX_GATEWAY_KEY (a Vercel AI Gateway key with a budget) or CODEX_API_KEY; the action passes it to the harness step only"));
     else if (env.CODEX_API_KEY && env.GITHUB_ACTIONS && !env.PENDULUM_INPUT_CODEX_API_KEY) out.push(WARN("codex credential", "CODEX_API_KEY is a job-level variable", "pass it as the codex_api_key input so only the harness child sees it"));
     else out.push(PASS("codex credential", "CODEX_API_KEY present, step-scoped"));
+    // Codex reports no service tier, and an OpenAI project can make Fast its default for every request that names none
+    // (Pendulum's never do): the Codex price table's dollars assume Standard (codex-prices.json).
+    if (key && !gateway && !(env.GITHUB_ACTIONS && chatgptLogin(key))) out.push(WARN("codex tier", CODEX_TIER_ROW.detail, CODEX_TIER_ROW.fix));
   }
   if (h === "copilot") {
     const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN;

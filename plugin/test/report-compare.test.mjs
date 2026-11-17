@@ -402,3 +402,33 @@ test("report --compare (#546): each arm counts the review findings of its Object
   const md = renderReport(r);
   assert.match(md, /\| Review findings \(fixed-test, fixed-verdict, answered, not-fixed, not-checkable, open\), over Objectives recorded \| 2 \(1, 0, 0, 0, 0, 1\), 1 review stage\(s\), 1 Objective\(s\) \| 0 \(0, 0, 0, 0, 0, 0\), 0 review stage\(s\), 0 Objective\(s\) \|/);
 });
+
+test("report --compare (#544): a merged Objective read from its finish card gives the same arm measures as its stages, with no artifact read", async () => {
+  // Through the module's namespace, so the suite loads on a tree without the summary and this test alone fails there.
+  const card = await import("../scripts/lib/finish-card.mjs");
+  const mine = card.pendulumOwn(APP.id);
+  // Each merged Objective's finish card, as Pendulum's App posts it: the real card from its comments, timeline, PR and
+  // the usage records the card reads (its stages have no spend line, so every one).
+  const withCards = () => {
+    const w = experiment();
+    for (const pr of w.pulls.filter((p) => p.merged_at)) {
+      const n = pr.number - 1000;
+      const comments = w.comments.filter((c) => c.issue_url === issueUrl(n));
+      const records = Object.entries(w.artifacts).filter(([name]) => name === `pendulum-usage-${n}` || name === `pendulum-usage-${n}-review`).flatMap(([name, list]) => list.map((a) => ({ ...a.record, artifact: name })));
+      const d = card.finishData({ repo: REPO.full, issue: w.issues.find((i) => i.number === n), timeline: w.timelines[n], comments, pulls: [{ pr, timeline: [], reviews: [], reviewComments: [] }], checks: [], records, mine });
+      w.comments.push({ id: (nextId += 1), issue_url: issueUrl(n), user: BOT, author_association: "CONTRIBUTOR", performed_via_github_app: { id: APP.id, slug: APP.slug }, created_at: pr.merged_at, updated_at: pr.merged_at, body: card.finishCardBody(d) });
+    }
+    return w;
+  };
+  const stages = await report(experiment(), ["--compare", "fast,slow", "--json"]);
+  const cards = await report(withCards(), ["--compare", "fast,slow", "--json"]);
+  assert.equal(cards.code, 0, cards.err);
+  // Every merged Objective in an arm is read from its card: #11-#13 and #21-#23 (not #15, #16 or #24, in no arm).
+  assert.equal(cards.json.source.read.summaries, 6);
+  assert.ok(!cards.calls.some((c) => /name=pendulum-usage-(11|12|13|21|22|23)\b/.test(c)), "no artifact of theirs is listed");
+  assert.ok(stages.calls.some((c) => /name=pendulum-usage-11\b/.test(c)), "read from its stages, the same Objective's are");
+  // The same arms, measure for measure: model minutes, fix passes and wall clock among them.
+  assert.deepEqual(cards.json.comparison, stages.json.comparison);
+  const [fast] = cards.json.comparison.arms;
+  assert.deepEqual(fast.objectives.filter((o) => o.outcome === "merged").map((o) => [o.issue, o.modelMinutes, o.fixPasses, o.wallMinutes]), [[11, 10, 0, 60], [12, 25, 1, 90], [13, 32, 0, 180]]);
+});

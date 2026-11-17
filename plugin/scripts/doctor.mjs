@@ -329,9 +329,9 @@ export function neededSecrets(inputs, accounts = "") {
  */
 export function routeAccountChecks(accounts = "", auto = "") {
   const d = routeAccounts(accounts);
-  if (!d.ok) return [FAIL("accounts", d.problem, 'set PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts)')];
+  if (!d.ok) return [FAIL("accounts", d.problem, 're-render the workflow with setup\'s --accounts set to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]}, and merge it (docs/INSTALL.md, Several accounts)')];
   const setting = routeAutoSetting({ PENDULUM_AUTO_ACCOUNT: auto });
-  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "set PENDULUM_AUTO_ACCOUNT in .github/workflows/pendulum.yml to 1 (on) or 0 (off) (docs/INSTALL.md, Several accounts)")] : [];
+  const warn = setting.problem ? [WARN("automatic account choice", setting.problem, "re-render the workflow with setup's --auto-account on or off and merge it (docs/INSTALL.md, Several accounts)")] : [];
   if (!d.declared) return warn;
   const each = Object.entries(d.accounts).filter(([, l]) => l.length).map(([h, l]) => `${h}: ${l.join(", ")} (default ${l[0]})`);
   const how = setting.on ? "the one a trusted pendulum:account:<name> label pins, else a free one by automatic account choice (PENDULUM_AUTO_ACCOUNT)" : "its harness's default or the one a trusted pendulum:account:<name> label pins";
@@ -823,21 +823,20 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
 
 /**
  * Doctor's row for the setting, from the resolved inputs, the named workflow as the default branch has it (`doc`, parsed:
- * null when it could not be read, with `readError`) and the route: off, nothing; a problem, FAIL; the cloud sandbox,
- * FAIL (its App token cannot dispatch); a workflow that cannot be dispatched for the legs (cross-os.mjs workflowProblem:
- * no `workflow_dispatch` trigger, or `permissions:` granting write at the top or on any job, named), FAIL; one it could
- * not read, WARN; else a PASS that names the legs, the bound and the cost, since macOS and Windows runner minutes bill
- * at a higher rate.
+ * null when it could not be read, with `readError`) and the route: off, nothing; a problem, FAIL; a workflow that cannot
+ * be dispatched for the legs (cross-os.mjs workflowProblem: no `workflow_dispatch` trigger, or `permissions:` granting
+ * write at the top or on any job, named), FAIL; one it could not read, WARN; else a PASS that names the legs, the token
+ * that dispatches them (on the cloud sandbox route the launch-event job's, since the launcher dispatches for the stage),
+ * the bound and the cost, since macOS and Windows runner minutes bill at a higher rate.
  */
 export function crossOsRow(inputs, { doc = null, readError = "", route = "actions" } = {}) {
   const { setting, problem } = crossOs(inputs);
   if (!setting && !problem) return null;
   if (problem) return FAIL("cross-OS CI", problem, "set cross_os_workflow and cross_os_checks together in the workflow's env block (docs/INSTALL.md, Cross-OS CI)");
-  if (route === "sandbox") return FAIL("cross-OS CI", `${setting.workflow} cannot be dispatched from a cloud sandbox stage: its App token has no Actions write, and Pendulum's App does not ask for one`, "run Objectives on Actions or locally, or empty cross_os_workflow");
   if (doc === null) return WARN("cross-OS CI", `could not read .github/workflows/${setting.workflow}${readError ? ` (${readError})` : ""}`, "check cross_os_workflow names a workflow file on the default branch");
   const bad = workflowProblem(doc, setting.workflow);
   if (bad) return FAIL("cross-OS CI", bad, "give the workflow a `workflow_dispatch:` trigger running its macOS and Windows legs, and read-only permissions at the top and on every job: each scope `read` or `none` (contents: read), or `read-all` or `{}`; no scope at `write` and no `write-all`");
-  const token = route === "local" ? "the repository token's Actions read and write" : "the work job's `actions: write`";
+  const token = route === "local" ? "the repository token's Actions read and write" : route === "sandbox" ? "the launch-event job's `actions: write`: the launcher dispatches it for the sandbox stage" : "the work job's `actions: write`";
   return PASS("cross-OS CI", `on: the work stage runs ${setting.workflow} on each head it validates (with ${token}) and waits up to ${Math.round(setting.waitMs / 60_000)} min per head for ${setting.checks.join("; ")}; macOS and Windows runner minutes bill at a higher rate than Linux minutes`);
 }
 

@@ -3167,13 +3167,19 @@ export function launchEvent(name, payload = {}, { issue = null, repoFull = "" } 
     return { kind: "review", issue: n, pr: pr.number ?? null, at: isoOrNull(pr.updated_at), sha: pr.head?.sha ?? null, ready: payload.action === "ready_for_review", human: payload.sender?.type !== "Bot", draft: !!pr.draft };
   }
   if (name === "repository_dispatch") {
-    // A stage in a sandbox asks the launcher for fresh tokens or for its next step (stage.mjs): only Pendulum sends these.
+    // A stage in a sandbox asks the launcher for fresh tokens, for a cross-OS CI run (cross-os.mjs launcherRelay) or for
+    // its next step (stage.mjs): only Pendulum sends these.
     const p = payload.client_payload || {};
     if (payload.action !== "pendulum-stage") return { skip: `repository_dispatch ${payload.action}` };
-    if (!Number.isSafeInteger(p.issue) || p.issue < 1 || typeof p.claim !== "string" || !["token", "ended"].includes(p.want)) return { skip: "a stage event without its issue, claim or want" };
-    // `ask`: when a token request was made (seconds), naming that one request; absent on an end.
-    const ask = p.want === "token" && Number.isSafeInteger(p.ask) && p.ask > 0 ? p.ask : null;
-    return { kind: "stage", issue: p.issue, claim: p.claim, want: p.want, ask, sender: payload.sender ?? null, at: null };
+    if (!Number.isSafeInteger(p.issue) || p.issue < 1 || typeof p.claim !== "string" || !["token", "cross-os", "ended"].includes(p.want)) return { skip: "a stage event without its issue, claim or want" };
+    // `ask`: when a request was made, naming that one request; absent on an end.
+    const ask = p.want !== "ended" && Number.isSafeInteger(p.ask) && p.ask > 0 ? p.ask : null;
+    if (p.want !== "cross-os") return { kind: "stage", issue: p.issue, claim: p.claim, want: p.want, ask, sender: payload.sender ?? null, at: null };
+    // A cross-OS run: the head it is for, and the workflow and ref the stage named, which the launcher checks against its
+    // own setting and the stage's branch (cross-os.mjs launcherDispatch).
+    if (!ask || !/^[0-9a-f]{40}$/.test(String(p.sha))) return { skip: "a cross-OS request without its ask or head" };
+    const plain = (v, n) => (typeof v === "string" && v.length <= n ? v : "");
+    return { kind: "stage", issue: p.issue, claim: p.claim, want: p.want, ask, sha: p.sha, workflow: plain(p.workflow, 200), ref: plain(p.ref, 255), sender: payload.sender ?? null, at: null };
   }
   return { skip: `${name} names no Objective` };
 }
@@ -3534,6 +3540,8 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
     if (!fromSelf) return { skip: "a stage event Pendulum did not send" };
     if (!record || record.claim !== ev.claim) return { skip: "not the claim the sandbox record carries" };
     if (ev.want === "token") return record.state === "running" ? { token: true } : { skip: `no stage runs (${record.state})` };
+    // Only a running work stage validates heads, so only it asks for cross-OS runs: one whose lease still holds.
+    if (ev.want === "cross-os") return record.stage === "work" && stageHolds(record, now, staleMs) ? { crossOs: true } : { skip: `no work stage runs (${record.stage ?? "none"}, ${record.state}${record.state === "running" ? ", its lease ran out" : ""})` };
     if (record.state !== "ended") return { skip: `the stage has not ended (${record.state})` };
     if (closed) return { stop: true };
     // The next step: a stage now due (the review the work asked for, a pick that came while the work ran), else stop.

@@ -43,7 +43,7 @@ Instead of or beside the Action, on the user's machine: walk [local.md](local.md
 
 ## Several accounts
 
-Several subscriptions or keys of one harness: [reference.md](reference.md).
+Adding or removing accounts ("add a second Claude account"): [reference.md](reference.md).
 
 ## After
 

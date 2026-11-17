@@ -50,9 +50,9 @@ on:
     workflows:
       - {{ci_workflow}}
     types: [completed]
-# Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below:
-#   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets; re-render after any change,
-#     since setup writes each declared account's secrets into the jobs by name
+# Several accounts of a harness (docs/INSTALL.md, Several accounts), in the env block below; set them with setup's
+# --add-account, --remove-account or --accounts and --auto-account, which also name each account's secrets in the jobs:
+#   PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'  each account its own secrets
 #   PENDULUM_AUTO_ACCOUNT: "1"  a stage with no account label starts on one no usage limit holds
 env:
   PENDULUM_HARNESS: {{harness}} # claude | codex | copilot
@@ -343,7 +343,7 @@ jobs:
     if: needs.launch-gate.outputs.start == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions: { contents: read, actions: write } # actions: write only for the dispatcher tick after a requeue, a stop, a quota refusal or a failed launch
+    permissions: { contents: read, actions: write } # actions: write for the dispatcher tick after a requeue, a stop, a quota refusal or a failed launch, and for cross-OS CI's dispatch, which a sandbox stage asks this job for (its App token has no Actions write)
     # The group is the Objective's only when the gate said start; a skipped job's group is its own run's, whatever GitHub
     # does with the group of a job it skips.
     concurrency: { group: "${{ needs.launch-gate.outputs.start == 'true' && format('pendulum-launch-pendulum/{0}', needs.launch-gate.outputs.issue) || format('pendulum-launch-none-{0}', github.run_id) }}", cancel-in-progress: false }

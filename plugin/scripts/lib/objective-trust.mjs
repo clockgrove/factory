@@ -498,7 +498,7 @@ export async function accountGate({ repo, issue, harness, labels = [], env = pro
   await apply(repo, { issue, pr, exit: "blocked", reason: c.refusal.reason, fix: c.refusal.fix, cause: "setup", notify, stage }, opts);
   return { ok: false, reason: c.refusal.reason };
 }
-const ACCOUNTS_FIX = 'Fix PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml: a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]} (docs/INSTALL.md, Several accounts), then re-apply `pendulum:objective`.';
+const ACCOUNTS_FIX = 'Fix PENDULUM_ACCOUNTS in .github/workflows/pendulum.yml: re-render it with setup\'s --accounts set to a JSON object of each harness\'s account names, such as {"claude": ["claude", "claude-2"]}, and merge it (docs/INSTALL.md, Several accounts), then re-apply `pendulum:objective`.';
 const ROUTE_PIN_FIX = "A person who can push removes the account label, or applies one naming an account PENDULUM_ACCOUNTS declares for the Objective's harness, then re-applies `pendulum:objective`.";
 
 export async function choiceGate({ repo, issue, labels, args = {}, env = process.env, pr = null, notify, opts, apply, before = null, stage, gh }) {

@@ -4370,7 +4370,7 @@ export async function reportCommand(flags, { out = (t) => process.stdout.write(t
   const repoFull = cloneRepo(checkout ?? here, flags.repo);
   // Pendulum's App: --app, else the repository variable PENDULUM_APP_ID (readReport), else local mode's notice App.
   const envAppId = /^\d+$/.test(String(env.PENDULUM_LOCAL_APP_ID ?? "").trim()) ? Number(env.PENDULUM_LOCAL_APP_ID) : null;
-  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
+  const read = await readReport(repoOf(repoFull), reportScope(flags, now), { token: token ?? sessionToken(repoFull), maxCalls: flags["max-calls"] ?? DEFAULT_MAX_CALLS, appId: flags.app ?? null, envAppId, self: flags.self ?? [], by: flags.by ? [flags.by] : [], stages: !!flags.rates, checkout, log: (line) => err(`${line}\n`), ...(download ? { download } : {}) });
   const report = buildReport(read, { by: flags.by ? [flags.by] : [], rates: flags.rates ? reportModels(flags.rates) : null, now: new Date(now).toISOString() });
   out(flags.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report));
   if (!report.source.complete) err(`pendulum report: ${report.source.missing[0].text}\n`);

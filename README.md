@@ -278,14 +278,7 @@ Save a secret with `gh secret set <NAME>` and paste the value at its prompt; `--
 
 - **Each run uses one account.** By default that is the agent's first account. A `pendulum:account:<name>` label on an issue pins that Objective to another account.
 - **Automatic choice, off by default,** starts each run that has no pin on a free account, preferring the one with the most quota left where the agent reports it. A usage limit then sets aside only the account that hit it, and work goes on on the others.
-- **On GitHub Actions,** list the accounts in your workflow's `env` block, the first being the default, and save each extra account's credential under its own secret name:
-
-  ```yaml
-  PENDULUM_ACCOUNTS: '{"claude": ["claude", "claude-2"]}'
-  PENDULUM_AUTO_ACCOUNT: "1"  # optional: automatic choice
-  ```
-
-  The account `claude-2` reads `ANTHROPIC_API_KEY_CLAUDE_2` (`CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` on a plan), while `claude` keeps the usual secret. Then run setup again and merge the workflow it writes, which names each account's secret in its jobs ([Several accounts](docs/INSTALL.md#several-accounts)).
+- **On GitHub Actions,** ask your coding agent to "add a second Claude account". Setup adds it to your workflow, names its secret in the jobs, and opens a pull request for you to merge. You then save that account's credential under its own secret name: the account `claude-2` reads `ANTHROPIC_API_KEY_CLAUDE_2` (`CLAUDE_CODE_OAUTH_TOKEN_CLAUDE_2` on a plan), while `claude` keeps the usual secret. Setup also offers automatic choice ([Several accounts](docs/INSTALL.md#several-accounts)).
 - **In local mode,** list each account's login folder or token file in `~/.config/pendulum/accounts.json` on that machine, and start `pendulum serve` with `PENDULUM_LOCAL_AUTO_ACCOUNT=1` for automatic choice ([Accounts](docs/LOCAL.md#accounts)).
 
 The progress comment, the usage record and the scorecard name the account each run used.

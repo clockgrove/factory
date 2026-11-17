@@ -14,6 +14,8 @@
 //           one, bring Pendulum's plugin and the harness CLI up to date in it, and start the stage (stage.mjs) detached
 //           with the App's write token, a read-only token and the harness's credential in its start environment
 //   token   hand a running stage fresh tokens before the hour is out (it asked: repository_dispatch)
+//   cross-os dispatch the configured cross-OS CI workflow on a running work stage's branch and head with this job's
+//           token, and hand the run's id to the stage (it asked: repository_dispatch; lib/cross-os.mjs launcherDispatch)
 //   ended   a stage ended (it said so): its usage directory comes out for the artifact, then the next stage due starts
 //           in the same sandbox, or the sandbox stops
 //   requeue an answered Question goes back to Queued for the dispatcher, the one place caps are decided
@@ -46,6 +48,7 @@ import { backend } from "./lib/backend.mjs";
 import { unknownOf } from "./lib/usage.mjs";
 import { sealCollected, sealKey, sealKeyProblem, usageSeal } from "./lib/seal.mjs";
 import { DRAFT_LABEL, RESTART_LABEL, stopCause } from "./lib/stop.mjs";
+import { launcherDispatch } from "./lib/cross-os.mjs";
 
 /** The launcher's claim lasts this long; the stage's heartbeat extends it while the stage runs (stage.mjs). */
 export const CLAIM_LEASE_MS = 10 * 60_000;
@@ -686,12 +689,13 @@ export function launchCue(ev, stage, ctx) {
 }
 
 /**
- * The lock a running stage's own request takes: one per token request (`ask`, when the stage asked) and one per end,
- * both of the claim the record carries. Null when the claim or the stage is not Pendulum's plain form.
+ * The lock a running stage's own request takes: one per token or cross-OS request (`ask`, when the stage asked) and one
+ * per end, all of the claim the record carries. Null when the claim or the stage is not Pendulum's plain form.
  */
 export function stageLock(n, ev, record) {
   if (!/^[0-9a-f]{12}$/.test(String(ev.claim)) || !["work", "review"].includes(record?.stage)) return null;
-  return lockRef(n, record.stage, ev.want === "token" ? `token-${ev.claim}-${Number.isSafeInteger(ev.ask) ? ev.ask : 0}` : `ended-${ev.claim}`);
+  const ask = Number.isSafeInteger(ev.ask) ? ev.ask : 0;
+  return lockRef(n, record.stage, ev.want === "token" ? `token-${ev.claim}-${ask}` : ev.want === "cross-os" ? `cross-os-${ev.claim}-${ask}` : `ended-${ev.claim}`);
 }
 
 /**
@@ -701,8 +705,9 @@ export function stageLock(n, ev, record) {
  * when its payload names none. With `gate` only the decision is made. After an Objective goes back to Queued, or on a
  * tick, the launch job's own step ticks the dispatcher. `adapterReady` is the vendor SDK's install still running
  * (installAdapter), awaited only before the first vendor call. Returns {exit, reason, issue, start, stage, sandboxId,
- * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | deferred | tick | started | token | stopped | blocked;
- * `usage` ({dir, name}) is a stage's usage directory to upload; `ms` the milliseconds per sub-step (stopwatch).
+ * found, latencyMs, usage, failed, ms}; `exit` is skipped | start | queued | deferred | tick | started | token | cross-os |
+ * stopped | blocked; `usage` ({dir, name}) is a stage's usage directory to upload; `ms` the milliseconds per sub-step
+ * (stopwatch). `adapter`: an opened sandbox adapter to use instead of opening the configured vendor's.
  */
 export async function launchOne(args) {
   const seen = {};
@@ -726,7 +731,7 @@ async function settleOwnMarker({ repo, n, opts, runId, stage, base }) {
   await writeSandboxRecord(repo, n, opts, (cur) => withoutOwnMarker(cur, { run: runId, stage }), { base: base ?? (await lockBase(repo, opts)) });
 }
 
-async function launchInner({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null, seen = {} }) {
+async function launchInner({ inputs, eventName, payload = {}, gate = false, runId = "", repoId = null, eventAt = null, adapterReady = null, adapter = null, seen = {} }) {
   const watch = stopwatch();
   const timed = (r) => ({ ...r, ms: watch.ms });
   const repo = repoOf(inputs.repo);
@@ -786,7 +791,7 @@ async function launchInner({ inputs, eventName, payload = {}, gate = false, runI
   // A start that throws before its own failure is recorded (the SDK's install, the vendor's or GitHub's reads before the
   // claim) records one here, so the dispatcher's next try waits its pause and the third real failure Blocks.
   try {
-    return await afterDecision(run, ctx, decision, { adapterReady, repoId });
+    return await afterDecision(run, ctx, decision, { adapterReady, repoId, adapter });
   } catch (e) {
     if (decision.stage && !run.started) {
       const w = await recordFailedStart(run, { stage: decision.stage, error: e }).catch((x) => ({ error: x }));
@@ -833,12 +838,12 @@ export async function recordFailedStart({ inputs, eventName, runId, repo, n, opt
   );
 }
 
-async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
+async function afterDecision(run, ctx, decision, { adapterReady, repoId, adapter: opened = null }) {
   const { inputs, repo, opts, watch, ev } = run;
   const timed = (r) => ({ ...r, ms: watch.ms });
   // The SDK (its install still finishing, when the caller started one) and the lock's base, at once.
   const [adapter, id, base] = await Promise.all([
-    Promise.resolve(adapterReady).then(() => openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId })),
+    opened ?? Promise.resolve(adapterReady).then(() => openSandbox(inputs.sandbox, { VERCEL_TOKEN: inputs.vercelToken, VERCEL_TEAM_ID: inputs.vercelTeamId, VERCEL_PROJECT_ID: inputs.vercelProjectId })),
     repoId || getRepo(repo, opts).then((r) => String(r.id)),
     lockBase(repo, opts),
   ]);
@@ -846,6 +851,7 @@ async function afterDecision(run, ctx, decision, { adapterReady, repoId }) {
   run.seen && (run.seen.base = base);
   watch.mark("open");
   if (decision.token) return timed(await handOver(run, ctx));
+  if (decision.crossOs) return timed(await relayCrossOs(run, ctx));
   if (ev.kind === "stage") return timed(await endStage(run, ctx));
   return timed(await startCue(run, ctx, decision));
 }
@@ -913,6 +919,26 @@ function handOver(run, ctx) {
     hold.keep = true;
     // The session is not extended: the stage's wall clock was fitted to it at the start (startInSandbox).
     return out({ exit: "token", reason: `#${n}: fresh tokens handed to the running stage; its session ends ${clock(prior.sessionEnd)}` });
+  });
+}
+
+/**
+ * A running work stage's cross-OS request (lib/cross-os.mjs launcherDispatch): the configured workflow dispatched on its
+ * own branch and head with this job's token (the stage's App token has no Actions write), or the refusal, handed into
+ * the stage's memory over its socket (stage.mjs --deliver), as fresh tokens are. Once per request.
+ */
+function relayCrossOs(run, ctx) {
+  const { n, ev, adapter, inputs, repo, opts, decide, out } = run;
+  return withLock(run, stageLock(n, ev, ctx.record), async (hold) => {
+    const now = await reread(run, ctx);
+    const again = now.skip ? { skip: now.skip } : decide(now);
+    if (!again.crossOs) return out({ exit: "skipped", reason: `#${n}: under the lock the decision changed (${again.skip || "no cross-OS request"})` });
+    const prior = now.record;
+    const answer = await launcherDispatch({ inputs, repo, issue: n, ask: { workflow: ev.workflow, ref: ev.ref, sha: ev.sha }, token: opts.token, actionsToken: inputs.githubToken });
+    await adapter.run(prior.id, { argv: ["node", `${prior.home}/pendulum/plugin/scripts/stage.mjs`, "--deliver"], env: { PENDULUM_STAGE_CLAIM: prior.claim, PENDULUM_STAGE_CROSS_OS: JSON.stringify(answer) }, timeoutMs: 60_000 });
+    // Answered: the lock stays until stale, so no second launcher answers this request.
+    hold.keep = true;
+    return out({ exit: "cross-os", reason: `#${n}: cross-OS CI on ${String(ev.sha).slice(0, 7)}: ${answer.refused ? `refused (${answer.refused.cause})` : answer.run ? `run ${answer.run}${answer.reused ? " (already on the head)" : ""}` : "dispatched, run not named"}; handed to the running stage` });
   });
 }
 

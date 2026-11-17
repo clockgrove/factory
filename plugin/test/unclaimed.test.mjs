@@ -747,3 +747,28 @@ test("Factory's local-route mark names only the label on now, and only this logi
     setSelf(null);
   }
 });
+
+test("a factory:local label the developer applied by hand is never marked as Factory's: a claimed Objective's heartbeats leave it a person's action (#455 review)", async () => {
+  const { localFactoryActions } = await import("../../bench/lib/objective.mjs");
+  const repo = cloneOf();
+  repo.addWorkflow();
+  const by = { login: "maintainer", type: "User" };
+  // The Action is active; the developer labelled #7 factory:local by hand (event 99), under the login Factory posts as.
+  const fake = await fakeGitHub({ labels: ["factory:objective", "factory:local"], workflow: "active", timeline: [{ id: 98, event: "labeled", label: { name: "factory:objective" }, actor: by, created_at: ago(3600_000) }, { id: 99, event: "labeled", label: { name: "factory:local" }, actor: by, created_at: ago(1800_000) }] });
+  const api = process.env.GITHUB_API_URL;
+  try {
+    const { picks, loop } = await serveTicks(fake, { extra: { dev: repo.dev, settingsBranch: "main", settingsEveryMs: 0 } });
+    assert.deepEqual(picks, [7]);
+    // Its stage holds the claim through several heartbeats.
+    process.env.GITHUB_API_URL = fake.url;
+    loop.heartbeatMs = 20;
+    await loop.withClaim(7, () => new Promise((done) => setTimeout(() => done({ exit: "skipped" }), 150)));
+    assert.ok(fake.state.writes.filter((w) => w.startsWith("PATCH /repos/o/r/issues/comments/")).length >= 2, `the heartbeats ran: ${fake.state.writes.join(", ")}`);
+    assert.equal(fake.state.comments.filter((c) => c.body.includes(":local-route:")).length, 0, "no mark");
+    const collected = { issue: { number: 7, labels: [...fake.state.labels].map((name) => ({ name })) }, issueTimeline: fake.state.timeline, issueComments: fake.state.comments };
+    assert.equal(localFactoryActions(collected)(ago(1800_000), by, "labeled factory:local", 99), false, "it scores as the person's");
+  } finally {
+    api === undefined ? delete process.env.GITHUB_API_URL : (process.env.GITHUB_API_URL = api);
+    await fake.close();
+  }
+});

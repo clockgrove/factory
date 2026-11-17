@@ -144,7 +144,7 @@ const SWITCHED_FROM = process.env[SWITCHED_FROM_ENV] || "";
 delete process.env[SWITCHED_FROM_ENV];
 /** The first wait before the start's read of the repository's variables is tried again (Local.startVariables). */
 export const START_VARIABLES_MS = 15_000;
-/** How many reads of a claimed Objective's timeline backfillMark makes while it shows no factory:local label event. */
+/** How many times backfillMark tries to write the mark of a factory:local label this process put on. */
 const MARK_TRIES = 5;
 /** How often a running serve fetches the default branch's workflow (refreshSettings); every tick uses the last read. */
 export const SETTINGS_EVERY_MS = 3 * 60_000;
@@ -723,24 +723,25 @@ export class Local {
   }
 
   /**
-   * Factory's mark of the factory:local label this login put on `issue` (lib/local.mjs markLocalRoute), written by a later
-   * tick when the pick's own write could not be (a failed post, a timeline that did not show the event yet), so the
-   * scorer counts the label as Factory's. At the claim's start when this process's own pick or run left it unmarked
-   * (`unmarked`), and at the heartbeats of every Objective this loop claims, until settled once per process (so a mark a
-   * loop that stopped meanwhile left unwritten is written too): a conditional timeline read, and the comments only when
-   * the label is this login's. Settled when the mark is there or a person put the label on; a timeline that shows no label event is read
-   * at most MARK_TRIES times (an Objective taken with --all has none); a failed read or write is tried at the next beat.
+   * Factory's mark of the factory:local label this process itself put on `issue` (serve's pick or `factory run`, left in
+   * `unmarked` when its own write could not be made: a failed post, a timeline that did not show the event yet), written
+   * at the claim's start and its heartbeats (lib/local.mjs markLocalRoute), so the scorer counts the label as Factory's.
+   * Only those: Factory posts as the developer here, so any other factory:local label of this login may be their own,
+   * and stays a person's action. Ends when the mark is there, a person put the label on now, or after MARK_TRIES reads
+   * that show no such label event; an adoption whose loop stopped first stays unmarked, a person's action in the score.
    */
   async backfillMark(issue) {
+    if (!this.unmarked?.has(issue)) return;
     const tries = (this.markTries ??= new Map());
-    if ((tries.get(issue) ?? 0) < 0 || (tries.get(issue) ?? 0) >= MARK_TRIES) return;
     const r = await markLocalRoute(this.repo, issue, this.opts ?? { token: this.token }, { check: true, timeline: (repo, n, opts) => timelineOf(repo, n, { ...opts, cache: (this.timelines ??= new Map()) }) });
-    if (r.marked || r.person) {
-      this.unmarked?.delete(issue);
-      return void tries.set(issue, -1);
+    const tried = (tries.get(issue) ?? 0) + 1;
+    tries.set(issue, tried);
+    if (r.marked || r.person || tried >= MARK_TRIES) {
+      this.unmarked.delete(issue);
+      if (!r.marked && !r.person) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is still not written after ${tried} tries (${r.why}); the label counts as a person's action`);
+      return;
     }
-    if (r.id === null) return void tries.set(issue, (tries.get(issue) ?? 0) + 1);
-    log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat`);
+    if (tried === 1) log(`#${issue}: Factory's mark of its ${LOCAL_LABEL} label is not written yet (${r.why}); tried again at the next heartbeat, up to ${MARK_TRIES} times`);
   }
 
   /** Labels `issue` factory:local, said once, when no Action runs here: `factory run` on it, as serve's pick does (#455). */
@@ -1835,8 +1836,8 @@ export class Local {
       return { exit: "skipped" };
     }
     this.ceded?.delete(issue);
-    // Factory's mark of the factory:local label this loop put on it, when the pick could not write it (backfillMark).
-    if (this.unmarked?.has(issue)) await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
+    // Factory's mark of the factory:local label this process put on it, when the pick could not write it (backfillMark).
+    await this.backfillMark(issue).catch((e) => log(`#${issue}: local-route mark: ${String(e?.message || e).slice(0, 120)}`));
     // One heartbeat at a time: while this machine's network is down a write waits for it (lib/network.mjs), and the
     // beats due meanwhile are skipped rather than queued behind it. Each reads who holds the claim first: a claim it
     // cannot read is written as before (no answer is no other holder).

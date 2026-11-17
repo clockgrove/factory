@@ -46,9 +46,9 @@ Pendulum needs:
 
 - **CI that runs on pull requests, with at least one required check on your default branch.** Pendulum merges on those checks; a repository with no CI needs that first.
 - **A public repository, or a private one on GitHub Pro, Team or Enterprise Cloud.** GitHub Free offers branch rules, and so required checks, on public repositories only. Pendulum uses a merge queue where GitHub offers one (repositories an organization owns: public ones, and private ones on Enterprise Cloud) and strict required checks elsewhere.
-- **Admin rights on the repository**, the [`gh` CLI](https://cli.github.com) logged in, and Node 22 or newer where you run setup.
+- **Admin rights on the repository**, and, where you run setup, your coding agent's CLI, the [`gh` CLI](https://cli.github.com) logged in, and Node 22 or newer.
 - **A model credential GitHub Actions can use:**
-  - Claude Code: an Anthropic API key, billed per use. On a repository of your own, your Claude subscription works instead ([Claude on your subscription](docs/INSTALL.md#claude-on-your-subscription)).
+  - Claude Code: an Anthropic API key, billed per use. For your own individual work, within your Claude plan's terms, your subscription works instead ([Claude on your subscription](docs/INSTALL.md#claude-on-your-subscription)).
   - Codex: an OpenAI API key or a Vercel AI Gateway key, billed per use. Your ChatGPT plan works only in [local mode](#where-it-runs).
   - Copilot CLI: a token from an account with a Copilot seat; runs are billed to that seat as AI credits.
 
@@ -107,7 +107,7 @@ Setup asks three questions: which coding agent and credential, the spending limi
 | `max_concurrent`, Objectives running at once | 3 | 1 |
 | `auto_merge` | on | off: Pendulum's PRs wait for you to merge them |
 
-Setup then shows each change and waits for your yes. It creates a GitHub App for this one repository (a few clicks in your browser) and saves the App's two secrets, then has you save your model credential. It creates Pendulum's labels and a ruleset that requires your CI's checks, and offers to make your default workflow token read-only. Finally it opens a PR titled "Add the Clockgrove Pendulum workflow" that adds `.github/workflows/pendulum.yml` ([everything setup adds](#what-it-adds-to-your-repository)).
+Setup then shows each change and waits for your yes. It creates a GitHub App for this one repository (a few clicks in your browser) and saves the App's two repository secrets, then has you save your model credential as a secret. It creates Pendulum's labels and a ruleset that requires your CI's checks, and offers to make your default workflow token read-only. Finally it opens a PR titled "Add the Clockgrove Pendulum workflow" that adds `.github/workflows/pendulum.yml` ([everything setup adds](#what-it-adds-to-your-repository)).
 
 ### 3. Merge the setup PR, then check
 
@@ -119,7 +119,7 @@ This runs Pendulum's doctor, which changes nothing. Each line reads PASS, WARN o
 
 ### 4. File your first Objective
 
-Pick a small change your CI already tests, in this repository, that touches no workflow files. Then ask, describing it in your own words:
+Pick a small behaviour change in this repository, one a test your CI runs can prove and that touches no workflow files. Then ask, describing it in your own words:
 
 > File a Clockgrove Pendulum Objective: `mytool --version` should print the version from package.json.
 
@@ -151,12 +151,12 @@ It asks whether to start it now (it adds the `pendulum:objective` label), save i
 
 Runs take from a few minutes to a few hours. If the issue comes back Blocked or with a Question instead, see [When it needs you](#when-it-needs-you).
 
-**Why this works:** the issue is the whole specification. The Goal says what should change; each Acceptance entry is something a reviewer can check, and the reviewer judges every one, met or not; the Context records what you have already decided. Your tests then confirm the behaviour on the PR.
+**Why the issue has this shape:** the worker reads the issue as the whole specification. The Goal says what should change; each Acceptance entry is something a reviewer can check, and the reviewer judges every one, met or not; the Context records what you have already decided. Your tests then confirm the behaviour on the PR.
 
 **Next steps:**
 
 - **Run one Objective on another model:** add a `pendulum:model:<id>` label to its issue before starting it; the repository's default stays for the rest ([Choose the harness and models](docs/USAGE.md#choose-the-harness-and-models)).
-- **Let Pendulum merge:** once you trust its PRs, have setup write the workflow again with auto-merge on (its `--auto-merge true` flag) and merge that change like the first setup PR. `max_usd` and `max_concurrent` can also be raised with repository variables, such as `gh variable set PENDULUM_MAX_USD --body 25` ([Inputs that tune cost](docs/INSTALL.md#inputs-that-tune-cost)).
+- **Let Pendulum merge:** once you trust its PRs, set `PENDULUM_AUTO_MERGE: true` in the `env` block of `.github/workflows/pendulum.yml` and merge that change. `max_usd` and `max_concurrent` can also be raised with repository variables, such as `gh variable set PENDULUM_MAX_USD --body 25` ([Inputs that tune cost](docs/INSTALL.md#inputs-that-tune-cost)).
 - **Set it up without the plugin:** the same setup runs as scripts from a clone of Pendulum ([Set it up](docs/INSTALL.md#set-it-up)).
 
 ## How it works
@@ -199,7 +199,7 @@ A run that goes well needs nothing from you. When one needs you, Pendulum does a
 | PR ready for review (auto-merge off) | Read it and merge it through your usual process. |
 | **Blocked:** Pendulum could not finish, for example a check still fails or a spending limit was reached. One comment on the issue gives the reason, and the PR becomes a draft | Fix what the comment names, then label the issue `pendulum:objective` again. It resumes from its branch and PR. |
 | **Question** in a draft PR: the work depends on a decision that should be yours, such as changing a public interface | Comment your decision on the issue or the PR, then mark the PR ready. |
-| **Question** on the issue: the work needs another repository | Split it into one Objective per repository and label them, or answer how to do it in this repository alone. |
+| **Question** on the issue: the work needs another repository | Split it into one Objective per repository and label them, or comment how to do it in this repository alone: the next run picks up your answer, with no relabelling. |
 | The work needs a workflow change | Pendulum leaves the change in a comment on the issue, labelled `pendulum:handover`. After the PR merges, ask "Apply the Clockgrove Pendulum workflow hand-over for Objective 12" ([Workflow changes](docs/USAGE.md#workflow-changes)). |
 | Stop one Objective | Remove its `pendulum:objective` label, close its issue, or ask "Stop Clockgrove Pendulum Objective 12". A run in progress ends within about two minutes with its spend recorded; label it again to resume. |
 | Start over from revised text | Label the issue `pendulum:restart`, or ask "Restart Clockgrove Pendulum Objective 12". The earlier PR is closed and its branch deleted. |
@@ -220,7 +220,7 @@ Pendulum has no paid tier or hosted service, and no bill comes from Clockgrove. 
 | Setting | Default | What it limits |
 | --- | --- | --- |
 | `max_usd` | $25 | Each worker or reviewer job. Every job gets its own limit, so one Objective with several PRs, re-reviews or restarts can spend several times this. |
-| `daily_usd` | $100 | Starting new work: once the UTC day's counted spend reaches it, no new stage starts that day. Work already running finishes, so a day can end above it. |
+| `daily_usd` | $100 | Starting new work: once the UTC day's counted spend reaches it, no new worker job starts that day. Jobs already running, reviews and their answers go on, so a day can end above it. |
 | `max_concurrent` | 3 | Objectives running at once. |
 | `timeout_minutes` | 240 | Each job's wall-clock time. |
 

@@ -1204,3 +1204,59 @@ test("cost: a Codex run killed before any turn completed stays a run of unknown 
   const row = scoreObjective(cleanMerge(62, [priced, killed]), { prices, now: NOW });
   assert.match(markdownTable([row]), /\$0\.18 plus 1 run of unknown cost \(/);
 });
+
+/**
+ * #480: a mixed-route Objective, its work on GitHub Actions (a progress comment with no spend line, its usage artifact
+ * naming the comment) and its review run locally (a spend line only). `review` is the local review's spend line.
+ */
+function mixedRoute(number, { review = { usd: 3 }, work = null, workKey = "5551", artifact = {} } = {}) {
+  const c = cleanMerge(number);
+  const app = c.issueComments[0].user;
+  const progress = (kind, key, spend, created) => ({ user: app, created_at: created, body: `<!-- pendulum:${number}:progress:${kind}:${key} -->\nPendulum ${kind} run ${key}\n- 01:02Z harness claude (claude-opus-5-5) attempt 1${spend ? `\n<!-- pendulum:spend ${JSON.stringify(spend)} -->` : ""}` });
+  c.issueComments.push(progress("work", workKey, work, "2031-03-02T01:02:00Z"), progress("review", "1700000002", review, "2031-03-02T02:20:00Z"));
+  c.usage = [{ harness: "claude", model: "claude-opus-5-5", artifact: `pendulum-usage-${number}/result.json`, progressRun: workKey, usd: 8, runs: 1, tokens: { input: 1, output: 1, cached: 0, written: 0 }, basis: "harness-reported: total_cost_usd, modelUsage (sub-agents included)", ...artifact }];
+  c.harness = "claude";
+  return c;
+}
+
+test("#480: a mixed-route Objective's dollars are its Actions artifacts' and its local stages' spend lines together: $8 + $3 = $11", () => {
+  const row = scoreObjective(mixedRoute(70), { prices, now: NOW });
+  assert.equal(row.cost.usd, 11);
+  assert.equal(row.cost.usdUnknown, undefined, "the Actions stage's comment, which its artifact names, is no run of unknown cost");
+  assert.deepEqual(row.cost.parts.map((p) => p.usd), [8, 3]);
+  assert.match(row.cost.basis, /; 1 artifact\(s\) and 1 spend line\(s\) summed$/);
+  assert.match(markdownTable([row]), /\| \$11\.00 \(/);
+  assert.deepEqual([row.activity.workRuns, row.activity.reviewRuns], [1, 1]);
+});
+
+test("#480: a stage seen in both its usage artifact and its progress comment's spend line counts once, whatever its comment's key", () => {
+  // A cloud sandbox stage: its spend line and its artifact (uploaded at its end) hold the same $8; its key is `<run>-<claim>`.
+  const sandbox = mixedRoute(71, { workKey: "5552-abcdef012345", work: { usd: 8 } });
+  const row = scoreObjective(sandbox, { prices, now: NOW });
+  assert.equal(row.cost.usd, 11, "$8 once, plus the local review's $3");
+  assert.deepEqual(row.cost.parts.map((p) => p.artifact), ["pendulum-usage-71/result.json", "spend/review/1700000002"]);
+});
+
+test("#480: a local stage of unknown cost, and an Actions stage whose artifact expired, carry through beside the known dollars", () => {
+  const unknown = mixedRoute(73, { review: { usd: 0, usdUnknown: 1, usdUnknownWhy: ["unreported"] } });
+  const row = scoreObjective(unknown, { prices, now: NOW });
+  assert.deepEqual([row.cost.usd, row.cost.usdUnknown, row.cost.usdUnknownWhy], [8, 1, ["unreported"]]);
+  assert.match(markdownTable([row]), /\| \$8\.00 plus 1 run of unknown cost \(/);
+  // The work artifact expired (not downloaded); a review artifact remains: the work stage's comment is a run of unknown cost.
+  const expired = mixedRoute(74, { artifact: { artifact: "pendulum-usage-74-review/result.json", progressRun: "9999" } });
+  const e = scoreObjective(expired, { prices, now: NOW });
+  assert.deepEqual([e.cost.usd, e.cost.usdUnknown], [11, 1]);
+  assert.match(markdownTable([e]), /\| \$11\.00 plus 1 run of unknown cost \(/);
+});
+
+test("#480: Codex's turn.completed carries the thread's running total, so a stream's events are never summed", () => {
+  const ev = (o) => JSON.stringify(o);
+  const turn = (input, cached, output) => ev({ type: "turn.completed", usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } });
+  // Two cumulative events in one process: 1.0M then 1.5M is 1.5M, not 2.5M.
+  const one = [ev({ type: "thread.started", thread_id: "t1" }), turn(1_000_000, 0, 10_000), turn(1_500_000, 0, 20_000)].join("\n");
+  assert.deepEqual(parseUsageText(one, { model: "gpt-6.1-sol" }).tokens, { input: 1_500_000, output: 20_000, cached: 0, written: null });
+  assert.equal(costOf([parseUsageText(one, { model: "gpt-6.1-sol" })], prices).usd, priceTokens(prices, "gpt-6.1-sol", { input: 1_500_000, cached: 0, output: 20_000 }));
+  // A later pass that resumes the thread counts its own share of the running total: 1.5M, then 1.8M, is 1.8M in all.
+  const resumed = [one, ev({ type: "thread.started", thread_id: "t1" }), turn(1_600_000, 0, 25_000), turn(1_800_000, 0, 30_000)].join("\n");
+  assert.deepEqual(parseUsageText(resumed, { model: "gpt-6.1-sol" }).tokens, { input: 1_800_000, output: 30_000, cached: 0, written: null });
+});

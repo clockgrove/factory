@@ -789,7 +789,9 @@ export const priceCodex = (model, tokens) => priceTokens(CODEX_PRICES, model, to
 /**
  * Codex: `codex exec --json` prints JSONL ending in one `turn.completed` whose
  * `usage.{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens}` is the
- * thread's running total, restored by `codex exec resume` (sinceSession takes a resumed pass's
+ * thread's running total (codex-rs exec builds it from the thread's total token usage, and shuts down after a completed
+ * turn), so a stream with more than one is read at its last, never summed. `codex exec resume` restores the running
+ * total (sinceSession takes a resumed pass's
  * share). `input_tokens` already includes the cached and the written parts and `output_tokens` the reasoning
  * part, so neither is added again. Sub-agent threads (`spawn_agent`) are threads of their own, in
  * neither: runHarness adds them from their rollouts (codex-threads.mjs). Dollars come from the price table. An `item.completed` of type `error` followed by a completed
@@ -824,10 +826,8 @@ export function parseCodex(stdout, model, { rollout = null, since = null } = {})
       const u = e.usage || {};
       // Codex reports usage per turn, not per request; cache writes where the provider bills them (the AI Gateway does).
       if (!first) first = { unit: "turn", input: num(u.input_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
-      input = add(input, num(u.input_tokens));
-      output = add(output, num(u.output_tokens));
-      cached = add(cached, num(u.cached_input_tokens));
-      written = add(written, num(u.cache_write_input_tokens));
+      // Each turn.completed carries the thread's running total, not the turn's share: the last one is the process's.
+      if (e.usage && typeof e.usage === "object") [input, output, cached, written] = [num(u.input_tokens), num(u.output_tokens), num(u.cached_input_tokens), num(u.cache_write_input_tokens)];
     }
     if (e.type === "turn.failed" || e.type === "error") {
       failed = e.error?.message || e.message || e.type;

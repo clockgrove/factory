@@ -1205,6 +1205,8 @@ export function harnessActivity(now = () => Date.now()) {
   // The command items started and not yet ended, by id.
   const open = new Set();
   let base = null;
+  // The running total the current Codex pass last reported.
+  let seen = null;
   // The Claude Code that runs, as its stream's init line names it (usage.mjs claudeRunningTotals).
   let claudeVersion = null;
   const brief = (v) => String(v || "").replace(/\s+/g, " ").trim().slice(0, 60);
@@ -1258,13 +1260,16 @@ export function harnessActivity(now = () => Date.now()) {
       if (typeof e.total_cost_usd === "number" && !resumedOld && !zeroed) s.usd = typeof prior === "number" && e.total_cost_usd >= prior ? e.total_cost_usd - prior : e.total_cost_usd;
     }
     // Codex: input_tokens already includes the cached and written parts and output_tokens the reasoning part.
-    else if (e.type === "thread.started") base = priors.get(e.thread_id) ?? null;
-    else if (e.type === "turn.started") s.turns += 1;
+    // Each turn.completed carries the thread's running total: counted from the pass's last one, else the prior total.
+    else if (e.type === "thread.started") {
+      base = priors.get(e.thread_id) ?? null;
+      seen = null;
+    } else if (e.type === "turn.started") s.turns += 1;
     else if (e.type === "turn.completed" && e.usage) {
-      s.tokens.input += Math.max(0, (e.usage.input_tokens || 0) - (base?.input ?? 0));
-      s.tokens.output += Math.max(0, (e.usage.output_tokens || 0) - (base?.output ?? 0));
-      s.tokens.written += Math.max(0, (e.usage.cache_write_input_tokens || 0) - (base?.written ?? 0));
-      base = null;
+      const from = seen ?? base;
+      const total = { input: e.usage.input_tokens || 0, output: e.usage.output_tokens || 0, written: e.usage.cache_write_input_tokens || 0 };
+      for (const k of ["input", "output", "written"]) s.tokens[k] += Math.max(0, total[k] - (from?.[k] ?? 0));
+      seen = total;
     } else if (e.type === "item.started" && e.item) {
       s.toolCalls += 1;
       s.lastTool = e.item.type === "command_execution" && e.item.command ? `command: ${brief(e.item.command)}` : e.item.type || "item";

@@ -755,13 +755,15 @@ export function accountUse(usage) {
 /**
  * The usage records given and the stages' progress-line records (spendRecords) together, each stage once: a line whose
  * progress comment a given record names (its `progressRun`, plugin session.mjs writeUsage) is left out for that record.
- * A given record of an account that names no comment (one written before `progressRun`) cannot be matched to a line,
- * so that account's lines are all left out and the records given count alone for it.
+ * A given record that names no comment (one written before `progressRun`) cannot be matched to a line, so every line
+ * on its account (or, for a record on none, every line on none: GitHub Actions and the cloud sandbox name no account)
+ * is left out, and the records given count alone there.
  */
 export const withLines = (records = [], lines = []) => {
+  const accountOf = (r) => (typeof r?.account === "string" ? r.account : null);
   const named = new Set(records.map((r) => r?.progressRun).filter((k) => typeof k === "string"));
-  const unmatched = new Set(records.filter((r) => typeof r?.account === "string" && typeof r.progressRun !== "string").map((r) => r.account));
-  return [...records, ...lines.filter((l) => !named.has(l.progressRun) && !unmatched.has(l.account))];
+  const unmatched = new Set(records.filter((r) => r && typeof r.progressRun !== "string").map(accountOf));
+  return [...records, ...lines.filter((l) => !named.has(l.progressRun) && !unmatched.has(accountOf(l)))];
 };
 
 /** One account's share as the Harness cell shows it: "alpha (3 stages, $1.20, 1 limit pause)". */
@@ -814,7 +816,9 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
     const booked = own ? c : vendors.find((v) => keyOf(v.body, "vendor") === keyOf(c.body, "progress"));
     const body = own ? (c.body || "").replace(`<!-- pendulum:${n}:vendor:`, `<!-- pendulum:${n}:progress:`) : c.body || "";
     const kind = new RegExp(`^<!-- pendulum:${n}:progress:(work|review)`).exec(body)[1];
-    const id = /^<!-- pendulum:\d+:progress:(?:work|review):([^\s>-]+)/.exec(body)?.[1] ?? c.id ?? out.length;
+    // The comment's whole key (plugin session.mjs progressRunId: a re-run's `<run>-<attempt>`, a sandbox stage's
+    // `<run>-<claim>`), which the stage's usage record names as its `progressRun` (withLines).
+    const id = /^<!-- pendulum:\d+:progress:(?:work|review):([A-Za-z0-9-]{1,100}) -->/.exec(body)?.[1] ?? /^<!-- pendulum:\d+:progress:(?:work|review):([^\s>-]+)/.exec(body)?.[1] ?? c.id ?? out.length;
     const ran = stageHarnessOf(body);
     if (ran) [harness, model] = [ran.harness, ran.model];
     const line = /^<!-- pendulum:spend (\{[^\n]*\}) -->$/m.exec(body);
@@ -1018,9 +1022,11 @@ export function scoreObjective(collected, opts = {}) {
             : `merged with no human action after the label${ownerNote}`,
   };
 
-  // No usage artifact (local mode uploads none): the dollars are Pendulum's spend lines in its own progress comments.
+  // Every stage on every route, once: the usage artifacts (GitHub Actions, the cloud sandbox) and the spend lines in
+  // Pendulum's own progress comments (local mode uploads no artifact), a line a record names left out (withLines). Beside
+  // artifacts every stage's line counts, one with no spend line as a run of unknown cost (an artifact that expired).
   const artifacts = collected.usage || [];
-  const usage = artifacts.length ? artifacts : spendRecords(collected, { app });
+  const usage = withLines(artifacts, spendRecords(collected, { app, all: artifacts.length > 0 }));
   if (!usage.length) missing.push("usage artifact");
   const cost = costOf(usage, prices, { harness: collected.harness ?? null });
   // The harness for the streak: the usage's, else Pendulum's own progress comments; two harnesses on one Objective, none.
@@ -1071,8 +1077,8 @@ export function scoreObjective(collected, opts = {}) {
     model: cost.model,
     models: objectiveModels(usage, cost),
     // The accounts from both: a stage run locally (`pendulum review`) on an Objective whose work ran on Actions is only in
-    // its progress line. The dollars stay the artifacts' alone (cost above).
-    accounts: objectiveAccounts(artifacts.length ? [...usage, ...spendRecords(collected, { app })] : usage),
+    // its progress line.
+    accounts: objectiveAccounts(usage),
     // Per account: the usage given (a local stage's own result.json names its account) and every local stage's progress
     // line, dollars or none, but a line whose stage a given record names (its `progressRun`) counts once, as the record.
     accountUse: accountUse(withLines(artifacts, spendRecords(collected, { app, all: true }))),

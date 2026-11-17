@@ -42,14 +42,16 @@ test("a local Objective's row reads what ran from its stages' harness lines", ()
   assert.match(markdownTable([row]), /\| codex gpt-6\.1-terra; sub-agents gpt-6-luna; reviewer gpt-6\.1-sol \(by label: pendulum:harness:codex, pendulum:model:gpt-6\.1-terra\) \|/);
 });
 
-test("#263: the row's accounts come from the usage artifacts and the local stages' harness lines, once each; the dollars from the artifacts", () => {
+test("#263: the row's accounts come from the usage artifacts and the local stages' harness lines, once each; the dollars from both", () => {
   // Work on Actions (its usage artifact, account-less, or on an account), review run locally on account `alpha`.
   const c = localMerge(62);
   c.issueComments[2].body += `\n${harnessMarker("codex", "gpt-6.1-sol", { ...ran("gpt-6.1-terra", null, "gpt-6.1-sol"), harness: "codex", account: "alpha" })}`;
   c.usage = [{ artifact: "pendulum-usage-62", harness: "codex", model: "gpt-6.1-terra", usd: 2 }];
   const row = score(c);
   assert.deepEqual(row.accounts, ["alpha"], "the local review's account");
-  assert.equal(row.cost.usd, score({ ...localMerge(62), usage: c.usage }).cost.usd, "the progress lines' dollars are not added to the artifacts'");
+  // The artifact (from before `progressRun`, on no account) may be the account-less work line's stage, never the review's
+  // on alpha: the review's dollars are added, the work line's are not. The artifact's Codex run reported no tokens.
+  assert.deepEqual([row.cost.usd, row.cost.usdUnknown], [0.25, 1], "the local review's line beside the artifact, the work line not twice");
   c.usage = [{ ...c.usage[0], account: "alpha" }, { ...c.usage[0], account: "beta" }];
   assert.deepEqual(score(c).accounts, ["alpha", "beta"], "deduplicated");
 });

@@ -141,8 +141,9 @@ export function vendorOf(records) {
 
 /**
  * Raw Codex JSONL to the normalized record (tokens only; dollars are priced by `costOf`). `output_tokens` already
- * includes the reasoning tokens, and `input_tokens` the cached and written ones (`cache_write_input_tokens`). Each pass starts with `thread.started`; a pass that resumes a thread seen earlier in
- * the stream reports the thread's running total, so it counts only its own share (as the worker's runHarness does).
+ * includes the reasoning tokens, and `input_tokens` the cached and written ones (`cache_write_input_tokens`). Each pass starts with `thread.started`;
+ * every `turn.completed` carries the thread's running total (plugin usage.mjs parseCodex), so a pass is its last one, and a
+ * pass that resumes a thread seen earlier in the stream counts only its own share (as the worker's runHarness does).
  */
 export function fromCodexEvents(text, model = null) {
   const rec = { harness: "codex", model, usd: null, tokens: { input: null, output: null, cached: null, written: null }, basis: "unpriced", turns: 0, exit: null, runs: 1 };
@@ -163,12 +164,9 @@ export function fromCodexEvents(text, model = null) {
     }
     if (e.type !== "turn.completed") continue;
     rec.turns += 1;
-    const u = e.usage || {};
-    pass ??= { input: null, output: null, cached: null, written: null };
-    pass.input = add(pass.input, num(u.input_tokens));
-    pass.output = add(pass.output, num(u.output_tokens));
-    pass.cached = add(pass.cached, num(u.cached_input_tokens));
-    pass.written = add(pass.written, num(u.cache_write_input_tokens));
+    // Each turn.completed carries the thread's running total, not the turn's share: a pass's last one is its total.
+    const u = e.usage;
+    if (u && typeof u === "object") pass = { input: num(u.input_tokens), output: num(u.output_tokens), cached: num(u.cached_input_tokens), written: num(u.cache_write_input_tokens) };
   }
   close();
   return rec;
@@ -353,7 +351,11 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     out.priceTableDate = null;
     out.note = null;
     out.basis = priced.length ? `pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
-  } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
+  } else if (out.parts.length > 1) {
+    // A mixed-route Objective: its artifacts' stages and its local stages' spend lines, each stage once.
+    const lines = parts.filter((r) => r.source === "spend").length;
+    out.basis += lines ? `; ${out.parts.length - lines} artifact(s) and ${lines} spend line(s) summed` : `; ${out.parts.length} artifacts summed (worker + review)`;
+  }
   out.basis += unknownNote;
   // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.
   if (out.workerKeyUsd > 0 && out.usd !== null) out.basis += `; includes ${out.workerKeyUsd} USD through a relayed worker key`;

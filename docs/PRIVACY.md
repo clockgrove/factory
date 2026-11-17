@@ -1,0 +1,52 @@
+# Data and privacy
+
+Pendulum has no server and no account. It runs on your GitHub Actions runners, on your own machine (local mode) or in your Vercel project (the cloud sandbox), and talks only to the services you configure. Nothing goes to Clockgrove.
+
+## What goes to the model provider
+
+The coding agent (Claude Code, Codex or GitHub Copilot CLI) sends its conversation to its model provider on your credential: Anthropic, OpenAI (or ChatGPT's service, on a ChatGPT login in local mode), GitHub Copilot, or the Vercel AI Gateway when Codex runs on a gateway key. On every route that conversation holds:
+
+- **The worker's prompt:** Pendulum's task card, the issue's title and body, and the maintainers' decisions recorded in comments on the issue and the PR.
+- **The repository:** whatever the agent reads in its checkout and the output of the commands it runs there. Treat every file in the repository, and anything its setup and test commands print, as able to reach the model.
+- **Fix and answer passes:** the reviewer's comments (and a named third-party reviewer's), and the failing lines of red required checks' logs.
+- **The reviewer's prompt:** the issue, the PR body and the diff, and whatever the reviewer reads in its checkout.
+
+**Decision calls go to the configured decision model.** Pendulum asks short typed questions of its own (red-check triage, the drift advisory, the answer gate, the finding check and the others under `decision_route` in [`action.yml`](../action.yml)). With an AI Gateway key they go to the gateway's decision models (`triage_model` and `drift_model`); without one, on the default `auto` route, to the stage's own harness and model on its own credential; with `decision_route: off`, nowhere. Each call carries only what its question needs, such as a failing job's log window and the PR's file list for triage, or the plan's items, the agent's last 12 activity entries and the files it edited for the drift advisory; the `ai_gateway_api_key` input in [`action.yml`](../action.yml) lists each.
+
+## The AI Gateway (optional)
+
+Nothing goes to the Vercel AI Gateway unless you give Pendulum a gateway key. There are three separate uses, each with its own key:
+
+- **Decision calls:** `ai_gateway_api_key` (locally, `~/.config/pendulum/ai-gateway-key`). Only Pendulum's own process holds it.
+- **Codex's model provider:** `codex_gateway_key`. Codex's whole conversation then goes through the gateway, with an opaque per-Objective session id (a hash) so a resumed session reaches the same provider account.
+- **Your code's own gateway calls:** when you opt your own `AI_GATEWAY_API_KEY` in to the worker's shell (`worker_secrets`), Pendulum relays those calls to the gateway and counts their cost; it forwards them to the gateway alone.
+
+[ADAPTERS.md](ADAPTERS.md) (Decision model, Codex model provider) and [PLAN.md](PLAN.md) (The gateway relay) have the details.
+
+## The cloud sandbox (optional)
+
+Only with the cloud sandbox set up (setup's `--sandbox vercel`) does anything go to Vercel Sandbox. Each Objective then runs in a sandbox in your Vercel project: the repository checkout, the stage's model credential and the short-lived GitHub tokens minted for the stage are inside it; your Vercel token stays with the launch job on GitHub Actions and never enters it. Between stages the sandbox is stopped and Vercel keeps a snapshot of its files; a built image keeps one with a clone of your default branch. Closing the issue destroys the Objective's sandbox. The launcher also reads your Vercel team's name and plan, for its log. See [ADAPTERS.md](ADAPTERS.md), Cloud sandbox.
+
+## What goes to GitHub
+
+Pendulum keeps every Objective's state in your repository: the branch, the PR and its review comments and replies, the plan and progress comments on the issue, the labels and the Project board.
+
+On GitHub Actions and the cloud sandbox, each job also uploads a usage artifact, `pendulum-usage-<issue>`, kept for up to 90 days: the usage record, the harness's event stream and its saved sessions, with every secret Pendulum knows of masked. The event stream and the sessions hold what the agent read and ran, so whoever can download your repository's workflow artifacts can read them; on a public repository, that is anyone signed in to GitHub. The job logs hold Pendulum's own log lines and the output of the commands it runs, with secrets masked.
+
+With GitHub Copilot as the harness, the model provider is GitHub too.
+
+## What stays local
+
+- **Local mode:** each Objective's clone and its stages' usage directories (the event streams included) stay in `.pendulum/<issue>/` in your clone, which git excludes; no usage artifact is uploaded, and each run's dollars go into its progress comment instead. Your tokens and keys stay in `~/.config/pendulum/` and Pendulum's machine state in `~/.cache/pendulum/`. See [LOCAL.md](LOCAL.md).
+- **GitHub Actions:** each job runs on a fresh runner that is discarded when it ends; only what the sections above name outlives it.
+
+## No telemetry
+
+Pendulum has no telemetry: its code calls no analytics, crash-reporting or usage-reporting service. Beyond GitHub, your model provider and the optional gateway and sandbox above, it contacts only:
+
+- **GitHub's public status page** (githubstatus.com), which local mode's `serve` reads when GitHub keeps answering with server errors;
+- **Pendulum's own repository on GitHub,** to read the latest release tag during setup and to fetch a newly pinned release for a running `serve`;
+- **your model provider's host,** with a bare request that tells an outage from a failed run;
+- **the token exchange URL you set,** if you use workload identity federation for Claude (`anthropic_oidc_exchange_url`).
+
+The coding agent CLIs are their vendors' own programs, and they may report usage to their vendor under that vendor's own settings; Pendulum does not change them. In local mode, Claude Code's and Copilot CLI's reporting hosts are among the hosts their sandbox lets them reach. Local mode starts the processes it runs, the agent's commands included, with `DO_NOT_TRACK=1`, `NEXT_TELEMETRY_DISABLED=1` and `TURBO_TELEMETRY_DISABLED=1` set.

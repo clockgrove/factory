@@ -1,0 +1,61 @@
+name: Bug report
+description: Pendulum did something wrong, such as a Block it should not have made, a wrong merge, or setup that fails.
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Leave out tokens, keys and private code. Report a security problem privately instead: see [SECURITY.md](https://github.com/clockgrove/pendulum/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Pendulum tag
+      description: The tag your workflow pins, `clockgrove/pendulum@vX.Y.Z`.
+      placeholder: clockgrove/pendulum@v0.10.0
+    validations:
+      required: true
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harness
+      options:
+        - Claude Code
+        - Codex
+        - GitHub Copilot
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Route
+      options:
+        - GitHub Actions
+        - Local mode
+        - Cloud sandbox
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Link the Objective's issue or PR when it is public.
+    validations:
+      required: true
+  - type: textarea
+    id: comment
+    attributes:
+      label: The Blocked or Question comment
+      description: The text of the comment Pendulum left on the issue or PR, if it left one.
+      render: markdown
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor's lines
+      description: When setup is involved, the lines `/pendulum:pendulum-doctor` printed.
+      render: text

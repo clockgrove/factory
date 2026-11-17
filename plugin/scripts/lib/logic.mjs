@@ -4,7 +4,7 @@
 import { parseToml } from "./toml.mjs";
 import { commandRefs as shellRefs } from "./shell.mjs";
 import { parseYaml } from "./yaml.mjs";
-import { BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
+import { BILLING, BILLING_WORDS, UNKNOWN_WHY, addBilling, billingCode, billingRead, billingText, claudeRunningTotals, passBilling, passRead, rerunRead, refusalCause, refusalFields, unknownOf, unknownRuns, unknownText, usageLimited } from "./usage.mjs";
 import { missingSecretsOf } from "./worker-secrets.mjs";
 
 /** usage.mjs refusalCause, which harness.mjs reads too (usage.mjs noResetLimit). */
@@ -2805,13 +2805,14 @@ export function rebaseTally(comments, issue, mine = trustedAuthor) {
  * `usdByPass`: its known dollars by pass kind (usage.mjs usdByPass), which the finish card breaks the stage down by;
  * `rerun` (usage.mjs rerunRead) and `judgeOnly`: what the stage records it ran again, the card's churn. `limitPaused`: the stage ended paused on its harness's
  * usage limit (local mode), or waiting to go on on another account (GitHub Actions and the cloud sandbox, #268), which
- * the scorecard counts per account (#266).
+ * the scorecard counts per account (#266). `ledger`: the per-pass ledger line written beside it (ledgerMarker), from
+ * the record's `ledger`; absent for a record with none.
  */
 export function stageSpendLine(usage) {
   const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
   const byPass = passRead(usage?.usdByPass);
   const rerun = rerunRead(usage?.rerun);
-  return { usd: num(usage?.usd) ?? 0, parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
+  return { usd: num(usage?.usd) ?? 0, ...(Array.isArray(usage?.ledger) ? { ledger: ledgerMarker(usage.ledger, { model: usage.model, version: usage.ran?.pendulum }) } : {}), parts: { ...(num(usage?.workerKeyUsd) > 0 ? { workerKeyUsd: usage.workerKeyUsd } : {}), ...billingParts(usage), ...unknownParts(usage), ...(Object.keys(byPass).length ? { usdByPass: byPass } : {}), ...(rerun ? { rerun } : {}), ...(usage?.judgeOnly === true ? { judgeOnly: true } : {}), ...((usage?.exit === "paused" || usage?.exit === "waiting") && usage.usageLimit ? { limitPaused: true } : {}) } };
 }
 /**
  * The harness a stage runs, written into its progress comment from the stage's start: structured, so the bench scorer
@@ -2855,6 +2856,127 @@ export function spendParts(body) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The largest per-pass ledger line a progress comment carries (ledgerMarker), in characters. A stage whose ledger does
+ * not fit gets a line saying so and a marker with its pass count alone (`cut`): its usage record stays the ledger's source.
+ */
+export const LEDGER_MAX = 6_000;
+const LEDGER = /^<!-- pendulum:ledger (\{[^\n]*\}) -->$/m;
+const LEDGER_LABEL = /^[a-z][a-z0-9-]{0,60}$/;
+const LEDGER_MODEL = /^[A-Za-z0-9._:/-]{1,80}$/;
+const LEDGER_EFFORT = /^[a-z]{1,16}$/;
+const LEDGER_VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:[-+][A-Za-z0-9.-]{1,40})?$/;
+const ledgerUsd = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v * 1e6) / 1e6 : null);
+const ledgerCount = (v) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
+const ledgerWord = (re, v) => (typeof v === "string" && re.test(v) ? v : null);
+const ledgerBilling = (v) => (BILLING.includes(v) ? v : null);
+const ledgerSecs = (at) => (typeof at === "string" && Number.isFinite(Date.parse(at)) ? Math.floor(Date.parse(at) / 1000) : null);
+const ledgerIso = (s) => (ledgerCount(s) === null ? null : new Date(s * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"));
+/** A pass's dollars by billing when nothing splits them (usage.mjs usdByBilling for one pass with no relayed key): its own kind's. */
+const plainByBilling = (billing, usd) => (billing ? { [billing]: usd ?? 0 } : {});
+const sameByBilling = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([k, v]) => b[k] === v);
+
+/**
+ * The per-pass ledger line a stage writes with its spend line on every route (#543), from its usage record's `ledger`
+ * (usage.mjs passLedger), the stage's `model` and the Pendulum `version` that ran it: numbers and labels only, short keys.
+ * Top level: `v` (the release), `m` (the stage's model) and `b` (the first pass's billing), each left out when none; `p`,
+ * one entry per pass: `l` its label, `d` its calls for a decision record, `m` and `b` where they differ from the top's,
+ * `e` its effort, `t` [start, end] in Unix seconds, `u` its known dollars (to a millionth, as the spend line), `q` and `w`
+ * its runs of unknown cost and their codes (usage.mjs UNKNOWN_WHY), `y` its dollars by billing where they are not all at
+ * its own kind, `k` a relayed key's share, `n` its tokens [input, output, cached, written], `r` 1 when it resumed a
+ * session and `c` its first request's cache [read, written]. A string that is no label of its kind is left out. A line
+ * over LEDGER_MAX characters is not written: a line in the comment says so, and the marker carries the pass count alone.
+ */
+export function ledgerMarker(ledger, { model = null, version = null } = {}) {
+  const passes = (Array.isArray(ledger) ? ledger : []).filter((e) => e && typeof e === "object");
+  const top = { ...(ledgerWord(LEDGER_VERSION, version) ? { v: version } : {}), ...(ledgerWord(LEDGER_MODEL, model) ? { m: model } : {}) };
+  const firstBilling = ledgerBilling(passes[0]?.billing);
+  if (firstBilling) top.b = firstBilling;
+  const p = passes.map((e) => {
+    const out = {};
+    const label = ledgerWord(LEDGER_LABEL, e.label);
+    if (label) out.l = label;
+    if (e.decision === true) out.d = ledgerCount(e.calls) || 1;
+    const m = ledgerWord(LEDGER_MODEL, e.model);
+    if (m !== (top.m ?? null)) out.m = m;
+    const b = ledgerBilling(e.billing);
+    if (b !== (top.b ?? null)) out.b = b;
+    const effort = ledgerWord(LEDGER_EFFORT, e.effort);
+    if (effort) out.e = effort;
+    const t = [ledgerSecs(e.started), ledgerSecs(e.ended)];
+    if (t.some((x) => x !== null)) out.t = t;
+    const u = ledgerUsd(e.usd);
+    if (u !== null) out.u = u;
+    const q = ledgerCount(e.usdUnknown);
+    if (q) out.q = q;
+    const w = [...new Set((Array.isArray(e.usdUnknownWhy) ? e.usdUnknownWhy : []).filter((x) => typeof x === "string" && Object.hasOwn(UNKNOWN_WHY, x)))];
+    if (w.length) out.w = w;
+    const y = Object.fromEntries(Object.entries(billingRead(e.usdByBilling)).map(([kind, v]) => [kind, ledgerUsd(v)]));
+    if (!sameByBilling(y, plainByBilling(b, u))) out.y = y;
+    const k = ledgerUsd(e.workerKeyUsd);
+    if (k !== null) out.k = k;
+    const tk = e.tokens && typeof e.tokens === "object" ? e.tokens : {};
+    const n = [ledgerCount(tk.input), ledgerCount(tk.output), ledgerCount(tk.cached), ledgerCount(tk.written)];
+    if (n.some((x) => x !== null)) out.n = n;
+    if (e.resumed === true) out.r = 1;
+    const fc = e.firstCache;
+    if (fc && typeof fc === "object") out.c = [ledgerCount(fc.cached), ledgerCount(fc.written)];
+    return out;
+  });
+  const line = `<!-- pendulum:ledger ${JSON.stringify({ ...top, p })} -->`;
+  if (line.length <= LEDGER_MAX) return line;
+  return `Per-pass ledger: ${p.length} passes, over the ${LEDGER_MAX}-character bound of this comment; the stage's usage record holds it.\n<!-- pendulum:ledger ${JSON.stringify({ cut: p.length })} -->`;
+}
+
+/**
+ * The per-pass ledger line in a progress comment's body (ledgerMarker), read back: `{ledger, model, version}`, each
+ * entry in usage.mjs passLedger's shape (its `firstCache` as `{cached, written}`, its times to the second); `{cut}` (the
+ * pass count) when the ledger did not fit; null with no line or a broken one. Only labels and numbers are taken, each
+ * checked as its kind; anything else reads as none. The caller decides whose comment it trusts (finish-card.mjs
+ * pendulumOwn, report.mjs ownPredicate): this reads a body alone.
+ */
+export function ledgerOfComment(body) {
+  const m = LEDGER.exec(body || "");
+  if (!m) return null;
+  let v;
+  try {
+    v = JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  if (!Object.hasOwn(v, "p") && ledgerCount(v.cut) !== null) return { cut: v.cut };
+  if (!Array.isArray(v.p) || v.p.some((e) => !e || typeof e !== "object" || Array.isArray(e))) return null;
+  const model = ledgerWord(LEDGER_MODEL, v.m);
+  const billing = ledgerBilling(v.b);
+  const ledger = v.p.map((e) => {
+    const b = Object.hasOwn(e, "b") ? ledgerBilling(e.b) : billing;
+    const usd = ledgerUsd(e.u);
+    const t = Array.isArray(e.t) ? e.t : [];
+    const n = Array.isArray(e.n) ? e.n : [];
+    const c = Array.isArray(e.c) ? e.c : null;
+    const y = e.y && typeof e.y === "object" && !Array.isArray(e.y) ? Object.fromEntries(Object.entries(billingRead(e.y)).map(([kind, x]) => [kind, ledgerUsd(x)])) : null;
+    return {
+      label: ledgerWord(LEDGER_LABEL, e.l),
+      ...(Object.hasOwn(e, "d") ? { decision: true, calls: ledgerCount(e.d) || 1 } : {}),
+      model: Object.hasOwn(e, "m") ? ledgerWord(LEDGER_MODEL, e.m) : model,
+      effort: ledgerWord(LEDGER_EFFORT, e.e),
+      started: ledgerIso(t[0]),
+      ended: ledgerIso(t[1]),
+      usd,
+      usdUnknown: ledgerCount(e.q) ?? 0,
+      usdUnknownWhy: [...new Set((Array.isArray(e.w) ? e.w : []).filter((x) => typeof x === "string" && Object.hasOwn(UNKNOWN_WHY, x)))],
+      billing: b,
+      usdByBilling: y ?? plainByBilling(b, usd),
+      workerKeyUsd: ledgerUsd(e.k),
+      tokens: { input: ledgerCount(n[0]), output: ledgerCount(n[1]), cached: ledgerCount(n[2]), written: ledgerCount(n[3]) },
+      resumed: e.r === 1,
+      firstCache: c ? { cached: ledgerCount(c[0]), written: ledgerCount(c[1]) } : null,
+    };
+  });
+  return { ledger, model, version: ledgerWord(LEDGER_VERSION, v.v) };
 }
 
 const money = (n) => (Number.isFinite(n) ? `$${n.toFixed(n < 1 ? 4 : 2)}` : "?");

@@ -941,9 +941,12 @@ export const progressRunId = (env = process.env) =>
  * its comment on its start time, which only its reporter knows).
  */
 export const stageProgressRun = (env = process.env) => (/^[A-Za-z0-9-]{1,60}$/.test(env.PENDULUM_PROGRESS_RUN || "") || env.GITHUB_RUN_ID ? progressRunId(env) : null);
-/** The progress comment's structured tail: the stage's harness, then its spend, rebase, decisions read, triage and plan-time asks. */
-export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
-  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
+/**
+ * The progress comment's structured tail: the stage's harness, then its spend with its per-pass ledger line (`ledger`,
+ * logic.mjs ledgerMarker: written only beside a spend line), rebase, decisions read, triage and plan-time asks.
+ */
+export const progressTail = ({ harness = null, model = "", ran = null, spend = null, spendParts = null, ledger = null, rebase = null, read = null, triage = null, asked = null } = {}) =>
+  `${harness ? `\n${harnessMarker(harness, model, ran)}` : ""}${spend === null ? "" : `\n${spendMarker(spend, spendParts)}${ledger ? `\n${ledger}` : ""}`}${rebase ? `\n${rebaseCostMarker(rebase)}` : ""}${read ? `\n${decisionsReadMarker(read)}` : ""}${triage ? `\n${triageMarker(triage)}` : ""}${asked ? `\n${planAskedMarker(asked)}` : ""}`;
 /** The progress comment's line naming the hosts an Objective's host labels open (choice.mjs ranWith `hosts`), or "". */
 export const hostsLine = (hosts = []) => (Array.isArray(hosts) && hosts.length ? `Network: this Objective's sandboxes also reach ${hosts.map((h) => `\`${h}\``).join(", ")} (its \`pendulum:host:\` labels).` : "");
 /**
@@ -991,6 +994,8 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   let status = "";
   let spend = null;
   let spendParts = null;
+  // The per-pass ledger line written beside the final spend line (progress.spend; logic.mjs ledgerMarker), never beside a figure so far.
+  let ledger = null;
   let read = null;
   let triage = null;
   let asked = null;
@@ -1023,7 +1028,7 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   const bodyOf = (interim) => {
     const head = status ? `**${status}**\n\n` : "";
     const where = [runUrl ? `[run ${runId}](${runUrl})` : `run ${runId}`, ...links].join(" · ");
-    const tail = progressTail({ harness, model, ran, ...interim, rebase, read, triage, asked });
+    const tail = progressTail({ harness, model, ran, ...interim, ledger: spend === null ? null : ledger, rebase, read, triage, asked });
     // The hosts this Objective's own host labels open to its sandboxes, beside every Objective's list (hostsLine).
     const hosts = hostsLine(ran?.hosts);
     return `${head}Pendulum ${stage} ${where}: started ${clock(started)}, ${Math.round((Date.now() - started) / 60000)} min at the last line.\n${hosts ? `${hosts}\n` : ""}${lines.join("\n")}${tail}${carried}`;
@@ -1141,10 +1146,12 @@ export function progressReporter(repo, issue, { token }, { stage, runId = progre
   };
   /** Whether the rebase line is set (progress.rebase). */
   progress.rebased = () => rebase !== null;
-  progress.spend = (usd, parts = null) => {
+  /** The stage's final spend line (logic.mjs stageSpendLine) and, beside it, its per-pass ledger line (`ledgerLine`). */
+  progress.spend = (usd, parts = null, ledgerLine = null) => {
     if (Number.isFinite(usd)) {
       spend = usd;
       spendParts = parts;
+      ledger = typeof ledgerLine === "string" && ledgerLine ? ledgerLine : null;
     }
   };
   /**
@@ -2284,7 +2291,7 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...unknown,
     priceTableDate: merged.basis?.includes("table") ? merged.basis.replace(/.*dated\s+/, "") : null,
     // Each pass's own figures (usage.mjs passLedger), which the merged ones above are summed from: `pendulum report` breaks
-    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder), never on GitHub.
+    // a stage's cost down by pass from it. Stored with the artifact (and in a local stage's usage folder); the progress comment carries it too, as numbers and labels beside the spend line (logic.mjs ledgerMarker).
     ledger: passLedger(records || [], billing),
     // Codex sub-agent threads the stage's runs spawned, each run's own share (already in usd and tokens above).
     ...(records.some((r) => r?.subAgents?.length) ? { subAgents: records.flatMap((r) => (r?.subAgents || []).map((t) => ({ ...t, run: r.label ?? null }))) } : {}),

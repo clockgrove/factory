@@ -81,6 +81,13 @@ const onPath = (bin) => whichSync(bin) !== null;
 /** An account's key in the readiness checks (Local.harnessReady, Local.accountReady): its harness, name and login. */
 const readyKey = (a) => `${a.harness}:${a.name}:${a.home || a.tokenFile || ""}`;
 /** How long automatic account choice passes over an account whose harness checks failed before it checks it again. */
+
+/** A finished stage's dollars from its result.json (session.mjs writeUsage): the known figure, its runs of unknown cost and how they are billed. */
+export const stageSpendOf = (result) => ({ usd: result?.usd ?? null, usdUnknown: Number.isInteger(result?.usdUnknown) ? result.usdUnknown : 0, usdByBilling: result?.usdByBilling ?? null });
+
+/** The serve log's words on a finished stage (`r`: its exit, code and stageSpendOf): "delivered, $1.20 API-equivalent at list prices, on the subscription". */
+export const stageEndText = (r) => `${r.exit ?? `no exit record (code ${r.code})`}${r.usd != null || r.usdUnknown ? `, ${spendText({ usd: r.usd, unknown: r.usdUnknown ?? 0, byBilling: r.usdByBilling })}` : ""}`;
+
 export const UNREADY_RETRY_MS = 10 * 60_000;
 /**
  * The models a `stage` runs (objective-trust.mjs objectiveInputs' inputs), whose quota windows automatic choice weighs
@@ -1707,7 +1714,7 @@ export class Local {
           }
           // `served`: a harness pass the provider served in this stage (writeUsage's servedPasses, which leaves the stage's
           // decision calls out), the progress outagePaused reads between pauses.
-          done({ code, signal, exit: result?.exit ?? null, usd: result?.usd ?? null, usdUnknown: Number.isInteger(result?.usdUnknown) ? result.usdUnknown : 0, usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
+          done({ code, signal, exit: result?.exit ?? null, ...stageSpendOf(result), usageDir, stage: name, log: logFile, served: Number(result?.servedPasses) > 0, ...(runs.account ? { account, hold, pinned: !!runs.pinned, pin: runs.pin ?? null } : {}), ...(result?.exit === "paused" && result.outage ? { outage: result.outage } : {}), ...(result?.exit === "paused" && result.usageLimit ? { usageLimit: result.usageLimit } : {}) });
         });
       } catch (e) {
         throw Object.assign(e instanceof Error ? e : new Error(String(e)), { stageStarted: true });
@@ -2625,7 +2632,7 @@ export class Local {
 
   async review(issue, prNumber, { wait = false, reruns = 0 } = {}) {
     const review = await this.stage(issue, "review", "review.mjs", ["--pr", String(prNumber)]);
-    log(`#${issue} review of PR #${prNumber}: ${review.exit ?? `no exit record (code ${review.code})`}${review.usd != null || review.usdUnknown ? `, ${spendText({ usd: review.usd, unknown: review.usdUnknown ?? 0 })}` : ""}`);
+    log(`#${issue} review of PR #${prNumber}: ${stageEndText(review)}`);
     // Waiting for a third-party reviewer (third-party-review.mjs): serve's dispatcher ticks put the label back. `run` and
     // `review`, which may have no serve behind them, do the same here, so the label is never left off with nothing to
     // put it back, and then review again.
@@ -3011,7 +3018,7 @@ export class Local {
     });
     // The stage started: this loop's count of failed starts for it is over.
     this.startFailures?.delete(issue);
-    log(`#${issue} work: ${work.exit ?? `no exit record (code ${work.code})`}${work.usd != null || work.usdUnknown ? `, ${spendText({ usd: work.usd, unknown: work.usdUnknown ?? 0 })}` : ""}`);
+    log(`#${issue} work: ${stageEndText(work)}`);
     if (work.exit !== "delivered") return work;
     const pr = await findPr(this.repo, `pendulum/${issue}`, this.opts).catch(() => null);
     if (pr && (pr.labels || []).some((l) => l.name === REVIEW_LABEL)) return this.review(issue, pr.number, { wait });
@@ -3794,7 +3801,7 @@ export class Local {
       if (free.length > reviews.length && !holdAll) log(`${free.length - reviews.length} review(s) wait for a free slot on this machine`);
       // What holds new starts on this machine, said once: here, unless the dispatcher's reason (localFull) says it already.
       const hold = box.why && result.reason !== box.why ? `; holding new starts: ${box.why}` : "";
-      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}${hold}; ${running.size} in flight here, $${Number.isFinite(result.spentToday) ? result.spentToday.toFixed(2) : "?"} spent today`);
+      log(`tick: ${picks.length ? `starting ${picks.map((n) => `#${n}`).join(", ")}` : "nothing ready"}${holding.length ? `; holding ${holding.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : ""}${reviews.length ? `; reviewing ${reviews.map((r) => `PR #${r.pr}`).join(", ")}` : ""}${result.reason ? ` (${result.reason})` : ""}${waitLine && result.reason !== waitLine ? `; ${waitLine}` : ""}${hold}; ${running.size} in flight here, ${Number.isFinite(result.spentToday) ? spendText({ usd: result.spentToday, unknown: result.unknownToday ?? 0, byBilling: result.billingToday }) : "?"} spent today`);
       for (const n of picks) slots.start(n, "work", () => track(n, this.runObjective(n)).catch((e) => log(`#${n} failed: ${e.message.slice(0, 200)}`)));
       slots.spare();
       if (once) {

@@ -299,7 +299,7 @@ test("localSandbox: a writable directory swapped for a symlink is refused", () =
 test("credential: on a developer's machine, api with no key falls back to the CLI login; inside Actions it refuses", async () => {
   const inputs = { anthropicApiKey: "", anthropicOidcExchangeUrl: "", codexApiKey: "", githubToken: "", claudeCodeOauthToken: "" };
   const cp = (inp, env) => credentialEnv({ harness: "copilot", credential: "api", inputs: { ...inputs, ...inp }, env: { GITHUB_ACTIONS: "true", ...env } });
-  assert.deepEqual(await cp({ copilotGithubToken: "github_pat_seat", githubToken: "ghs_job" }, { COPILOT_GITHUB_TOKEN: "x" }), { env: { COPILOT_GITHUB_TOKEN: "github_pat_seat" }, basis: "copilot_github_token (step-scoped)" });
+  assert.deepEqual(await cp({ copilotGithubToken: "github_pat_seat", githubToken: "ghs_job" }, { COPILOT_GITHUB_TOKEN: "x" }), { env: { COPILOT_GITHUB_TOKEN: "github_pat_seat" }, basis: "copilot_github_token (step-scoped)", billing: "credits" });
   await assert.rejects(cp({ copilotGithubToken: "", githubToken: "ghs_job" }, {}), /no Copilot credential/, "the job token can write: never Copilot's credential");
   const local = await credentialEnv({ harness: "claude", credential: "api", inputs, env: { PATH: "/bin" } });
   assert.match(local.basis, /CLI login on this machine \(no API credential present; local fallback\)/);

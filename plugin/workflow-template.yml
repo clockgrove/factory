@@ -1,9 +1,9 @@
 # Pendulum: unattended Objectives. Written by `/pendulum setup`; edit the env block, not the jobs.
 # Triggers: cron, manual (one issue), a new pendulum:objective label or its removal, the review job's own last step,
 # pull_request when the Pendulum App labels a PR pendulum:review, and a review submitted on a Pendulum PR. Never from a fork: the Objective text (a writer) and the label (a
-# maintainer) are the only inputs. PENDULUM_AUTO_MERGE is ON: Pendulum merges the reviewed head with
-# no human read. The gate is your CI workflow's checks on that exact head (and the merge queue's
-# commit), the comment-only reviewer pass, and the queue's own re-run. Set it false for ready PRs.
+# maintainer) are the only inputs. PENDULUM_AUTO_MERGE (below) decides the merge: true merges the reviewed head
+# with no human read, gated by your CI workflow's checks on that exact head (and the merge queue's commit), the
+# comment-only reviewer pass and the queue's own re-run; false leaves a ready-for-review PR.
 name: pendulum
 on:
   schedule:

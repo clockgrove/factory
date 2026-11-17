@@ -27,7 +27,7 @@ copilot plugin marketplace add clockgrove/pendulum && copilot plugin install pen
 
 ## Start
 
-In a session in your repository, say: **"Set up Clockgrove Pendulum for this repository."** Setup asks a few questions, shows each change and waits for your yes, and opens a pull request that adds Pendulum's workflow; Pendulum starts once you merge it. To run on your own machine on the Claude Code or Codex login you already have, say "Set up Clockgrove Pendulum in local mode" instead.
+In a session in your repository, say: **"Set up Pendulum for this repository."** Setup asks a few questions, shows each change and waits for your yes, and opens a pull request that adds Pendulum's workflow; Pendulum starts once you merge it. To run on your own machine on the Claude Code or Codex login you already have, say "Set up Pendulum in local mode" instead.
 
 ## Documentation
 

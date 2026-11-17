@@ -49,8 +49,8 @@ These run as the App when the user exported `PENDULUM_APP_TOKEN`, or `PENDULUM_A
 The workflow does nothing until `.github/workflows/pendulum.yml` is on the default branch: its cron and its triggers start there. Land it through a pull request, so the repository's own checks and rules apply:
 
 1. Start from the default branch as GitHub has it: `git fetch origin`, then `git switch -c setup-pendulum origin/<default branch>`. Never use a `pendulum/` branch name; those are Objectives' branches.
-2. Stage that one file only (`git add .github/workflows/pendulum.yml`) and check `git status` shows nothing else staged. Commit it as `Add the Clockgrove Pendulum workflow`.
-3. Push the branch and open the pull request: `gh pr create --title "Add the Clockgrove Pendulum workflow" --body-file <file>`. The body says, in a few lines: what Clockgrove Pendulum does (an issue labelled `pendulum:objective` becomes a merged pull request), what this file adds (the jobs and their triggers, never from a fork), the Action tag it pins, and that the cron starts once this merges.
+2. Stage that one file only (`git add .github/workflows/pendulum.yml`) and check `git status` shows nothing else staged. Commit it as `Add the Pendulum workflow`.
+3. Push the branch and open the pull request: `gh pr create --title "Add the Pendulum workflow" --body-file <file>`. The body says, in a few lines: what Pendulum does (an issue labelled `pendulum:objective` becomes a merged pull request), what this file adds (the jobs and their triggers, never from a fork), the Action tag it pins, and that the cron starts once this merges.
 4. A push GitHub refuses for the workflow scope is fixed by `gh auth refresh -s workflow`, run by the user; say so and try again after it.
 5. Print the pull request's URL. Merging is the user's: do not merge it or turn on auto-merge unless they ask.
 

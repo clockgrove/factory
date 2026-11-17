@@ -569,6 +569,31 @@ test("finish card (#544): the summary marker carries the card's own figures, fro
   assert.deepEqual(rich.cost.why, ["sandbox", "unreported", "zeroed"]);
   assert.deepEqual(rich.stageCounts, { work: 1, rebase: 1, review: 2 });
 
+  // A stage's passes by kind, model minutes, tokens and release are its ledger's, through the report's own
+  // stagePassFigures: from its usage record here, from the ledger line beside its spend line on newer stages.
+  const { stagePassFigures } = await import("../scripts/lib/pass-figures.mjs");
+  const pass = (label, usd, started, ended) => ({ label, usd, billing: "api", usdByBilling: { api: usd }, started, ended, tokens: { input: 1000, output: 10, cached: 500, written: 200 } });
+  const ledgers = [[pass("work-1", 0.3, "2026-11-17T02:24:40Z", "2026-11-17T02:25:10Z"), pass("answer", 0.05637, "2026-11-17T02:25:20Z", "2026-11-17T02:25:50Z")], [pass("review", 0.163442, "2026-11-17T02:26:21Z", "2026-11-17T02:26:51Z")]];
+  const withLedger = withSelf(() => data({ records: real.records.map((r, i) => ({ ...r, ledger: ledgers[i], ran: { pendulum: "0.10.1" }, tokens: { input: 1000 * ledgers[i].length, output: 10, cached: 0, written: 0 } })) }));
+  const sum = card.readSummary(card.finishCardBody(withLedger), 3);
+  assert.deepEqual(sum, card.finishSummary(withLedger));
+  assert.deepEqual(sum.stages.map((x) => x.passes), ledgers.map(stagePassFigures));
+  assert.deepEqual(sum.stages.map((x) => x.passes.map((k) => [k.kind, k.passes, k.minutes])), [[["work", 1, 0.5], ["answer", 1, 0.5]], [["review", 1, 0.5]]]);
+  assert.deepEqual(sum.stages.map((x) => [x.version, x.tokens.input]), [["0.10.1", 2000], ["0.10.1", 1000]]);
+  assert.deepEqual(rich.stages.map((x) => x.passes), [null, null, null, null], "no ledger, no passes: a reader reads the stages");
+  assert.deepEqual([rich.passes, rich.modelMinutes], [null, null], "an Objective's passes only when every stage's are known");
+  assert.deepEqual([sum.passes, sum.modelMinutes], [{ total: 3, answer: 1, fix: 0 }, 1.5]);
+  // A harness pass with no times: its passes count, its model minutes are not known.
+  const untimed = withSelf(() => data({ records: real.records.map((r, i) => ({ ...r, ledger: i ? [{ ...ledgers[1][0], started: null }] : ledgers[0] })) }));
+  assert.deepEqual([card.finishSummary(untimed).passes.total, card.finishSummary(untimed).modelMinutes], [3, null]);
+
+  // A summary over its bound is written with no stage's passes: a reader then reads the stages.
+  const many = Array.from({ length: 200 }, (_, i) => pass(`k${i}x`, 0.001, "2026-11-17T02:24:40Z", "2026-11-17T02:25:10Z"));
+  const huge = withSelf(() => data({ records: real.records.map((r) => ({ ...r, ledger: many })) }));
+  const hugeLine = card.finishCardBody(huge).split("\n")[1];
+  assert.ok(hugeLine.length <= card.SUMMARY_MAX);
+  assert.deepEqual(card.readSummary(hugeLine, 3).stages.map((x) => x.passes), [null, null]);
+
   // Another issue's, another version's or a broken one reads as none.
   const body = card.finishCardBody(runs[0]);
   assert.equal(card.readSummary(body, 4), null);

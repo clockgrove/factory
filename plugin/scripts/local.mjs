@@ -250,7 +250,7 @@ export const COMMANDS = {
   },
   report: {
     args: [],
-    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account|pass" }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
+    flags: { ...WHERE, since: { value: "DATE" }, until: { value: "DATE" }, issue: { value: "N[,N...]", many: true }, label: { value: "NAME" }, parent: { value: "N", number: true }, json: "bool", "max-calls": { value: "N", number: true }, by: { value: "account" }, app: { value: "ID", number: true }, self: { value: "LOGIN", many: true } },
     check: reportCheck,
     about: `cost and token use of a period (--since, --until; the ${DEFAULT_DAYS} days before --until or now, from UTC midnight, by default) or a set of Objectives (--issue, --label, --parent), every figure precomputed: --json for the documented schema (${REPORT_SCHEMA}), else Markdown; prints its planned GitHub calls first and stops at --max-calls (${DEFAULT_MAX_CALLS}), exiting ${STOPPED_EXIT} with what it read`,
   },

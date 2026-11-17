@@ -96,9 +96,9 @@
       }
     },
     "pendulum-report": {
-      "sha256": "f610b57e07b20e457740b2d73c36ed9f5d3ed6cebcc50ed4271a515004180bc6",
+      "sha256": "ea9e9edd4873d5d5e235523c54b574f645c64df8d486959e56f76213b20d4c80",
       "lines": 31,
-      "words": 649,
+      "words": 623,
       "files": {
         "reference.md": {
           "sha256": "1bda2df160b694a06504fdc0dd5e2810be8da47612ffe8b431bbc45a76af03bd",

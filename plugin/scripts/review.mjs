@@ -47,7 +47,7 @@ import { GOALS, openDrift } from "./lib/drift.mjs";
 import { openFenceCheck } from "./lib/fence-check.mjs";
 import { hunksOf } from "./lib/kept.mjs";
 import { openProgressCheck } from "./lib/fix-progress.mjs";
-import { checkAnswers, namedTestRunner, openFindingCheck } from "./lib/finding-check.mjs";
+import { checkAnswers, listedFindings, namedTestRunner, openFindingCheck } from "./lib/finding-check.mjs";
 import {
   TASK_CARD_TEMPLATE,
   applyExit as applyExitNow,
@@ -1777,6 +1777,8 @@ async function main() {
     }
     const posted = await postReview(repo, pr.number, { body: post.body, comments, commitId: read.head }, token);
     postedAt = read.head;
+    // The review this stage's reviewer raised its findings in (#546): the report counts them against this stage.
+    await progress.findings({ pr: pr.number, reviews: [posted.review?.id] });
     log(`posted review with ${comments.length} comment(s)${placeholder ? " (placeholder: nothing to answer)" : ""}${posted.moved ? `; ${posted.moved} moved to a line GitHub takes` : ""}${posted.inBody ? `; ${posted.inBody} in the review body${posted.retried ? ` (GitHub answered ${posted.retried} to the line comments)` : " (no line GitHub can take)"}, answered from there` : ""}`);
   }
   // What this stage's review covers as it goes (#350, coverAfter), recorded on the PR (recordCovered): its own answer and
@@ -1853,6 +1855,8 @@ async function main() {
   // Answers the last stage's check got no verdict on are judged again first, with no worker pass for them (a gateway
   // failure costs no answer round); one still without a verdict waits for the exit (session.mjs openFindingsExit).
   const listedOpen = await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty });
+  // The stage's findings record (#546): each open finding it lists, open until the finding check finds otherwise.
+  await progress.findings({ pr: pr.number, items: listedFindings(listedOpen), listed: true });
   // A stage started only to judge them (no answer round: checkState judgeOnly) gives the worker none of them, so a gateway
   // failure never buys an answer pass past the rounds; one read as not resolved waits for the round the exit takes.
   const lastCheck = findingCheck.judge && listedOpen.some((c) => c.earlier) ? checkState(await readAnswerRounds(repo, { issue, prNumber: pr.number, objectiveLabel: inputs.objectiveLabel }, token).catch(() => null)) : { unjudged: [] };
@@ -1864,6 +1868,7 @@ async function main() {
   }
   const held = new Set([...unjudged.map((u) => String(u.id)), ...(lastCheck.judgeOnly ? again.map((c) => String(c.id)) : [])]);
   const toAnswer = answerList(again.length ? await unaddressedReviewComments(repo, pr.number, reviewerLogin, { ...token, reviewIds: await pendulumReviewIds(), thirdParty }) : listedOpen, { placeholder, first: scope.first }).filter((c) => !held.has(String(c.id)));
+  if (again.length) await progress.findings({ items: listedFindings(toAnswer), listed: true });
   // A Question answered (a person marked the PR ready): the answer pass applies the decisions even with no comment open.
   const answerQuestion = newDecisions.length > 0 || afterPush.length > 0;
   // A red required check the stage held (heldRed: the checks the reviewer ran beside, or the merge queue's run) is the

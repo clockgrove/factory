@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { costOf, coversLine, decisionSpendRecords, loadPrices, stageHarnessOf, stageOf, stageSpendRecords, withLines, ACCOUNT } from "./cost-join.mjs";
 import { downloadArtifactResult, ownRunArtifact, rest } from "./github.mjs";
 import { APP_ID_VARIABLE, DEFAULTS, PENDULUM_VERSION } from "./inputs.mjs";
-import { STATE_LABELS, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
+import { FINDING_OUTCOMES, STATE_LABELS, findingsOf, loginKey, pushAuthor, rebaseCostOf, setSelf, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumOwn, throughApp } from "./finish-card.mjs";
 import { BILLING, BILLING_WORDS, UNKNOWN_WHY, billingRead } from "./usage.mjs";
 
@@ -570,6 +570,10 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
   const passMinutes = new Map();
   const cacheByKind = new Map();
   const objectives = [];
+  // Review findings (#546): by reviewer and by review stage, beside the review stages' dollars.
+  const findingRows = new Map();
+  const findingStages = [];
+  const findingTotals = { findings: 0, outcomes: zeroOutcomes(), reviewStages: 0, cost: zeroCost(), unnamed: 0 };
   const trust = { own: 0, vouched: 0, ignored: 0 };
   const missing = { noRecord: new Set(), stopped: new Set(), unattributed: new Set(), noLedger: new Set(), noVersion: new Set(), unreadIssue: new Set() };
   let stagesSeen = 0;
@@ -665,6 +669,8 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       return stages.find((c) => keys.includes(runOf(c.body))) ?? null;
     };
     const localRecs = local?.get(n) ?? new Map();
+    // Each review stage's dollars and model, by its run key, for the findings it raised (#546).
+    const reviewStages = new Map();
     const row = { issue: n, title: typeof issue?.title === "string" ? issue.title : null, url: `https://github.com/${repo.full}/issues/${n}`, outcome: issue ? outcomeOf(issue, pulls, { pullsRead: source.pullsRead !== false }) : null, stages: { work: 0, rebase: 0, review: 0 }, passes: null, cost: zeroCost(), tokens: zeroTokens(), modelMinutes: null, usdPerModelMinute: null };
     const minutes = { priced: 0, passes: 0, usd: zeroCost(), unpriced: 0 };
     let ledgered = 0;
@@ -690,6 +696,11 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       const account = rec.source === "decisions" ? null : [rec.account, line?.account].find((a) => typeof a === "string" && ACCOUNT.test(a)) ?? null;
       addCost(row.cost, c);
       addCost(totals, c);
+      if (stageKind === "review" && key && !rec.unattributed) {
+        const s = reviewStages.get(key) ?? { cost: zeroCost(), model };
+        addCost(s.cost, c);
+        reviewStages.set(key, s);
+      }
       addTokens(row.tokens, tokens);
       addTokens(totalTokens, tokens);
       // A sandbox booking with no stage of its own counts its cost, but no stage.
@@ -750,6 +761,7 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       row.usdPerModelMinute = minutes.priced > 0 ? Object.fromEntries(BILLING.filter((k) => minutes.usd.usd[k] > 0).map((k) => [k, { usd: minutes.usd.usd[k], modelMinutes: round2(minutes.priced), passes: minutes.passes, usdPerModelMinute: round6(minutes.usd.usd[k] / minutes.priced) }])) : {};
       row.unpricedPasses = minutes.unpriced;
     } else if (ledgered) row.passes = null;
+    row.findings = findingsFor({ n, own: allStages, scope, runOf, reviewStages, rows: findingRows, stageRows: findingStages, totals: findingTotals });
     objectives.push(row);
   }
 
@@ -777,6 +789,12 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
       ...(by.includes("account") ? { account: views.account.rows() } : {}),
     },
     objectives,
+    findings: {
+      outcomes: [...FINDING_OUTCOMES],
+      totals: findingTotals,
+      byReviewer: [...findingRows.values()],
+      byStage: findingStages,
+    },
     hotSpots: {
       reviewLoops: { rankBy: "reviews", items: rank(objectives.filter((o) => o.stages.review > 0).map((o) => ({ issue: o.issue, reviews: o.stages.review })), "reviews") },
       answerAndFixPasses: { rankBy: "passes", items: rank(objectives.filter((o) => o.passes && o.passes.answer + o.passes.fix > 0).map((o) => ({ issue: o.issue, answer: o.passes.answer, fix: o.passes.fix, passes: o.passes.answer + o.passes.fix })), "passes"), unrecorded: objectives.filter((o) => !o.passes).map((o) => o.issue) },
@@ -790,6 +808,74 @@ export function buildReport(read, { prices = loadPrices(), by = [], now = new Da
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+/** A count per finding outcome (logic.mjs FINDING_OUTCOMES), each at zero. */
+const zeroOutcomes = () => Object.fromEntries(FINDING_OUTCOMES.map((o) => [o, 0]));
+
+/**
+ * One Objective's review findings (#546), from the findings records in Pendulum's own review progress comments (`own`,
+ * its stage comments, oldest first; logic.mjs findingsOf), never from prose. A finding's outcome is the one the latest
+ * stage that names it recorded. It was raised by the stage whose record names the review it came from (Pendulum's
+ * reviewer: that stage's reviewer model) or, for a reviewer outside Pendulum, by that login, first named in the stage
+ * that first listed it; a finding of Pendulum's reviewer whose review no record names has no reviewer (null). A
+ * finding counts when that stage is in the period. The review stages counted are the ones in the period with a record,
+ * each with its dollars (`reviewStages`: the cost loop's, by run key) and model. Adds to `rows` (by reviewer),
+ * `stageRows` (by review stage, the findings its own reviewer raised) and `totals`; returns the Objective's figures, or
+ * null when it has neither a recorded review stage in the period nor a finding.
+ */
+function findingsFor({ n, own, scope, runOf, reviewStages, rows, stageRows, totals }) {
+  const head = new RegExp(`^<!-- pendulum:${n}:progress:review:`);
+  const recorded = own
+    .filter((c) => head.test(c.body || ""))
+    .map((c) => ({ key: runOf(c.body), at: c.created_at, rec: findingsOf(c.body) }))
+    .filter((s) => s.rec && s.key);
+  const counted = recorded.filter((s) => inWindow(s.at, scope));
+  const raisedIn = new Map();
+  for (const s of recorded) for (const r of s.rec.reviews) if (!raisedIn.has(r)) raisedIn.set(r, s);
+  const byId = new Map();
+  for (const s of recorded) {
+    for (const x of s.rec.items) {
+      const had = byId.get(String(x.id));
+      byId.set(String(x.id), { first: had?.first ?? s, outcome: x.outcome, review: had?.review ?? x.review ?? null, from: had?.from ?? x.from ?? null });
+    }
+  }
+  if (!counted.length && !byId.size) return null;
+  const rowsByKey = new Map(counted.map((s) => [s.key, { issue: n, stage: s.key, model: reviewStages.get(s.key)?.model ?? null, findings: 0, outcomes: zeroOutcomes(), cost: reviewStages.get(s.key)?.cost ?? zeroCost() }]));
+  const rowOf = (key, outside) => {
+    const k = `${outside ? "outside" : "pendulum"}:${key ?? ""}`;
+    if (!rows.has(k)) rows.set(k, { key: key ?? null, outside, findings: 0, outcomes: zeroOutcomes(), reviewStages: outside ? null : 0, cost: outside ? null : zeroCost() });
+    return rows.get(k);
+  };
+  const out = { findings: 0, outcomes: zeroOutcomes(), reviewStages: counted.length, cost: zeroCost(), unnamed: 0 };
+  for (const s of counted) {
+    const r = rowOf(rowsByKey.get(s.key).model, false);
+    r.reviewStages += 1;
+    addCost(r.cost, rowsByKey.get(s.key).cost);
+    addCost(out.cost, rowsByKey.get(s.key).cost);
+    out.unnamed += s.rec.more;
+  }
+  for (const f of byId.values()) {
+    const by = f.from ? null : f.review !== null ? raisedIn.get(f.review) ?? null : null;
+    if (!inWindow((by ?? f.first).at, scope)) continue;
+    out.findings += 1;
+    out.outcomes[f.outcome] += 1;
+    const r = rowOf(f.from ?? (by ? rowsByKey.get(by.key)?.model ?? reviewStages.get(by.key)?.model ?? null : null), !!f.from);
+    r.findings += 1;
+    r.outcomes[f.outcome] += 1;
+    const st = by ? rowsByKey.get(by.key) : null;
+    if (st) {
+      st.findings += 1;
+      st.outcomes[f.outcome] += 1;
+    }
+  }
+  stageRows.push(...rowsByKey.values());
+  totals.findings += out.findings;
+  for (const o of FINDING_OUTCOMES) totals.outcomes[o] += out.outcomes[o];
+  totals.reviewStages += out.reviewStages;
+  addCost(totals.cost, out.cost);
+  totals.unnamed += out.unnamed;
+  return out;
+}
 
 /**
  * The reasons for unknown cost: per code, the stages (and decision records) naming it, and its runs where they are its
@@ -876,6 +962,16 @@ export function renderReport(r) {
   view("Pendulum version", r.breakdowns.version, "Version");
   if (r.breakdowns.account) view("account", r.breakdowns.account, "Account");
   if (r.objectives.length) out.push("", "## Objectives", "", table(["Issue", "Outcome", "Work", "Rebase", "Review", ...COST_HEAD], r.objectives.map((o) => [`#${o.issue}`, o.outcome ?? "unread", o.stages.work, o.stages.rebase, o.stages.review, ...costCells(o.cost)])));
+  const f = r.findings;
+  if (f.totals.findings || f.totals.reviewStages) {
+    const counts = (x) => [x.findings, ...f.outcomes.map((o) => x.outcomes[o])];
+    const noCost = COST_HEAD.map(() => "—");
+    out.push("", "## Review findings", "", `How each reviewer finding ended, from Pendulum's own records: ${f.totals.findings} finding(s) over ${f.totals.reviewStages} recorded review stage(s)${f.totals.unnamed ? `, and ${f.totals.unnamed} more no record names one by one` : ""}. A review stage's dollars are all its passes'; a reviewer outside Pendulum has none here.`);
+    out.push("", table(["Reviewer", "Findings", ...f.outcomes, "Review stages", ...COST_HEAD], f.byReviewer.map((x) => [x.outside ? `${x.key} (outside Pendulum)` : (x.key ?? "not recorded"), ...counts(x), x.outside ? "—" : x.reviewStages, ...(x.cost ? costCells(x.cost) : noCost)])));
+    const rows = r.objectives.filter((o) => o.findings);
+    if (rows.length) out.push("", table(["Issue", "Findings", ...f.outcomes, "Review stages", ...COST_HEAD], rows.map((o) => [`#${o.issue}`, ...counts(o.findings), o.findings.reviewStages, ...costCells(o.findings.cost)])));
+    if (f.byStage.length) out.push("", table(["Issue", "Review stage", "Model", "Findings raised", ...f.outcomes, ...COST_HEAD], f.byStage.map((x) => [`#${x.issue}`, x.stage, x.model ?? "not recorded", ...counts(x), ...costCells(x.cost)])));
+  }
   const h = r.hotSpots;
   out.push("", "## Hot spots", "", "Ranked by exact counts; nothing is flagged against a threshold.");
   const list = (title, items, line) => out.push("", `**${title}**: ${items.length ? items.map(line).join("; ") : "none"}`);

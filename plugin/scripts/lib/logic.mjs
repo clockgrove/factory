@@ -2857,6 +2857,66 @@ export function spendParts(body) {
   }
 }
 
+/**
+ * How a review finding ended (#546), from exact fields only, never from prose: `fixed-test` (a test the answer named
+ * fails without the fix and passes with it), `fixed-verdict` (the finding check's `fixed` at the confidence floor),
+ * `answered` (its `rebutted` or `decided` there: resolved without a change), `not-fixed` (the named test failed on the
+ * head, or any other verdict), `not-checkable` (no verdict, or no decision model and no test that decides: the answer
+ * stands unjudged) and `open` (no answer of Pendulum's, or its resolution could not be posted).
+ */
+export const FINDING_OUTCOMES = Object.freeze(["fixed-test", "fixed-verdict", "answered", "not-fixed", "not-checkable", "open"]);
+/** The most findings one stage's record names; the rest are counted (`more`), never named. */
+export const FINDINGS_MAX = 300;
+const FINDING_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+const findingId = (id) => (Number.isSafeInteger(id) && id > 0) || isBodyFindingId(id);
+const reviewId = (n) => Number.isSafeInteger(n) && n > 0;
+/** One finding of a record as kept: {id, outcome, review?, from?}; null when it is not one. */
+const findingItem = (x) => {
+  if (!x || typeof x !== "object" || !findingId(x.id) || !FINDING_OUTCOMES.includes(x.outcome)) return null;
+  return { id: x.id, outcome: x.outcome, ...(reviewId(x.review) ? { review: x.review } : {}), ...(typeof x.from === "string" && FINDING_LOGIN.test(x.from) ? { from: x.from } : {}) };
+};
+/**
+ * A review stage's findings record (#546), `update` merged in: `pr`; `reviews`, the ids of the reviews its own reviewer
+ * posted; `items`, each finding it handled, {id, outcome (FINDING_OUTCOMES), review (the review that raised it, for
+ * Pendulum's reviewer's), from (the login of a reviewer outside Pendulum)}, by id. A later outcome replaces an earlier
+ * one; with `listed`, the update only adds findings the record does not name yet (the stage's list of open findings,
+ * before any check of its own).
+ */
+export function mergeFindings(rec, { pr = null, reviews = [], items = [], listed = false } = {}) {
+  const byId = new Map((rec?.items || []).map((x) => [String(x.id), x]));
+  for (const raw of items || []) {
+    const x = findingItem(raw);
+    if (!x) continue;
+    const had = byId.get(String(x.id));
+    if (had && listed) continue;
+    byId.set(String(x.id), { ...had, ...x });
+  }
+  return { pr: Number.isSafeInteger(pr) && pr > 0 ? pr : (rec?.pr ?? null), reviews: [...new Set([...(rec?.reviews || []), ...(reviews || []).filter(reviewId)])], items: [...byId.values()] };
+}
+/** The progress comment's findings line (mergeFindings' record): at most FINDINGS_MAX findings, the rest as `more`. */
+export const findingsMarker = (rec) => {
+  const items = rec?.items || [];
+  const json = JSON.stringify({ ...(rec?.pr ? { pr: rec.pr } : {}), reviews: rec?.reviews || [], items: items.slice(0, FINDINGS_MAX), ...(items.length > FINDINGS_MAX ? { more: items.length - FINDINGS_MAX } : {}) });
+  return `<!-- pendulum:findings ${json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
+};
+const FINDINGS = /^<!-- pendulum:findings (\{[^\n]*\}) -->$/gm;
+/**
+ * A progress comment's findings record (findingsMarker), its last line: {pr, reviews, items, more}, each field checked as
+ * mergeFindings keeps it; null when it has none. The caller decides whose comment it trusts.
+ */
+export function findingsOf(body) {
+  const line = [...String(body || "").matchAll(FINDINGS)].at(-1);
+  if (!line) return null;
+  try {
+    const v = JSON.parse(line[1]);
+    if (!v || typeof v !== "object" || Array.isArray(v) || !Array.isArray(v.items)) return null;
+    const rec = mergeFindings(null, { pr: v.pr, reviews: Array.isArray(v.reviews) ? v.reviews : [], items: v.items });
+    return { ...rec, more: Number.isSafeInteger(v.more) && v.more > 0 ? v.more : 0 };
+  } catch {
+    return null;
+  }
+}
+
 const money = (n) => (Number.isFinite(n) ? `$${n.toFixed(n < 1 ? 4 : 2)}` : "?");
 const word = (s) => (typeof s === "string" && /^[A-Za-z0-9._:/-]{1,40}$/.test(s) ? s : "?");
 /**

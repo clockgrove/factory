@@ -11,7 +11,7 @@
 import { DRAFT_LABEL } from "./stop.mjs";
 import { DEFAULTS } from "./inputs.mjs";
 import { checkRuns, getPr, listComments, listReviewComments, ownRunArtifact, primeSelf, requiredCheckSpecs, rest, transientError, updatePr } from "./github.mjs";
-import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
+import { RUNNING_LABEL, STATE_LABELS, bodyFindings, decisionSpendEntries, isPlaceholder, isSelf, ledgerOfComment, marker, pushAuthor, rebaseCostOf, restartedAt, selfLogin, spendParts } from "./logic.mjs";
 import { pendulumNotice } from "./answer-check.mjs";
 import { BILLING_WORDS, addBilling, billingRead, passRead, rerunRead, unknownRuns } from "./usage.mjs";
 
@@ -78,6 +78,11 @@ function stageModel(body) {
     return null;
   }
 }
+/**
+ * The stage's model from the per-pass ledger line beside its spend line (logic.mjs ledgerOfComment: its usage record's
+ * model, Copilot's default one included), or null. Read from a comment the caller trusts (pendulumOwn) only.
+ */
+const ledgerModel = (body) => (spendParts(body) ? modelId(ledgerOfComment(body)?.model) : null);
 /** A GitHub login as the card may print it, else null. */
 const login = (v) => (typeof v === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(v) ? v : null);
 
@@ -153,8 +158,8 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     keys.add(`${stage}:${key}`);
     // Its dollars: the spend line it carries (every route's), else its usage record; with neither, unknown.
     const line = spendParts(c.body);
-    // Its usage record: its dollars only when it has no spend line; its model whenever its harness line names none
-    // (Copilot's default model is known only from the run's record).
+    // Its usage record: its dollars only when it has no spend line; its model whenever neither its harness line nor the
+    // ledger line beside its spend line names one (Copilot's default model is known only from the run's record).
     const record = byRun.get(`${stage}:${key}`) || null;
     const rec = line ? null : record;
     let usd = line ? (line.modelUsd ?? line.usd) : rec ? num(rec.usd) : null;
@@ -164,7 +169,7 @@ export function objectiveStages({ issue: n, comments = [], records = [], mine = 
     if (unknown && !usd) usd = null;
     const rebase = rebaseCostOf(c.body);
     const from = line ?? rec ?? {};
-    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? modelId(record?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
+    stages.push({ stage, rebase: !!rebase, conflict: !!rebase?.conflict, part: partOf(c.created_at), at: c.created_at, start: c.created_at, end: endOf(c), model: stageModel(c.body) ?? ledgerModel(c.body) ?? modelId(record?.model), usd, unknown, byBilling: billingRead(from.usdByBilling), byPass: passRead(from.usdByPass), rerun: rerunRead(from.rerun), judgeOnly: from.judgeOnly === true });
   }
   // The sandbox stages' vendor comments, matched to their stage's progress comment by key whenever they were written.
   // One with no progress comment (a stage that never wrote one) is a stage of its own, with the model dollars the vendor
@@ -208,12 +213,13 @@ export function unlinedStages(comments, n, mine = isSelf) {
 }
 
 /**
- * The progress comment keys of Pendulum's stages whose harness line names no model (Copilot at its default model), by
- * stage: the usage artifacts the finish card reads for their model alone. A stage with no harness line is none.
+ * The progress comment keys of Pendulum's stages whose harness line names no model (Copilot at its default model) and
+ * that have no ledger line naming one beside their spend line (ledgerModel), by stage: the usage artifacts the finish
+ * card reads for their model alone. A stage with no harness line is none.
  */
 export function modellessStages(comments, n, mine = isSelf) {
   const progress = new RegExp(`^<!-- pendulum:${n}:progress:(work|review):([A-Za-z0-9:-]{1,100}) -->`);
-  return comments.filter((c) => mine(c) && HARNESS_LINE.test(c.body || "") && stageModel(c.body) === null).map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => ({ stage: m[1], key: m[2] }));
+  return comments.filter((c) => mine(c) && HARNESS_LINE.test(c.body || "") && stageModel(c.body) === null && ledgerModel(c.body) === null).map((c) => progress.exec(c.body || "")).filter(Boolean).map((m) => ({ stage: m[1], key: m[2] }));
 }
 
 /**

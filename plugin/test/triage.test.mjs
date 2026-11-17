@@ -2241,7 +2241,7 @@ test("#519 validation loop: a required job cancelled at its time limit goes to t
     const detail = await redDetail({ repo: repo165, issue: 4, prNumber: 5, sha, failedRuns: [checkRun], required: [WIN], token: "t" });
     assert.equal(detail.jobs[0].cancel.text, said);
     const ask = redLines(redOfDetail(detail), { files: false }).join("\n");
-    assert.match(ask, new RegExp(`^Command: CI job ${WIN.replace(/[()]/g, "\\$&")}\nExit: ${said.replace(/[()]/g, "\\$&")}$`, "m"));
+    assert.match(ask, new RegExp(`^Command: CI job ${WIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\nExit: ${said.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
   });
 });
 

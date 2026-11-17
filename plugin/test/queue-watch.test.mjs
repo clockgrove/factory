@@ -927,7 +927,7 @@ test("queue red: a job cancelled at its time limit is never a flake: one fix pas
     // The answer pass's ask: the leg's exit is the cancel.
     assert.ok(redLines(step.red, { files: false }).includes(`Exit: ${text}`), redLines(step.red, { files: false }).join("\n"));
     // The queue Block's failed-job lines say it too.
-    assert.match(await queueFailureLines(repo, { prNumber: PR, base: "main", since: ago(3 * 3600_000), actionsToken: "job" }, { token: "t" }), new RegExp(`^\`${leg.replace(/[()]/g, "\\$&")}\`: ${text.replace(/[()]/g, "\\$&")}`));
+    assert.match(await queueFailureLines(repo, { prNumber: PR, base: "main", since: ago(3 * 3600_000), actionsToken: "job" }, { token: "t" }), new RegExp(`^\`${leg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\`: ${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 
     // The fix's head goes back in and runs past the limit again: no progress, Blocked, said as the limit again.
     queueCancel(fake, { sha: "9".repeat(40), id: 9640, ranMs: 20 * MIN + 30_000, startAgo: 36 * MIN });
@@ -935,7 +935,7 @@ test("queue red: a job cancelled at its time limit is never a flake: one fix pas
     assert.equal(await merge({}), "queue-red");
     const blocked = await reviewReads(fake, { verdict: "flaky_or_infra", confidence: 0.95 });
     assert.equal(blocked.state, "blocked");
-    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit 9999999 failed: the ${leg.replace(/[()]/g, "\\$&")} job ran past its 20-minute limit on the queue's commit 9999999, after Pendulum's fix pass, which made no progress`));
+    assert.match(blocked.reason, new RegExp(`^the merge queue's run on its commit 9999999 failed: the ${leg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} job ran past its 20-minute limit on the queue's commit 9999999, after Pendulum's fix pass, which made no progress`));
     for (const said of [step.line, blocked.line, blocked.reason]) assert.doesNotMatch(said, /own change/);
   });
   // Triage off: a job past its limit is read exactly, so it gets its fix pass too, never a re-enqueue.

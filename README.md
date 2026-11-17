@@ -64,6 +64,7 @@ Pendulum never handles a payment, and no bill comes from Clockgrove. To keep tho
 - **The commands a worker runs are sandboxed** there and see none of your credentials unless you choose to share one. The exceptions are the commands that run inside your own agent session, `/pendulum:pendulum-run --here` and `/pendulum:pendulum-review-here` ([docs/USAGE.md](docs/USAGE.md)): they are not among the places Pendulum runs and work as you, unsandboxed, with your own GitHub login.
 - **Only people you trust can start a run.** Pendulum acts on an issue only when its author can push to the repository or is a maintainer you name during setup, so a stranger's issue cannot instruct the worker.
 - **One repository per Objective.** An Objective that needs a change in another repository stops before any code is written, with a Question on the issue.
+- **Your data goes only to the services you configure,** and Pendulum has no telemetry. [Data and privacy](docs/PRIVACY.md) says what goes to your model provider, to GitHub, and to the optional AI Gateway and cloud sandbox, and what stays on your machine.
 
 ## Quick start
 
@@ -191,6 +192,7 @@ Wherever it runs, Pendulum keeps each Objective's state in GitHub: the branch, t
 | [docs/INSTALL.md](docs/INSTALL.md) | The install footprint, credentials, cost inputs, upgrade and uninstall |
 | [docs/LOCAL.md](docs/LOCAL.md) | Local mode: platforms, setup, sandboxes, settings |
 | [docs/ADAPTERS.md](docs/ADAPTERS.md) | The cloud sandbox and the other third-party adapters |
+| [docs/PRIVACY.md](docs/PRIVACY.md) | Data and privacy: what goes to the model provider, GitHub, the AI Gateway and the cloud sandbox, and what stays local |
 | [docs/PLAN.md](docs/PLAN.md) | The design: rules, contracts, security, the 1.0 bar |
 | [bench/README.md](bench/README.md) | The scorecard: how Pendulum measures whether runs finish unattended, and what they cost |
 | [Releases](https://github.com/clockgrove/pendulum/releases) | Release notes for every tag |
@@ -201,7 +203,8 @@ Pendulum is at 0.10.x, the release candidate for 1.0: run it on real work, but t
 
 - **Pin an exact tag** (`clockgrove/pendulum@vX.Y.Z`); setup does this for you. Pendulum publishes no floating tag (no `v0`, no `v1`), and release tags cannot be moved or deleted, so what your workflow runs does not change until you upgrade. The plugin in your coding agent follows `main` instead, and with it the setup, doctor and file skills.
 - **Names may still change before 1.0.** A 0.10.x release may rename an input, a label or a job as the exception, and its release notes call the change out. [docs/PLAN.md](docs/PLAN.md) (The 1.0 bar) lists what freezes at 1.0 and what Pendulum must prove to get there.
-- **Supported:** the latest 0.10.x release gets security fixes; older tags do not.
+- **Releases come often:** until 1.0, Pendulum ships small patch releases often rather than large ones rarely, and every tag gets release notes on the [Releases](https://github.com/clockgrove/pendulum/releases) page.
+- **Supported:** the latest 0.10.x release gets security fixes; older tags do not ([SECURITY.md](SECURITY.md)).
 
 ## Help and contributing
 

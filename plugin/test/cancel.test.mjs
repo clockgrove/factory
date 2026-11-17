@@ -338,3 +338,105 @@ test("the Action's work and review steps are the stage's own process, so a cance
     }
   }
 });
+
+// #532: on Actions the harness runs as the agent uid in systemd units (proc.mjs asAgent), outside the step's process
+// tree: neither the stage's exit nor the runner's kill reaches it, and on a self-hosted runner it runs on. The cancelled
+// stage reaps them itself, after its record, within the runner's grace.
+
+/**
+ * A stage as worker.mjs wires it on Actions with the agent set up (systemd), its reap's sudo, systemctl and pkill fakes in
+ * a directory of their own (onCancel's `resolve`): sudo runs what it is given; systemctl and pkill log their arguments
+ * and whether the stage's record was there yet; `systemctl kill` kills a process started outside the stage's tree, the
+ * agent's unit as far as this test goes; with `hang`, every systemctl call never returns. Signals the stage with `signal`
+ * and returns its exit, the ms from the signal to it, its log, the tools' log, its record and whether the unit is alive.
+ */
+async function cancelledOnRunner({ signal = "SIGINT", hang = false, env = {} } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "cancel-reap-"));
+  const tools = join(root, "tools");
+  mkdirSync(tools);
+  const usage = join(root, "u");
+  const calls = join(root, "calls");
+  const unit = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 60000);"], { detached: true, stdio: "ignore" });
+  unit.unref();
+  const seen = `"$(test -e ${JSON.stringify(join(usage, "result.json"))} && echo record || echo no-record)"`;
+  writeFileSync(join(tools, "sudo"), `#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n`, { mode: 0o755 });
+  writeFileSync(join(tools, "systemctl"), `#!/bin/sh\necho "systemctl $*" ${seen} >> ${JSON.stringify(calls)}\n${hang ? "exec sleep 30\n" : ""}[ "$1" = kill ] && kill -KILL ${unit.pid}\nexit 0\n`, { mode: 0o755 });
+  writeFileSync(join(tools, "pkill"), `#!/bin/sh\necho "pkill $*" ${seen} >> ${JSON.stringify(calls)}\nexit 1\n`, { mode: 0o755 });
+  const ready = join(root, "ready");
+  const script = `
+    import { mkdirSync, writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { setAgent } from ${JSON.stringify(LIB("proc.mjs"))};
+    import { cancelledEnd, onCancel } from ${JSON.stringify(LIB("session.mjs"))};
+    const usageDir = ${JSON.stringify(usage)};
+    mkdirSync(usageDir, { recursive: true });
+    setAgent({ user: "pendulum-agent", home: ${JSON.stringify(join(root, "agent-home"))}, tmp: ${JSON.stringify(join(root, "agent-home", "tmp"))}, allow: new Set(), launcher: "systemd" });
+    const resolve = (name, env) => [join(${JSON.stringify(tools)}, name), env];
+    onCancel((sig) => cancelledEnd(sig, { usageDir, fields: () => ({ harness: "claude", model: "claude-opus-5-5", progressRun: "4242", account: null, passes: 1, credentialBasis: "none" }) }), process.env, { resolve });
+    writeFileSync(${JSON.stringify(ready)}, "");
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { HOME: root, PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (c) => (out += c));
+  child.stderr.on("data", (c) => (out += c));
+  const exited = new Promise((r) => child.on("exit", (code, sig) => r({ code, sig, at: Date.now() })));
+  const alive = () => {
+    try {
+      process.kill(unit.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    assert.ok(await until(() => existsSync(ready) || child.exitCode !== null), out);
+    assert.ok(existsSync(ready), out);
+    const sent = Date.now();
+    child.kill(signal);
+    const end = await Promise.race([exited, new Promise((r) => setTimeout(() => r(null), 15_000).unref())]);
+    assert.ok(end, `the stage did not exit on ${signal}:\n${out}`);
+    // The unit is this process's child: a killed one is gone once the event loop has collected it.
+    await until(() => !alive(), 1_000);
+    const file = join(usage, "result.json");
+    return { end: { code: end.code, sig: end.sig }, ms: end.at - sent, out, calls: existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [], record: existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null, unitAlive: alive() };
+  } finally {
+    child.kill("SIGKILL");
+    kill(unit.pid);
+  }
+}
+
+test("a stage cancelled on Actions writes its record, then stops the agent's units and processes, within the runner's grace", async () => {
+  const { CANCEL_GRACE_MS } = await import("../scripts/lib/session.mjs");
+  const r = await cancelledOnRunner({ signal: "SIGINT" });
+  assert.deepEqual(r.end, { code: 130, sig: null }, r.out);
+  assert.equal(r.record?.exit, "cancelled", r.out);
+  // Each step after the record; the agent's units by their prefix and the agent's uid, nothing else of the runner's.
+  assert.deepEqual(r.calls, ["systemctl kill --signal=SIGKILL pendulum-agent-* record", "systemctl stop pendulum-agent-* record", "pkill -KILL -u pendulum-agent record"]);
+  assert.equal(r.unitAlive, false, "the agent's unit is stopped");
+  assert.ok(r.ms < CANCEL_GRACE_MS.SIGINT, `the stage exited ${r.ms} ms after the signal`);
+  assert.match(r.out, /agent reaped: units kill exit 0, units stop exit 0, uid kill exit 1/);
+});
+
+test("a reap that hangs is cut off at its bound, the agent's uid still killed, and the stage exits inside the grace", async () => {
+  const { CANCEL_GRACE_MS } = await import("../scripts/lib/session.mjs");
+  const { REAP_NOW_MS } = await import("../scripts/lib/proc.mjs");
+  // SIGTERM first: the runner's last 2.5 s.
+  const r = await cancelledOnRunner({ signal: "SIGTERM", hang: true });
+  assert.deepEqual(r.end, { code: 143, sig: null }, r.out);
+  assert.equal(r.record?.exit, "cancelled", "the record, written before the reap");
+  assert.deepEqual(r.calls, ["systemctl kill --signal=SIGKILL pendulum-agent-* record", "systemctl stop pendulum-agent-* record", "pkill -KILL -u pendulum-agent record"], "each hung step cut at its share, the next still run");
+  assert.match(r.out, /agent reaped: units kill cut, units stop cut, uid kill exit 1/);
+  assert.ok(r.ms < Math.min(CANCEL_GRACE_MS.SIGTERM, REAP_NOW_MS) + 1_000, `the stage exited ${r.ms} ms after the signal`);
+});
+
+test("only an Actions stage reaps the agent on a cancel: never in local mode or a cloud sandbox stage", async () => {
+  const actions = await cancelledOnRunner();
+  assert.equal(actions.calls.length, 3, actions.out);
+  for (const env of [{ PENDULUM_LOCAL: "1" }, { PENDULUM_STAGE_SANDBOX: "1" }]) {
+    const r = await cancelledOnRunner({ env });
+    assert.deepEqual(r.calls, [], `${JSON.stringify(env)}: nothing reaped\n${r.out}`);
+    assert.equal(r.unitAlive, true, JSON.stringify(env));
+    assert.equal(r.record, null, `${JSON.stringify(env)}: no cancel path at all`);
+  }
+});

@@ -1,6 +1,6 @@
 // Child processes: run to completion with optional stdin, a wall clock, and captured
 // stdout/stderr. Used for gh, git and the harness CLIs. No dependencies.
-import { execFile, execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, closeSync, constants, fstatSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
@@ -179,9 +179,7 @@ export function runnerCommand(cmd, env) {
 export async function reapAgent() {
   if (!AGENT) return;
   if (AGENT.launcher === "namespace") return reapNamespace(AGENT.user);
-  await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "kill", "--signal=SIGKILL", `${UNIT_PREFIX}*`], { env: { PATH: SAFE_PATH } });
-  await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", `${UNIT_PREFIX}*`], { env: { PATH: SAFE_PATH } });
-  await exec("/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-u", AGENT.user], { env: { PATH: SAFE_PATH } });
+  for (const { args } of reapSteps("systemd", AGENT.user, FIXED_TOOL)) await exec("/usr/bin/sudo", args, { env: { PATH: SAFE_PATH } });
 }
 
 /**
@@ -189,8 +187,60 @@ export async function reapAgent() {
  * no agent registered (the stage in a cloud sandbox, whose worker child registered it and may have died mid-command).
  */
 export async function reapNamespace(user) {
-  await exec("/usr/bin/sudo", ["-n", "/bin/sh", "-c", `[ -e ${AGENT_CGROUP}/cgroup.kill ] && echo 1 > ${AGENT_CGROUP}/cgroup.kill || true`], { env: { PATH: SAFE_PATH } });
-  await exec("/usr/bin/sudo", ["-n", "/usr/bin/pkill", "-KILL", "-u", user], { env: { PATH: SAFE_PATH } });
+  for (const { args } of reapSteps("namespace", user, FIXED_TOOL)) await exec("/usr/bin/sudo", args, { env: { PATH: SAFE_PATH } });
+}
+
+/** The system tools the async reaps name under sudo. */
+const FIXED_TOOL = (name) => ({ systemctl: "/usr/bin/systemctl", pkill: "/usr/bin/pkill", sh: "/bin/sh" })[name];
+
+/**
+ * A reap's steps in order, each {step: what it does, args: sudo's arguments}, `tool(name)` the absolute path of each tool
+ * sudo runs: on the systemd launcher every unit named UNIT_PREFIX killed whole and stopped, on the namespace launcher
+ * AGENT_CGROUP killed whole; then whatever of the agent's uid is left. Nothing outside the agent's units, cgroup and uid.
+ */
+function reapSteps(launcher, user, tool) {
+  const units =
+    launcher === "namespace"
+      ? [{ step: "cgroup kill", args: ["-n", tool("sh"), "-c", `[ -e ${AGENT_CGROUP}/cgroup.kill ] && echo 1 > ${AGENT_CGROUP}/cgroup.kill || true`] }]
+      : [
+          { step: "units kill", args: ["-n", tool("systemctl"), "kill", "--signal=SIGKILL", `${UNIT_PREFIX}*`] },
+          { step: "units stop", args: ["-n", tool("systemctl"), "stop", `${UNIT_PREFIX}*`] },
+        ];
+  return [...units, { step: "uid kill", args: ["-n", tool("pkill"), "-KILL", "-u", user] }];
+}
+
+/** The most the cancel path's reap (reapAgentNow) takes: it comes after the stage's record, inside the runner's grace. */
+export const REAP_NOW_MS = 2_000;
+
+/**
+ * reapAgent at once, with no await, for a stage exiting on a stop signal (session.mjs onCancel): the same steps, sudo and
+ * every tool under it the system's own (runnerCommand, or `resolve` in its place), all of them within `ms`. Each step
+ * gets an even share of the time left, so one that hangs (a systemctl waiting on D-Bus) is killed at its share and the
+ * next still runs. Returns each step's {step, end}: `exit N`, `cut` (killed at its share, or no time was left for it) or
+ * `not started` (its tool or sudo not in the system directories, or a spawn that failed); an empty list when no agent is
+ * set up.
+ */
+export function reapAgentNow(ms = REAP_NOW_MS, { resolve = runnerCommand } = {}) {
+  if (!AGENT) return [];
+  const until = Date.now() + ms;
+  const tool = (name) => {
+    try {
+      return resolve(name, { PATH: SAFE_PATH })[0];
+    } catch {
+      return null;
+    }
+  };
+  const sudo = tool("sudo");
+  const steps = reapSteps(AGENT.launcher === "namespace" ? "namespace" : "systemd", AGENT.user, tool);
+  return steps.map(({ step, args }, i) => {
+    if (!sudo || !args[1]) return { step, end: "not started" };
+    const share = Math.floor((until - Date.now()) / (steps.length - i));
+    if (share <= 0) return { step, end: "cut" };
+    // No pipes (stdio ignored): killing sudo at its share ends the wait, whatever sudo started.
+    const r = spawnSync(sudo, args, { cwd: "/", env: { PATH: SAFE_PATH }, stdio: "ignore", timeout: share, killSignal: "SIGKILL" });
+    if (r.error?.code === "ETIMEDOUT") return { step, end: "cut" };
+    return { step, end: r.error ? "not started" : `exit ${r.status}` };
+  });
 }
 
 /** How often a `fileStdio` run's output files are read for what was added. */

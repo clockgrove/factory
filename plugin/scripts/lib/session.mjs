@@ -62,7 +62,7 @@ import {
 import { PENDULUM_VERSION, log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
-import { agentUser, atStop, exec, git, runnerCommand, trapStops } from "./proc.mjs";
+import { REAP_NOW_MS, agentUser, atStop, exec, git, reapAgentNow, runnerCommand, trapStops } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
 import { RELAUNCH_MAX } from "./relaunch.mjs";
@@ -2431,16 +2431,38 @@ export async function stoppedEnd({ cause, label, repo, issue, pr = undefined, fi
 }
 
 /**
+ * What the runner leaves a step after each stop signal before it kills what is left (SIGINT, 7.5 s, SIGTERM, 2.5 s), less
+ * the stage's own exit: the time from the first signal the stage sees to that kill.
+ */
+export const CANCEL_GRACE_MS = { SIGINT: 9_750, SIGTERM: 2_250, SIGHUP: 2_250 };
+
+/** The least time the cancel path's reap gets, whatever the record and the session took: its first kill always goes out. */
+export const CANCEL_REAP_MIN_MS = 500;
+
+/**
  * A work or review stage's end when its GitHub Actions job is cancelled. The runner sends the step's process SIGINT, then
  * SIGTERM, then kills what is left, a few seconds apart; `end(sig)` (cancelledEnd) runs on the first of them, before the
- * process exits (proc.mjs trapStops and atStop), so it is synchronous and makes no network call. Not in local mode, whose
- * loop stops its own stages, and not in a cloud sandbox, whose stage writes the record of a child it ended (stage.mjs
- * killedRecord). Returns what removes it.
+ * process exits (proc.mjs trapStops and atStop), so it is synchronous and makes no network call. After it, whatever ended
+ * it, the agent's harness is reaped (proc.mjs reapAgentNow): it runs as the agent uid in systemd units (or the namespace
+ * launcher's cgroup), outside the step's process tree, so neither the stage's exit nor the runner's kill reaches it, and on a self-hosted runner it would run on.
+ * The reap has what is left of the runner's grace since the signal (CANCEL_GRACE_MS), at most REAP_NOW_MS and at least
+ * CANCEL_REAP_MIN_MS; `resolve` stands in for runnerCommand there. Not in local mode, whose loop stops its own stages,
+ * and not in a cloud sandbox, whose stage writes the record of a child it ended and reaps its agent (stage.mjs
+ * afterKill). Returns what removes it.
  */
-export function onCancel(end, env = process.env) {
+export function onCancel(end, env = process.env, { resolve } = {}) {
   if (backend(env).name !== "actions" || env.PENDULUM_STAGE_SANDBOX === "1") return () => {};
   trapStops();
-  return atStop(end);
+  return atStop((sig) => {
+    const at = Date.now();
+    try {
+      end(sig);
+    } finally {
+      const left = (CANCEL_GRACE_MS[sig] ?? CANCEL_GRACE_MS.SIGTERM) - (Date.now() - at);
+      const reaped = reapAgentNow(Math.max(CANCEL_REAP_MIN_MS, Math.min(REAP_NOW_MS, left)), resolve ? { resolve } : {});
+      if (reaped.length) log(`the cancelled stage's agent reaped: ${reaped.map((r) => `${r.step} ${r.end}`).join(", ")}`);
+    }
+  });
 }
 
 /**

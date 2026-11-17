@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLOCK_SKEW_MS, STEP_BASELINE_RUNS, answersComment, evaluateChecks, pendulumReply, gateStarted, filesDiff, fitToFiles, isPlaceholder, isSelf, marker, parseWake, pooled, reviewBody, reviewComment, selfLogin, setMaintainers, setSelf, setWriters, spendOf, trustedAuthor, unpatchedFiles, writersRepo } from "./logic.mjs";
+import { addBilling } from "./usage.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
 import { exec } from "./proc.mjs";
 import { OUTAGE, RATE_LIMIT_SPENT, UNREACHABLE, causeCode, clearSpent, downFor, networkBack, noteSpent, outageOn, quotaKey, quotaNow, quotaResource, spentCandidate, spentOn, spentResetOf, spentUntil, stoppedWaiting, waitingOutages } from "./network.mjs";
@@ -1620,7 +1621,7 @@ const USAGE_DOWNLOADS = 8;
 /**
  * Today's spend by runs that upload no usage artifact (local mode, any machine, a cloud sandbox): the spend lines in
  * the progress comments and a sandbox stage's vendor comments updated today, written by Pendulum or someone who can
- * push, as `{usd, unknown}` (logic.mjs spendOf: the known dollars and the runs of unknown cost). Actions runs write
+ * push, as `{usd, unknown, byBilling}` (logic.mjs spendOf: the known dollars, the runs of unknown cost, the dollars by billing). Actions runs write
  * none, so nothing here is counted twice with the artifacts.
  */
 export async function localSpendToday(repo, { dateIso = new Date().toISOString().slice(0, 10), token } = {}) {
@@ -1628,13 +1629,16 @@ export async function localSpendToday(repo, { dateIso = new Date().toISOString()
   const comments = (await rest(`repos/${repo.full}/issues/comments?since=${dateIso}T00:00:00Z&per_page=100`, { token, paginate: true })) || [];
   let usd = 0;
   let unknown = 0;
+  const lines = [];
   for (const c of comments) {
     if (!trustedAuthor(c) || !/^<!-- pendulum:\d+:(?:progress|vendor):/.test(c.body || "") || !String(c.updated_at || "").startsWith(dateIso)) continue;
     const s = spendOf(c.body);
     usd += s.usd;
     unknown += s.unknown;
+    lines.push(s.byBilling);
   }
-  return { usd, unknown };
+  // The known dollars by what they are (usage.mjs BILLING), said beside the day's figure.
+  return { usd, unknown, byBilling: addBilling(...lines) };
 }
 
 /** Usage artifacts uploaded today (UTC), as parsed result.json records. */

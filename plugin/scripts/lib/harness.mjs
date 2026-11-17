@@ -96,8 +96,8 @@ export function scrubbedEnv(base = process.env, extra = {}) {
 }
 
 /**
- * The credential each harness child gets, and nothing else. Returns {env, basis}
- * or throws when the configured credential is absent.
+ * The credential each harness child gets, and nothing else. Returns {env, basis, billing} (`billing`: what the run's
+ * dollars are, usage.mjs BILLING) or throws when the configured credential is absent.
  *   claude  api : ANTHROPIC_API_KEY, or a federated short-lived token (see federate())
  *           plan: CLAUDE_CODE_OAUTH_TOKEN (a developer's own repository only)
  *   codex   api : PENDULUM_CODEX_GATEWAY_KEY (the codex_gateway_key input) when set: Codex through the Vercel AI
@@ -119,6 +119,17 @@ export function hasApiCredential({ harness, inputs, env = process.env }) {
   return false;
 }
 
+/**
+ * What a CLI login's dollars are (usage.mjs BILLING), from the variables it carries (`env`, credentialEnv's): Copilot's
+ * are included credits; Claude's or Codex's are billed spend when an API key variable is among them, else the CLI's own
+ * sign-in, a subscription's (a Claude pass that reports an API key or a third-party provider is billed: passBilling).
+ */
+export function loginBilling(harness, env = {}) {
+  if (harness === "copilot") return "included-credits";
+  const key = harness === "claude" ? env.ANTHROPIC_API_KEY : env.CODEX_API_KEY || env.OPENAI_API_KEY;
+  return key && !chatgptLogin(key) ? "api" : "subscription";
+}
+
 export async function credentialEnv({ harness, credential, inputs: asked, env: given = process.env, session = null }) {
   const out = {};
   // On an account its credential is the step's own input alone (lib/accounts.mjs routeInputs).
@@ -134,24 +145,24 @@ export async function credentialEnv({ harness, credential, inputs: asked, env: g
     // Whatever the developer's shell already carries for the CLI's own sign-in; not the gateway key, which would turn
     // the run onto the gateway (codexGatewayOf).
     for (const k of MODEL_SECRET_KEYS) if (env[k] && k !== CODEX_GATEWAY_ENV) out[k] = env[k];
-    return { env: out, basis: `${harness} CLI login on this machine${credential === "api" ? " (no API credential present; local fallback)" : ""}` };
+    return { env: out, basis: `${harness} CLI login on this machine${credential === "api" ? " (no API credential present; local fallback)" : ""}`, billing: loginBilling(harness, out) };
   }
   if (harness === "claude") {
     if (credential === "plan") {
       const tok = inputs.claudeCodeOauthToken || env.CLAUDE_CODE_OAUTH_TOKEN;
       if (!tok) throw new Error(named("credential: plan needs CLAUDE_CODE_OAUTH_TOKEN (claude setup-token); use it only on your own repository"));
       out.CLAUDE_CODE_OAUTH_TOKEN = tok;
-      return { env: out, basis: "plan token" };
+      return { env: out, basis: "plan token", billing: "subscription" };
     }
     const key = inputs.anthropicApiKey || env.ANTHROPIC_API_KEY;
     if (key) {
       out.ANTHROPIC_API_KEY = key;
-      return { env: out, basis: "ANTHROPIC_API_KEY" };
+      return { env: out, basis: "ANTHROPIC_API_KEY", billing: "api" };
     }
     const fed = account ? null : await federate({ exchangeUrl: inputs.anthropicOidcExchangeUrl, env });
     if (fed) {
       out.ANTHROPIC_API_KEY = fed;
-      return { env: out, basis: "workload identity federation" };
+      return { env: out, basis: "workload identity federation", billing: "api" };
     }
     throw new Error(account ? named("no Claude credential: set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN with credential: plan)") : "no Claude credential: set ANTHROPIC_API_KEY, or id-token: write with anthropic_oidc_exchange_url for federation");
   }
@@ -162,19 +173,20 @@ export async function credentialEnv({ harness, credential, inputs: asked, env: g
     if (inputs.codexGatewayKey) {
       out[CODEX_GATEWAY_ENV] = inputs.codexGatewayKey;
       out.PENDULUM_GATEWAY_SESSION = session || gatewaySession({});
-      return { env: out, basis: `${CODEX_GATEWAY_ENV} (Vercel AI Gateway, step-scoped)` };
+      return { env: out, basis: `${CODEX_GATEWAY_ENV} (Vercel AI Gateway, step-scoped)`, billing: "api" };
     }
     const key = inputs.codexApiKey || env.CODEX_API_KEY;
     if (!key) throw new Error(named("no Codex credential: set CODEX_API_KEY (or PENDULUM_CODEX_GATEWAY_KEY) on the worker step"));
     out.CODEX_API_KEY = key;
-    return { env: out, basis: "CODEX_API_KEY (step-scoped)" };
+    // A ChatGPT login (an auth.json or its token, local mode only) is the plan's: its table-priced tokens are no charge.
+    return { env: out, basis: "CODEX_API_KEY (step-scoped)", billing: chatgptLogin(key) ? "subscription" : "api" };
   }
   if (harness === "copilot") {
     // Never the job's own token: it can write to the repository, and the harness holds no GitHub write access.
     const tok = inputs.copilotGithubToken || env.COPILOT_GITHUB_TOKEN;
     if (!tok) throw new Error(named("no Copilot credential: set copilot_github_token, the secret COPILOT_GITHUB_TOKEN (a fine-grained token with only the Copilot Requests permission)"));
     out.COPILOT_GITHUB_TOKEN = tok;
-    return { env: out, basis: inputs.copilotGithubToken ? "copilot_github_token (step-scoped)" : "COPILOT_GITHUB_TOKEN" };
+    return { env: out, basis: inputs.copilotGithubToken ? "copilot_github_token (step-scoped)" : "COPILOT_GITHUB_TOKEN", billing: "included-credits" };
   }
   throw new Error(`unknown harness ${harness}`);
 }
@@ -505,7 +517,9 @@ export async function stageSpendSoFar() {
 export function stageSpendNow() {
   // Each session's last reported total, as `usd` counted it: a running pass's share is not in either until it ends.
   const totals = Object.fromEntries(SESSION_TOTALS);
-  const usd = STAGE_SPEND.done + (Number(activeRelay()?.totals().usd) || 0);
+  // The relayed worker key's spend so far (gateway-relay.mjs): billed API spend, whatever the harness's credential.
+  const keyUsd = Math.max(0, Number(activeRelay()?.totals().usd) || 0);
+  const usd = STAGE_SPEND.done + keyUsd;
   const unknown = STAGE_SPEND.unknown + STAGE_SPEND.open.size;
   const { dir, harness } = STAGE_SPEND;
   const commit = () => {
@@ -516,7 +530,7 @@ export function stageSpendNow() {
       log(`session totals not written: ${String(e?.message || e).slice(0, 120)}`);
     }
   };
-  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, unknown, commit };
+  return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, keyUsd: Math.round(keyUsd * 1e6) / 1e6, unknown, commit };
 }
 /**
  * A pass counted as running from its start until `end(rec)` books its record: its known dollars, and its runs of unknown

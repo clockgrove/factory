@@ -20,6 +20,7 @@ import { log, mask, parseArgs, resolveInputs, setOutput } from "./lib/inputs.mjs
 import { listLocks, lockBase, sweepLocks } from "./lib/lock.mjs";
 import { writeSandboxRecord } from "./launch.mjs";
 import { KEEP_LAUNCHES, queueHungMs, NOT_READY_STATUSES, RETRY_WAKE_MS, LAUNCH_JOB_MS, REVIEW_LABEL, launchJobState, lostLaunch, pendingMarkers, runGone, SWEEP_WAKE_KINDS, WAKE_SLACK_MS, wakeKinds, checksResume, doneRecord, doneTidies, launchedSince, marker, missedAnswer, questionFormOf, nextUtcMidnight, nextWake, parseWake, pooled, quotaWaiting, sandboxRecord, isSelf, selectReady, selfLogin, setSelf, trustedAuthor, stageHolds, startRetryAt, staleDecision, transientHold, refusalStreakAt, restartedAt, vendorEvidence, stateOf, spendText, stopwatch, sumSpend, timingLine, REBASE_LIMIT } from "./lib/logic.mjs";
+import { addBilling } from "./lib/usage.mjs";
 import { CLAIM_PAUSE_MS, LOCAL_LABEL, adoptLocal, hasLocalLabel } from "./lib/local.mjs";
 import { MAX_PARTS, nextPart } from "./lib/handoff.mjs";
 import { waitOf, waitState } from "./lib/third-party-review.mjs";
@@ -95,7 +96,9 @@ export async function todaysSpend(repo, inputs, { token, now = new Date() }) {
   }
   // A record whose stage also wrote a spend line (a cloud sandbox stage) is counted there, once.
   const artifacts = sumSpend(records.filter((r) => !r?.spendInProgress));
-  return { spentToday: usageError ? Number.POSITIVE_INFINITY : artifacts.usd + local.usd, unknownToday: usageError ? 0 : artifacts.unknown + local.unknown, records, usageError };
+  // The known dollars by what they are (usage.mjs BILLING): said beside the day's figure, which daily_usd compares whole.
+  const billingToday = usageError ? {} : addBilling(artifacts.byBilling, local.byBilling);
+  return { spentToday: usageError ? Number.POSITIVE_INFINITY : artifacts.usd + local.usd, unknownToday: usageError ? 0 : artifacts.unknown + local.unknown, billingToday, records, usageError };
 }
 
 /** Why a tick starts nothing while GitHub's primary rate limit is spent (reset at `resetAt`, ms). */
@@ -697,7 +700,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   const capHold = (n) => {
     if (!dayCapped) return false;
     if (!spentNow.usageError) due(null, "daily-cap", nextUtcMidnight(now.getTime()));
-    log(`  #${n}: its stage was lost; relaunched once daily_usd allows (${spentNow.usageError ? "today's spend unread" : `${spendText({ usd: spentNow.spentToday, unknown: spentNow.unknownToday })} of $${Number(inputs.dailyUsd)}`})`);
+    log(`  #${n}: its stage was lost; relaunched once daily_usd allows (${spentNow.usageError ? "today's spend unread" : `${spendText({ usd: spentNow.spentToday, unknown: spentNow.unknownToday, byBilling: spentNow.billingToday })} of $${Number(inputs.dailyUsd)}`})`);
     return true;
   };
   // What to do with one lost stage, decided on its timeline (labels and comments): `{relaunch, tries, record}` or
@@ -1344,7 +1347,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   // loop's paused ones too, which stay Running), never only the ones this route picks from. Drafts are not in `issues`.
   const running = issues.filter((i) => stateOf(i, statuses[i.number] ?? null) === "Running").length;
 
-  const { spentToday, unknownToday, records, usageError } = await spend;
+  const { spentToday, unknownToday, billingToday, records, usageError } = await spend;
   if (usageError) retry("today's spend");
   watch.mark("spend");
 
@@ -1434,6 +1437,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
       dailyUsd: inputs.dailyUsd,
       spentToday,
       unknownToday,
+      billingToday,
     });
   let picked = pick();
   // GitHub's REST quota spent, read once for this tick: nothing starts (below), so no start is read.
@@ -1644,7 +1648,7 @@ export async function dispatch(inputs, { token, notice = null, now = new Date(),
   watch.mark("mark");
   // The Queued Objectives this route leaves to the other one: a local loop says how many once (#455).
   const unrouted = inputs.issue ? [] : issues.filter((i) => !wanted.includes(i) && stateOf(i, statuses[i.number] ?? null) === "Queued").map((i) => i.number);
-  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, unknownToday: usageError ? 0 : unknownToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
+  return { ...picked, unrouted, unmarked, skipped: [...draftSkips, ...picked.skipped], deadlines, relaunch: relaunch.filter((n) => !picked.ready.includes(n)), relaunched, relaunchesUsed, updated, nextParts, merged, running, spentToday: usageError ? 0 : spentToday, unknownToday: usageError ? 0 : unknownToday, billingToday: usageError ? {} : billingToday, usageError, usageRecords: records.length, relationSource, project: project?.title ?? null, reset, answered, released, done, stopped, restarted, vanished, paused, unclaimed, sentBack, rebaseHeld, thirdPartyResumed, accountResumed, reviewHeld: reviewHeld.map((h) => h.issue.number), reviewResumed, queue, queueWatch, ms: watch.ms };
 }
 
 /**
@@ -1802,6 +1806,8 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
     spent_today_usd: Math.round(result.spentToday * 100) / 100,
     // Today's runs of unknown cost (usage.mjs UNKNOWN_WHY): beside the known dollars, never in them.
     spent_today_unknown_runs: result.unknownToday ?? 0,
+    // Today's known dollars by what they are (usage.mjs BILLING): billed API spend, API-equivalent figures.
+    spent_today_by_billing: result.billingToday ?? {},
     daily_usd: inputs.dailyUsd,
     max_concurrent: inputs.maxConcurrent,
     skipped: result.skipped,
@@ -1825,7 +1831,7 @@ export function reportDispatch(result, inputs, { json = false } = {}) {
   if (json) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
   else {
     log(`objectives ready: ${result.ready.length ? result.ready.map((n) => `#${n}`).join(", ") : "none"}${result.reason ? ` (${result.reason})` : ""}${result.usageError ? ` [usage unreadable: ${result.usageError}]` : ""}`);
-    log(`running: ${result.running}, spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs })} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
+    log(`running: ${result.running}, spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} of $${inputs.dailyUsd}, blocking from ${result.relationSource}, board: ${result.project ?? "none (labels)"}, merge queue: ${result.queue ? "on (a conflicting PR goes back to the worker once)" : "off (a behind or conflicting PR goes back to the worker once)"}`);
     for (const n of result.vanished) log(`  #${n}: Running with no job alive; Blocked`);
     for (const n of result.relaunched || []) log(`  #${n}: its stage was lost to a network failure or vanished; relaunched`);
     for (const n of result.relaunchesUsed || []) log(`  #${n}: its stage ended on its network with its relaunches used; Blocked`);
@@ -1910,7 +1916,7 @@ async function main() {
   setOutput("image_owed", owed ? "true" : "");
   if (process.env.GITHUB_STEP_SUMMARY) {
     const { appendFileSync } = await import("node:fs");
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs })} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pendulum dispatch\n\nReady: ${result.ready.map((n) => `#${n}`).join(", ") || "none"}  \nRunning: ${result.running} · Spent today: ${spendText({ usd: summary.spent_today_usd, unknown: summary.spent_today_unknown_runs, byBilling: summary.spent_today_by_billing })} / $${inputs.dailyUsd}\n\n${result.skipped.map((s) => `- #${s.number}: ${s.reason}`).join("\n")}\n`);
   }
 }
 

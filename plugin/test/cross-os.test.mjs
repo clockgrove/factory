@@ -1,6 +1,6 @@
 import "./temp.mjs";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, fork } from "node:child_process";
 import { EventEmitter } from "node:events";
 import net from "node:net";
 import { promisify } from "node:util";
@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { decideExit, sandboxMarkerLine, setSelf } from "../scripts/lib/logic.mjs";
 import { launchOne } from "../scripts/launch.mjs";
-import { readHandOver, stageDispatchBody } from "../scripts/stage.mjs";
+import { forwardAsks, readHandOver, stageDispatchBody } from "../scripts/stage.mjs";
 import { RETRY } from "../scripts/lib/github.mjs";
 import { WORKFLOW_ONLY_SETTINGS, resolveInputs } from "../scripts/lib/inputs.mjs";
-import { crossOs, crossOsAsk, crossOsChecks, launcherDispatch, launcherRelay, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
+import { RELAY_WAIT_MS, crossOs, crossOsAsk, crossOsChecks, launcherDispatch, launcherRelay, legsLine, workflowProblem } from "../scripts/lib/cross-os.mjs";
 import { openProgressCheck } from "../scripts/lib/fix-progress.mjs";
 import { parseYaml } from "../scripts/lib/yaml.mjs";
 import { workValidation } from "../scripts/lib/session.mjs";
@@ -49,12 +49,13 @@ const CI = "name: CI\non:\n  pull_request:\n  workflow_dispatch:\npermissions:\n
  *   `legs(sha, 2)`), as a re-dispatch or the workflow's concurrency group would.
  * The head a dispatch runs on is the checkout's HEAD then.
  */
-async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, replaced = false, appActions = true, record = null, branchAt = null, log }, fn) {
+async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => [], dispatch = "auto", workflow = CI, noRunner = false, replaced = false, appActions = true, record = null, branchAt = null, failHead = () => false, dispatchOn = null, log }, fn) {
   const realFetch = globalThis.fetch;
   const before = process.env.GITHUB_API_URL;
   process.env.GITHUB_API_URL = "https://github.test";
   // `tokens`: the token of each workflow dispatch; `stageAsks`: the stage's repository dispatches to its launcher.
-  const seen = { dispatches: [], tokens: [], heads: new Map(), stageAsks: [], locks: new Set() };
+  // `locks`: each lock ref and its commit; `commits`: the lock commits made.
+  const seen = { dispatches: [], tokens: [], heads: new Map(), stageAsks: [], locks: new Map(), commits: new Map() };
   let ids = 100;
   const json = (b, status = 200) => new Response(status === 204 ? null : JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const headOf = () => execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -76,14 +77,26 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
       if (p === `/repos/${REPO.full}/issues/4`) return json({ number: 4, state: "open", user: { login: "maintainer", type: "User" }, labels: [{ name: "pendulum:objective" }, { name: "pendulum:running" }] });
       if (p === `/repos/${REPO.full}/issues/4/comments`) return json([{ id: 9, user: { login: "pendulum-app[bot]", type: "Bot" }, body: `<!-- pendulum:4:sandbox -->\n${sandboxMarkerLine(record)}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]);
       if (p === `/repos/${REPO.full}/issues/4/timeline` || p === `/repos/${REPO.full}/pulls`) return json([]);
-      if (p === `/repos/${REPO.full}/git/commits` && init.method === "POST") return json({ sha: (ids += 1).toString(16).padStart(40, "c") }, 201);
+      if (p === `/repos/${REPO.full}/git/commits` && init.method === "POST") {
+        const c = { ...JSON.parse(String(init.body)), sha: (ids += 1).toString(16).padStart(40, "c") };
+        seen.commits.set(c.sha, c);
+        return json(c, 201);
+      }
+      if (p.startsWith(`/repos/${REPO.full}/git/commits/`)) return json(seen.commits.get(p.split("/").at(-1)) ?? { message: "Not Found" }, seen.commits.has(p.split("/").at(-1)) ? 200 : 404);
       if (p === `/repos/${REPO.full}/git/refs` && init.method === "POST") {
-        const { ref } = JSON.parse(String(init.body));
+        const { ref, sha } = JSON.parse(String(init.body));
         if (seen.locks.has(ref)) return json({ message: "Reference already exists" }, 422);
-        seen.locks.add(ref);
+        seen.locks.set(ref, sha);
         return json({ ref }, 201);
       }
-      if (p === `/repos/${REPO.full}/git/ref/heads/pendulum/4`) return json({ ref: "refs/heads/pendulum/4", object: { sha: branchAt ?? headOf(), type: "commit" } });
+      if (p.startsWith(`/repos/${REPO.full}/git/ref/pendulum-launch/`)) {
+        const ref = `refs/${p.slice(`/repos/${REPO.full}/git/ref/`.length)}`;
+        return seen.locks.has(ref) ? json({ ref, object: { sha: seen.locks.get(ref), type: "commit" } }) : json({ message: "Not Found" }, 404);
+      }
+      if (p === `/repos/${REPO.full}/git/ref/heads/pendulum/4`) {
+        if (failHead(seen)) return json({ message: "Server Error" }, 502);
+        return json({ ref: "refs/heads/pendulum/4", object: { sha: branchAt ?? headOf(), type: "commit" } });
+      }
       if (p === `/repos/${REPO.full}/dispatches` && init.method === "POST") {
         seen.stageAsks.push(JSON.parse(String(init.body)));
         return json(null, 204);
@@ -95,7 +108,7 @@ async function withGitHub({ work, legs, lag = 0, pr = () => [], earlier = () => 
       seen.tokens.push(token);
       const status = dispatch === "auto" ? (body.return_run_details === true ? 200 : 204) : dispatch;
       if (![200, 204].includes(status)) return json({ message: dispatch === 403 ? "Resource not accessible by integration" : "Workflow does not have 'workflow_dispatch' trigger" }, dispatch);
-      const sha = execFileSync("git", ["-C", work, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const sha = dispatchOn ?? headOf();
       log.push(`dispatch ${sha.slice(0, 7)}`);
       const h = { n: seen.dispatches.length, id: (ids += 10), at: Date.now() + 1000, cr: 0, lr: 0 };
       seen.heads.set(sha, [...(seen.heads.get(sha) || []), h]);
@@ -409,7 +422,7 @@ const RECORD = { vendor: "vercel", stage: "work", state: "running", claim: CLAIM
  * starts the real `stage.mjs --deliver` in a home whose socket reads each hand-over as the stage does (readHandOver) and
  * passes its messages back over `on`. `out`: the launches, the vendor runs and the hand-overs.
  */
-async function sandboxRelay({ settings = ON, rewrite = (b) => b, retryMs } = {}) {
+async function sandboxRelay({ settings = ON, rewrite = (b) => b, retryMs, againMs } = {}) {
   const home = mkdtempSync(join(tmpdir(), "vm-"));
   mkdirSync(join(home, "pendulum"), { mode: 0o700 });
   const on = new EventEmitter();
@@ -450,7 +463,7 @@ async function sandboxRelay({ settings = ON, rewrite = (b) => b, retryMs } = {})
   };
   const pending = [];
   // `settled()`: every launch the stage's asks started, finished (a launch ends after its hand-over reached the stage).
-  return { relay: launcherRelay({ send, on, ...(retryMs ? { retryMs } : {}) }), launch, out, settled: () => Promise.all(pending), close: () => (server.close(), rmSync(home, { recursive: true, force: true })) };
+  return { relay: launcherRelay({ send, on, ...(retryMs ? { retryMs } : {}), ...(againMs ? { againMs } : {}) }), launch, out, settled: () => Promise.all(pending), close: () => (server.close(), rmSync(home, { recursive: true, force: true })) };
 }
 
 const bothGreen = () => ({ [MAC]: green, [WIN]: green });
@@ -480,18 +493,20 @@ test("#538: a cloud sandbox stage asks its launcher, which dispatches the config
 
 test("#538: the launcher dispatches only the configured workflow, on the stage's own branch, at the head it asked for; anything else is refused and the stage Blocks on it", async () => {
   const swap = (k, v) => (b) => ({ ...b, client_payload: { ...b.client_payload, [k]: v } });
-  for (const [rewrite, branchAt, why] of [
-    [swap("workflow", "release.yml"), null, /^cross-OS CI: the stage asked the launcher for another workflow than ci\.yml \(cross_os_workflow\), the only one it dispatches/],
-    [swap("ref", "main"), null, /^cross-OS CI: the stage asked the launcher for another ref than its branch pendulum\/4, the only one it dispatches on/],
-    [swap("ref", "pendulum/5"), null, /another ref than its branch pendulum\/4/],
-    [(b) => b, "a".repeat(40), /^cross-OS CI: pendulum\/4 is at aaaaaaa, not at [0-9a-f]{7}, the head the stage asked for: the branch moved/],
+  // A workflow other than the launcher's setting is a setup gap (the setting changed while the stage ran); another ref or
+  // a moved branch is Pendulum's, as no stage of its own asks for one.
+  for (const [rewrite, branchAt, why, cause] of [
+    [swap("workflow", "release.yml"), null, /^cross-OS CI: the stage asked the launcher for another workflow than ci\.yml, the one cross_os_workflow names in the launcher's settings and the only one it dispatches/, "setup"],
+    [swap("ref", "main"), null, /^cross-OS CI: the stage asked the launcher for another ref than its branch pendulum\/4, the only one it dispatches on/, "pendulum"],
+    [swap("ref", "pendulum/5"), null, /another ref than its branch pendulum\/4/, "pendulum"],
+    [(b) => b, "a".repeat(40), /^cross-OS CI: pendulum\/4 is at aaaaaaa, not at [0-9a-f]{7}, the head the stage asked for: the branch moved/, "pendulum"],
   ]) {
     const s = await sandboxRelay({ rewrite });
     try {
       const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, branchAt, legs: bothGreen } });
       assert.equal(r.result.green, false);
       assert.match(r.result.stuck?.reason || "", why, JSON.stringify(s.out));
-      assert.equal(r.result.stuck.cause, "pendulum");
+      assert.equal(r.result.stuck.cause, cause);
       assert.deepEqual(r.dispatches, [], "nothing dispatched");
       await s.settled();
       assert.deepEqual(s.out.launches.map((l) => l.exit), ["cross-os"], "answered with the refusal");
@@ -535,11 +550,12 @@ test("#538: on Actions and in local mode the stage dispatches with its own token
   assert.equal(none.result.stuck?.cause, "pendulum");
   assert.deepEqual(none.dispatches, []);
   const asks = [];
-  // Its clock runs ten minutes a reading, so the 60-minute bound passes after two asks.
+  // The relay's bound is the stage's wall clock here (2 min, under RELAY_WAIT_MS), and its clock runs 20 s a reading,
+  // so the bound passes after two asks.
   let t = 0;
-  const quiet = await stage({ settings: ON, route: "sandbox", relay: launcherRelay({ send: (m) => asks.push(m), on: new EventEmitter(), retryMs: 20, clock: () => (t += 10 * 60_000) }), github: { legs: bothGreen } });
+  const quiet = await stage({ settings: ON, route: "sandbox", relay: launcherRelay({ send: (m) => asks.push(m), on: new EventEmitter(), retryMs: 20, clock: () => (t += 20_000) }), github: { legs: bothGreen } });
   assert.equal(quiet.result.stuck?.cause, "outage", JSON.stringify(quiet.result));
-  assert.match(quiet.result.stuck.reason, /^cross-OS CI: the launcher did not answer the stage's request to run ci\.yml on [0-9a-f]{7} within 60 min \(cross_os_wait_minutes\)/);
+  assert.match(quiet.result.stuck.reason, /^cross-OS CI: the launcher gave no run for the stage's request to run ci\.yml on [0-9a-f]{7} within 2 min; check the workflow's launch-event job runs/);
   assert.equal(asks.length, 2, "asked again before the bound");
   assert.equal(new Set(asks.map((a) => a.ask)).size, asks.length, "each ask names itself");
   assert.deepEqual(quiet.dispatches, []);
@@ -555,4 +571,108 @@ test("#538: on Actions and in local mode the stage dispatches with its own token
   } finally {
     s.close();
   }
+});
+
+/** A git checkout on pendulum/4 with one commit, and its head. */
+function headRepo() {
+  const root = mkdtempSync(join(tmpdir(), "head-"));
+  execFileSync("git", ["init", "-q", "-b", "pendulum/4", root]);
+  execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"]);
+  return { root, sha: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
+}
+
+test("#538 review: a second ask on a head reuses its run with no second dispatch; a replayed ask is skipped by its lock; another claim's ask is skipped", async () => {
+  const { root, sha } = headRepo();
+  const s = await sandboxRelay();
+  try {
+    await withGitHub({ work: root, legs: bothGreen, record: RECORD, log: [] }, async (seen) => {
+      const ask = (n, claim = CLAIM) => stageDispatchBody({ issue: 4, claim, want: "cross-os", ask: n, more: { sha, workflow: "ci.yml", ref: "pendulum/4" } });
+      assert.equal((await s.launch(ask(1))).exit, "cross-os");
+      const replay = await s.launch(ask(1));
+      assert.equal(replay.exit, "skipped");
+      assert.match(replay.reason, /another launcher holds pendulum-launch\/4\/work-cross-os-0123456789ab-1$/);
+      assert.equal((await s.launch(ask(2))).exit, "cross-os");
+      const other = await s.launch(ask(3, "ffffffffffff"));
+      assert.equal(other.exit, "skipped");
+      assert.match(other.reason, /not the claim the sandbox record carries/);
+      assert.equal(seen.dispatches.length, 1, "one run on the head");
+      const [first, second] = s.out.runs.map((r) => JSON.parse(r.env.PENDULUM_STAGE_CROSS_OS));
+      assert.equal(s.out.runs.length, 2, "the replay and the other claim are not answered");
+      assert.equal(first.reused, undefined);
+      assert.deepEqual(second, { sha, run: first.run, suite: first.suite, reused: true });
+    });
+  } finally {
+    s.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#538 review: GitHub naming no run (204) is answered with the head's dispatched run; a run made on another head is refused and left to finish", async () => {
+  const s = await sandboxRelay();
+  try {
+    const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, dispatch: 204, legs: bothGreen } });
+    assert.equal(r.result.green, true, r.log.join("\n"));
+    await s.settled();
+    const answer = JSON.parse(s.out.runs[0].env.PENDULUM_STAGE_CROSS_OS);
+    assert.ok(answer.run > 0 && answer.suite === answer.run, JSON.stringify(answer));
+  } finally {
+    s.close();
+  }
+  const m = await sandboxRelay();
+  try {
+    const r = await stage({ settings: ON, route: "sandbox", relay: m.relay, github: { record: RECORD, appActions: false, dispatchOn: "d".repeat(40), legs: bothGreen } });
+    assert.match(r.result.stuck?.reason || "", /^cross-OS CI: the run GitHub made \(\d+\) is on ddddddd, not on [0-9a-f]{7}: pendulum\/4 moved; re-apply the label/);
+    assert.equal(r.result.stuck.cause, "pendulum");
+    assert.equal(r.dispatches.length, 1, "dispatched once; nothing cancels it");
+  } finally {
+    m.close();
+  }
+});
+
+test("#538 review: a branch read that fails for now is no refusal: the stage asks again and gets its run", async () => {
+  const s = await sandboxRelay({ againMs: 5 });
+  try {
+    // Every read of the branch fails while the first launch holds its lock (its first lock is the only one).
+    const r = await stage({ settings: ON, route: "sandbox", relay: s.relay, github: { record: RECORD, appActions: false, failHead: (seen) => seen.locks.size === 1, legs: bothGreen } });
+    assert.equal(r.result.green, true, `${r.log.join("\n")}\n${JSON.stringify(s.out)}`);
+    await s.settled();
+    assert.deepEqual(s.out.runs.map((x) => JSON.parse(x.env.PENDULUM_STAGE_CROSS_OS).again ?? false), [true, false]);
+    assert.equal(r.dispatches.length, 1);
+  } finally {
+    s.close();
+  }
+});
+
+test("#538 review: the relay asks again after an answer with no run or no check suite, and resolves on one it can wait on", async () => {
+  const on = new EventEmitter();
+  const asks = [];
+  const sha = "c".repeat(40);
+  const answers = [{ sha, run: 5, suite: null }, { sha, run: null, suite: null }, { sha, again: true }, { sha, run: 5, suite: 9, reused: true }];
+  const relay = launcherRelay({ send: (m) => (asks.push(m), setImmediate(() => on.emit("message", { type: "pendulum-cross-os", ...answers[asks.length - 1] }))), on, againMs: 1, retryMs: 60_000 });
+  assert.deepEqual(await relay({ workflow: "ci.yml", ref: "pendulum/4", sha, boundMs: RELAY_WAIT_MS }), { sha, run: 5, suite: 9, reused: true });
+  assert.equal(asks.length, 4);
+  assert.equal(on.listenerCount("message"), 0, "its listener is gone once answered");
+});
+
+test("#538 review: stage.mjs passes the worker's ask over the real IPC channel to its launcher dispatch, and the answer back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ipc-"));
+  const sha = "e".repeat(40);
+  const script = join(dir, "worker.mjs");
+  writeFileSync(script, `import { launcherRelay } from ${JSON.stringify(join(import.meta.dirname, "..", "scripts", "lib", "cross-os.mjs"))};\nconst a = await launcherRelay()({ workflow: "ci.yml", ref: "pendulum/4", sha: ${JSON.stringify(sha)}, boundMs: 60000 });\nprocess.send({ type: "done", a }, () => process.disconnect());\n`);
+  const child = fork(script, [], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  const asked = [];
+  let stopping = false;
+  forwardAsks(child, {
+    stopping: () => stopping,
+    dispatch: async (want, ask, more) => {
+      asked.push({ want, ask: typeof ask, more });
+      for (const m of readHandOver(JSON.stringify({ claim: CLAIM, crossOs: { sha, run: 41, suite: 42 } }), CLAIM).messages) child.send(m);
+    },
+  });
+  const done = await new Promise((resolve) => child.on("message", (m) => m?.type === "done" && resolve(m.a)));
+  stopping = true;
+  await new Promise((r) => child.on("exit", r));
+  rmSync(dir, { recursive: true, force: true });
+  assert.deepEqual(asked, [{ want: "cross-os", ask: "number", more: { sha, workflow: "ci.yml", ref: "pendulum/4" } }]);
+  assert.deepEqual(done, { sha, run: 41, suite: 42, reused: false });
 });

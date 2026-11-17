@@ -84,6 +84,25 @@ export function readHandOver(text, claim) {
   return { tokens, messages: [...(tokens ? [{ type: "pendulum-tokens", write: tokens.write, read: tokens.read }] : []), ...(answer ? [{ type: "pendulum-cross-os", ...answer }] : [])] };
 }
 
+/**
+ * The worker's asks for a cross-OS CI run (`child`'s IPC messages, cross-os.mjs crossOsAsk), each sent on to the
+ * launcher with `dispatch(want, ask, more)` while the stage is not `stopping()`. A dispatch that fails is logged: the
+ * worker asks again (cross-os.mjs launcherRelay).
+ */
+export function forwardAsks(child, { dispatch, stopping = () => false }) {
+  child.on("message", (m) => {
+    const ask = crossOsAsk(m);
+    if (!ask || stopping()) return;
+    const { ask: at, ...more } = ask;
+    Promise.resolve()
+      .then(() => dispatch("cross-os", at, more))
+      .then(
+        () => log(`a cross-OS run on ${ask.sha.slice(0, 7)} asked of the launcher`),
+        (e) => log(`cross-OS ask not sent (${String(e?.message || e).slice(0, 120)}); the worker asks again`),
+      );
+  });
+}
+
 /** The stage's repository dispatch to its launcher (`pendulum-stage`): what it wants, the request's name and its fields. */
 export const stageDispatchBody = ({ issue, claim, want, ask = null, more = {} }) => ({ event_type: "pendulum-stage", client_payload: { issue, claim, want, ...(ask ? { ask } : {}), ...more } });
 
@@ -276,17 +295,7 @@ async function run() {
       env: { ...env, ...secrets, PENDULUM_APP_TOKEN: tokens.write, ...(tokens.read ? { PENDULUM_READ_TOKEN: tokens.read } : {}), GITHUB_ACTIONS: "true", ...files, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: tmp, PENDULUM_STAGE_SANDBOX: "1", PENDULUM_USAGE_DIR: usageDir, PENDULUM_TIMEOUT_MINUTES: String(minutes) },
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
-    // The worker's asks for a cross-OS CI run, sent on to the launcher (cross-os.mjs launcherRelay, which asks again
-    // until it is answered).
-    child.on("message", (m) => {
-      const ask = crossOsAsk(m);
-      if (!ask || stopping) return;
-      const { ask: at, ...more } = ask;
-      dispatch("cross-os", at, more).then(
-        () => log(`a cross-OS run on ${ask.sha.slice(0, 7)} asked of the launcher`),
-        (e) => log(`cross-OS ask not sent (${String(e.message).slice(0, 120)}); the worker asks again`),
-      );
-    });
+    forwardAsks(child, { dispatch, stopping: () => stopping });
     code = await new Promise((resolve) =>
       child.on("exit", (c, sig) => {
         exited = true;

@@ -3319,8 +3319,8 @@ export function launchDecision({ ev, state, record = null, trusted = false, from
     if (!fromSelf) return { skip: "a stage event Pendulum did not send" };
     if (!record || record.claim !== ev.claim) return { skip: "not the claim the sandbox record carries" };
     if (ev.want === "token") return record.state === "running" ? { token: true } : { skip: `no stage runs (${record.state})` };
-    // Only a running work stage validates heads, so only it asks for cross-OS runs.
-    if (ev.want === "cross-os") return record.state === "running" && record.stage === "work" ? { crossOs: true } : { skip: `no work stage runs (${record.stage ?? "none"}, ${record.state})` };
+    // Only a running work stage validates heads, so only it asks for cross-OS runs: one whose lease still holds.
+    if (ev.want === "cross-os") return record.stage === "work" && stageHolds(record, now, staleMs) ? { crossOs: true } : { skip: `no work stage runs (${record.stage ?? "none"}, ${record.state}${record.state === "running" ? ", its lease ran out" : ""})` };
     if (record.state !== "ended") return { skip: `the stage has not ended (${record.state})` };
     if (closed) return { stop: true };
     // The next step: a stage now due (the review the work asked for, a pick that came while the work ran), else stop.

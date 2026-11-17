@@ -1322,7 +1322,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // Checks the stage asks GitHub to run on this head itself (cross-os.mjs: a workflow dispatched on the branch), once per
     // head; one refused is no red, and the stage Blocks with its reason.
     if (checks.request) {
-      const asked = await checks.request(sha);
+      const asked = await checks.request(sha, { remainingMs: remainingMs(deadlineAt) });
       if (asked?.refused) return { green: false, stuck: asked.refused, command: `${checks.what || "required checks"} ${checks.names.join("; ")} on ${sha.slice(0, 7)}`, sha };
     }
     if (onPhase) await onPhase(`waiting for ${checks.what || "required checks"} (${checks.names.join(checks.request ? "; " : ", ")}) on ${sha.slice(0, 7)}`);

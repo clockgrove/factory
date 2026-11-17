@@ -88,7 +88,7 @@ test("two branches that change different skills and re-record merge with no conf
   assert.match(r.stderr, /run node bench\/skills\.mjs and commit bench\/skills\.json/);
 });
 
-// An install copies plugin/ alone (every marketplace entry is a git-subdir of `plugin`), so a skill that names Pendulum's
+// An install copies plugin/ alone (every marketplace entry names `plugin`), so a skill that names Pendulum's
 // docs, bench or README, or a path written from the checkout's root, points at nothing in an installed plugin (#454).
 const CHECKOUT = join(import.meta.dirname, "..", "..");
 

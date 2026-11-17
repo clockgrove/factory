@@ -9,7 +9,7 @@ The mark is the lower half of a grandfather clock's case: an arched wooden windo
 - `master/pendulum-icon-cream-1024.png`: the primary icon on warm cream.
 - `master/pendulum-icon-slate-1024.png`: full-bleed square icon on slate, for platforms that apply their own corner mask.
 
-The plugin's listing icon (`plugin/assets/icon.png`) and `docs/img/icon.png` are the cream icon; `docs/img/social-preview.png` is the repository's 1280×640 social preview.
+The plugin's listing icon (`plugin/assets/icon.png`) and `docs/img/icon.png` are the cream icon, at 512 px as a palette PNG under 50 KB for the plugin listings; `docs/img/social-preview.png` is the repository's 1280×640 social preview.
 
 ## Web files
 

@@ -196,7 +196,7 @@ jobs:
         id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.PENDULUM_ACCOUNTS != ''
         with: { mode: account, rendered_accounts: {{rendered_accounts}}, issue: "${{ matrix.issue }}", harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
         id: f
@@ -216,7 +216,7 @@ jobs:
           worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # optional, with PENDULUM_WORKER_SECRETS in the env block: SOURCE=value lines for the worker's shell only; a dedicated key with a gateway-side budget (docs/PLAN.md, Worker secrets)
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }} # Claude federation (with id-token: write above)
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with: { name: "pendulum-usage-${{ matrix.issue }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90 }
       - name: Dispatch tick (this worker finished; a conflicting PR fires no review job)
@@ -237,7 +237,7 @@ jobs:
         id: account # several accounts (PENDULUM_ACCOUNTS): the one this stage runs on, so the step below gets only its secrets
         if: env.PENDULUM_ACCOUNTS != ''
         with: { mode: account, rendered_accounts: {{rendered_accounts}}, harness: "${{ inputs.harness }}", app_id: "${{ secrets.PENDULUM_APP_ID }}", app_private_key: "${{ secrets.PENDULUM_APP_PRIVATE_KEY }}", vars: "${{ toJSON(vars) }}" }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: {{action}}
         id: f
@@ -257,7 +257,7 @@ jobs:
           worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the fix and answer passes only, never the reviewer
           # anthropic_oidc_exchange_url: ${{ vars.ANTHROPIC_OIDC_EXCHANGE_URL }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.issue_number != ''
         with: { name: "pendulum-usage-${{ steps.f.outputs.issue_number }}-review", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # one name per review run; the bench lists it exactly
       - name: Dispatch tick (a worker slot freed)
@@ -301,7 +301,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
           worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # an earlier stage's usage whose end was never answered
       - name: Dispatch tick (this launch failed, was cut off, requeued the Objective, deferred its stage to a retry time, or started nothing)
@@ -365,7 +365,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # credential: plan only; your own repository only
           ai_gateway_api_key: ${{ secrets.AI_GATEWAY_API_KEY }}
           worker_secret_values: ${{ secrets.PENDULUM_WORKER_SECRET_VALUES }} # with PENDULUM_WORKER_SECRETS: the worker's harness only (work stage, review stage's fix and answer passes)
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.usage_dir != ''
         with: { name: "${{ steps.f.outputs.usage_name }}", path: "${{ steps.f.outputs.usage_dir }}", retention-days: 90, overwrite: true } # the ended stage's usage, as the work and review jobs upload theirs
       - name: Dispatch tick (an answered Question is Queued, a stage ended and its sandbox stopped, or this launch failed, was cut off, deferred its stage to a retry time or started nothing)
@@ -412,7 +412,7 @@ jobs:
     # cancel-in-progress and cancel a build (Actions cannot stop that); the next build destroys what it left.
     concurrency: { group: pendulum-image, cancel-in-progress: false }
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false, ref: "${{ needs.dispatch.outputs.image_owed == 'true' && github.event.repository.default_branch || '' }}" } # the image's clone gets the whole history, from a bundle; an owed build, the default branch whatever the event
       - uses: {{action}}
         id: f
@@ -458,13 +458,13 @@ jobs:
           vercel_token: ${{ secrets.VERCEL_TOKEN }}
           vercel_team_id: ${{ secrets.VERCEL_TEAM_ID }}
           vercel_project_id: ${{ secrets.VERCEL_PROJECT_ID }}
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.usage_dir_1 != ''
         with: { name: "${{ steps.f.outputs.usage_name_1 }}", path: "${{ steps.f.outputs.usage_dir_1 }}", retention-days: 90, overwrite: true }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.usage_dir_2 != ''
         with: { name: "${{ steps.f.outputs.usage_name_2 }}", path: "${{ steps.f.outputs.usage_dir_2 }}", retention-days: 90, overwrite: true }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.f.outputs.usage_dir_3 != ''
         with: { name: "${{ steps.f.outputs.usage_name_3 }}", path: "${{ steps.f.outputs.usage_dir_3 }}", retention-days: 90, overwrite: true }
   sweep-wake:

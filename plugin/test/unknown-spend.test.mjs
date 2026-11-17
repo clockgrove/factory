@@ -11,11 +11,11 @@ import { join, relative } from "node:path";
 import { test } from "node:test";
 import { runHarness, seedSessionTotal } from "../scripts/lib/harness.mjs";
 import { writeUsage } from "../scripts/lib/session.mjs";
-import { capReached, harnessActivity, selectReady, spendMarker, stageSpendLine, sumSpend, usdText } from "../scripts/lib/logic.mjs";
+import { capReached, harnessActivity, harnessMarker, selectReady, spendMarker, stageSpendLine, sumSpend, usdText } from "../scripts/lib/logic.mjs";
 import { CODEX_PRICES, UNKNOWN_WHY, claudeRunningTotals } from "../scripts/lib/usage.mjs";
 import { todaysSpend } from "../scripts/dispatch.mjs";
 import { costOf } from "../../bench/lib/cost.mjs";
-import { spendRecords } from "../../bench/lib/objective.mjs";
+import { spendRecords, withLines } from "../../bench/lib/objective.mjs";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 
@@ -37,22 +37,23 @@ const mode = process.env.FAKE_MODE;
 if (mode === "claude-killed") { ${line(init("2.1.325"))} ${line(assistant)} setTimeout(() => {}, 60000); }
 if (mode === "claude-zeroed") { ${line(init("2.1.325"))} ${line(assistant)} ${line({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "s1", num_turns: 3, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {} })} }
 if (mode === "claude-resumed") {
-  console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "s1", claude_code_version: process.env.FAKE_VERSION }));
-  ${line({ type: "result", subtype: "success", is_error: false, session_id: "s1", num_turns: 2, total_cost_usd: 0.8, result: "ok" })}
+  const session = process.env.FAKE_SESSION || "s1";
+  console.log(JSON.stringify({ type: "system", subtype: "init", session_id: session, claude_code_version: process.env.FAKE_VERSION }));
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: session, num_turns: 2, total_cost_usd: Number(process.env.FAKE_USD || 0.8), result: "ok" }));
 }
 `, { mode: 0o755 });
   writeFileSync(join(bin, "codex"), `#!${process.execPath}
 const mode = process.env.FAKE_MODE;
-${line({ type: "thread.started", thread_id: "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" })}
+console.log(JSON.stringify({ type: "thread.started", thread_id: process.env.FAKE_THREAD || "01a1c6ba-16b2-7a13-b2da-47bf51b4e724" }));
 if (mode === "codex-killed") setTimeout(() => {}, 60000);
-if (mode === "codex-turn") ${line({ type: "turn.completed", usage: { input_tokens: 200000, cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } })}
+if (mode === "codex-turn") console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: Number(process.env.FAKE_INPUT || 200000), cached_input_tokens: 100000, cache_write_input_tokens: 0, output_tokens: 5000, reasoning_output_tokens: 0 } }));
 `, { mode: 0o755 });
   return bin;
 }
 
 const BIN = fakeBin();
-const pass = (harness, model, mode, { resume = null, timeoutMs = 60_000, version = "" } = {}) =>
-  runHarness({ harness, model, prompt: "p", maxUsd: 25, resume, cwd: BIN, env: { HOME: process.env.HOME, PATH: `${BIN}:${process.env.PATH}`, CODEX_HOME: join(BIN, "codex-home"), FAKE_MODE: mode, FAKE_VERSION: version }, timeoutMs, label: "work-1" });
+const pass = (harness, model, mode, { resume = null, timeoutMs = 60_000, version = "", usd = "", session = "", input = "", thread = "" } = {}) =>
+  runHarness({ harness, model, prompt: "p", maxUsd: 25, resume, cwd: BIN, env: { HOME: process.env.HOME, PATH: `${BIN}:${process.env.PATH}`, CODEX_HOME: join(BIN, "codex-home"), FAKE_MODE: mode, FAKE_VERSION: version, FAKE_USD: String(usd), FAKE_SESSION: session, FAKE_INPUT: String(input), FAKE_THREAD: thread }, timeoutMs, label: "work-1" });
 
 /** A fake GitHub that lists `comments` as the repository's comments updated today, and no usage artifact. */
 async function fakeGitHub(comments) {
@@ -324,4 +325,68 @@ test("#483 review: a stage killed after its progress comment's last write leaves
   const now = JSON.parse(r.stdout);
   assert.ok(now.usd > 0, r.stdout);
   assert.deepEqual(lastSpendLine(dir), now, "what the launcher books for the stage is what the line showed");
+});
+
+test("#506 review F1: a resumed total below the one counted is unknown, and the session's later totals count from it", async () => {
+  // Counted before: $3. The session then reports $1.50, $2.50 and $3.50 (Claude Code 2.1.325, running totals).
+  seedSessionTotal("s-below", { usd: 3, tokens: { input: 1, output: 1, cached: 0, written: 0 } });
+  const got = [];
+  for (const usd of [1.5, 2.5, 3.5]) {
+    const r = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-below", version: "2.1.325", usd, session: "s-below" });
+    got.push([r.usd === null ? null : Math.round(r.usd * 100) / 100, r.usdUnknownWhy ?? []]);
+  }
+  assert.deepEqual(got, [[null, ["resumed-total"]], [1, []], [1, []]], "unknown, then $1.00 and $1.00 from the $1.50 base: never $0.50 against the old $3");
+  // A Claude Code before 2.1.277 reports no running total at all: its figure is no base, and the session's stays.
+  seedSessionTotal("s-old", { usd: 3, tokens: { input: 1, output: 1, cached: 0, written: 0 } });
+  const old = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-old", version: "2.1.276", usd: 1.5, session: "s-old" });
+  assert.deepEqual([old.usd, old.usdUnknownWhy], [null, ["resumed-total"]]);
+  const next = await pass("claude", "claude-opus-5-5", "claude-resumed", { resume: "s-old", version: "2.1.325", usd: 3.5, session: "s-old" });
+  assert.ok(Math.abs(next.usd - 0.5) < 1e-9, `$0.50 against the $3 still counted, never $2.00 against the old version's $1.50: ${next.usd}`);
+  // Codex: its running total is its tokens. Counted before: 500,000 input; the thread then reports 200,000 (unknown, the
+  // new base), then 300,000: that pass's share is 100,000, never 0 against the old 500,000.
+  const thread = "02b2d7cb-27c3-7b24-b3eb-58c062c5f835";
+  seedSessionTotal(thread, { usd: null, tokens: { input: 500_000, output: 5000, cached: 100_000, written: 0 } });
+  const low = await pass("codex", "gpt-6.1-sol", "codex-turn", { resume: thread, input: 200_000, thread });
+  assert.deepEqual([low.usd, low.usdUnknownWhy], [null, ["resumed-total"]]);
+  const after = await pass("codex", "gpt-6.1-sol", "codex-turn", { resume: thread, input: 300_000, thread });
+  assert.deepEqual([after.tokens.input, after.tokens.output, after.usdUnknownWhy ?? []], [100_000, 0, []], "the share from the 200,000 base");
+});
+
+test("#506 review: every result.json Pendulum writes for a stage whose own process wrote none names the stage's progress comment and account, and says it stands in", async () => {
+  const { killedRecord } = await import("../scripts/stage.mjs");
+  const { earlyOutageEnd } = await import("../scripts/lib/session.mjs");
+  const { bookVendor, startedRecord } = await import("../scripts/launch.mjs");
+  const { VERCEL_RATES } = await import("../scripts/lib/adapters/sandbox-vercel.mjs");
+  const read = (dir) => JSON.parse(readFileSync(join(dir, "result.json"), "utf8"));
+  // A sandbox stage its launcher ended (stage.mjs): keyed by the launcher's progress key, on the stage's account.
+  const killed = mkdtempSync(join(tmpdir(), "stand-in-killed-"));
+  killedRecord({ why: "wall clock", stage: "work", env: { PENDULUM_HARNESS: "claude", PENDULUM_PROGRESS_RUN: "5552-abcdef012345", PENDULUM_STAGE_ACCOUNT: "alpha" }, usageDir: killed });
+  assert.deepEqual((({ progressRun, account, standIn }) => ({ progressRun, account, standIn }))(read(killed)), { progressRun: "5552-abcdef012345", account: "alpha", standIn: true });
+  // A stage the network ended before it began (session.mjs): its run's key and account; it is the stage's own record.
+  const early = mkdtempSync(join(tmpdir(), "stand-in-early-"));
+  const saved = { run: process.env.GITHUB_RUN_ID, account: process.env.PENDULUM_STAGE_ACCOUNT, output: process.env.GITHUB_OUTPUT };
+  Object.assign(process.env, { GITHUB_RUN_ID: "5553", PENDULUM_STAGE_ACCOUNT: "beta", GITHUB_OUTPUT: join(early, "out") });
+  try {
+    await earlyOutageEnd({ origin: "https://api.github.com", since: Date.now(), code: "ECONNRESET" }, { local: true, usageDir: early, harness: "claude", model: null });
+  } finally {
+    for (const [k, v] of [["GITHUB_RUN_ID", saved.run], ["PENDULUM_STAGE_ACCOUNT", saved.account], ["GITHUB_OUTPUT", saved.output]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  assert.deepEqual([read(early).progressRun, read(early).account, read(early).standIn], ["5553", "beta", undefined]);
+  // A sandbox stage whose usage never came out (launch.mjs bookVendor): the record's progress key and account.
+  process.env.RUNNER_TEMP = mkdtempSync(join(tmpdir(), "stand-in-vendor-"));
+  const record = startedRecord({ claim: "abcdef012345" }, { base: {}, result: { home: "/h", id: "pendulum-abc", meter: { base: { wallMs: 0, activeCpuMs: 0 }, created: false, stored: { ms: 0, bytes: null }, vcpus: 2 } }, claim: "abcdef012345", progress: "5552-abcdef012345", account: "alpha", at: "2031-03-02T01:00:00Z", leaseUntil: null, entry: { stage: "work", ok: true } });
+  assert.equal(record.account, "alpha", "the started record names the stage's account");
+  const booked = await bookVendor({ adapter: { rates: VERCEL_RATES }, repo: { full: "o/r" }, n: 7, opts: {}, record: { ...record, stage: "work" }, after: null, settled: true, state: "stopped", usage: null, harness: "claude", detach: true, api: { rest: async () => Promise.reject(new Error("offline")) } });
+  const stub = read(booked.usage.dir);
+  assert.deepEqual([stub.progressRun, stub.account, stub.standIn], ["5552-abcdef012345", "alpha", true]);
+  // The scorer, given the stub and the stage's progress and vendor comments on that account, counts the stage once.
+  const app = { login: "pendulum-app[bot]", type: "Bot" };
+  const harness = harnessMarker("claude", "claude-opus-5-5", { harness: "claude", worker: "claude-opus-5-5", account: "alpha" });
+  const collected = { issue: { number: 7, labels: [] }, issueTimeline: [], issueComments: [
+    { user: app, created_at: "2031-03-02T01:00:00Z", body: `<!-- pendulum:7:progress:work:5552-abcdef012345 -->\nPendulum work.\n${harness}\n${spendMarker(4.1, { usdUnknown: 1, usdUnknownWhy: ["unreported"] })}` },
+    { user: app, created_at: "2031-03-02T02:00:00Z", body: `<!-- pendulum:7:vendor:work:5552-abcdef012345 -->\nSandbox cost.\n${spendMarker(0.6, { vendorUsd: 0.6 })}` },
+  ] };
+  const usage = withLines([{ ...stub, artifact: "pendulum-usage-7", vendor: { ...stub.vendor, usd: 0.6 } }], spendRecords(collected, { app: app.login, all: true }));
+  const cost = costOf(usage, { date: "x", perMillion: {} }, { harness: "claude" });
+  assert.deepEqual([cost.usd, cost.usdUnknown, cost.vendorUsd], [4.1, 1, 0.6], JSON.stringify(cost.parts));
 });

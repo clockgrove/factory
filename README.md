@@ -1,16 +1,63 @@
-# Clockgrove Pendulum
+<p align="center">
+  <img src="assets/brand/pendulum/web/mark-240.png" width="120" height="120" alt="The Pendulum mark: a brass pendulum in an arched wooden clock case">
+</p>
 
-Label a GitHub issue, walk away, come back to merged work.
+<h1 align="center">Clockgrove Pendulum</h1>
 
-[![Release](https://img.shields.io/github/v/release/clockgrove/pendulum)](https://github.com/clockgrove/pendulum/releases)
-[![Quality](https://github.com/clockgrove/pendulum/actions/workflows/quality.yml/badge.svg)](https://github.com/clockgrove/pendulum/actions/workflows/quality.yml)
-[![License: MIT](https://img.shields.io/github/license/clockgrove/pendulum)](LICENSE)
+<p align="center"><strong>Label a GitHub issue, walk away, come back to a merged pull request.</strong></p>
 
-Pendulum turns an issue into a merged pull request with no one watching. You write the goal and what "done" means. A coding agent (Claude Code, Codex or GitHub Copilot) plans and builds the change, a second one reviews it, and by default Pendulum merges it once your own CI is green. Your CI is the only test of whether the change is correct: with no tests, Pendulum merges whatever your CI lets through, except changes to protected files such as your workflows, which it refuses, and decisions it hands back to you as Questions.
+<p align="center">
+  <a href="https://github.com/clockgrove/pendulum/releases"><img src="https://img.shields.io/github/v/release/clockgrove/pendulum" alt="Release"></a>
+  <a href="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml"><img src="https://github.com/clockgrove/pendulum/actions/workflows/quality.yml/badge.svg" alt="Quality"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/clockgrove/pendulum" alt="License: MIT"></a>
+</p>
 
-> **Free and open source (MIT).** Pendulum charges nothing and has no paid tier or hosted service. What you pay for is your own: the model your coding agent uses, your CI runners, and a cloud sandbox if you choose one.
+<p align="center"><em>Pendulum: the part that keeps a clock running while no one is watching.</em></p>
 
-> **Status:** 0.10.x, the release candidate for 1.0. Run it on real work; there is no stability promise until 1.0 ([Versioning](#versioning)).
+For maintainers of a GitHub repository with CI. You write an issue that says what you want and what "done" means, and label it `pendulum:objective`. A coding agent (Claude Code, Codex or GitHub Copilot CLI) plans and builds the change and opens a pull request, a second agent run reviews it, and Pendulum merges it once your own CI is green. It runs on GitHub Actions or on your own machine, keeps its state in GitHub, and is free and open source (MIT). To start, install the plugin in your coding agent and ask it to set Pendulum up ([Quick start](#quick-start)). Version 0.10.x is the release candidate for 1.0 ([Versioning](#versioning)).
+
+## A real run
+
+<img src="docs/img/example-run.png" width="760" alt="Issue 3 on clockgrove/pendulum-scratch: labelled pendulum:objective at 02:23 UTC, Pendulum's progress comment ending in 'exit: delivered; usd 0.35637', then pull request 4: the reviewer's comment at 02:26 UTC, added to the merge queue at 02:26 UTC and merged via the queue at 02:27 UTC, 16 checks passed">
+
+[Issue #3](https://github.com/clockgrove/pendulum-scratch/issues/3) on the public scratch repository asked for a `multiply(a, b)` function with a test and a README entry. Pendulum ran it on GitHub Actions with Claude Code, and [pull request #4](https://github.com/clockgrove/pendulum-scratch/pull/4) merged with no one touching it after the label.
+
+| Step | Time (UTC, 2026-11-17) |
+| --- | --- |
+| Issue filed and labelled `pendulum:objective` | 02:23:41 |
+| Pull request opened | 02:25:40 |
+| Reviewer's comment | 02:26:39 |
+| Merged through the merge queue | 02:27:36, 3 min 55 s after filing |
+
+The model cost was **$0.52**: $0.36 for the worker (`claude-opus-5-5`, with `claude-sonnet-5-5` sub-agents) and $0.16 for the reviewer (`claude-fable-5-2`), on an Anthropic API key, as Claude Code reported them in the `usd` lines of the issue's two progress comments and the runs' usage artifacts. It was a small change: [What it costs](#what-it-costs-and-how-to-stay-in-control) covers caps and larger Objectives. [bench/README.md](bench/README.md) explains how Pendulum scores every run: whether it merged with no one stepping in, solution quality, operator minutes and dollars.
+
+## Quick start
+
+In your clone of the repository, with Claude Code:
+
+```sh
+claude plugin marketplace add https://github.com/clockgrove/pendulum.git
+claude plugin install pendulum@clockgrove
+```
+
+then, in a Claude Code session: **"Set up Clockgrove Pendulum for this repository."**
+
+- **Codex:** `codex plugin marketplace add clockgrove/pendulum && codex plugin add pendulum@clockgrove`
+- **GitHub Copilot CLI:** `copilot plugin marketplace add clockgrove/pendulum && copilot plugin install pendulum@clockgrove`
+
+Setup asks a few questions, shows each change and waits for your yes, and opens a pull request that adds Pendulum's workflow; Pendulum starts once you merge it. Check first that [it will work for you](#will-it-work-for-you); [Set it up, step by step](#set-it-up-step-by-step) has the details. To run on your own machine on the Claude Code or Codex login you already have, say "Set up Clockgrove Pendulum in local mode" instead ([local mode](#run-it-on-your-own-machine-instead)).
+
+## How it differs
+
+| | Pendulum | Copilot coding agent and Agent Merge | claude-code-action | OpenHands on GitHub |
+| --- | --- | --- | --- | --- |
+| **What starts the work** | The `pendulum:objective` label on an issue | Assigning the issue to Copilot, or an automation (a schedule, a new issue or PR); Agent Merge: "Watch and fix" on a PR | A label you name, `@claude`, or assignment | The `openhands` label on an issue, or `@openhands` |
+| **Review** | A separate reviewer run on every PR, whose comments the worker answers | Copilot code review of its own changes, before it opens the PR | A separate review workflow you add | A separate review workflow you add |
+| **Coding agent** | Claude Code, Codex or Copilot CLI | Copilot, or the Claude and Codex agents GitHub runs | Claude Code | OpenHands' own agent, with any LLM |
+| **Where it runs** | GitHub Actions or your own machine; all state in GitHub, no server | GitHub's cloud | Your GitHub Actions runner | OpenHands Cloud |
+| **How the PR lands** | Pendulum merges it on your required checks, through your merge queue where you have one | With auto-merge on, GitHub merges it once its requirements are met; Agent Merge fixes failing checks and conflicts | It pushes a branch and links a pre-filled PR form | It opens a PR |
+
+Each cell is from the tool's own documentation; [docs/COMPARISON.md](docs/COMPARISON.md) quotes and links the source of each.
 
 ## How it works
 
@@ -19,6 +66,8 @@ Pendulum turns an issue into a merged pull request with no one watching. You wri
 3. **Your CI decides.** The worker waits for your required checks on the PR. If one fails, the worker gets one try to fix it, and in a few cases one more, for example when only your CI, not the worker's own run of your commands, found the failure.
 4. **A reviewer comments once.** The reviewer is a separate agent run that compares the change with the issue. The worker answers each comment once.
 5. **Pendulum merges** the commit that was reviewed, once your required checks are green on it, through your merge queue when your repository has one. Without a queue, a PR that only fell behind your default branch is brought up to date by GitHub, and that update is what merges.
+
+Your CI is the only test of whether the change is correct: with no tests, Pendulum merges whatever your CI lets through, except changes to protected files such as your workflows, which it refuses, and decisions it hands back to you as Questions.
 
 A run that goes well needs nothing from you. When one needs you, Pendulum does all the work it can first and then hands the Objective back to you in one of two states. Your other Objectives keep running meanwhile.
 
@@ -39,7 +88,7 @@ A run that goes well needs nothing from you. When one needs you, Pendulum does a
 
 ## What it costs, and how to stay in control
 
-Pendulum itself is free. Every cost goes to a provider you already pick and pay directly:
+Pendulum itself is free: it has no paid tier or hosted service. Every cost goes to a provider you already pick and pay directly:
 
 - **Your coding agent's model:** your Anthropic, OpenAI or Copilot account, or your Vercel AI Gateway key.
 - **Your CI runners:** GitHub Actions minutes, or your own machine in local mode.
@@ -47,10 +96,10 @@ Pendulum itself is free. Every cost goes to a provider you already pick and pay 
 
 Pendulum never handles a payment, and no bill comes from Clockgrove. To keep those costs in check:
 
-- **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change costs a dollar or a few; a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Pendulum's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/pendulum:pendulum-run --here`) is neither capped nor counted.
+- **Model usage is capped twice:** `max_usd` for each worker or reviewer job ($25 unless you change it) and `daily_usd` for each day ($100). A small change can cost under a dollar (the [real run](#a-real-run) above: $0.52), and a large Objective can reach the job cap. Setup asks for both caps. Two exceptions: a Codex model missing from Pendulum's price table runs uncapped (doctor warns about it), and a run inside your own agent session (`/pendulum:pendulum-run --here`) is neither capped nor counted.
 - **To run one Objective on a cheaper or a stronger model,** or another coding agent, label its issue (`pendulum:model:<id>`, `pendulum:harness:<name>`, and sub-agent and reviewer labels): the workflow's coding agent and models stay the defaults for the rest ([docs/USAGE.md](docs/USAGE.md), Choose the harness and models).
 - **Several subscriptions or keys of one coding agent work as one pool.** Declare them as accounts, and with automatic choice on, each worker or reviewer run starts on the free one with the most quota left, as Claude Code and Codex report it on each run: a usage limit sets aside only the account that met it, runs go on on the others, and that account comes back into use on its own. Set it up for your machine in [docs/LOCAL.md](docs/LOCAL.md) (Accounts), for GitHub Actions and the cloud sandbox in [docs/INSTALL.md](docs/INSTALL.md) (Several accounts).
-- **Runs take from about ten minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run pendulum.yml -f issue=<number>`) runs it even when that limit is reached.
+- **Runs take from a few minutes to a few hours.** `timeout_minutes` bounds each job (240 by default), and up to three Objectives run at once (`max_concurrent`). Starting one by hand (`gh workflow run pendulum.yml -f issue=<number>`) runs it even when that limit is reached.
 - **On a private repository the jobs use your Actions minutes**, including a short scheduled check every ten minutes.
 - **For your first runs, start small:** when setup asks, set a low `max_usd`, `max_concurrent` of 1, and auto-merge off. With auto-merge off, Pendulum stops at a ready-for-review PR and you merge it yourself.
 - **With auto-merge on, which is the default, nobody reads the code before it lands.** What stands between a change and your default branch is your required checks; the reviewer only comments, and the worker has to answer each comment.
@@ -66,23 +115,9 @@ Pendulum never handles a payment, and no bill comes from Clockgrove. To keep tho
 - **One repository per Objective.** An Objective that needs a change in another repository stops before any code is written, with a Question on the issue.
 - **Your data goes only to the services you configure,** and Pendulum has no telemetry. [Data and privacy](docs/PRIVACY.md) says what goes to your model provider, to GitHub, and to the optional AI Gateway and cloud sandbox, and what stays on your machine.
 
-## Quick start
+## Set it up, step by step
 
-**1. Install the plugin** in the coding agent you use:
-
-```sh
-# Claude Code
-claude plugin marketplace add https://github.com/clockgrove/pendulum.git
-claude plugin install pendulum@clockgrove
-
-# Codex
-codex plugin marketplace add clockgrove/pendulum
-codex plugin add pendulum@clockgrove
-
-# GitHub Copilot CLI
-copilot plugin marketplace add clockgrove/pendulum
-copilot plugin install pendulum@clockgrove
-```
+**1. Install the plugin** in the coding agent you use, with the commands in the [Quick start](#quick-start).
 
 The plugin follows Pendulum's `main` branch. The workflow it writes for your repository pins the latest release tag.
 
@@ -192,6 +227,7 @@ Wherever it runs, Pendulum keeps each Objective's state in GitHub: the branch, t
 | [docs/INSTALL.md](docs/INSTALL.md) | The install footprint, credentials, cost inputs, upgrade and uninstall |
 | [docs/LOCAL.md](docs/LOCAL.md) | Local mode: platforms, setup, sandboxes, settings |
 | [docs/ADAPTERS.md](docs/ADAPTERS.md) | The cloud sandbox and the other third-party adapters |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | How Pendulum differs from Copilot coding agent and Agent Merge, claude-code-action and OpenHands, with a source for each claim |
 | [docs/PRIVACY.md](docs/PRIVACY.md) | Data and privacy: what goes to the model provider, GitHub, the AI Gateway and the cloud sandbox, and what stays local |
 | [docs/PLAN.md](docs/PLAN.md) | The design: rules, contracts, security, the 1.0 bar |
 | [bench/README.md](bench/README.md) | The scorecard: how Pendulum measures whether runs finish unattended, and what they cost |

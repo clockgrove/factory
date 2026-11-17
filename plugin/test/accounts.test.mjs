@@ -290,7 +290,7 @@ test("#263: readiness is checked per account; the loop's starting account passed
     await withHome(h, {}, () => {
       local.startAccount = { name: "alpha", harness: "claude", declared: true, home: join(h, "work", "claude-a") };
       assert.deepEqual(local.harnessReady("claude", local.startAccount), []);
-      assert.deepEqual(local.harnessReady("claude", { name: "beta", harness: "claude", declared: true, home: join(h, "work", "claude-b") }), ["claude is not on PATH"], "another account is checked on its own");
+      assert.deepEqual(local.harnessReady("claude", { name: "beta", harness: "claude", declared: true, home: join(h, "work", "claude-b") }), ["claude is not on PATH; install Claude Code (npm i -g @anthropic-ai/claude-code) and log in (claude, then /login)"], "another account is checked on its own");
     });
   } finally {
     process.env.PATH = path;

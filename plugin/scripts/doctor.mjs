@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Factory doctor: the checks under "Doctor" in PLAN.md, each PASS, WARN or FAIL
 // with the fix. Changes nothing.
-//   node scripts/doctor.mjs --repo OWNER/NAME [--checkout CLONE] [--json] [--probe] [--run-setup] [--local]
+//   node scripts/doctor.mjs [--repo OWNER/NAME] [--checkout CLONE] [--json] [--probe] [--run-setup] [--local] [--verbose]
+//   (`factory doctor` runs it with --local; without --repo, the repository is the clone's origin remote)
 // Runs from the plugin (`/factory doctor`) and, through jobChecks(), as the first
 // step of every worker job, where a FAIL Blocks the Objective with that line.
 import { homedir, platform } from "node:os";
@@ -26,7 +27,7 @@ import { unrelayedGatewayKeys } from "./lib/worker-relay.mjs";
 import { backend } from "./lib/backend.mjs";
 import { lfsVersion, usesLfs } from "./lib/lfs.mjs";
 import { ROUTE_CREDENTIAL_INPUTS, ROUTE_SECRETS, accountEnv, accountSecretText, accountToken, chatgptLogin, defaultAccount, jobLevelCredentials, loadAccounts, routeAccounts, routeAccountsText, routeAutoSetting, routeCredentialEnv, routeCredentialSecrets, routeInputs, routeSecretSuffix, routeStageAccount, sandboxRoots } from "./lib/accounts.mjs";
-import { LOCAL_DOMAINS, codexLocalConfig, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
+import { LOCAL_DOMAINS, TOKEN_LINK_FIX, cloneRepo, codexLocalConfig, tokenLinkDetail, codexWrapper, credentialPaths, committedWorkflowEnv, droppedDomains, gitGuardScript, harnessInstall, harnessLogins, harnessOuterSettings, localBaseEnv, localToken, loginsExposedBy, ownLogin, ownLoginProblems, outerProbe, sandboxDroppedHosts, readWorkflowEnv, stageTemp, stageTmpBase, workflowEnv } from "./lib/local.mjs";
 import { grantsWrite, parseYaml, workflowEvents } from "./lib/yaml.mjs";
 import { AGENT_HOME, AGENT_USER, agentHomeProblem, agentLauncher } from "./lib/agent.mjs";
 import { parseUsage, unpricedCodex } from "./lib/usage.mjs";
@@ -2218,8 +2219,8 @@ export async function doctorSettings({ args, checkout, repo, token, varsToken = 
 }
 
 /** doctor's flags (lib/inputs.mjs readFlags: `--dir` is `--checkout`, as on `factory`). */
-const DOCTOR_FLAGS = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" }, json: "bool", probe: "bool", "run-setup": "bool", local: "bool" };
-const DOCTOR_USAGE = "usage: node scripts/doctor.mjs --repo OWNER/NAME [--checkout CLONE] [--json] [--probe] [--run-setup] [--local]\n";
+export const DOCTOR_FLAGS = { repo: { value: "OWNER/NAME" }, checkout: { value: "CLONE" }, json: "bool", probe: "bool", "run-setup": "bool", local: "bool", verbose: "bool" };
+const DOCTOR_USAGE = "usage: node scripts/doctor.mjs [--repo OWNER/NAME] [--checkout CLONE] [--json] [--probe] [--run-setup] [--local] [--verbose]\n  without --repo, the repository is the clone's origin remote (the clone in --checkout, else here); --verbose names every setting left at Factory's defaults\n";
 
 /**
  * doctor's command line, checked before any check runs: {help} for --help or -h anywhere, else its flags. Throws an
@@ -2235,15 +2236,16 @@ export function doctorArgs(argv) {
 }
 
 /**
- * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row; and a WARN naming the
- * repository variables that are ignored: a setting only the reviewed workflow file sets, no setting at all, or a value
- * Factory would not take as given.
+ * Each effective setting and the layer it came from (#284, inputs.mjs settingLayers), as one row, the ones left at
+ * Factory's defaults named only with `verbose`; and a WARN naming the repository variables that are ignored: a setting
+ * only the reviewed workflow file sets, no setting at all, or a value Factory would not take as given.
  */
-export function settingsRows(layers) {
-  const lines = layerLines({ values: layers.values, from: layers.from });
+export function settingsRows(layers, { verbose = true } = {}) {
+  const lines = layerLines({ values: layers.values, from: layers.from }, { defaults: verbose });
   const ignored = ignoredLines(layers);
+  const more = verbose ? "" : "; --verbose names the ones left at Factory's defaults too";
   return [
-    PASS("settings", `each over the one below (Factory's defaults, the workflow, the repository's variables, this machine):\n       ${lines.join("\n       ")}`),
+    PASS("settings", lines.length ? `each over the one below (Factory's defaults, the workflow, the repository's variables, this machine)${more}:\n       ${lines.join("\n       ")}` : `every one at Factory's defaults${more}`),
     ...(ignored.length ? [WARN("repository variables", ignored.join("; "), "delete or correct those variables; a setting only the workflow file sets goes in its env block, through a pull request")] : []),
   ];
 }
@@ -2266,8 +2268,8 @@ async function main() {
   const found = !process.env.GITHUB_ACTIONS && local ? committedWorkflowEnv(checkout) : null;
   // The repository and the App's credentials doctorSettings reads GitHub with: this shell's, else the local workflow's.
   const pre = resolveInputs({ args, env: process.env.GITHUB_ACTIONS ? process.env : { ...workflowSettings(found ? found.wf : readWorkflowEnv(checkout)).kept, ...process.env } });
-  if (!pre.repo) throw new Error("--repo OWNER/NAME is required");
-  const repo = repoOf(pre.repo);
+  // No --repo (nor GITHUB_REPOSITORY): the clone's origin, as `factory serve` finds it.
+  const repo = repoOf(pre.repo || cloneRepo(checkout));
   let token = pre.appToken || null;
   let app = null;
   if (!token && pre.appId && pre.appPrivateKey) {
@@ -2280,9 +2282,20 @@ async function main() {
     }
   }
   // The variables are listed as serve lists them: with local mode's token in local mode.
-  const varsToken = (local && localToken(repo.full)) || token;
+  // A token file reached through a symbolic link is not read (lib/local.mjs tokenPlaceProblem): a FAIL row with its fix.
+  let linked = null;
+  let ownToken = "";
+  if (local) {
+    try {
+      ownToken = localToken(repo.full);
+    } catch (e) {
+      if (!e.link) throw e;
+      linked = FAIL("local token", tokenLinkDetail(e.link), TOKEN_LINK_FIX);
+    }
+  }
+  const varsToken = ownToken || token;
   const { wf, committed, env, stage, inputs, layers, checks: source } = await doctorSettings({ args, checkout, repo, token, varsToken, committed: found, local });
-  const results = [defaultsCheck(inputs), ...source, ...settingsRows(layers), ...ownerLimitChecks({ inputs, local, stage })];
+  const results = [defaultsCheck(inputs), ...(linked ? [linked] : []), ...source, ...settingsRows(layers, { verbose: !!args.verbose }), ...ownerLimitChecks({ inputs, local, stage })];
   results.push(...(await credentialChecks({ inputs, probe: !!args.probe, local })));
   results.push(...workerSecretChecks({ inputs, env }));
   results.push(...gatewayRelayChecks({ inputs, env }));

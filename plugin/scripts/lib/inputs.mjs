@@ -434,14 +434,15 @@ const LAYER_NAMES = { workflow: "workflow", variable: "repository variable", mac
 /**
  * settingLayers's result as lines for serve's log and doctor: each setting a layer sets, `NAME: "value" (layer)`, in name
  * order (values cut at 80 characters; an empty one reads as the default), then one line naming the rest, at Factory's
- * defaults, and one each for the variables ignored.
+ * defaults (unless `defaults` is false: serve without --verbose, doctor without --verbose), and one each for the
+ * variables ignored.
  */
-export function layerLines({ values = {}, from = {}, excluded = [], unknown = [], invalid = [] } = {}) {
+export function layerLines({ values = {}, from = {}, excluded = [], unknown = [], invalid = [] } = {}, { defaults = true } = {}) {
   const show = (v) => JSON.stringify(v.length > 80 ? `${v.slice(0, 77)}...` : v);
   const set = Object.keys(values).filter((k) => values[k] !== "").sort();
   const rest = [...WORKFLOW_SETTINGS].filter((k) => !set.includes(k)).sort();
   const lines = set.map((k) => `${k}: ${show(values[k])} (${LAYER_NAMES[from[k]] || from[k]})`);
-  if (rest.length) lines.push(`Factory's defaults: ${rest.join(", ")}`);
+  if (defaults && rest.length) lines.push(`Factory's defaults: ${rest.join(", ")}`);
   return [...lines, ...ignoredLines({ excluded, unknown, invalid })];
 }
 

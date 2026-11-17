@@ -1335,6 +1335,21 @@ export function activityLine(snap, { harness = "harness", model = null, label = 
   return `${who} ${snap.ended ? "finished" : label}: ${snap.elapsedMin} min, ${snap.turns} turns, ${snap.toolCalls} tool calls${agents}${bg}; ${last}; ${k(snap.tokens.input)} tokens in, ${k(snap.tokens.output)} out${cost}${snap.lastTool ? `; last tool ${snap.lastTool}` : ""}`;
 }
 
+/** The latest check run of each name (a re-run, or a newer workflow run on the same head, supersedes), by name. */
+export function latestByName(checkRuns) {
+  const latest = new Map();
+  for (const r of checkRuns || []) {
+    const have = latest.get(r.name);
+    if (!have || String(r.started_at || "") > String(have.started_at || "") || (r.id ?? 0) > (have.id ?? 0)) latest.set(r.name, r);
+  }
+  return latest;
+}
+/** The latest check run of each name among `checkRuns` (latestByName), in their order. */
+export const latestRuns = (checkRuns) => {
+  const latest = new Set(latestByName(checkRuns).values());
+  return (checkRuns || []).filter((r) => latest.has(r));
+};
+
 /**
  * Required checks on a head, from the check-runs GitHub lists for it:
  *   { done, green, missing: [name], failed: [{name, conclusion, id}], pending: [name] }
@@ -1342,11 +1357,7 @@ export function activityLine(snap, { harness = "harness", model = null, label = 
  * missing, not red: the caller decides how long to wait for it.
  */
 export function evaluateChecks(names, checkRuns) {
-  const latest = new Map();
-  for (const r of checkRuns || []) {
-    const have = latest.get(r.name);
-    if (!have || String(r.started_at || "") > String(have.started_at || "") || (r.id ?? 0) > (have.id ?? 0)) latest.set(r.name, r);
-  }
+  const latest = latestByName(checkRuns);
   const out = { done: true, green: true, missing: [], failed: [], pending: [] };
   for (const name of names) {
     const r = latest.get(name);

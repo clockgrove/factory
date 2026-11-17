@@ -60,7 +60,7 @@ import {
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
 import { carryDecisionSpend } from "./decision-spend.mjs";
-import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
+import { EXIT_PROMPT, activityLine, latestRuns, answersComment, blockMarker, pendulumReply, personAnswer, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
 import { OUTAGE, givenUp, outageMet, outageOf, outageReason, serverDown, stopWaiting } from "./network.mjs";
@@ -87,7 +87,7 @@ import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { stageAccountName } from "./choice.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, runningTokens, transcriptTotal, unknownOf, usdByBilling, BILLING, addBilling, stageBilling } from "./usage.mjs";
-import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, refusedRerunText, triageMarker } from "./triage.mjs";
+import { CANCELLED, ENDED_EARLY, checkCancel, checkSources, checksNotStarted, failureSignature, mergeTriage, notStartedJobs, notStartedReason, redCancels, unplacedCancelReason, refusedRerunText, triageMarker } from "./triage.mjs";
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
@@ -1190,6 +1190,9 @@ export async function validationLoop({ checkout, commands, harness, model, effor
   // drift advisory's is not, since its reserve is no part of `maxUsd` here (harness.mjs passMaxUsd).
   const passDecisions = () => decisionSpend() - reservedSpend();
   const decisionsAtStart = passDecisions();
+  // The Actions jobs and workflow files read about a red's cancelled jobs: triage's own (openTriage `cache`), so none is
+  // read again for the fix pass or the Block.
+  const cancelReads = triage?.cache ?? new Map();
   const usage = [];
   let passes = 0;
   let last = null;
@@ -1317,7 +1320,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     };
     // Nothing required running for CHECKS_WAIT_MS ends a wait (queued, waiting, not reported): GitHub's not-started bound.
     // The reads back off from the first hour on.
-    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, conflicted, ended: (runs) => ended(runs, ignoreIds), progress, idleMs: checks.stuckWaitMs ?? CHECKS_WAIT_MS, maxPollMs: checks.maxPollMs ?? 5 * 60_000, backoffAfterMs: checks.backoffAfterMs ?? CHECKS_WAIT_MS, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? Infinity, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
+    const wait = (ignoreIds = null, capMs = Infinity, more = {}) => awaitChecks(checks.repo, sha, checks.names, { token: checks.token, actionsToken: checks.actionsToken || checks.token, cache: cancelReads, conflicted, ended: (runs) => ended(runs, ignoreIds), progress, idleMs: checks.stuckWaitMs ?? CHECKS_WAIT_MS, maxPollMs: checks.maxPollMs ?? 5 * 60_000, backoffAfterMs: checks.backoffAfterMs ?? CHECKS_WAIT_MS, ignoreIds, onRead, signal, ...(checks.appearMs !== undefined ? { appearMs: checks.appearMs } : {}), ...(checks.pollMs !== undefined ? { pollMs: checks.pollMs } : {}), ...more, timeoutMs: Math.min(remainingMs(deadlineAt), checks.timeoutMs ?? Infinity, capMs), onPoll: (state, min) => { if (min && min % 10 === 0) log(`checks on ${sha.slice(0, 7)} after ${min} min: pending ${state.pending.join(", ") || "none"}, missing ${state.missing.join(", ") || "none"}`); } });
     const waitedFrom = Date.now();
     // How long a triage rerun may wait for its workflow run to complete (GitHub reruns only a completed run's failed
     // jobs): what is left of the checks' own wait, counted from its start, within the stage's wall clock less
@@ -1417,11 +1420,22 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     // A required check whose job GitHub never started (no step, no runner: a billing lock, a spending limit, a runner
     // label nothing serves) is infrastructure no change can fix: no triage, no rerun, no fix pass; the stage Blocks.
     if (!r.green && !r.timedOut && r.failedRuns?.length) {
-      const stuck = await notStartedJobs({ repo: checks.repo, failedRuns: r.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token }).catch((e) => {
+      const stuck = await notStartedJobs({ repo: checks.repo, failedRuns: r.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, cache: cancelReads }).catch((e) => {
         log(`never-started check failed: ${String(e?.message || e).slice(0, 160)}; triage and the fix pass as before`);
         return [];
       });
       if (stuck.length) return { green: false, notStarted: notStartedReason(stuck), command };
+    }
+    // A red that is only cancels, one of them not stopped at its time limit and cancelled before any other job of its
+    // run failed (a person's or the API's cancel, or one whose limit could not be read: triage.mjs redCancels `unplaced`),
+    // is no flake and not known to be the PR's change: no triage, no rerun and no fix pass; the stage Blocks saying so, as
+    // Pendulum's, since it cannot place the cause. A red with any other failure goes to triage and the fix pass.
+    if (!r.green && !r.timedOut && r.failedRuns?.some((f) => CANCELLED.includes(f.conclusion))) {
+      const { unplaced, onlyCancels } = await redCancels(checks.repo, r.failedRuns, { token: checks.token, actionsToken: checks.actionsToken || checks.token, sha, required: checks.names, cache: cancelReads }).catch((e) => {
+        log(`cancelled-job check failed: ${String(e?.message || e).slice(0, 160)}; triage and the fix pass as before`);
+        return { unplaced: [], onlyCancels: false };
+      });
+      if (onlyCancels && unplaced.length) return { green: false, stuck: { kind: "cancelled", reason: unplacedCancelReason(unplaced), cause: "pendulum" }, command, sha };
     }
     // A red every failing job of which reads as a flake gets its failed jobs rerun once on this head (triage.mjs), and
     // the wait starts again; no fix pass is spent and no pass is counted. Any other red goes on to the fix pass.
@@ -1464,7 +1478,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     const failed = v.failed;
     const read = v.fromChecks && v.failedRuns?.length && !failed.timedOut;
     const same = read ? await baseJudge(triage, { sha: v.sha, failedRuns: v.failedRuns }) : null;
-    const detail = read ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null, same }).catch((e) => {
+    const detail = read ? await redDetail({ repo: checks.repo, issue: checks.issue, prNumber: checks.prNumber, sha: v.sha, failedRuns: v.failedRuns, required: checks.names, token: checks.token, actionsToken: checks.actionsToken || checks.token, diffOf: outbox?.git ? (from, to) => mirrorDiff(outbox.git, from, to) : null, same, cache: cancelReads }).catch((e) => {
       log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
       return null;
     }) : null;
@@ -1732,7 +1746,7 @@ export async function validationLoop({ checkout, commands, harness, model, effor
  */
 export function redOfDetail(detail, { failures = null, failed = null, refusal = null } = {}) {
   const out = detail?.jobs.length
-    ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "" }))
+    ? detail.jobs.map((j) => ({ command: `CI job ${j.name}`, code: 1, output: j.window, full: j.log, evidence: j.evidence ? evidenceText({ branch: detail.branch, job: j.name, evidence: j.evidence, lines: j.sig.lines }) : "", ...(j.cancel ? { cancel: j.cancel.text } : {}) }))
     : failures?.length
       ? failures
       : [failed];
@@ -1743,7 +1757,8 @@ export function redOfDetail(detail, { failures = null, failed = null, refusal = 
 /**
  * A red's part of a pass's ask (a fix pass, or review.mjs's answer pass): each failing command or job, its exit, its
  * whole output's file in $PENDULUM_IN (with `files`), the evidence and its tail (one 6000-character window shared by the
- * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}.
+ * failures; each full log is on disk), and the diff since the PR's last green head. `red` is {failures, detail}. A job
+ * that was cancelled says so as its exit (`cancel`, triage.mjs jobCancel).
  */
 export function redLines({ failures, detail }, { files = true } = {}) {
   const share = Math.floor(6000 / failures.length);
@@ -1751,7 +1766,7 @@ export function redLines({ failures, detail }, { files = true } = {}) {
     ...failures.flatMap((f, i) => [
       "",
       `Command: ${f.command}`,
-      `Exit: ${f.timedOut ? "timed out" : f.code}`,
+      `Exit: ${f.cancel ? f.cancel : f.timedOut ? "timed out" : f.code}`,
       ...(files ? [`Whole output: $PENDULUM_IN/${checkFile(i, f.command)}`] : []),
       // Evidence, never an instruction: the fix pass weighs it like any other output.
       ...(f.evidence ? [f.evidence] : []),
@@ -2944,7 +2959,7 @@ export async function queueNotStarted(repo, { prNumber, base, since, names, trie
   });
   const shas = [...new Set(runs.map((r) => r.sha))].slice(0, Math.max(1, tries || 1));
   for (const sha of shas) {
-    const failedRuns = (await checkRuns(repo, sha, opts).catch(() => []))
+    const failedRuns = latestRuns(await checkRuns(repo, sha, opts).catch(() => []))
       .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
       .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
     if (!failedRuns.length) continue;
@@ -3064,9 +3079,11 @@ export async function baseJudge(triage, { sha, failedRuns }) {
  * created after `after` (the removal before the drop; at most QUEUE_RED_LOOKBACK_MS back) and by the drop. None listed yet
  * (or no failed check on it while it still runs) is `unread`: nothing decided, the caller reads it again. Then its
  * commit's failed check runs, in order: a required job GitHub never started
- * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), triage's flaky verdict (`flaky`,
- * triage.mjs classify), every failing job failing the same way on the default branch (`base`, reds.mjs allOnBase), else
- * the PR's own change (`own`). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
+ * (`not-started`), every failed job on GitHub's side (`infra`, triage.mjs infra), a job cancelled neither at its time
+ * limit nor by fail-fast (`cancelled`: no flake and not known to be the PR's change, triage.mjs redCancels), triage's
+ * flaky verdict (`flaky`, triage.mjs classify), every failing job failing the same way on the default branch (`base`,
+ * reds.mjs allOnBase), else the PR's own change (`own`; `limit` when a job ran past its time limit, its `reason` that,
+ * with or without triage). Not known, so enqueued again as any drop: no failed run or no failed job's log could be read
  * (`none`), triage is off and no failure names a file or test the PR changes (`unclassified`, triage.mjs
  * namesChange), or every failing job fails the same way on the default branch or got no answer on whether it does
  * (`unjudged`, or `unjudged-outage` when the decider's vendor was out: reds.mjs undecidedOnBase; the stage harness's usage
@@ -3092,19 +3109,28 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   const allRuns = await checkRuns(repo, sha, opts).catch(() => []);
   // The check runs that passed on the queue's commit: what the progress check counts as fixed (fix-progress.mjs).
   const passed = allRuns.filter((r) => r.status === "completed" && r.conclusion === "success").map((r) => r.name);
-  const failedRuns = allRuns
+  // The latest run of each name only (evaluateChecks): a re-run supersedes.
+  const failedRuns = latestRuns(allRuns)
     .filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion))
     .map((r) => ({ id: r.id, name: r.name, conclusion: r.conclusion, suite: r.check_suite?.id ?? null, started_at: r.started_at ?? null, completed_at: r.completed_at ?? null }));
   if (!failedRuns.length) return run.status && run.status !== "completed" ? { kind: "unread", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)} yet` } : { kind: "none", sha, reason: `no failed check run on the queue's commit ${sha.slice(0, 7)}` };
-  const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken }).catch(() => []);
+  const stuck = await notStartedJobs({ repo, failedRuns, required: names, token, actionsToken, cache: triage?.cache ?? new Map() }).catch(() => []);
   if (stuck.length) return { kind: "not-started", sha, reason: notStartedReason(stuck) };
   if (await triage?.infra?.({ sha, failedRuns }).catch(() => false)) return { kind: "infra", sha, reason: "every failed job failed in its set-up or checkout on GitHub's side" };
+  // Cancelled jobs (triage.mjs redCancels), read through triage's own reads: a red that is only cancels, one of them one
+  // Pendulum cannot place (`unplaced`: a person's or the API's cancel), is no flake and not known to be the PR's change,
+  // so the stage Blocks (`cancelled`); one stopped at its limit gets the queue's fix pass, worded as that, never as the
+  // PR's own change.
+  const cancelReads = triage?.cache ?? new Map();
+  const cancels = await redCancels(repo, failedRuns, { token, actionsToken, sha, required: names, cache: cancelReads }).catch(() => ({ all: [], unplaced: [], onlyCancels: false }));
+  if (cancels.onlyCancels && cancels.unplaced.length) return { kind: "cancelled", sha, reason: unplacedCancelReason(cancels.unplaced) };
+  const past = cancels.all.filter((c) => c.atLimit);
   // Triage first: its verdicts on this commit say whether the decision model may judge the red the default branch's.
   const verdict = await triage?.classify?.({ sha, failedRuns, required: names }).catch((e) => {
     log(`triage failed: ${String(e?.message || e).slice(0, 160)}`);
     return { flaky: false, off: true, named: false };
   });
-  const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false, same: await baseJudge(triage, { sha, failedRuns }) }).catch((e) => {
+  const detail = await redDetail({ repo, issue, prNumber, sha, failedRuns, required: names, token, actionsToken, sinceGreen: false, same: await baseJudge(triage, { sha, failedRuns }), cache: cancelReads }).catch((e) => {
     log(`red detail unavailable: ${String(e?.message || e).slice(0, 160)}`);
     return null;
   });
@@ -3121,16 +3147,20 @@ export async function queueRedOf({ repo, issue, prNumber, base, at, after = null
   const { failures, lead, tail } = redOfDetail(detail, { failed: { command, ok: false, code: 1, output: "" } });
   const first = String(lead || "").split("\n")[0].replace(/^--- /, "") || command;
   // No model to read it (triage off, or no verdict) and no failure naming what the PR changed: not known to be its own.
-  if (!verdict || verdict.off) {
+  // A job stopped at its time limit is read exactly, so it gets its fix pass with or without a model.
+  if ((!verdict || verdict.off) && !past.length) {
     if (!verdict?.named) return { kind: "unclassified", sha, reason: `${first}; triage is off and no failure names a file or test the PR changes` };
   }
-  return { kind: "own", sha, reason: first, red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: queueJobs(detail.jobs), passed };
+  // `limit`: the red is a job past its time limit, which the fix pass answers; said as that, never as the PR's own change.
+  const reason = past.length ? `${past.map((c) => c.past).join("; ")} on the queue's commit ${sha.slice(0, 7)}` : first;
+  return { kind: "own", sha, reason, ...(past.length ? { limit: true } : {}), red: { sha, failures, detail: { ...detail, queue: true }, tail, lead, command, queue: true }, sigs: [...new Set(detail.jobs.map(queueRedClass))], jobs: queueJobs(detail.jobs), passed };
 }
 
 /**
  * The review stage's step for a red queue drop the merge pass handed it: the issue's newest record, when it is `handed`.
  * A record of another head than the PR's `head` now is `superseded` (the head moved on: a fix, a person's push). Else the
- * drop is read (queueRedOf) and: `requeued` (written now: not known to be the PR's change), `blocked` (the PR's own change,
+ * drop is read (queueRedOf) and: `requeued` (written now: not known to be the PR's change), `blocked` (a job cancelled
+ * by a person or the API, queueRedOf `cancelled`, at once; or the PR's own change, or a job past its time limit,
  * and the last fix pass since the Objective's last re-entry, its Objective label, `pendulum:restart` or a Block, made no
  * progress on the red it was handed: fix-progress.mjs, `progressCheck`'s judge, with every red fixed since the re-entry
  * as the ones seen; the stage Blocks with `reason`) or `fixing` (the PR's own change: the
@@ -3159,6 +3189,12 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
     }
     q.kind = "none";
   }
+  // A job cancelled neither at its time limit nor by fail-fast (queueRedOf `cancelled`): no fix pass and no re-enqueue;
+  // the stage Blocks saying so.
+  if (q.kind === "cancelled") {
+    await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: q.kind }, { token });
+    return { state: "blocked", cause: "pendulum", line: `merge queue run red${where}: ${q.reason}`, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)}: ${q.reason}` };
+  }
   if (q.kind !== "own") {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "requeued", kind: q.kind }, { token });
     return { state: "requeued", line: `merge queue run red${where}: ${q.reason}; not known to be the PR's change (${q.kind}), enqueued again as any drop` };
@@ -3184,12 +3220,15 @@ export async function readQueueRed({ repo, issue, prNumber, base, head, names = 
   if (over) {
     await writeQueueRed(repo, issue, prNumber, { ...pending, state: "blocked", kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead }, { token });
     // An unmade judgement (the decider gave no answer) is Pendulum's, or its vendor's outage, never the work's.
-    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; the PR's own change again, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} failed in this PR's own change (${q.reason}) after Pendulum's ${over}; fix it on the branch, then re-apply the label` };
+    // A job past its time limit (`limit`) is said as that, never as the PR's own change.
+    const again = q.limit ? "again" : "the PR's own change again";
+    const failed = q.limit ? `failed: ${q.reason},` : `failed in this PR's own change (${q.reason})`;
+    return { state: "blocked", cause: p && !p.progress && p.undecided ? p.cause || "pendulum" : "work", line: `merge queue run red${where}: ${q.reason}; ${again}, after Pendulum's ${over}`, red: q.red, reason: `the merge queue's run on its commit ${q.sha.slice(0, 7)} ${failed} after Pendulum's ${over}; fix it on the branch, then re-apply the label` };
   }
   // Started: counted on the record, so a pass that keeps committing nothing reaches the bound above.
   const record = { ...pending, kind: "own", sigs: q.sigs, jobs: q.jobs, lead: q.red.lead, tries: pending.tries + 1, ends: pending.ends ?? [] };
   await writeQueueRed(repo, issue, prNumber, record, { token });
-  return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; the PR's own change, one fix pass (the answer pass)`, red: q.red, record };
+  return { state: "fixing", line: `merge queue run red${where}: ${q.reason}; ${q.limit ? "" : "the PR's own change, "}one fix pass (the answer pass)`, red: q.red, record };
 }
 
 /** The fix pass for a red queue drop committed (readQueueRed `fixing`): its record is `fixed`, which counts toward the bound. */
@@ -3232,7 +3271,7 @@ export async function mirrorOwnStat(mgit, from, to) {
 
 /**
  * The failed jobs of the PR's newest failed merge-queue run since `since`, each with its first failure line (triage.mjs
- * failureSignature), at most three: "`<job>`: <line>; ...", "" when none could be read (Actions read with
+ * failureSignature; for a cancelled job, that it was cancelled: checkCancel), at most three: "`<job>`: <line>; ...", "" when none could be read (Actions read with
  * `actionsToken`, else `opts.token`).
  */
 export async function queueFailureLines(repo, { prNumber, base, since, actionsToken = null }, opts) {
@@ -3240,10 +3279,14 @@ export async function queueFailureLines(repo, { prNumber, base, since, actionsTo
   const aopts = { ...opts, token: actionsToken || opts.token };
   const run = (await mergeGroupRuns(repo, prNumber, base, since, aopts).catch(() => []))[0];
   if (!run) return "";
-  const failedRuns = (await checkRuns(repo, run.sha, opts).catch(() => [])).filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
+  const failedRuns = latestRuns(await checkRuns(repo, run.sha, opts).catch(() => [])).filter((r) => r.status === "completed" && !["success", "neutral", "skipped"].includes(r.conclusion));
   const out = [];
+  // Each job and workflow file read once for all the cancelled jobs (checkCancel).
+  const cache = new Map();
   for (const r of failedRuns.slice(0, 6)) {
-    const line = failureSignature(r.name, await jobLog(repo, r.id, aopts).catch(() => "")).line;
+    // A cancelled job is said to be cancelled (at its time limit, by fail-fast or otherwise: triage.mjs checkCancel), not quoted from its log.
+    const cancel = await checkCancel(repo, r, { token: opts.token, actionsToken: aopts.token, sha: run.sha, runs: failedRuns, cache }).catch(() => null);
+    const line = cancel?.text || failureSignature(r.name, await jobLog(repo, r.id, aopts).catch(() => "")).line;
     if (line) out.push(`${checkName(r.name)}: ${line.slice(0, 200)}`);
     if (out.length >= 3) break;
   }

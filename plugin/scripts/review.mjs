@@ -1552,7 +1552,7 @@ async function main() {
     if (queued.state === "blocked") {
       log(queued.reason);
       await dropLabel();
-      await applyExit(repo, { issue, pr, exit: "blocked", reason: queued.reason, cause: queued.cause ?? "work", detail: queued.red.tail, notify: inputs.notify, stage: "review" }, token);
+      await applyExit(repo, { issue, pr, exit: "blocked", reason: queued.reason, cause: queued.cause ?? "work", detail: queued.red?.tail ?? "", notify: inputs.notify, stage: "review" }, token);
       await finish("blocked", queued.reason);
       return;
     }

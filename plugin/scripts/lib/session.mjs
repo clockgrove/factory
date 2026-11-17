@@ -80,6 +80,7 @@ import { HANDOVER_FILE, WORKFLOWS_DIR } from "./handover.mjs";
 import { RUNNER_SESSION_ROOT, SESSION_CAPTURE_BYTES, SESSION_CAPTURE_MS, capturedSession, holdSession } from "./claude-runner.mjs";
 import { CODEX_RUNNER_SESSION_ROOT } from "./codex-runner.mjs";
 import { tarAsAgent, untarAsAgent } from "./untar.mjs";
+import { artifactStage, openSealed } from "./seal.mjs";
 import { COPILOT_RUNNER_SESSION_ROOT } from "./copilot-runner.mjs";
 import { codexRolloutFiles, plainThread } from "./codex-threads.mjs";
 import { cacheSummary, clampTotal, copilotSessionTotal, markUnknown, mergeUsage, noResetLimit, refusalFields, transcriptTotal, unknownOf } from "./usage.mjs";
@@ -87,7 +88,7 @@ import { ENDED_EARLY, checkSources, checksNotStarted, failureSignature, mergeTri
 import { GOALS } from "./drift.mjs";
 import { exactJudge, redNames, signed } from "./fix-progress.mjs";
 import { allOnBase, baseFailureReason, evidenceText, lastGreenHead, leadJobs, redDetail, undecidedOnBase } from "./reds.mjs";
-import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, unmeteredRun, updateBranchHead } from "./logic.mjs";
+import { HUNG_CODE, hungOutcome, QUEUE_CLEARED_MAX, queueDeadline, REVIEW_LABEL, STALL_CODE, STALL_DEFAULTS, freshPassDenied, ACTIONS_APP_ID, jobPosition, jobStall, needsBaseline, queueHangs, queueTargets, stepBaselineMs, stepKey, QUEUE_HUNG_MS, queueHungMs, queueRetry, queueSince, queueStall, fixScopeReason, REBASE_LIMIT, REBASE_WINDOW_MS, parseOnto, rebaseBlockReason, rebaseCost, rebaseCostMarker, rebaseLine, rebaseTally, harnessMarker, isSelf, planAskedMarker, questionForm, questionMarker, selfLogin, setSelf, spendMarker, sumSpend, trustedAuthor, updateBranchHead } from "./logic.mjs";
 
 export const TASK_CARD_TEMPLATE = (pluginRoot) => join(pluginRoot, "templates", "task-card.md");
 
@@ -349,10 +350,12 @@ export const ARTIFACT_LOOKS = 3;
  * harness call can resume it. Locally the earlier stages' usage directories sit beside this one (`workDir`); on
  * Actions they are the work and review usage artifacts (`token` must read them). A file already in place is left
  * alone: locally the live session is the newer copy. `only`: that stage directory's session alone (local mode; a work
- * stage continuing its pause, continue.mjs). Returns `{id, from, reason}`: `id` is the session to resume, or null with
- * the reason it is not.
+ * stage continuing its pause, continue.mjs). An artifact's session comes under the job's `seal` (seal.mjs usageSeal:
+ * the stage's key and the repository's policy): sealed, it is opened for this Objective and the artifact's stage, and
+ * under the sealed policy an unsealed one is refused (seal.mjs openSealed); with no seal given, the sealed policy with no
+ * key. Returns `{id, from, reason}`: `id` is the session to resume, or null with the reason it is not.
  */
-export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null }) {
+export async function restoreTranscript({ repo, issue, token, checkout, workDir, harness, only = null, seal = null }) {
   const fromStageDirs = backend().sandbox.sessions === "stage-dirs";
   const sources = (fromStageDirs ? localSessionSources(workDir) : await artifactSessionSources({ repo, issue, token, workDir })).filter((s) => !only || s.name === only);
   if (!sources.length) return { id: null, from: null, reason: fromStageDirs ? "no earlier stage here" : "no earlier usage artifact" };
@@ -378,6 +381,12 @@ export async function restoreTranscript({ repo, issue, token, checkout, workDir,
     if (s.harness !== harness) return { id: null, from: src.name, reason: `the earlier session is ${s.harness ?? "another harness"}'s; this stage runs ${harness}` };
     if (s.checkout !== checkout) return { id: null, from: src.name, reason: `the checkout path differs (${s.checkout} then, ${checkout} now)` };
     if (!s.files.every(plainRelative)) return { id: null, from: src.name, reason: "the saved session lists a name Pendulum will not use" };
+    // An artifact's session: opened from its seal, or refused when the policy is sealed and it is not; then the stage
+    // starts fresh (an older artifact's session would be an earlier point of the same lineage, so none is looked for).
+    if (!fromStageDirs) {
+      const opened = await openSealed(dir, seal?.key ?? null, { policy: seal ? await seal.policy() : "sealed", bind: { issue, stage: artifactStage(src.name) } });
+      if (!opened.ok) return { id: null, from: src.name, reason: opened.reason };
+    }
     for (const rel of s.files) if (!existsSync(join(dir, "transcript", rel))) return { id: null, from: src.name, reason: `${rel} is missing from the saved session` };
     // Locally the live session is resumed when it is in place, and it may hold passes of a later stage that was killed
     // before it wrote a result.json: that stage's last persisted total for the session is the seed, so the passes its
@@ -808,7 +817,6 @@ export async function holdScope({ outbox, session, harness, model, effort = null
     usage.push(rec);
     if (rec.sessionId && session) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]).usd >= left) rec.budgetExceeded = true;
-    if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
     const after = await read();
     return { usage, ...scopeTurnResult({ first: first.out, out: after.out, verdict: after.verdict, rec, exitBefore, exitNow: io?.files?.()?.["exit.json"] }) };
   }
@@ -1482,9 +1490,8 @@ export async function validationLoop({ checkout, commands, harness, model, effor
     if (!fresh) red.rec = rec;
     if (rec.sessionId) session.id = rec.sessionId;
     if (maxUsd > 0 && sumSpend([rec]).usd >= left) rec.budgetExceeded = true; // Codex has no in-run cap; Copilot's is checked again here
-    if (maxUsd > 0 && unmeteredRun(rec)) Object.assign(rec, { budgetExceeded: true, unmetered: true });
     // A fresh pass that reached its dollar or time cap: the caller Blocks with the unchanged red, the work's.
-    if (fresh && !rec.refusal && !rec.unmetered && (rec.timedOut || rec.budgetExceeded)) return { capped: rec.timedOut ? "time" : "dollar" };
+    if (fresh && !rec.refusal && (rec.timedOut || rec.budgetExceeded)) return { capped: rec.timedOut ? "time" : "dollar" };
     const end = (more) => ({ green: false, passes, lastOutput: red.tail, command: red.command, usage, ...more });
     if (rec.timedOut || rec.budgetExceeded || rec.refusal) return end({ harness: rec });
     if (crashed(rec)) return end({ harness: { ...rec, died: 1 }, died: true });
@@ -1945,7 +1952,7 @@ export function stageQuota(records = []) {
 /** Write usage/result.json and return the merged record. */
 /**
  * The usage record's worker-key fields: `workerKeyUsd` (the stage's spend through a relayed AI Gateway key, already in
- * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, a call it could not price, the AI Gateway's own budget or credits refusal as `gatewayRefused`, the calls of unknown cost as `unknown`, the relay's shutdown and its per-call log as `callLog`).
+ * `usd`), `harnessUsd` (the rest) and `workerKey` (the relay's own counts: calls, refusals, the AI Gateway's own budget or credits refusal as `gatewayRefused`, the calls of unknown cost as `unknown`, and its per-call log as `callLog`).
  * Empty when no relay ran.
  */
 export function keyBreakdown(records, workerKey = null) {
@@ -1962,7 +1969,7 @@ export function keyBreakdown(records, workerKey = null) {
     fields: {
       workerKeyUsd: keyUsd,
       harnessUsd: total === null ? null : Math.round(Math.max(0, total - keyUsd) * 1e6) / 1e6,
-      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, unpriced: workerKey.unpriced, failClosed: workerKey.failClosed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), ...(workerKey.unknown ? { unknown: workerKey.unknown } : {}), ...(workerKey.shut ? { shut: workerKey.shut } : {}), ...(workerKey.callLog ? { callLog: workerKey.callLog } : {}), refused: workerKey.refused } } : {}),
+      ...(workerKey ? { workerKey: { calls: workerKey.calls, failed: workerKey.failed, capped: workerKey.capped, ...(workerKey.gatewayRefused ? { gatewayRefused: workerKey.gatewayRefused } : {}), ...(workerKey.unknown ? { unknown: workerKey.unknown } : {}), ...(workerKey.callLog ? { callLog: workerKey.callLog } : {}), refused: workerKey.refused } } : {}),
     },
   };
 }
@@ -2437,13 +2444,12 @@ export async function markRunning(repo, issue, { token }) {
  * call, questionCheckPrompt: the harness keeps what meets a test and records the rest as assumptions in pr.md and
  * plan.md. `checked` is true when that call ran, so the caller re-reads $PENDULUM_OUT and updates the PR body.
  */
-export async function exitRecord({ text, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0, unmetered = false }) {
+export async function exitRecord({ text, harness, model, effort = null, session, cwd, env, eventsFile, deadlineAt, maxUsd, spentUsd = 0 }) {
   const usage = [];
-  // One more harness call, resumed where it can; a short refusal code when no time, budget or metering is left.
+  // One more harness call, resumed where it can; a short refusal code when no time or budget is left (the known
+  // dollars: a run of unknown cost adds none).
   const ask = async (prompt, label) => {
     if (remainingMs(deadlineAt) < EXIT_ASK_MIN_MS) return { refused: "time" };
-    // A run that reported no priced AI credits left max_usd unenforceable: the harness is not asked again.
-    if (unmetered) return { refused: "unmetered" };
     const left = maxUsd > 0 ? Math.max(0, maxUsd - spentUsd - sumSpend(usage).usd) : 0;
     if (maxUsd > 0 && left <= 0) return { refused: "budget" };
     const resume = session?.canResume ? session.id : null;
@@ -2466,7 +2472,7 @@ export async function exitRecord({ text, harness, model, effort = null, session,
   if (!record) log(`${missing}; asking the harness`);
   if (!record) {
     const asked = await ask(EXIT_PROMPT, "exit");
-    const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", unmetered: "unmetered: max_usd cannot be enforced", budget: "no exit record and no budget left to ask" }[asked.refused];
+    const refused = asked.refusal ? refusalReason(asked.refusal) : { time: "no exit record and no time left to ask", budget: "no exit record and no budget left to ask" }[asked.refused];
     if (refused) return { record: { exit: "blocked", reason: refused, questions: [] }, usage, basis: "none" };
     record = parseExitRecord(asked.text);
     if (!record) return { record: { exit: "blocked", reason: "the harness gave no exit record (neither the exit file nor a JSON answer)", questions: [] }, usage, basis: "none" };

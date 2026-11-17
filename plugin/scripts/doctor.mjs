@@ -37,6 +37,7 @@ import { DRIFT_MODEL } from "./lib/drift.mjs";
 import { deciderKind } from "./lib/decider.mjs";
 import { MERGE_BASE_GIT, gitAtLeast, gitVersion } from "./lib/outbox.mjs";
 import { HOLDS_LABEL, HOLDS_TITLE } from "./lib/route-holds.mjs";
+import { publishOn, sealKey, sealKeyProblem, transcriptPolicy } from "./lib/seal.mjs";
 import { Lexer, Parser } from "../vendor/@actions/expressions/dist/index.js";
 import { forEachChild, parse as parseShell } from "../vendor/unbash/dist/parser.js";
 import { ContextAccess, IndexAccess, Literal } from "../vendor/@actions/expressions/dist/ast.js";
@@ -111,7 +112,7 @@ export async function credentialChecks({ inputs: asked, env: given = process.env
     if (inputs.credential !== "plan" && oauth) out.push(WARN("claude credential", "CLAUDE_CODE_OAUTH_TOKEN is set on an api run", "remove it; a present API key silently wins, but a plan token must never reach unattended runs"));
   }
   if (h === "codex") {
-    // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is unmetered.
+    // Codex's JSONL names no model, so the worker prices tokens by the `model` input; without it the row is of unknown cost.
     if (!inputs.model) out.push(WARN("codex model", "no model input", "set model (for example gpt-6.1-sol) so Codex tokens are priced; the CLI's default is not reported in its output"));
     for (const m of new Set([inputs.model, inputs.reviewerModel, inputs.subagentModel].filter(Boolean))) {
       // A promotional rate: WARN in the week before it ends, FAIL once it has (its runs are then of unknown cost).
@@ -163,14 +164,13 @@ export function defaultsCheck(inputs) {
 export function ownerLimitChecks({ inputs, local = false, stage = {} }) {
   const h = (ms) => `${Number((ms / 3600_000).toFixed(2))} h`;
   const min = (ms) => `${Number((ms / 60_000).toFixed(2))} min`;
-  const { stall, relay } = inputs;
+  const { stall } = inputs;
   const lines = [
     `a usage limit waited out in place ${inputs.usageLimitWaits} time(s) per pass, and on Actions and the cloud sandbox a reset over ${min(inputs.usageLimitMoveMs)} away moves to a free account`,
     `a quiet local claim Blocked after ${h(inputs.claimPauseMs)}`,
     `a sibling waited for ${h(inputs.siblingWaitMs)} at most`,
     `${inputs.maxParts} part(s) per Objective at most`,
     `a queue check's step hung past ${stall.factor} x its normal duration and at least ${min(stall.floorMs)} over it, a queue commit with no CI begun stalled after ${min(stall.queueMs)}`,
-    `the gateway relay shut at ${relay.unknownShut} calls of unknown cost (never counted against max_usd)`,
   ];
   const own = local ? localLimits(stage) : null;
   if (own) lines.push(`a local stage waits in place ${min(own.waitMs)}, and an Objective paused on one outage Blocks after ${h(own.outageMs)}`);
@@ -702,6 +702,10 @@ export async function githubChecks({ inputs, repo, token, app, notice = false, e
     const waits = longWaitCheck(repoData);
     if (waits) out.push(waits);
   }
+  // Local mode uploads no usage artifact; every other route does. In a job its own setting, else the workflow file's.
+  if (!local) out.push(transcriptCheck(repoData, job ? inputs.publishTranscripts : publishOn(workflowValue(text, "PENDULUM_PUBLISH_TRANSCRIPTS"))));
+  const sealRow = local ? null : sealKeyCheck({ appPrivateKey: inputs.appPrivateKey, repoFull: repo.full });
+  if (sealRow) out.push(sealRow);
   out.push(...(await workflowTokenChecks({ repo, token: inputs.githubToken || token })));
 
   const rulesets = await listRulesets(repo, { token });
@@ -1203,6 +1207,41 @@ const thirdPartyNamed = (doc, jobs) =>
 export function longWaitCheck(repoData) {
   if (repoData?.private !== true) return null;
   return PASS("long waits", "private repository: a sandbox stage's lease end, the UTC day's turn after daily_usd and a third-party wait's bound fall back to events and GitHub's cron (often hours late); the wake jobs sleep only to quota, read and start retries and the sweep's minutes, so no long sleeper bills runner minutes");
+}
+
+/** One setting of the workflow file's env block (`text`), or "" when the file is unread, does not parse or has none. */
+function workflowValue(text, key) {
+  try {
+    return String(parseYaml(text ?? "")?.env?.[key] ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What the usage artifacts publish of the agent's work (lib/seal.mjs transcriptPolicy): on a public repository (or one
+ * whose visibility is unread) the event stream and the saved sessions are sealed unless publish_transcripts is on, which
+ * WARNs, since anyone signed in to GitHub can then download them; a private repository's need read access to it.
+ */
+export function transcriptCheck(repoData, publish) {
+  const isPrivate = repoData?.private === true;
+  const policy = transcriptPolicy({ isPrivate, publish });
+  if (policy === "published" && !isPrivate) return WARN("transcripts", "publish_transcripts is on for a public repository: anyone signed in to GitHub can download the agent's event stream and saved sessions (the files it read, the commands it ran and their output) from the usage artifacts for 90 days", "set PENDULUM_PUBLISH_TRANSCRIPTS: false in .github/workflows/pendulum.yml (setup --publish-transcripts false) unless publishing them is intended");
+  if (isPrivate) return PASS("transcripts", `private repository: the usage artifacts carry the agent's event stream and saved sessions readable, to those who can read the repository${publish ? " (publish_transcripts is on: they would be readable to anyone if it turned public)" : ""}`);
+  return PASS("transcripts", "public repository: the usage artifacts carry the agent's event stream and saved sessions sealed (AES-256-GCM, a key derived from the App's private key, which only this workflow's jobs hold); the usage record stays readable");
+}
+
+/**
+ * Whether the usage artifacts' seal key derives from the App's private key (lib/seal.mjs sealKey): a key given that
+ * does not parse FAILs (a public repository's stages would then upload their usage without the transcript and the
+ * stream, and no resume could open one). Null with no key to try: a laptop, a job given an App token, a sandbox stage
+ * (handed the derived key, never the App's).
+ */
+export function sealKeyCheck({ appPrivateKey, repoFull }) {
+  if (!appPrivateKey) return null;
+  const key = sealKey(appPrivateKey, repoFull);
+  if (key) return PASS("seal key", "the usage artifacts' seal key derives from the App's private key");
+  return FAIL("seal key", `${sealKeyProblem(appPrivateKey, key)}: a public repository's usage artifacts go up without the agent's event stream and sessions, and no fix-passes resume opens one`, "save the App's private key, the whole PEM file, as PENDULUM_APP_PRIVATE_KEY (gh secret set PENDULUM_APP_PRIVATE_KEY < key.pem)");
 }
 
 /** The approval policies under which GitHub can hold a run whose actor is the merge queue's bot (#2683: all_external_contributors did). */

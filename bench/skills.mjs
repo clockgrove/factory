@@ -88,7 +88,7 @@ function textFiles(dir) {
 
 /**
  * Every reference in the plugin's skills and agent definitions to something an installed plugin does not hold. An install
- * copies the plugin directory alone (every marketplace entry is a git-subdir of `plugin`), so a skill can name:
+ * copies the plugin directory alone (every marketplace entry names `plugin`), so a skill can name:
  * - a path in the installed plugin, from its root (`${CLAUDE_PLUGIN_ROOT}/…` or `<plugin root>/…`), which must exist there;
  * - a path in a clone of Pendulum (`<pendulum clone>/…`), for a tool the plugin does not ship, which must exist in the checkout;
  * - a full link into Pendulum's repository at a release tag, to a file of the checkout and, with an anchor, one of its headings;

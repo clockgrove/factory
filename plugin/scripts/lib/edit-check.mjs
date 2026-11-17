@@ -63,9 +63,9 @@ export function openEditCheck({ inputs = {}, env = process.env, home = homedir()
   const { model } = ask;
   const route = inputs?.decisionRoute;
   if (ask.off) return { model, off: ask.off, elsewhere: ask.off !== "route-off" && (route === "gateway" ? !!env.GITHUB_ACTIONS : true) };
-  const judge = async (before, after) => {
+  const judge = async (before, after, { issue = null, repo = null } = {}) => {
     if (!editFits(before, after)) return { verdict: null, error: "too_long" };
-    const a = await Promise.resolve(ask.decide(editInput(before, after), EDIT_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
+    const a = await Promise.resolve(ask.decide(editInput(before, after), EDIT_QUESTION, { issue, repo })).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     if (!EDIT_QUESTION.choices.some((c) => c.value === a?.verdict)) return { verdict: null, error: a?.error || "no_answer" };
     const wording = a.verdict === "wording" && typeof a.confidence === "number" && a.confidence >= confidenceFloor(inputs, ask).min;
     return { verdict: wording ? "wording" : "requirement", confidence: typeof a.confidence === "number" ? a.confidence : null, error: null };

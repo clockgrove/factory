@@ -52,6 +52,9 @@ export const UNKNOWN_WHY = {
   relay: "calls through the relayed gateway key whose cost the gateway did not report",
   // A cloud sandbox's usage the vendor did not report (adapters/sandbox.mjs stageVendorCost).
   sandbox: "the sandbox vendor did not report the stage's usage",
+  // Decision calls through the AI Gateway (adapters/decider-ai-gateway.mjs) whose cost the gateway did not report: no
+  // cost in the answer and no generation record, or a call that failed after it was sent.
+  decision: "decision calls through the AI Gateway whose cost the gateway did not report",
 };
 
 /** `rec` marked as having spend that was not reported, for `why` (an UNKNOWN_WHY code); in place. `usd` stays what was reported. */

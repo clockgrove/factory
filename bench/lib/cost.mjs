@@ -273,10 +273,12 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
     } else if (rec.harness === "codex") {
       // The bench's table replaces whatever the worker priced with: one price basis per scorecard.
       // Its sub-agent threads (the record's `subAgents`) each at their own model, the rest at the stage's. The spend
-      // through a relayed gateway key is no harness spend: kept as the worker priced it.
+      // through a relayed gateway key and the AI Gateway's decision calls (`gatewayDecisionUsd`) are no harness spend:
+      // kept as the gateway reported them.
       const priced = priceStage(prices, rec.model, rec.tokens, rec.subAgents);
       const key = num(rec.workerKeyUsd);
-      part.usd = priced.usd === null && key === null ? null : round4((priced.usd ?? 0) + (key ?? 0));
+      const decisions = num(rec.gatewayDecisionUsd);
+      part.usd = priced.usd === null && key === null && decisions === null ? null : round4((priced.usd ?? 0) + (key ?? 0) + (decisions ?? 0));
       // The record's own runs of unknown cost (a turn that failed, a sub-agent thread not read), or one for tokens this
       // table cannot price: never $0 for them.
       part.usdUnknown = Number.isInteger(rec.usdUnknown) && rec.usdUnknown > 0 ? rec.usdUnknown : priced.unknown ? 1 : 0;
@@ -347,13 +349,20 @@ export function costOf(records, prices, { harness: declared = null } = {}) {
       out.unit = "usd";
       out.basis = priced.length ? `${parts[0].basis ?? "unknown"}` : "unknown";
   }
-  if (parts.every((r) => r.source === "spend")) {
+  // The decision calls made outside any stage (plugin decision-spend.mjs): parts of their own, said apart in the basis.
+  const outside = parts.filter((r) => r.source === "decisions");
+  const stageParts = parts.filter((r) => r.source !== "decisions");
+  if (stageParts.length && stageParts.every((r) => r.source === "spend")) {
     // Read from the progress comments' spend lines: dollars as the worker priced them, no tokens, no table.
     out.unit = "usd";
     out.priceTableDate = null;
     out.note = null;
-    out.basis = priced.length ? `pendulum:spend lines in ${parts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
-  } else if (out.parts.length > 1) out.basis += `; ${out.parts.length} artifacts summed (worker + review)`;
+    out.basis = priced.length ? `pendulum:spend lines in ${stageParts.length} progress comment(s), the worker's own pricing (no usage artifact)` : unknown.usdUnknown ? "unknown: no stage's spend line holds a reported figure" : "unknown: no usage artifact and no pendulum:spend line";
+  } else if (stageParts.length > 1) out.basis += `; ${stageParts.length} artifacts summed (worker + review)`;
+  if (outside.length) {
+    const usd = outside.reduce((s, r) => s + (num(r.usd) ?? 0), 0);
+    out.basis += `; includes ${round4(usd)} USD of decision calls outside a stage (the AI Gateway's cost, ${outside.length} comment(s))`;
+  }
   out.basis += unknownNote;
   // The relayed worker key's dollars are inside the figure already: said, so no reader adds them again.
   if (out.workerKeyUsd > 0 && out.usd !== null) out.basis += `; includes ${out.workerKeyUsd} USD through a relayed worker key`;

@@ -58,6 +58,7 @@ import {
   RETRY,
 } from "./github.mjs";
 import { log, redactSecrets, secretForms, setOutput, commandFailed } from "./inputs.mjs";
+import { flushDecisionSpend } from "./decision-spend.mjs";
 import { EXIT_PROMPT, activityLine, answersComment, blockMarker, pendulumReply, answerDuring, bodyFindingId, bodyFindings, conflictsAt, decisionsRead, decisionsReadMarker, decisionsReadOf, decisionsSection, harnessActivity, isPlaceholder, knownWriter, maintainerDecisions, pinnedMaintainer, marker, mergeChecked, mergeRead, parseExitRecord, questionCheckPrompt, refusalReason, renderTaskCard, setupFilesNote, usageLimitReason, taskCardValues, unreadDecisions } from "./logic.mjs";
 import { agentUser, atStop, exec, git } from "./proc.mjs";
 import { restSync } from "./rest-sync.mjs";
@@ -1967,6 +1968,14 @@ export function keyBreakdown(records, workerKey = null) {
   };
 }
 
+/** `{gatewayDecisionUsd, gatewayDecisionCalls}` from the stage's AI Gateway decision records, or {} with none. */
+export function gatewayDecisionFields(records) {
+  const recs = (records || []).filter((r) => r?.decision && r.decider === "ai-gateway");
+  if (!recs.length) return {};
+  const priced = recs.filter((r) => typeof r.usd === "number" && Number.isFinite(r.usd));
+  return { gatewayDecisionUsd: priced.length ? Math.round(priced.reduce((s, r) => s + Math.max(0, r.usd), 0) * 1e6) / 1e6 : null, gatewayDecisionCalls: recs.reduce((s, r) => s + (Number(r.calls) || 0), 0) };
+}
+
 export function writeUsage(usageDir, { harness, model, records, passes, exit, reason, credentialBasis, harnessVersion = null, session = null, reentry = null, spendInProgress: inProgress = false, workerKey = null, ran = null, outage = null, usageLimit = null, progressRun = null }) {
   mkdirSync(usageDir, { recursive: true });
   // A Block on the account's usage limit or quota with no reset reported (Copilot's always; Codex's with no snapshot in its
@@ -2046,6 +2055,9 @@ export function writeUsage(usageDir, { harness, model, records, passes, exit, re
     ...(inProgress ? { spendInProgress: true } : {}),
     // The spend through a relayed AI Gateway key (gateway-relay.mjs), already in `usd`: broken out beside the harness's own.
     ...kb.fields,
+    // The known dollars of the stage's AI Gateway decision calls (decider.mjs gatewayDecisionRecord), already in `usd`:
+    // broken out, so the bench adds them to a Codex stage's tokens it prices again from its own table.
+    ...gatewayDecisionFields(records),
   };
   // Stored for 90 days with the artifact: no held secret (a worker secret's value) in its reason or anywhere else.
   const stored = redactSecrets(result);
@@ -3512,6 +3524,8 @@ const keptSaid = (repo, issue, opts) => (line) => progressReporter(repo, issue, 
  */
 async function unreadCleared(repo, { issue, prNumber, pr, issueData, unread, check, objectiveLabel, self }, opts) {
   const r = await judgeUnread({ check, repo, issue, issueData, pr, unread });
+  // A call made outside a stage (the dispatcher's, a local loop's): its cost written now (decision-spend.mjs).
+  await flushDecisionSpend(repo, opts);
   const held = (why) => (log(`#${issue}: ${unread.length} maintainer decision(s) no pass has read (${why}); the review runs again to apply them`), "unread");
   if (!r.clear) return held(`${r.why}${r.limited ? `; ${r.limited}` : ""}`);
   // The call took a while: a comment posted or edited meanwhile was never judged, and a stop may have come.

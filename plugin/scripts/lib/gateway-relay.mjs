@@ -139,9 +139,9 @@ const num = (v) => {
   const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
   return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
 };
-const GEN_ID = /^gen_[A-Za-z0-9]{6,64}$/;
+export const GEN_ID = /^gen_[A-Za-z0-9]{6,64}$/;
 /** The answers that bill nothing: the gateway refused the call before any model ran. */
-const UNBILLED = new Set([400, 401, 403, 404, 413, 422, 429]);
+export const UNBILLED = new Set([400, 401, 403, 404, 413, 422, 429]);
 /**
  * The gateway's own 402 refusals, by their error type: a team, project, key or user budget spent
  * (`quota_for_entity_exceeded`), or no AI Gateway Credits left (`insufficient_funds`). Refused before any model ran, so
@@ -219,6 +219,29 @@ export function errorTypeOf(doc, { topLevel = false } = {}) {
   const d = top(doc);
   const e = top(d?.error) ?? (topLevel ? d : null);
   return typeof e?.type === "string" && /^[a-z0-9_]{1,64}$/.test(e.type) ? e.type : null;
+}
+
+/**
+ * One try at a generation's record (`/v1/generation?id=`, its `total_cost`) with `key`, ended by `signal`: {usd}, {none}
+ * (the gateway answered 404: no record), or {failed} (anything else: a 5xx, a 429, a redirect, a network error, a record
+ * with no cost yet), with the wait its Retry-After asks for (`retryAfterMs`). The relay's lookups and the gateway
+ * decider's (adapters/decider-ai-gateway.mjs) both price a call by it.
+ */
+export async function generationCost(id, { key, origin = GATEWAY_ORIGIN, fetchImpl = globalThis.fetch, signal = null }) {
+  try {
+    const r = await fetchImpl(`${origin}/v1/generation?id=${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, redirect: "manual", ...(signal ? { signal } : {}) });
+    if (r.ok) {
+      const usd = num((await r.json())?.data?.total_cost);
+      return usd !== null ? { usd } : { failed: true };
+    }
+    const after = Number(r.headers?.get?.("retry-after"));
+    // The answer's body is not read: dropped, so its connection is not held.
+    await Promise.resolve(r.body?.cancel?.()).catch(() => {});
+    if (r.status === 404) return { none: true };
+    return { failed: true, retryAfterMs: Number.isFinite(after) && after > 0 ? Math.min(after * 1000, LOOKUP_RETRY_AFTER_MAX_MS) : 0 };
+  } catch {
+    return { failed: true };
+  }
 }
 
 /** An error answer's generation id, from the gateway's own places: its top-level `generationId` or `id`, or the header. */
@@ -636,27 +659,9 @@ export async function openRelay({ key, dir, socketDir = null, group = null, chgr
     shutDown(why, { calls: 1, complete: true });
     return { usd: null, basis: "shut", unpriced: why };
   };
-  // One try at a generation's record, given `timeoutMs`: {usd}, {none} (the gateway answered 404: no record), or
-  // {failed} (anything else: a 5xx, a 429, a redirect, a network error, a record with no cost yet), with the wait its
-  // Retry-After asks for.
-  const lookupOnce = async (id, timeoutMs) => {
-    try {
-      // A try already waiting on the gateway when the pass's lookup time ends is stopped there too.
-      const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), s.lookupsEnd.signal]);
-      const r = await fetchImpl(`${origin}/v1/generation?id=${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, redirect: "manual", signal });
-      if (r.ok) {
-        const usd = num((await r.json())?.data?.total_cost);
-        return usd !== null ? { usd } : { failed: true };
-      }
-      const after = Number(r.headers?.get?.("retry-after"));
-      // The answer's body is not read: dropped, so its connection is not held.
-      await Promise.resolve(r.body?.cancel?.()).catch(() => {});
-      if (r.status === 404) return { none: true };
-      return { failed: true, retryAfterMs: Number.isFinite(after) && after > 0 ? Math.min(after * 1000, LOOKUP_RETRY_AFTER_MAX_MS) : 0 };
-    } catch {
-      return { failed: true };
-    }
-  };
+  // One try at a generation's record, given `timeoutMs` (generationCost). A try already waiting on the gateway when the
+  // pass's lookup time ends is stopped there too.
+  const lookupOnce = (id, timeoutMs) => generationCost(id, { key, origin, fetchImpl, signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), s.lookupsEnd.signal]) });
   // A generation's cost from its record, tried at lookupDelaysMs (the gateway writes it seconds after the answer), all
   // within lookupMaxMs: {usd} (null: none found), `failed` (the last try was no answer at all) and `cut` (the pass's
   // end stopped it: endPass gives the lookups ENDPASS_LOOKUP_MS, then none is tried again). `wait`: for a complete

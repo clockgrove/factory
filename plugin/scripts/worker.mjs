@@ -16,7 +16,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dropOwned, privateTmp, writeOwn } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageBudgetLeft, stageLimits } from "./lib/harness.mjs";
 import { addLabels, findPr, getIssue, getRepo, listComments, prComment, primeWriters, markReady, removeLabel, repoOf, rest, runningSince } from "./lib/github.mjs";
 import { commandFailed, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { unpricedCodex } from "./lib/usage.mjs";
@@ -448,12 +448,13 @@ async function main() {
     return;
   }
 
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, each
-  // call's spend in the stage's usage: one decision stage for all of them. Their env is the harness's own once the stage
+  // The decision calls (lib/decider.mjs): with an AI Gateway key the gateway answers them, without one this stage's
+  // harness on its login; either way each call's spend is in the stage's usage, and the drift advisory is not asked of
+  // the harness once max_usd has less known left than one call's cap (budgetLeft): one decision stage for all of them. Their env is the harness's own once the stage
   // builds it (step 5); before that, for the edit check and the answer check at the stage's start, the env every child
   // starts from with a credential read of their own (readyDecisionEnv), only when one asks the harness.
   let decisionEnv = null;
-  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r) };
+  const decisionStage = { harness: inputs.harness, model: inputs.model, env: () => decisionEnv ?? {}, record: (r) => records.push(r), budgetLeft: () => stageBudgetLeft(inputs.maxUsd) };
   // That early read, once: never the passes' own, since federate() returns a key with no expiry and the passes read theirs
   // as they start (step 5), never one minted before setup and install. Masked like `cred` in everything the stage saves.
   const readyDecisionEnv = async () => {

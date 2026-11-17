@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { openDecider } from "./decider.mjs";
 import { findProject, listComments, moveCard, primeSelf, setStateLabel, upsertComment } from "./github.mjs";
 import { log, redactSecrets } from "./inputs.mjs";
+import { flushDecisionSpend } from "./decision-spend.mjs";
 import { isSelf, marker, questionMarker, selfLogin } from "./logic.mjs";
 import { timelineOf } from "./relaunch.mjs";
 import { RESTART_LABEL, goTrust, labelTrust } from "./stop.mjs";
@@ -154,8 +155,8 @@ export function openAnswerCheck({ inputs = {}, env = process.env, home = homedir
   const ask = openDecider({ inputs, env, home, model: inputs?.triageModel || TRIAGE_MODEL, stage, decider });
   const floor = () => confidenceFloor(inputs, ask);
   if (ask.off) return { model: ask.model, off: ask.off, floor, judge: null, asked: () => ask.asked() };
-  const judge = async (input) => {
-    const a = await Promise.resolve(ask.decide(input, ANSWER_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
+  const judge = async (input, { issue = null, repo = null } = {}) => {
+    const a = await Promise.resolve(ask.decide(input, ANSWER_QUESTION, { issue, repo })).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     const verdict = ANSWER_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
     return { verdict, confidence: verdict && typeof a?.confidence === "number" ? a.confidence : null, error: verdict ? null : a?.error || "no_answer" };
   };
@@ -189,7 +190,7 @@ export async function judgeAnswer({ check, repo, issue, comments, decisions, sin
   const asked = questionAsked(comments, { issue, since, appId });
   if (!asked) return { resume: true, why: "no Pendulum notice of the Question to judge the comments against: a writer's comment resumes it" };
   if (prepare && (await prepare()) === false) return { resume: true, why: "the stage's decider could not be readied: a writer's comment resumes the Question" };
-  const v = await check.judge(answerInput({ repo, issue, question: asked.text, comments: fresh }));
+  const v = await check.judge(answerInput({ repo, issue, question: asked.text, comments: fresh }), { issue, repo: repo?.full ?? null });
   const floor = check.floor?.() ?? confidenceFloor();
   log(`answer check (${check.model}, ${floor.text}): #${issue}, ${fresh.length} comment(s) since the Question, the newest by ${newest.author}: ${said(v)}`);
   const named = { issue, key, author: newest.author, at: newest.at, root: asked.root, form: asked.form, model: check.model, confidence: v.confidence };
@@ -235,6 +236,8 @@ const unwritten = (what, issue) => (e) => log(`#${issue}: the ${what} was not wr
  */
 export async function screenAnswer({ check, repo, issue, since, comments, decisions, label, appId = null, opts, dryRun = false }) {
   const r = await judgeAnswer({ check, repo, issue, comments, decisions, since, appId });
+  // The call ran outside any stage: its cost is written now on the issue (decision-spend.mjs).
+  await flushDecisionSpend(repo, opts, { dryRun });
   if (r.none) return { requeue: true, why: "no writer comment since the Question to judge" };
   if (r.judged && !r.resume) return { requeue: false, judged: true, why: "the newest writer comment was judged before as no decision" };
   if (r.open) {

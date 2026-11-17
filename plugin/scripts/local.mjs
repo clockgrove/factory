@@ -67,6 +67,7 @@ import { openCommentCheck } from "./lib/comment-check.mjs";
 import { DRAFT_LABEL, goTrust, isDraft, labelTrust, requeuedIn, stopCause } from "./lib/stop.mjs";
 import { loopCap, machineBudget, machineLimits, machineRoom, readPressure, slotHolders, slotsDir, takeSlot } from "./lib/machine.mjs";
 import { lapseFacts, lapseInput, openLapseCheck } from "./lib/lapse-check.mjs";
+import { flushDecisionSpend } from "./lib/decision-spend.mjs";
 import { THIRD_PARTY_POLL_MS, waitOf, waitState } from "./lib/third-party-review.mjs";
 import { reviewNow, reviewWaitOf } from "./lib/overlap.mjs";
 import { runningStint, timelineOf } from "./lib/relaunch.mjs";
@@ -2002,7 +2003,9 @@ export class Local {
     const facts = lapseFacts({ result, failure, pressure });
     // Opened for each lapse, so a key file or decision route set since serve started is read (`lapseCheck`: a test's own).
     const check = this.lapseCheck ?? openLapseCheck({ inputs: resolveInputs({ args: { repo: this.repoFull }, env: this.baseEnv() }), env: this.baseEnv() });
-    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null)).catch(() => null);
+    const verdict = await check.judge(lapseInput(facts, before?.facts ?? null), { issue, repo: this.repoFull }).catch(() => null);
+    // The call's cost, outside any stage: written now on the Objective's issue (decision-spend.mjs).
+    await flushDecisionSpend(this.repo, this.opts);
     const count = (before?.count ?? 0) + 1;
     const judged = verdict ? `; the lapse check (${check.asked()?.model ?? "the AI Gateway"}) judged it ${verdict === "same_again" ? "likely to end the same way again" : "transient"}` : "";
     const resume = verdict === "same_again" ? false : verdict === "transient" ? count < this.bounded("PENDULUM_LOCAL_LAPSE_MAX") : count < 2;

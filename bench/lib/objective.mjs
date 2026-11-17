@@ -846,6 +846,27 @@ export function spendRecords(collected, { app = null, all = false } = {}) {
 }
 
 /**
+ * Usage records of the decision calls made about the Objective outside any stage (the dispatcher's, the launcher's and
+ * local mode's answer, comment, edit and lapse checks), one per comment of Pendulum's own marked
+ * `<!-- pendulum:<n>:decisions:<date>:<writer> -->` (plugin decision-spend.mjs): its spend line's known dollars and runs
+ * of unknown cost, `source` "decisions", on every route (no usage artifact carries them).
+ */
+export function decisionRecords(collected, { app = null } = {}) {
+  const n = collected.issue.number;
+  const self = pendulumLogin(collected.issueTimeline, app);
+  const local = localLogin(collected);
+  const mine = (c) => (self && String(c.user?.login ?? "").toLowerCase() === self) || (local && c.user?.login === local);
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  return (collected.issueComments || [])
+    .filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:\\d{4}-\\d{2}-\\d{2}:[0-9a-f]{12} -->`).test(c.body || "") && mine(c))
+    .sort((a, b) => ms(a.created_at) - ms(b.created_at))
+    .map((c) => {
+      const spend = spendOf(c.body);
+      return { source: "decisions", harness: null, model: null, usd: num(spend?.usd), ...unknownIn(spend), tokens: { input: null, output: null, cached: null, written: null }, basis: spend ? "pendulum:spend line of decision calls outside a stage (the AI Gateway's cost)" : "unknown: no pendulum:spend line in the decision calls' comment" };
+    });
+}
+
+/**
  * The Objective's send-back rebases (#277): `sentBack`, Pendulum's send-back notices on its PRs (each names the head it
  * saw, `<!-- pendulum:<n>:rebase:<sha> -->`), and from its own work stages' rebase lines (plugin logic.mjs
  * rebaseCostMarker, written on every route) `stages` (the rebases that ran), `usd` (their known dollars with their
@@ -1020,8 +1041,10 @@ export function scoreObjective(collected, opts = {}) {
 
   // No usage artifact (local mode uploads none): the dollars are Pendulum's spend lines in its own progress comments.
   const artifacts = collected.usage || [];
-  const usage = artifacts.length ? artifacts : spendRecords(collected, { app });
-  if (!usage.length) missing.push("usage artifact");
+  const stages = artifacts.length ? artifacts : spendRecords(collected, { app });
+  if (!stages.length) missing.push("usage artifact");
+  // The decision calls made outside any stage, on every route: in no stage's record.
+  const usage = [...stages, ...decisionRecords(collected, { app })];
   const cost = costOf(usage, prices, { harness: collected.harness ?? null });
   // The harness for the streak: the usage's, else Pendulum's own progress comments; two harnesses on one Objective, none.
   const ran = objectiveHarness(collected, { app });

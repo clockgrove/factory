@@ -519,10 +519,17 @@ export function stageSpendNow() {
   return { usd: Math.round(Math.max(0, usd) * 1e6) / 1e6, unknown, commit };
 }
 /**
+ * What max_usd (`maxUsd`) has left for this stage by its known spend so far (stageSpendNow: finished passes, decision
+ * calls and the relay's key spend; a pass still running counts nothing until it ends), or null with no cap. What a
+ * non-essential decision call is gated on (decider.mjs openDecider `essential`).
+ */
+export const stageBudgetLeft = (maxUsd) => (Number(maxUsd) > 0 ? Math.max(0, Number(maxUsd) - stageSpendNow().usd) : null);
+
+/**
  * A pass counted as running from its start until `end(rec)` books its record: its known dollars, and its runs of unknown
  * cost (usage.mjs unknownRuns) when it reported none or not all. `more(rec)` books runs of unknown cost the record gained
  * after its end (a relayed key call the gateway did not price, gateway-relay.mjs addKeySpend). `session`: the session it
- * resumes, null for a fresh one.
+ * resumes, null for a fresh one. `decision`: a decision call, whose known dollars decisionSpend counts too.
  */
 export function meterPass({ session = null, label = "run", harness = null, model = null, decision = false } = {}) {
   const token = {};
@@ -531,7 +538,10 @@ export function meterPass({ session = null, label = "run", harness = null, model
   return {
     end: (rec) => {
       if (!STAGE_SPEND.open.delete(token)) return;
-      if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.done += Math.max(0, rec.usd);
+      if (typeof rec?.usd === "number" && Number.isFinite(rec.usd)) {
+        STAGE_SPEND.done += Math.max(0, rec.usd);
+        if (decision) STAGE_SPEND.decisions += Math.max(0, rec.usd);
+      }
       booked = unknownRuns(rec);
       STAGE_SPEND.unknown += booked;
     },
@@ -1782,7 +1792,6 @@ export async function runDecision({ harness, model = null, prompt, env: given = 
   }
   const rec = parseUsage(harness, r.stdout, model || null, r.code ?? 1, { creditUsd, rollout, since: started });
   metered.end(rec);
-  if (typeof rec.usd === "number" && Number.isFinite(rec.usd)) STAGE_SPEND.decisions += Math.max(0, rec.usd);
   Object.assign(rec, { label, started, ended: at(), timedOut: r.timedOut, exitCode: r.code, stopped: !!r.stopped, answer: answerText(harness, r.stdout) });
   if (r.timedOut) Object.assign(rec, { ok: false, error: "wall clock reached" });
   else if (r.stopped) Object.assign(rec, { ok: false, error: "stopped by Pendulum" });

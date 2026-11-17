@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import { dropOwned, privateTmp } from "./lib/fsafe.mjs";
 import { join, resolve } from "node:path";
 import { AGENT_DIRS, PLUGIN_ROOT, branchIdentity, installCommand, installDeps, installPlugin, installTools, runnerFileEnv, runSetup } from "./lib/checkout.mjs";
-import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageLimits } from "./lib/harness.mjs";
+import { LIMIT, USAGE_LIMIT, UsageLimitReached, credentialEnv, gatewaySession, harnessVersion, runHarness, scrubbedEnv, stageBudgetLeft, stageLimits } from "./lib/harness.mjs";
 import { addLabels, requiredChecks, closingIssues, getIssue, hasMergeQueue, getPr, listComments, markReady, postReview, prDiff, primeWriters, removeLabel, repoOf, resolvePendulumThreads, rest, runningSince, transientError } from "./lib/github.mjs";
 import { commandFailed, eventAction, eventSender, log, mask, parseArgs, postedError, redactSecrets, resolveInputs, setOutput } from "./lib/inputs.mjs";
 import { refusalFields, unpricedCodex, usageLimited } from "./lib/usage.mjs";
@@ -1028,12 +1028,13 @@ async function main() {
     await finish("blocked", block.reason);
     return;
   }
-  // The decision calls (lib/decider.mjs): without an AI Gateway key, this stage's harness answers them on its login, on
-  // the reviewer's model (the independent one), each call's spend in the stage's usage. Their env is the harness env (no
+  // The decision calls (lib/decider.mjs): with an AI Gateway key the gateway answers them, without one this stage's
+  // harness on its login, on the reviewer's model (the independent one); either way each call's spend is in the stage's
+  // usage, and the drift advisory is not asked of the harness once max_usd has less known left than one call's cap. Their env is the harness env (no
   // worker secret) once the hand-off is open; before it, for the edit check alone, the env every child starts from with
   // this harness's credential, read only when a question is due.
   let decisionEnv = null;
-  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: () => decisionEnv, record: (r) => records.push(r) };
+  const decisionStage = { harness: inputs.harness, model: inputs.reviewerModel || inputs.model, env: () => decisionEnv, record: (r) => records.push(r), budgetLeft: () => stageBudgetLeft(inputs.maxUsd) };
   // The edit check (lib/edit-check.mjs): on decision_route off nothing is read for it.
   const editCheck = async () => {
     if (inputs.decisionRoute === "off") return openEditCheck({ inputs });

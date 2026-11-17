@@ -38,11 +38,14 @@ const MIN = 60_000;
  * Question asked that long ago, its issue-form notice with it (else ask() asks one through applyExit). Pages carry an
  * ETag; a request whose If-None-Match matches gets a 304.
  */
+let nextIds = 0;
 function fakeGitHub(open, { self = BOT } = {}) {
   let last = 0;
   const stamp = () => new Date((last = Math.max(Date.now(), last + 1))).toISOString();
   const issues = new Map();
-  let ids = 1000;
+  // Comment ids are unique across every fake of the file, as GitHub's are: a process that keeps a comment's id (a
+  // decision-spend comment, decision-spend.mjs) never edits another fake's comment by it.
+  let ids = (nextIds += 1000);
   for (const { number, asked = null, pr = null } of open) {
     const labels = asked === null ? [OBJ] : [OBJ, "pendulum:question"];
     const at = new Date(Date.now() - (asked ?? 60 * MIN)).toISOString();
@@ -57,8 +60,9 @@ function fakeGitHub(open, { self = BOT } = {}) {
     });
   }
   const reads = [];
-  // The AI Gateway's decisions endpoint: each call's input kept, answered by `verdict` (a function of the input).
-  const gateway = { calls: [], verdict: () => ({ choice: "decision", confidence: 0.9 }) };
+  // The AI Gateway's decisions endpoint: each call's input kept, answered by `verdict` (a function of the input). With
+  // `cost` set, each answer names a generation whose record (`/v1/generation`) gives that total_cost.
+  const gateway = { calls: [], verdict: () => ({ choice: "decision", confidence: 0.9 }), cost: null, lookups: 0 };
   // Writes whose body matches one of `writes` fail with a 500; `permission`: every permission read fails; `jobs`: the
   // Action's live jobs cannot be listed.
   const fail = { writes: [], permission: false, jobs: false };
@@ -70,11 +74,16 @@ function fakeGitHub(open, { self = BOT } = {}) {
     const u = new URL(url);
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : null;
+    if (u.host === "ai-gateway.vercel.sh" && u.pathname === "/v1/generation") {
+      gateway.lookups += 1;
+      return gateway.cost === null ? new Response("{}", { status: 404 }) : new Response(JSON.stringify({ data: { total_cost: gateway.cost } }), { status: 200 });
+    }
     if (u.host === "ai-gateway.vercel.sh") {
       gateway.calls.push(body);
       const v = gateway.verdict(body.input);
       if (v.status) return new Response("{}", { status: v.status });
-      return new Response(JSON.stringify({ answers: [{ type: "choice", ...v }] }), { status: 200, headers: { "content-type": "application/json" } });
+      const generation = gateway.cost === null ? {} : { "x-generation-id": `gen_FAKE${String(gateway.calls.length).padStart(20, "0")}` };
+      return new Response(JSON.stringify({ answers: [{ type: "choice", ...v }] }), { status: 200, headers: { "content-type": "application/json", ...generation } });
     }
     const path = decodeURIComponent(u.pathname).replace("/repos/acme/app", "");
     const tag = init.headers?.["If-None-Match"] ?? null;
@@ -147,7 +156,7 @@ function fakeGitHub(open, { self = BOT } = {}) {
     if (method === "GET" && /^\/actions\/workflows\/[^/]+\/runs$/.test(path)) return fail.jobs ? json({ message: "Server Error" }, 500) : json({ workflow_runs: reviewJobs.size ? [{ id: 1 }] : [] });
     if (method === "GET" && path === "/actions/runs/1/jobs") return json({ jobs: [...reviewJobs].map((n) => ({ name: `review (pendulum/${n})`, status: "in_progress" })) });
     if (method === "GET" && path === "/actions/artifacts") return json({ artifacts: [] });
-    if (method === "GET" && path === "/issues/comments") return json([]);
+    if (method === "GET" && path === "/issues/comments") return json([...issues.values()].flatMap((i) => i.comments).filter((c) => c.updated_at >= (u.searchParams.get("since") ?? "")));
     return json({ message: "Not Found" }, 404);
   };
   return {
@@ -540,6 +549,39 @@ test("dispatcher with an AI Gateway key: a comment that gives no decision keeps 
   const { ended } = await workStage(gh, 7, openAnswerCheck({ inputs: {}, env: {}, home: stageHome("dispatcher-judged") }));
   assert.equal(ended, false, "the stage goes on");
   assert.equal(gh.gateway.calls.length, 2, "no second call for the same comment");
+});
+
+test("#479 dispatcher: an answer check's gateway call outside any stage is booked on its issue, where daily_usd reads it; one the gateway gives no cost for is unknown", async () => {
+  const { todaysSpend } = await import("../scripts/dispatch.mjs");
+  const decisionsOf = (gh, n) => gh.comments(n).filter((c) => new RegExp(`^<!-- pendulum:${n}:decisions:\\d{4}-\\d{2}-\\d{2}:[0-9a-f]{12} -->`).test(c.body));
+  const gh = fakeGitHub([{ number: 47 }, { number: 48 }]);
+  await ask(gh, 47);
+  await ask(gh, 48);
+  verdictFor(gh, { "use the second one": YES, "back tomorrow": NO });
+  gh.gateway.cost = 0.0031;
+  gh.comment(47, PERSON, "thanks, I'll look at this when I'm back tomorrow");
+  await tick(gh, { key: true });
+  assert.equal(gh.gateway.calls.length, 1);
+  assert.equal(gh.gateway.lookups, 1, "the call's generation looked up");
+  const [booked] = decisionsOf(gh, 47);
+  assert.ok(booked, "a decision-spend comment on the issue");
+  assert.equal(booked.user.login, BOT.login, "Pendulum's own, which daily_usd trusts");
+  assert.match(booked.body, /\n<!-- pendulum:spend \{"usd":0\.0031\} -->$/);
+  // daily_usd's sum (the dispatcher's own read) counts it.
+  const spent = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
+  assert.ok(Math.abs(spent.spentToday - 0.0031) < 1e-9);
+  assert.equal(spent.unknownToday, 0);
+  // The next call about #47 in this process adds to its own comment; one the gateway gives no cost for is unknown.
+  gh.gateway.cost = null;
+  gh.comment(47, PERSON, "use the second one");
+  assert.deepEqual((await tick(gh, { key: true })).answered, [47], "an unknown cost never stops the screen");
+  assert.equal(decisionsOf(gh, 47).length, 1, "one comment per process and day");
+  assert.match(decisionsOf(gh, 47)[0].body, /2 calls, \$0\.0031 plus 1 run of unknown cost/);
+  assert.match(decisionsOf(gh, 47)[0].body, /<!-- pendulum:spend \{"usd":0\.0031,"usdUnknown":1,"usdUnknownWhy":\["decision"\]\} -->$/);
+  const later = await onGitHub(gh, () => todaysSpend(REPO, { dailyUsd: 10 }, { token: "t" }));
+  assert.ok(Math.abs(later.spentToday - 0.0031) < 1e-9);
+  assert.equal(later.unknownToday, 1);
+  assert.deepEqual(decisionsOf(gh, 48), [], "nothing asked about #48, nothing booked there");
 });
 
 test("an edited comment is a new version, judged once more", async () => {

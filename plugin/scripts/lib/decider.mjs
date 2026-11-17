@@ -8,6 +8,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { openVendor } from "./adapters/decider.mjs";
+import { bookDecisionSpend } from "./decision-spend.mjs";
 import { log, mask } from "./inputs.mjs";
 import { gatewayKeyFile, keyDirExposedBy } from "./local.mjs";
 
@@ -80,13 +81,78 @@ let harnessSaid = false;
  */
 const STAGES = new WeakMap();
 const shared = (stage) => {
-  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null });
+  if (!STAGES.has(stage)) STAGES.set(stage, { harness: null, opened: null, gatewayRefused: null, gatewayRecord: null, capSaid: false });
   return STAGES.get(stage);
 };
 const harnessOf = (stage) => {
   const s = shared(stage);
   s.harness ??= openVendor({ vendor: "harness", harness: stage.harness, model: stage.model ?? null, env: stage.env, record: stage.record ?? null }).then((a) => (s.opened = a));
   return s.harness;
+};
+
+/**
+ * One gateway decision call's record (adapters/decider-ai-gateway.mjs `spend`) as the stage's usage keeps it, as a
+ * harness decision call's is (harness.mjs keepDecision): labelled `decision`, `decider` "ai-gateway", its dollars the
+ * gateway's reported cost, or of unknown cost (usage.mjs UNKNOWN_WHY `decision`), no tokens (the gateway's model is no
+ * harness's), `calls` the tries that reached the gateway.
+ */
+export const gatewayDecisionRecord = (spend) => ({
+  harness: null,
+  decider: "ai-gateway",
+  model: spend.model ?? null,
+  label: "decision",
+  usd: typeof spend.usd === "number" && Number.isFinite(spend.usd) ? spend.usd : null,
+  ...(spend.usdUnknown > 0 ? { usdUnknown: spend.usdUnknown, usdUnknownWhy: spend.usdUnknownWhy?.length ? spend.usdUnknownWhy : ["decision"] } : {}),
+  tokens: { input: null, output: null, cached: null, written: null },
+  turns: null,
+  basis: "the AI Gateway's cost of each decision call (its generation's total_cost)",
+  started: spend.started ?? null,
+  ended: spend.ended ?? null,
+  ok: true,
+  decision: true,
+  calls: spend.calls ?? 0,
+});
+
+/**
+ * One gateway decision call, its cost booked where its spend is counted. In a stage (`stage`): counted as running while
+ * it runs, then in the stage's spend so far (harness.mjs meterPass: max_usd, decisionSpend and the spend line see it),
+ * and folded into the stage's one gateway decision record, given to `stage.record` at its first call and kept with the
+ * stage's passes. Outside one: booked for the Objective `opts.issue` and repository `opts.repo` name (decision-spend.mjs
+ * bookDecisionSpend), which the process writes where daily_usd and the scorecard read it.
+ */
+async function gatewayCall(vendor, input, question, opts, stage) {
+  if (!stage) {
+    const a = await vendor.decide(input, question, opts);
+    bookDecisionSpend({ issue: opts?.issue ?? null, repo: opts?.repo ?? null }, a?.spend);
+    return answerOf(a);
+  }
+  const h = await import("./harness.mjs");
+  const metered = h.meterPass({ label: "decision", model: vendor.model ?? null, decision: true });
+  let a = null;
+  try {
+    a = await vendor.decide(input, question, opts);
+  } finally {
+    const spend = a?.spend;
+    if (!spend || !(spend.calls > 0)) metered.end({ usd: 0, noRun: true });
+    else {
+      const rec = gatewayDecisionRecord(spend);
+      metered.end(rec);
+      const s = shared(stage);
+      if (!s.gatewayRecord) {
+        s.gatewayRecord = rec;
+        h.keepDecisionPass(rec);
+        stage.record?.(rec);
+      } else h.foldDecision(s.gatewayRecord, rec);
+    }
+  }
+  return answerOf(a);
+}
+
+/** The answer a caller gets: the vendor's, less its `spend`, which is booked here and nowhere else. */
+const answerOf = (a) => {
+  if (!a || typeof a !== "object" || !("spend" in a)) return a;
+  const { spend: _booked, ...answer } = a;
+  return answer;
 };
 
 /**
@@ -102,9 +168,14 @@ const harnessOf = (stage) => {
  *   a function returning it, and where the stage's decision record goes): that harness, on that env's login, through
  *   the stage's one shared adapter.
  * - Otherwise: `off` is why (the key's code, or `route-off`), and decide answers nothing.
+ * Each gateway call's cost is booked (gatewayCall): with `stage`, in the stage's spend; without, for the Objective that
+ * `decide`'s `issue` and `repo` options name. `essential` false marks a call nothing waits on (the drift advisory: advice only):
+ * the stage's harness is not asked it once the stage's known budget left (`stage.budgetLeft()`, harness.mjs
+ * stageBudgetLeft: max_usd less the known spend so far, null with no cap) is under one decision call's own cap
+ * (harness.mjs DECISION_RUN `maxUsd`); it answers `budget` at once, said once per stage. Every other call runs.
  * `decider` stands in for the vendor (tests). The vendor module opens at the first question.
  */
-export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null } = {}) {
+export function openDecider({ inputs = {}, env = process.env, home = homedir(), model, stage = null, decider = null, essential = true } = {}) {
   const fixed = (name, label) => () => ({ name, model: label });
   if (decider) return { name: decider.name ?? "given", model, off: null, asked: fixed(decider.name ?? "given", model), limited: () => null, decide: (input, question, opts) => decider.decide(input, question, opts) };
   const route = DECISION_ROUTES.includes(inputs?.decisionRoute) ? inputs.decisionRoute : "auto";
@@ -113,14 +184,28 @@ export function openDecider({ inputs = {}, env = process.env, home = homedir(), 
   const { key, code } = deciderKeyState({ inputs, env, home });
   const withHarness = route === "auto" && !!stage?.harness;
   const harnessLabel = withHarness ? `${stage.harness}${stage.model ? ` ${stage.model}` : ""}` : null;
-  const harnessDecide = async (input, question, opts) => (await harnessOf(stage)).decide(input, question, opts);
+  const harnessDecide = async (input, question, opts) => {
+    if (!essential && typeof stage.budgetLeft === "function") {
+      const left = stage.budgetLeft();
+      const { DECISION_RUN } = await import("./harness.mjs");
+      if (typeof left === "number" && left < DECISION_RUN.maxUsd) {
+        const s = shared(stage);
+        if (!s.capSaid) {
+          s.capSaid = true;
+          log(`decision calls: max_usd has $${left.toFixed(2)} known left, under one decision call's own cap ($${DECISION_RUN.maxUsd.toFixed(2)}); the stage's harness is asked no non-essential question (the drift advisory) for the rest of this stage`);
+        }
+        return { verdict: null, confidence: null, error: "budget" };
+      }
+    }
+    return (await harnessOf(stage)).decide(input, question, opts);
+  };
   // The stage's harness refusal that stopped its decision calls (a usage limit), once its adapter is open.
   const limited = () => (withHarness && shared(stage).opened ? shared(stage).opened.limited() : null);
   if (key) {
     mask(key);
     // One vendor per decider, opened at the first question: concurrent first questions share it.
     let opened = null;
-    const gateway = async (input, question, opts) => (await (opened ??= openVendor({ vendor: "ai-gateway", key, model }))).decide(input, question, opts);
+    const gateway = async (input, question, opts) => gatewayCall(await (opened ??= openVendor({ vendor: "ai-gateway", key, model })), input, question, opts, stage);
     if (!withHarness) return { name: "ai-gateway", model, off: null, asked: fixed("ai-gateway", model), limited: () => null, decide: gateway };
     const state = shared(stage);
     return {

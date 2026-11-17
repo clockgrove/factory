@@ -98,8 +98,8 @@ export function openCommentCheck({ inputs = {}, env = process.env, home = homedi
   const limited = () => ask.limited?.() ?? null;
   const floor = () => confidenceFloor(inputs, ask);
   if (ask.off) return { model: ask.model, off: ask.off, floor, judge: null, asked: () => ask.asked(), limited };
-  const judge = async (input) => {
-    const a = await Promise.resolve(ask.decide(input, COMMENT_QUESTION)).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
+  const judge = async (input, { issue = null, repo = null } = {}) => {
+    const a = await Promise.resolve(ask.decide(input, COMMENT_QUESTION, { issue, repo })).catch(() => ({ verdict: null, confidence: null, error: "vendor" }));
     const verdict = COMMENT_QUESTION.choices.some((c) => c.value === a?.verdict) ? a.verdict : null;
     return { verdict, confidence: verdict && typeof a?.confidence === "number" ? a.confidence : null, error: verdict ? null : a?.error || "no_answer" };
   };
@@ -128,7 +128,7 @@ export async function judgeUnread({ check, repo, issue, issueData, pr, unread })
   if (!commentsFit(unread)) return { clear: false, why: `the unread comments are longer than one question shows whole (${INPUT_CAPS.comment} characters each, ${INPUT_CAPS.comments} in all)` };
   const labels = (issueData?.labels || []).map((l) => (typeof l === "string" ? l : l?.name));
   const input = commentInput({ repo: repo.full, issue, title: issueData?.title, body: issueData?.body, pr: { number: pr.number, title: pr.title, state: "open, reviewed, its required checks green, about to merge" }, questionOpen: labels.includes("pendulum:question"), comments: unread });
-  const v = await c.judge(input);
+  const v = await c.judge(input, { issue, repo: repo.full });
   const newest = unread.at(-1);
   const floor = c.floor?.() ?? confidenceFloor();
   log(`comment check (${c.model}, ${floor.text}): #${issue}, ${unread.length} unread writer comment(s), the newest by ${newest.author}: ${said(v)}`);

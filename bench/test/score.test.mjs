@@ -1193,6 +1193,27 @@ test("cost: runs of unknown cost are counted beside the known dollars, from a re
   assert.match(markdownTable([row]), /\| \$2\.00 plus 1 run of unknown cost \|/);
 });
 
+test("#479 cost: decision calls outside a stage (their own comment's spend line) join the row on every route, and a Codex stage's gateway decision dollars survive its re-pricing", () => {
+  // A local Objective whose stages' spend lines hold $2, and the dispatcher's decision calls about it: $0.0031 and one
+  // call the gateway gave no cost for.
+  const local = localMerge(63);
+  const at = "2031-03-02T00:30:00Z";
+  local.issueComments.push({ id: 77, user: OPERATOR, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:2031-03-02:0123456789ab -->\nPendulum's decision calls about this Objective outside a stage on 2031-03-02 (the AI Gateway): 2 calls, $0.0031 plus 1 run of unknown cost.\n<!-- pendulum:spend ${JSON.stringify({ usd: 0.0031, usdUnknown: 1, usdUnknownWhy: ["decision"] })} -->` });
+  // Someone else's paste of the marker counts nothing.
+  local.issueComments.push({ id: 78, user: { login: "passer-by", type: "User" }, created_at: at, updated_at: at, body: `<!-- pendulum:63:decisions:2031-03-02:ffffffffffff -->\n<!-- pendulum:spend {"usd":100} -->` });
+  const before = scoreObjective(localMerge(63), { prices, now: NOW }).cost.usd;
+  const row = scoreObjective(local, { prices, now: NOW });
+  assert.ok(Math.abs(row.cost.usd - before - 0.0031) < 1e-9);
+  assert.equal(row.cost.usdUnknown, 1);
+  assert.deepEqual(row.cost.usdUnknownWhy, ["decision"]);
+  assert.match(row.cost.basis, /includes 0\.0031 USD of decision calls outside a stage/);
+  // On Actions the stage dollars are the artifacts', and the comment still adds its own.
+  const artifact = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-63/result.json", usd: 0.2, gatewayDecisionUsd: 0.0042, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };
+  const priced = costOf([{ ...artifact, gatewayDecisionUsd: undefined }], prices).usd;
+  const cost = costOf([artifact], prices);
+  assert.ok(Math.abs(cost.usd - priced - 0.0042) < 1e-9, "the Codex tokens re-priced, the gateway's decision dollars kept");
+});
+
 test("cost: a Codex run killed before any turn completed stays a run of unknown cost on the scorecard, beside the priced one; never $0, never dropped", () => {
   const priced = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-62/result.json", usd: 0.1815, tokens: { input: 150000, output: 10000, cached: 115000, written: null }, runs: 1, basis: "priced" };
   const killed = { harness: "codex", model: "gpt-6.1-sol", artifact: "pendulum-usage-62-review/result.json", usd: null, usdUnknown: 1, usdUnknownWhy: ["unreported"], tokens: { input: null, output: null, cached: null, written: null }, runs: 1, basis: CODEX_NO_TOKENS };

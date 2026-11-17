@@ -149,9 +149,9 @@ function recordSessions(dir) {
 
 /**
  * Make the usage directory `dir` ready for upload under `policy`: the stream's counts go into the usage record, then,
- * when sealed, the transcript and the stream are sealed under `key` into SEALED_FILE and removed. With no key, or a seal that
- * failed, they are removed unsealed: nothing readable is published either way. Returns {policy, sealed, dropped} (the
- * names sealed or dropped) and a failed seal's `error`.
+ * when sealed, the transcript and the stream are sealed under `key` into SEALED_FILE and removed. With no key, or a
+ * seal that failed, they are removed unsealed: nothing readable is published either way. Returns {policy, sealed,
+ * dropped} (the names sealed or dropped) and a failed seal's `error`.
  */
 export async function sealUsage(dir, { policy, key }) {
   recordSessions(dir);
